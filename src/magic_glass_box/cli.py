@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
+from importlib.metadata import version
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -76,6 +77,18 @@ from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
 class InputError(ValueError):
     pass
+
+
+class _VersionAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        print(f"{parser.prog} {version('magic-glass-box')}")
+        parser.exit()
 
 
 class _TerminationRequested(BaseException):
@@ -255,6 +268,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="magic-glass-box",
         description="Magic Glass Box control-plane administration",
+    )
+    parser.add_argument(
+        "--version",
+        action=_VersionAction,
+        nargs=0,
+        help="show the installed distribution version and exit",
     )
     parser.add_argument(
         "--db",
