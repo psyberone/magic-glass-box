@@ -150,6 +150,16 @@ class MutationScoreGateTests(unittest.TestCase):
             [r"^\s*(?:field|subject|help|description|prog)\s*="],
         )
 
+    def test_package_license_uses_spdx_with_supported_setuptools(self) -> None:
+        configuration = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+
+        with self.subTest("SPDX license expression"):
+            self.assertEqual(configuration["project"]["license"], "MIT")
+        with self.subTest("SPDX-capable build requirement"):
+            self.assertEqual(
+                configuration["build-system"]["requires"], ["setuptools>=77"]
+            )
+
     def test_development_lock_is_hashed_and_auditable(self) -> None:
         lock = DEVELOPMENT_LOCK.read_text(encoding="utf-8")
 
