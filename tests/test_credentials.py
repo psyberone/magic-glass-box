@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hexadecapus.credentials import (
+from magic_glass_box.credentials import (
     CredentialError,
     PrivateFileCredentialResolver,
 )
@@ -95,7 +95,7 @@ class PrivateFileCredentialResolverTests(unittest.TestCase):
     def test_rejects_unowned_parent_and_file(self) -> None:
         actual_uid = os.getuid()
         with mock.patch(
-            "hexadecapus.credentials.os.getuid", return_value=actual_uid + 1
+            "magic_glass_box.credentials.os.getuid", return_value=actual_uid + 1
         ):
             with self.assertRaisesRegex(CredentialError, "parent is not owned"):
                 self.resolver.reference(self.path)

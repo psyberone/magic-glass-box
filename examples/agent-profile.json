@@ -4,7 +4,7 @@
     "exec"
   ],
   "credential_names": [],
-  "image": "hexadecapus/codex-agent@sha256:replace-with-a-pinned-digest",
+  "image": "magic-glass-box/codex-agent@sha256:replace-with-a-pinned-digest",
   "network_mode": "none",
   "workspace_mode": "copy_on_write"
 }

@@ -8,29 +8,28 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from hexadecapus.db import (
+from magic_glass_box.db import (
     ConcurrentUpdateError,
     ConflictError,
     Database,
     NotFoundError,
     StorageError,
     default_db_path,
-    default_state_dir,
 )
-from hexadecapus.domain import (
+from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
     RunState,
     ValidationError,
 )
-from hexadecapus.krab import KrabIdentity
+from magic_glass_box.krab import KrabIdentity
 
 
 class DatabaseTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.path = Path(self.temporary.name) / "hex.db"
+        self.path = Path(self.temporary.name) / "control-plane.db"
         self.database = Database(self.path)
         self.database.initialize()
         self.user = self.database.create_user("operator", "Local Operator")
@@ -48,7 +47,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.context = ProjectContext.from_mapping(
             {
-                "purpose": "Maintain Hex",
+                "purpose": "Maintain Magic Glass Box",
                 "instructions": ["Run tests"],
                 "test_commands": [["python", "-m", "unittest"]],
             }
@@ -56,8 +55,8 @@ class DatabaseTests(unittest.TestCase):
         self.project = self.database.create_project(
             instance_id=self.instance["id"],
             krab_project_id="prj_" + "2" * 32,
-            krab_project_key="hex-project",
-            display_name="Hexadecapus",
+            krab_project_key="box-project",
+            display_name="Magic Glass Box",
             context=self.context,
             created_by=self.user["id"],
         )
@@ -75,7 +74,7 @@ class DatabaseTests(unittest.TestCase):
 
     def create_run(self) -> dict[str, object]:
         return self.database.create_run(
-            project_key="hex-project",
+            project_key="box-project",
             profile_name="Codex Worker",
             requested_by=self.user["id"],
             source_revision="abc123",
@@ -88,43 +87,83 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
 
-    def test_default_paths_follow_documented_environment_precedence(self) -> None:
+    def test_default_database_follows_documented_environment_precedence(self) -> None:
+        home = Path(self.temporary.name) / "home"
         state_override = Path(self.temporary.name) / "explicit-state"
         xdg_override = Path(self.temporary.name) / "xdg-state"
         db_override = Path(self.temporary.name) / "explicit.db"
-        with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(
-                default_state_dir(), Path.home() / ".local" / "state" / "hexadecapus"
-            )
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("magic_glass_box.db.Path.home", return_value=home),
+        ):
             self.assertEqual(
                 default_db_path(),
-                Path.home() / ".local" / "state" / "hexadecapus" / "hex.db",
+                home / ".local" / "state" / "magic-glass-box" / "control-plane.db",
             )
         with mock.patch.dict(
             os.environ,
             {"XDG_STATE_HOME": str(xdg_override)},
             clear=True,
         ):
-            self.assertEqual(default_state_dir(), xdg_override / "hexadecapus")
-            self.assertEqual(default_db_path(), xdg_override / "hexadecapus" / "hex.db")
+            self.assertEqual(
+                default_db_path(),
+                xdg_override / "magic-glass-box" / "control-plane.db",
+            )
         with mock.patch.dict(
             os.environ,
             {
+                "MAGIC_GLASS_BOX_STATE_DIR": str(state_override),
+                "MAGIC_GLASS_BOX_DB": str(db_override),
                 "HEX_STATE_DIR": str(state_override),
                 "XDG_STATE_HOME": str(xdg_override),
-                "HEX_DB": str(db_override),
+                "HEX_DB": str(Path(self.temporary.name) / "legacy.db"),
             },
             clear=True,
         ):
-            self.assertEqual(default_state_dir(), state_override)
             self.assertEqual(default_db_path(), db_override)
+
+        legacy_state = Path(self.temporary.name) / "legacy-state"
+        legacy_db = Path(self.temporary.name) / "legacy.db"
+        with mock.patch.dict(
+            os.environ,
+            {"HEX_STATE_DIR": str(legacy_state), "HEX_DB": str(legacy_db)},
+            clear=True,
+        ):
+            self.assertEqual(default_db_path(), legacy_db)
+
+        with mock.patch.dict(
+            os.environ,
+            {"MAGIC_GLASS_BOX_STATE_DIR": str(state_override)},
+            clear=True,
+        ):
+            self.assertEqual(default_db_path(), state_override / "control-plane.db")
+        with mock.patch.dict(
+            os.environ,
+            {"HEX_STATE_DIR": str(legacy_state)},
+            clear=True,
+        ):
+            self.assertEqual(default_db_path(), legacy_state / "hex.db")
+
+    def test_legacy_state_is_reused_until_a_new_database_exists(self) -> None:
+        xdg = Path(self.temporary.name) / "xdg"
+        legacy = xdg / "hexadecapus" / "hex.db"
+        legacy.parent.mkdir(parents=True)
+        legacy.touch()
+        environment = {"XDG_STATE_HOME": str(xdg)}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(default_db_path(), legacy)
+
+            current = xdg / "magic-glass-box" / "control-plane.db"
+            current.parent.mkdir(parents=True)
+            current.touch()
+            self.assertEqual(default_db_path(), current)
 
     def test_created_records_have_complete_shapes_and_id_namespaces(self) -> None:
         records = (
-            (self.user, "hxu_"),
+            (self.user, "boxu_"),
             (self.instance, "ksi_"),
             (self.identity, "kid_"),
-            (self.project, "hxp_"),
+            (self.project, "boxp_"),
             (self.profile, "agp_"),
         )
         for record, prefix in records:
@@ -147,7 +186,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(
             self.identity["credential_ref"], "file:/private/krab-agent-one"
         )
-        self.assertIsNone(self.identity["hex_user_id"])
+        self.assertIsNone(self.identity["local_user_id"])
         self.assertTrue(self.project["context_version_id"].startswith("ctx_"))
         self.assertEqual(self.project["context_version"], 1)
         self.assertEqual(self.project["context"], self.context.to_dict())
@@ -161,7 +200,7 @@ class DatabaseTests(unittest.TestCase):
     def test_run_pins_context_and_profile_versions(self) -> None:
         first = self.create_run()
         self.database.add_project_context(
-            "hex-project",
+            "box-project",
             ProjectContext.from_mapping({"purpose": "New purpose"}),
             self.user["id"],
         )
@@ -189,13 +228,13 @@ class DatabaseTests(unittest.TestCase):
             execution["credential_references"],
             {"krab": self.identity["credential_ref"]},
         )
-        self.assertEqual(execution["project_key"], "hex-project")
+        self.assertEqual(execution["project_key"], "box-project")
 
     def test_run_persists_complete_request_and_creation_event(self) -> None:
         session_id = "ses_" + "4" * 32
         claim_id = "clm_" + "5" * 32
         run = self.database.create_run(
-            project_key="hex-project",
+            project_key="box-project",
             profile_name="Codex Worker",
             requested_by=self.user["id"],
             source_revision="abc123",
@@ -204,7 +243,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertTrue(run["id"].startswith("run_"))
         self.assertEqual(len(run["id"]), 36)
-        self.assertEqual(run["project_key"], "hex-project")
+        self.assertEqual(run["project_key"], "box-project")
         self.assertEqual(run["context_version_id"], self.project["context_version_id"])
         self.assertEqual(run["context_version"], 1)
         self.assertEqual(run["profile_version_id"], self.profile["profile_version_id"])
@@ -318,7 +357,7 @@ class DatabaseTests(unittest.TestCase):
 
     def test_run_input_boundaries_and_validation_errors(self) -> None:
         accepted = self.database.create_run(
-            project_key="hex-project",
+            project_key="box-project",
             profile_name="Codex Worker",
             requested_by=self.user["id"],
             source_revision="x" * 512,
@@ -328,7 +367,7 @@ class DatabaseTests(unittest.TestCase):
             ValidationError, "source_revision exceeds 512 UTF-8 bytes"
         ):
             self.database.create_run(
-                project_key="hex-project",
+                project_key="box-project",
                 profile_name="Codex Worker",
                 requested_by=self.user["id"],
                 source_revision="x" * 513,
@@ -425,7 +464,7 @@ class DatabaseTests(unittest.TestCase):
     def test_duplicate_context_is_rejected(self) -> None:
         with self.assertRaisesRegex(ConflictError, "identical"):
             self.database.add_project_context(
-                "hex-project", self.context, self.user["id"]
+                "box-project", self.context, self.user["id"]
             )
 
     def test_profile_from_another_krab_instance_cannot_run_project(self) -> None:
@@ -449,7 +488,7 @@ class DatabaseTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConflictError, "different Krab instances"):
             self.database.create_run(
-                project_key="hex-project",
+                project_key="box-project",
                 profile_name="Wrong Instance",
                 requested_by=self.user["id"],
             )

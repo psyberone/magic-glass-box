@@ -6,19 +6,19 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hexadecapus.credentials import PrivateFileCredentialResolver
-from hexadecapus.db import Database
-from hexadecapus.domain import (
+from magic_glass_box.credentials import PrivateFileCredentialResolver
+from magic_glass_box.db import Database
+from magic_glass_box.domain import (
     AgentProfileSpec,
     NetworkMode,
     ProjectContext,
     RunState,
     WorkspaceMode,
 )
-from hexadecapus.executor import SandboxPlan, SandboxRequest, SandboxResult
-from hexadecapus.krab import KrabIdentity
-from hexadecapus.orchestration import RunCoordinator, RunOrchestrationError
-from hexadecapus.workspace import PreparedWorkspace
+from magic_glass_box.executor import SandboxPlan, SandboxRequest, SandboxResult
+from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.orchestration import RunCoordinator, RunOrchestrationError
+from magic_glass_box.workspace import PreparedWorkspace
 
 USER_ID = "usr_" + "1" * 32
 PROJECT_ID = "prj_" + "2" * 32
@@ -74,7 +74,7 @@ class FakeExecutor:
             raise self.execute_error
         plan = SandboxPlan(
             request.run_id,
-            "hex-" + request.run_id.removeprefix("run_"),
+            "magic-glass-box-" + request.run_id.removeprefix("run_"),
             IMAGE_ID,
             (),
         )
@@ -107,7 +107,7 @@ class RunCoordinatorTests(unittest.TestCase):
         self.token = self.root / "krab.token"
         self.token.write_text(TOKEN + "\n", encoding="ascii")
         os.chmod(self.token, 0o600)
-        self.database = Database(self.root / "hex.db")
+        self.database = Database(self.root / "control-plane.db")
         self.database.initialize()
         self.user = self.database.create_user("operator", "Local Operator")
         instance = self.database.create_krab_instance(
@@ -121,11 +121,11 @@ class RunCoordinatorTests(unittest.TestCase):
         self.database.create_project(
             instance_id=instance["id"],
             krab_project_id=PROJECT_ID,
-            krab_project_key="hex-project",
-            display_name="Hex",
+            krab_project_key="box-project",
+            display_name="Magic Glass Box",
             context=ProjectContext.from_mapping(
                 {
-                    "purpose": "Build Hex",
+                    "purpose": "Build Magic Glass Box",
                     "repository_path": str(self.repository),
                 }
             ),
@@ -155,7 +155,7 @@ class RunCoordinatorTests(unittest.TestCase):
 
     def create_run(self, revision: str | None = "main") -> dict[str, object]:
         return self.database.create_run(
-            project_key="hex-project",
+            project_key="box-project",
             profile_name="Worker",
             requested_by=self.user["id"],
             source_revision=revision,
@@ -177,7 +177,7 @@ class RunCoordinatorTests(unittest.TestCase):
             finished["events"][2]["metadata"],
             {
                 "container_id": CONTAINER_ID,
-                "container_name": "hex-" + run["id"].removeprefix("run_"),
+                "container_name": "magic-glass-box-" + run["id"].removeprefix("run_"),
                 "image_id": IMAGE_ID,
                 "source_revision": COMMIT,
             },
@@ -258,7 +258,7 @@ class RunCoordinatorTests(unittest.TestCase):
 
         restored = ProjectContext.from_mapping(
             {
-                "purpose": "Build Hex",
+                "purpose": "Build Magic Glass Box",
                 "repository_path": str(self.repository),
             }
         )

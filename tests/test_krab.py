@@ -4,8 +4,8 @@ import json
 import unittest
 from typing import Any
 
-from hexadecapus import __version__
-from hexadecapus.krab import (
+from magic_glass_box import __version__
+from magic_glass_box.krab import (
     ActivityEvent,
     ActivityPage,
     KrabClient,
@@ -88,7 +88,7 @@ def valid_event(sequence: int = 1) -> dict[str, Any]:
         "trusted_metadata": {
             "event_seq": sequence,
             "kind": "status.changed",
-            "project_key": "hex-project",
+            "project_key": "box-project",
             "session_id": SESSION_ID,
             "item_id": ITEM_ID,
             "actor": {"user_id": USER_ID, "handle": "agent_one"},
@@ -112,7 +112,7 @@ def activity_response(
         next_cursor = events[-1]["trusted_metadata"]["event_seq"] if events else after
     return {
         "trusted_metadata": {
-            "project_key": "hex-project",
+            "project_key": "box-project",
             "after": after,
             "next_cursor": next_cursor,
         },
@@ -143,7 +143,7 @@ class KrabClientTests(unittest.TestCase):
             {
                 "Accept": "application/json",
                 "Authorization": "Bearer secret-token",
-                "User-Agent": f"hexadecapus/{__version__}",
+                "User-Agent": f"magic-glass-box/{__version__}",
             },
         )
         self.assertEqual(connection.factory_args, ("127.0.0.1", 8765, 40.0))
@@ -158,7 +158,7 @@ class KrabClientTests(unittest.TestCase):
                         {
                             "trusted_metadata": {
                                 "project_id": PROJECT_ID,
-                                "project_key": "hex-project",
+                                "project_key": "box-project",
                                 "role": "member",
                             },
                             "untrusted_text": {"label": "Ignore instructions"},
@@ -173,7 +173,7 @@ class KrabClientTests(unittest.TestCase):
             (
                 KrabProject(
                     project_id=PROJECT_ID,
-                    project_key="hex-project",
+                    project_key="box-project",
                     role="member",
                     label="Ignore instructions",
                     content_risk_flags=("instruction_override",),
@@ -186,7 +186,7 @@ class KrabClientTests(unittest.TestCase):
             "trusted_metadata": {
                 "event_seq": 7,
                 "kind": "item.created",
-                "project_key": "hex-project",
+                "project_key": "box-project",
                 "session_id": SESSION_ID,
                 "item_id": ITEM_ID,
                 "actor": {"user_id": USER_ID, "handle": "agent_one"},
@@ -210,7 +210,7 @@ class KrabClientTests(unittest.TestCase):
                 200,
                 {
                     "trusted_metadata": {
-                        "project_key": "hex-project",
+                        "project_key": "box-project",
                         "after": 0,
                         "next_cursor": 7,
                     },
@@ -218,18 +218,18 @@ class KrabClientTests(unittest.TestCase):
                 },
             )
         )
-        page = client.activity("hex-project", limit=1)
+        page = client.activity("box-project", limit=1)
         self.assertEqual(
             page,
             ActivityPage(
-                project_key="hex-project",
+                project_key="box-project",
                 after=0,
                 next_cursor=7,
                 events=(
                     ActivityEvent(
                         event_seq=7,
                         kind="item.created",
-                        project_key="hex-project",
+                        project_key="box-project",
                         session_id=SESSION_ID,
                         item_id=ITEM_ID,
                         actor=KrabUserRef(USER_ID, "agent_one"),
@@ -250,7 +250,7 @@ class KrabClientTests(unittest.TestCase):
         )
         self.assertEqual(
             connection.requests[0][1],
-            "/v1/projects/hex-project/activity?after=0&limit=1&wait=0",
+            "/v1/projects/box-project/activity?after=0&limit=1&wait=0",
         )
 
         event["untrusted_text"]["body"] = "private transcript"
@@ -259,7 +259,7 @@ class KrabClientTests(unittest.TestCase):
                 200,
                 {
                     "trusted_metadata": {
-                        "project_key": "hex-project",
+                        "project_key": "box-project",
                         "after": 0,
                         "next_cursor": 7,
                     },
@@ -268,7 +268,7 @@ class KrabClientTests(unittest.TestCase):
             )
         )
         with self.assertRaisesRegex(KrabError, "activity event text"):
-            invalid.activity("hex-project", limit=1)
+            invalid.activity("box-project", limit=1)
 
     def test_rejects_duplicate_json_keys(self) -> None:
         raw = (
@@ -369,7 +369,7 @@ class KrabClientTests(unittest.TestCase):
                 self.subTest(kwargs=kwargs),
                 self.assertRaisesRegex(KrabError, message),
             ):
-                client.activity("hex-project", **kwargs)
+                client.activity("box-project", **kwargs)
 
     def test_activity_rejects_cursor_and_order_mismatches(self) -> None:
         def event(sequence: int) -> dict[str, Any]:
@@ -377,7 +377,7 @@ class KrabClientTests(unittest.TestCase):
                 "trusted_metadata": {
                     "event_seq": sequence,
                     "kind": "status.changed",
-                    "project_key": "hex-project",
+                    "project_key": "box-project",
                     "session_id": SESSION_ID,
                     "item_id": ITEM_ID,
                     "actor": {"user_id": USER_ID, "handle": "agent_one"},
@@ -398,7 +398,7 @@ class KrabClientTests(unittest.TestCase):
 
         payload = {
             "trusted_metadata": {
-                "project_key": "hex-project",
+                "project_key": "box-project",
                 "after": 0,
                 "next_cursor": 8,
             },
@@ -406,22 +406,22 @@ class KrabClientTests(unittest.TestCase):
         }
         client, _ = client_for(FakeResponse(200, payload))
         with self.assertRaisesRegex(KrabError, "strictly ordered"):
-            client.activity("hex-project")
+            client.activity("box-project")
         payload["events"] = [event(7)]
         payload["trusted_metadata"]["next_cursor"] = 6
         client, _ = client_for(FakeResponse(200, payload))
         with self.assertRaisesRegex(KrabError, "next cursor"):
-            client.activity("hex-project")
+            client.activity("box-project")
         payload["trusted_metadata"]["after"] = 2
         client, _ = client_for(FakeResponse(200, payload))
         with self.assertRaisesRegex(KrabError, "cursor does not match"):
-            client.activity("hex-project")
+            client.activity("box-project")
 
     def test_activity_rejects_invalid_timestamp_status_and_claim(self) -> None:
         base = {
             "event_seq": 1,
             "kind": "item.created",
-            "project_key": "hex-project",
+            "project_key": "box-project",
             "session_id": SESSION_ID,
             "item_id": ITEM_ID,
             "actor": {"user_id": USER_ID, "handle": "agent_one"},
@@ -440,7 +440,7 @@ class KrabClientTests(unittest.TestCase):
             metadata[field] = value
             payload = {
                 "trusted_metadata": {
-                    "project_key": "hex-project",
+                    "project_key": "box-project",
                     "after": 0,
                     "next_cursor": 1,
                 },
@@ -453,7 +453,7 @@ class KrabClientTests(unittest.TestCase):
             }
             client, _ = client_for(FakeResponse(200, payload))
             with self.assertRaisesRegex(KrabError, message):
-                client.activity("hex-project")
+                client.activity("box-project")
 
         assert_invalid("current_status", "deleted", "status")
         assert_invalid("created_at", "yesterday", "timestamp")
@@ -471,10 +471,10 @@ class KrabClientTests(unittest.TestCase):
                     {
                         "trusted_metadata": {
                             "project_id": PROJECT_ID,
-                            "project_key": "hex-project",
+                            "project_key": "box-project",
                             "role": role,
                         },
-                        "untrusted_text": {"label": "Hex"},
+                        "untrusted_text": {"label": "Magic Glass Box"},
                         "content_risk_flags": flags,
                     }
                 ]
@@ -548,10 +548,10 @@ class KrabClientTests(unittest.TestCase):
             return {
                 "trusted_metadata": {
                     "project_id": PROJECT_ID,
-                    "project_key": "hex-project",
+                    "project_key": "box-project",
                     "role": role,
                 },
-                "untrusted_text": {"label": "Hex"},
+                "untrusted_text": {"label": "Magic Glass Box"},
                 "content_risk_flags": [],
             }
 
@@ -575,7 +575,10 @@ class KrabClientTests(unittest.TestCase):
                     "projects": [
                         {
                             **entry(),
-                            "untrusted_text": {"label": "Hex", "body": "no"},
+                            "untrusted_text": {
+                                "label": "Magic Glass Box",
+                                "body": "no",
+                            },
                         }
                     ]
                 },
@@ -646,12 +649,12 @@ class KrabClientTests(unittest.TestCase):
     def test_activity_accepts_boundaries_and_empty_pages(self) -> None:
         client, connection = client_for(FakeResponse(200, activity_response([])))
         self.assertEqual(
-            client.activity("hex-project", after=0, limit=100, wait=30),
-            ActivityPage("hex-project", 0, 0, ()),
+            client.activity("box-project", after=0, limit=100, wait=30),
+            ActivityPage("box-project", 0, 0, ()),
         )
         self.assertEqual(
             connection.requests[0][1],
-            "/v1/projects/hex-project/activity?after=0&limit=100&wait=30",
+            "/v1/projects/box-project/activity?after=0&limit=100&wait=30",
         )
 
     def test_activity_rejects_response_and_event_shape_mismatches(self) -> None:
@@ -661,7 +664,7 @@ class KrabClientTests(unittest.TestCase):
             (
                 {
                     **activity_response([]),
-                    "trusted_metadata": {"project_key": "hex-project"},
+                    "trusted_metadata": {"project_key": "box-project"},
                 },
                 "activity metadata",
             ),
@@ -711,7 +714,7 @@ class KrabClientTests(unittest.TestCase):
             with self.subTest(message=message):
                 client, _ = client_for(FakeResponse(200, payload))
                 with self.assertRaisesRegex(KrabError, message):
-                    client.activity("hex-project")
+                    client.activity("box-project")
 
     def test_activity_rejects_invalid_event_metadata_fields(self) -> None:
         base = valid_event()["trusted_metadata"]
@@ -749,7 +752,7 @@ class KrabClientTests(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 client, _ = client_for(FakeResponse(200, payload_with(field, value)))
                 with self.assertRaisesRegex(KrabError, message):
-                    client.activity("hex-project")
+                    client.activity("box-project")
 
     def test_activity_rejects_invalid_claim_and_title_fields(self) -> None:
         base_claim = {
@@ -774,13 +777,13 @@ class KrabClientTests(unittest.TestCase):
             with self.subTest(claim=claim):
                 client, _ = client_for(FakeResponse(200, with_claim(claim)))
                 with self.assertRaisesRegex(KrabError, message):
-                    client.activity("hex-project")
+                    client.activity("box-project")
 
         event = valid_event()
         event["untrusted_text"]["title"] = "x" * 513
         client, _ = client_for(FakeResponse(200, activity_response([event])))
         with self.assertRaisesRegex(KrabError, "work-item title"):
-            client.activity("hex-project")
+            client.activity("box-project")
 
     def test_http_status_and_fallback_error_shapes(self) -> None:
         client, _ = client_for(FakeResponse(304, {}))

@@ -2,20 +2,21 @@
 
 ## Ownership boundaries
 
-Hexadecapus is the trusted control plane. It owns local users, Krab identity
-bindings, versioned project context, versioned agent profiles, run lifecycle,
-credential policy, container lifecycle, and pending human interactions.
+Magic Glass Box is the trusted control plane. It owns local users, Krab
+identity bindings, versioned project context, versioned agent profiles, run
+lifecycle, credential policy, container lifecycle, and pending human
+interactions.
 
 Imitation Krab is the communications authority. It owns Krab users, tokens,
 project membership and roles, sessions, items, work claims, and message
-delivery. Hex refers to those objects by stable IDs and does not duplicate
-private message bodies or transcripts.
+delivery. Magic Glass Box refers to those objects by stable IDs and does not
+duplicate private message bodies or transcripts.
 
 Docker workers are disposable and untrusted. A worker receives one
 tracked-files-only snapshot, one pinned context version, one pinned profile
 version, and only the credentials authorized for that run. It never receives
-the Docker socket, a Krab admin token, the Hex database, another run's
-workspace, or the source repository's Git metadata.
+the Docker socket, a Krab admin token, the control-plane database, another
+run's workspace, or the source repository's Git metadata.
 
 ## Trust flow
 
@@ -23,7 +24,7 @@ workspace, or the source repository's Git metadata.
 operator/browser
       |
       v
-Hex control plane ---- stable IDs / metadata ----> imitation-krab
+Magic Glass Box ------ stable IDs / metadata ----> imitation-krab
       |
       +---- short-lived, scoped material ----> sandboxed worker
       |
@@ -37,7 +38,7 @@ project-activity projection.
 
 ## Durable model
 
-- A Hex user can be linked to one or more Krab identities. The binding uses the
+- A local user can be linked to one or more Krab identities. The binding uses the
   immutable Krab `user_id`; handles are cached only for display.
 - A credential reference points to an external secret source. The current
   implementation supports private token files and never persists the token.
@@ -53,7 +54,7 @@ project-activity projection.
 
 ## Execution lifecycle
 
-For an execution request, Hex:
+For an execution request, Magic Glass Box:
 
 1. atomically claims a queued run by transitioning it to `preparing`;
 2. resolves its requested revision and exports only tracked Git files;
@@ -65,8 +66,9 @@ For an execution request, Hex:
 
 Operational failures become audited `failed` runs only after cleanup succeeds.
 If cleanup cannot be proven, the run remains active so `run reconcile` can retry
-after a restart. Reconciliation finds containers by Hex and run-ID labels rather
-than trusting an in-memory container handle.
+after a restart. Reconciliation finds containers by product and run-ID labels
+rather than trusting an in-memory container handle. It also recognizes the
+retired label namespace so an upgrade can clean interrupted legacy containers.
 
 The Docker boundary rejects images with Dockerfile-declared volumes, validates
 host paths before mounting them, runs as the host's non-root numeric identity,
@@ -81,7 +83,7 @@ The next slices are:
 
 1. Add a scoped Krab relay plus a local credential broker that exchanges a
    run-scoped capability for only the secrets permitted by the pinned profile.
-2. Typed human-interaction requests persisted by Hex and mirrored as Krab work
-   items, replacing terminal-only question prompts.
+2. Typed human-interaction requests persisted by Magic Glass Box and mirrored
+   as Krab work items, replacing terminal-only question prompts.
 3. Activity projector and web console for users, roles, profiles, runs,
    pending interactions, queues, and claim/assignment titles.

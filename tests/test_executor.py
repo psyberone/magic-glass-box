@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hexadecapus.domain import AgentProfileSpec, NetworkMode, WorkspaceMode
-from hexadecapus.executor import (
+from magic_glass_box.domain import AgentProfileSpec, NetworkMode, WorkspaceMode
+from magic_glass_box.executor import (
     DockerCLI,
     DockerExecutor,
     DockerImage,
@@ -70,7 +70,7 @@ class SandboxPlanTests(unittest.TestCase):
             gid=os.getgid(),
         )
         self.assertEqual(plan.run_id, RUN_ID)
-        self.assertEqual(plan.container_name, "hex-" + "1" * 32)
+        self.assertEqual(plan.container_name, "magic-glass-box-" + "1" * 32)
         self.assertEqual(plan.image_id, IMAGE_ID)
         self.assertEqual(
             plan.create_args,
@@ -78,11 +78,11 @@ class SandboxPlanTests(unittest.TestCase):
                 "container",
                 "create",
                 "--name",
-                "hex-" + "1" * 32,
+                "magic-glass-box-" + "1" * 32,
                 "--label",
-                "io.hexadecapus.managed=true",
+                "io.magicglassbox.managed=true",
                 "--label",
-                f"io.hexadecapus.run-id={RUN_ID}",
+                f"io.magicglassbox.run-id={RUN_ID}",
                 "--pull",
                 "never",
                 "--read-only",
@@ -108,7 +108,7 @@ class SandboxPlanTests(unittest.TestCase):
                 "--user",
                 f"{os.getuid()}:{os.getgid()}",
                 "--hostname",
-                "hex-agent",
+                "magic-glass-box-agent",
                 "--workdir",
                 "/workspace",
                 "--tmpfs",
@@ -125,17 +125,17 @@ class SandboxPlanTests(unittest.TestCase):
                 "--env",
                 "HOME=/tmp",
                 "--env",
-                f"HEX_RUN_ID={RUN_ID}",
+                f"MAGIC_GLASS_BOX_RUN_ID={RUN_ID}",
                 "--env",
-                "HEX_CREDENTIAL_DIR=/run/secrets/hex",
+                "MAGIC_GLASS_BOX_CREDENTIAL_DIR=/run/secrets/magic-glass-box",
                 "--env",
-                "KRAB_TOKEN_FILE=/run/secrets/hex/krab",
+                "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab",
                 "--mount",
                 (f"type=bind,src={self.workspace.resolve()},dst=/workspace,readonly"),
                 "--mount",
                 (
                     f"type=bind,src={self.token.resolve()},"
-                    "dst=/run/secrets/hex/krab,readonly"
+                    "dst=/run/secrets/magic-glass-box/krab,readonly"
                 ),
                 "--entrypoint",
                 "agent",
@@ -166,7 +166,9 @@ class SandboxPlanTests(unittest.TestCase):
             mounts,
             [f"type=bind,src={self.workspace.resolve()},dst=/workspace"],
         )
-        self.assertNotIn("KRAB_TOKEN_FILE=/run/secrets/hex/krab", plan.create_args)
+        self.assertNotIn(
+            "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab", plan.create_args
+        )
 
     def test_plan_rejects_network_or_identity_policy_weakening(self) -> None:
         for request, uid, gid, message in (
@@ -450,7 +452,7 @@ class DockerExecutorTests(unittest.TestCase):
                     result,
                     SandboxResult(
                         container_id=CONTAINER_ID,
-                        container_name="hex-" + "1" * 32,
+                        container_name="magic-glass-box-" + "1" * 32,
                         image_id=IMAGE_ID,
                         exit_code=exit_code,
                     ),
@@ -622,12 +624,12 @@ class DockerCLITests(unittest.TestCase):
         self,
     ) -> None:
         with mock.patch(
-            "hexadecapus.executor.shutil.which", return_value="/bin/docker"
+            "magic_glass_box.executor.shutil.which", return_value="/bin/docker"
         ):
             discovered = DockerCLI(runner=self.runner)
         self.assertEqual(discovered.binary, Path("/bin/docker"))
         with (
-            mock.patch("hexadecapus.executor.shutil.which", return_value=None),
+            mock.patch("magic_glass_box.executor.shutil.which", return_value=None),
             self.assertRaisesRegex(ExecutionError, "not found"),
         ):
             DockerCLI(runner=self.runner)
@@ -645,7 +647,12 @@ class DockerCLITests(unittest.TestCase):
                 )
 
     def test_lifecycle_commands_parse_exact_outputs(self) -> None:
-        plan = SandboxPlan(RUN_ID, "hex-" + "1" * 32, IMAGE_ID, ("container", "create"))
+        plan = SandboxPlan(
+            RUN_ID,
+            "magic-glass-box-" + "1" * 32,
+            IMAGE_ID,
+            ("container", "create"),
+        )
         self.runner.side_effect = (
             self.completed(CONTAINER_ID + "\n"),
             self.completed(CONTAINER_ID + "\n"),
@@ -669,33 +676,49 @@ class DockerCLITests(unittest.TestCase):
 
     def test_lists_managed_containers_by_exact_run_label(self) -> None:
         second = "c" * 64
-        self.runner.return_value = self.completed(f"{CONTAINER_ID}\n{second}\n")
+        self.runner.side_effect = (
+            self.completed(f"{CONTAINER_ID}\n"),
+            self.completed(f"{second}\n"),
+        )
         self.assertEqual(
             self.client.managed_containers(RUN_ID),
             (CONTAINER_ID, second),
         )
         self.assertEqual(
-            self.runner.call_args.args[0][1:],
+            [call.args[0][1:] for call in self.runner.call_args_list],
             [
-                "container",
-                "ls",
-                "--all",
-                "--no-trunc",
-                "--quiet",
-                "--filter",
-                "label=io.hexadecapus.managed=true",
-                "--filter",
-                f"label=io.hexadecapus.run-id={RUN_ID}",
+                [
+                    "container",
+                    "ls",
+                    "--all",
+                    "--no-trunc",
+                    "--quiet",
+                    "--filter",
+                    "label=io.magicglassbox.managed=true",
+                    "--filter",
+                    f"label=io.magicglassbox.run-id={RUN_ID}",
+                ],
+                [
+                    "container",
+                    "ls",
+                    "--all",
+                    "--no-trunc",
+                    "--quiet",
+                    "--filter",
+                    "label=io.hexadecapus.managed=true",
+                    "--filter",
+                    f"label=io.hexadecapus.run-id={RUN_ID}",
+                ],
             ],
         )
 
     def test_managed_container_listing_rejects_invalid_output(self) -> None:
         for output in ("short\n", f"{CONTAINER_ID}\n{CONTAINER_ID}\n"):
             with self.subTest(output=output):
-                self.runner.return_value = self.completed(output)
+                self.runner.side_effect = (self.completed(output), self.completed(""))
                 with self.assertRaisesRegex(ExecutionError, "container listing"):
                     self.client.managed_containers(RUN_ID)
-        self.runner.return_value = self.completed("\n")
+        self.runner.side_effect = (self.completed("\n"), self.completed("\n"))
         self.assertEqual(self.client.managed_containers(RUN_ID), ())
         with self.assertRaisesRegex(ExecutionError, "run identifier"):
             self.client.managed_containers("run_bad")
@@ -713,7 +736,12 @@ class DockerCLITests(unittest.TestCase):
                 "daemon denied",
             ),
         )
-        plan = SandboxPlan(RUN_ID, "hex-" + "1" * 32, IMAGE_ID, ("container", "create"))
+        plan = SandboxPlan(
+            RUN_ID,
+            "magic-glass-box-" + "1" * 32,
+            IMAGE_ID,
+            ("container", "create"),
+        )
         for operation, completed, message in cases:
             with self.subTest(operation=operation, message=message):
                 self.runner.reset_mock()

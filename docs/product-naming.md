@@ -1,10 +1,10 @@
 # Product naming
 
-## Current direction
+## Decision
 
-- **Internal development codename:** Hex
-- **Serious product-name candidate:** Magic Glass Box
-- **Status:** Candidate; not yet selected or legally cleared
+- **Product name:** Magic Glass Box
+- **Natural shorthand:** the Box
+- **Status:** Selected
 
 ## Why Magic Glass Box fits
 
@@ -20,16 +20,23 @@ The name captures the product's central promise:
 The natural shorthand is **the Box**. The full name is preferable to **MGB** as
 the public-facing identity.
 
-## Relationship to Hex
+## Canonical technical identifiers
 
-**Hex** remains the internal development codename. It may continue to appear in
-package names, developer tooling, architecture discussions, and implementation
-terminology while the public product name is being evaluated.
+- Python distribution: `magic-glass-box`
+- Python package: `magic_glass_box`
+- CLI command: `magic-glass-box`
+- State directory: `magic-glass-box`
+- Environment prefix: `MAGIC_GLASS_BOX_`
+- Docker label namespace: `io.magicglassbox`
 
-## Before adoption
+The earlier working codename is retired. Its database locations, environment
+overrides, and Docker labels remain readable only as narrow compatibility
+surfaces for existing state and interrupted-run cleanup.
+
+## Name clearance
 
 A preliminary search found no prominent software or AI product using the exact
 name, but it did find a phone screen-protector installation product and a
 related Indonesian Class 9 trademark filing. Before adopting the name, perform
 formal trademark, domain, package-registry, and major software-platform
-clearance in the intended markets.
+clearance in the intended markets before a commercial launch.

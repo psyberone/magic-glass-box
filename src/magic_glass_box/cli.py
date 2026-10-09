@@ -75,7 +75,8 @@ def _emit(value: object, *, stream: Any | None = None) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hex", description="Hexadecapus control-plane administration"
+        prog="magic-glass-box",
+        description="Magic Glass Box control-plane administration",
     )
     parser.add_argument(
         "--db",
@@ -88,9 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("init", help="initialize the private state database")
     commands.add_parser("status", help="validate state and show object counts")
 
-    user = commands.add_parser("user", help="manage Hex users")
+    user = commands.add_parser("user", help="manage local users")
     user_commands = user.add_subparsers(dest="user_command", required=True)
-    user_add = user_commands.add_parser("add", help="add a Hex user")
+    user_add = user_commands.add_parser("add", help="add a local user")
     user_add.add_argument("handle")
     user_add.add_argument("--display-name")
 
@@ -104,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     identity_add.add_argument("instance")
     identity_add.add_argument("--token-file", required=True, type=Path)
-    identity_add.add_argument("--hex-user")
+    identity_add.add_argument("--local-user")
     activity = krab_commands.add_parser(
         "activity", help="read metadata-only project activity"
     )
@@ -209,7 +210,7 @@ def _dispatch(
             return control.add_krab_identity(
                 instance_name=args.instance,
                 credential_path=args.token_file,
-                hex_user_handle=args.hex_user,
+                local_user_handle=args.local_user,
             )
         if args.krab_command == "activity":
             return activity_to_dict(

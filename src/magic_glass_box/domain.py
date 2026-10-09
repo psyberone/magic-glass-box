@@ -13,7 +13,7 @@ class ValidationError(ValueError):
     """A control-plane value failed deterministic validation."""
 
 
-HEX_HANDLE_RE = re.compile(r"^[a-z][a-z0-9_-]{2,31}$")
+HANDLE_RE = re.compile(r"^[a-z][a-z0-9_-]{2,31}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
 KRAB_PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]{2,31}$")
 KRAB_OBJECT_ID_RE = re.compile(r"^(?:usr|prj|ses|itm|clm)_[0-9a-f]{32}$")
@@ -39,7 +39,7 @@ def require_string(
 
 
 def validate_handle(value: object) -> str:
-    if not isinstance(value, str) or HEX_HANDLE_RE.fullmatch(value) is None:
+    if not isinstance(value, str) or HANDLE_RE.fullmatch(value) is None:
         raise ValidationError("handle must match [a-z][a-z0-9_-]{2,31}")
     return value
 

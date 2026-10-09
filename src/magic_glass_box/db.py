@@ -27,6 +27,10 @@ from .domain import (
 from .krab import KrabIdentity, validate_base_url
 
 SCHEMA_VERSION = 1
+STATE_DIRECTORY_NAME = "magic-glass-box"
+DATABASE_FILENAME = "control-plane.db"
+LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
+LEGACY_DATABASE_FILENAME = "hex.db"
 
 
 SCHEMA = """
@@ -224,20 +228,26 @@ class ConcurrentUpdateError(ConflictError):
     pass
 
 
-def default_state_dir() -> Path:
-    override = os.environ.get("HEX_STATE_DIR")
+def default_db_path() -> Path:
+    override = os.environ.get("MAGIC_GLASS_BOX_DB")
     if override:
         return Path(override).expanduser()
-    xdg = os.environ.get("XDG_STATE_HOME")
-    root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    return root / "hexadecapus"
-
-
-def default_db_path() -> Path:
     override = os.environ.get("HEX_DB")
     if override:
         return Path(override).expanduser()
-    return default_state_dir() / "hex.db"
+    state_override = os.environ.get("MAGIC_GLASS_BOX_STATE_DIR")
+    if state_override:
+        return Path(state_override).expanduser() / DATABASE_FILENAME
+    legacy_state_override = os.environ.get("HEX_STATE_DIR")
+    if legacy_state_override:
+        return Path(legacy_state_override).expanduser() / LEGACY_DATABASE_FILENAME
+    xdg = os.environ.get("XDG_STATE_HOME")
+    root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    current = root / STATE_DIRECTORY_NAME / DATABASE_FILENAME
+    legacy = root / LEGACY_STATE_DIRECTORY_NAME / LEGACY_DATABASE_FILENAME
+    if current.exists() or not legacy.exists():
+        return current
+    return legacy
 
 
 class Database:
@@ -371,7 +381,7 @@ class Database:
     def create_user(self, handle: str, display_name: str) -> dict[str, Any]:
         handle = validate_handle(handle)
         display_name = require_string(display_name, field="display_name", max_bytes=256)
-        user_id = self.new_id("hxu")
+        user_id = self.new_id("boxu")
         now = self.now()
         try:
             with closing(self.connect()) as connection:
@@ -384,7 +394,7 @@ class Database:
                 )
                 connection.commit()
         except sqlite3.IntegrityError as exc:
-            raise ConflictError(f"Hex user already exists: {handle}") from exc
+            raise ConflictError(f"local user already exists: {handle}") from exc
         return self.get_user(handle)
 
     def get_user(self, handle: str) -> dict[str, Any]:
@@ -396,7 +406,7 @@ class Database:
                 (handle,),
             ).fetchone()
         if row is None:
-            raise NotFoundError(f"Hex user not found: {handle}")
+            raise NotFoundError(f"local user not found: {handle}")
         return dict(row)
 
     def create_krab_instance(self, name: str, base_url: str) -> dict[str, Any]:
@@ -498,7 +508,7 @@ class Database:
                     ).fetchone()
                     if binding is None or binding["user_id"] != user_id:
                         raise ConflictError(
-                            "Krab identity is already linked to another Hex user"
+                            "Krab identity is already linked to another local user"
                         )
                 connection.commit()
             except ConflictError:
@@ -517,7 +527,7 @@ class Database:
             row = connection.execute(
                 "SELECT ki.id, ki.krab_instance_id, ki.krab_user_id, ki.handle, "
                 "ki.token_version, ki.credential_ref, ki.verified_at, "
-                "ki.created_at, ki.updated_at, ub.user_id AS hex_user_id "
+                "ki.created_at, ki.updated_at, ub.user_id AS local_user_id "
                 "FROM krab_identities ki "
                 "LEFT JOIN user_krab_bindings ub ON ub.krab_identity_id = ki.id "
                 "WHERE ki.krab_instance_id = ? AND ki.handle = ?",
@@ -540,7 +550,7 @@ class Database:
         krab_project_id = validate_krab_id(krab_project_id, "prj")
         krab_project_key = validate_project_key(krab_project_key)
         display_name = require_string(display_name, field="display_name", max_bytes=256)
-        project_id = self.new_id("hxp")
+        project_id = self.new_id("boxp")
         context_id = self.new_id("ctx")
         now = self.now()
         try:

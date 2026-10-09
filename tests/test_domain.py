@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from hexadecapus.domain import (
+from magic_glass_box.domain import (
     AgentProfileSpec,
     NetworkMode,
     ProjectContext,

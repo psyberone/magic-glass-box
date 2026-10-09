@@ -21,6 +21,10 @@ MIN_MEMORY_BYTES = 64 * 1024 * 1024
 MAX_MEMORY_BYTES = 64 * 1024 * 1024 * 1024
 MIN_TMPFS_BYTES = 16 * 1024 * 1024
 MAX_TMPFS_BYTES = 4 * 1024 * 1024 * 1024
+MANAGED_LABEL = "io.magicglassbox.managed"
+RUN_ID_LABEL = "io.magicglassbox.run-id"
+LEGACY_MANAGED_LABEL = "io.hexadecapus.managed"
+LEGACY_RUN_ID_LABEL = "io.hexadecapus.run-id"
 
 
 class ExecutionError(RuntimeError):
@@ -198,7 +202,7 @@ def build_sandbox_plan(
         name: _credential_path(path, uid=uid, workspace=workspace)
         for name, path in request.credential_files.items()
     }
-    container_name = "hex-" + request.run_id.removeprefix("run_")
+    container_name = "magic-glass-box-" + request.run_id.removeprefix("run_")
     workspace_mount = f"type=bind,src={workspace},dst=/workspace"
     if request.profile.workspace_mode is WorkspaceMode.READ_ONLY:
         workspace_mount += ",readonly"
@@ -209,9 +213,9 @@ def build_sandbox_plan(
         "--name",
         container_name,
         "--label",
-        "io.hexadecapus.managed=true",
+        f"{MANAGED_LABEL}=true",
         "--label",
-        f"io.hexadecapus.run-id={request.run_id}",
+        f"{RUN_ID_LABEL}={request.run_id}",
         "--pull",
         "never",
         "--read-only",
@@ -237,7 +241,7 @@ def build_sandbox_plan(
         "--user",
         f"{uid}:{gid}",
         "--hostname",
-        "hex-agent",
+        "magic-glass-box-agent",
         "--workdir",
         "/workspace",
         "--tmpfs",
@@ -254,12 +258,12 @@ def build_sandbox_plan(
         "--env",
         "HOME=/tmp",
         "--env",
-        f"HEX_RUN_ID={request.run_id}",
+        f"MAGIC_GLASS_BOX_RUN_ID={request.run_id}",
         "--env",
-        "HEX_CREDENTIAL_DIR=/run/secrets/hex",
+        "MAGIC_GLASS_BOX_CREDENTIAL_DIR=/run/secrets/magic-glass-box",
     ]
     if "krab" in credentials:
-        args.extend(("--env", "KRAB_TOKEN_FILE=/run/secrets/hex/krab"))
+        args.extend(("--env", "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab"))
     args.extend(("--mount", workspace_mount))
     for name in sorted(credentials):
         args.extend(
@@ -267,7 +271,7 @@ def build_sandbox_plan(
                 "--mount",
                 (
                     f"type=bind,src={credentials[name]},"
-                    f"dst=/run/secrets/hex/{name},readonly"
+                    f"dst=/run/secrets/magic-glass-box/{name},readonly"
                 ),
             )
         )
@@ -474,23 +478,29 @@ class DockerCLI:
     def managed_containers(self, run_id: str) -> tuple[str, ...]:
         if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:
             raise ExecutionError("invalid run identifier")
-        raw = self._run(
-            (
-                "container",
-                "ls",
-                "--all",
-                "--no-trunc",
-                "--quiet",
-                "--filter",
-                "label=io.hexadecapus.managed=true",
-                "--filter",
-                f"label=io.hexadecapus.run-id={run_id}",
-            )
-        )
-        container_ids = tuple(line.strip() for line in raw.splitlines() if line.strip())
-        if len(set(container_ids)) != len(container_ids) or any(
-            CONTAINER_ID_RE.fullmatch(container_id) is None
-            for container_id in container_ids
+        discovered: list[str] = []
+        for managed_label, run_id_label in (
+            (MANAGED_LABEL, RUN_ID_LABEL),
+            (LEGACY_MANAGED_LABEL, LEGACY_RUN_ID_LABEL),
         ):
-            raise ExecutionError("Docker returned an invalid container listing")
-        return container_ids
+            raw = self._run(
+                (
+                    "container",
+                    "ls",
+                    "--all",
+                    "--no-trunc",
+                    "--quiet",
+                    "--filter",
+                    f"label={managed_label}=true",
+                    "--filter",
+                    f"label={run_id_label}={run_id}",
+                )
+            )
+            listed = tuple(line.strip() for line in raw.splitlines() if line.strip())
+            if len(set(listed)) != len(listed) or any(
+                CONTAINER_ID_RE.fullmatch(container_id) is None
+                for container_id in listed
+            ):
+                raise ExecutionError("Docker returned an invalid container listing")
+            discovered.extend(listed)
+        return tuple(dict.fromkeys(discovered))

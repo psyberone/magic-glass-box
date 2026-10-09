@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from hexadecapus.cli import InputError, _emit, _json_file, build_parser, main
-from hexadecapus.domain import AgentProfileSpec, ProjectContext, RunState
-from hexadecapus.krab import ActivityPage
+from magic_glass_box.cli import InputError, _emit, _json_file, build_parser, main
+from magic_glass_box.domain import AgentProfileSpec, ProjectContext, RunState
+from magic_glass_box.krab import ActivityPage
 
 
 class FakeDatabase:
@@ -49,7 +50,7 @@ class FakeControlPlane:
 
     def project_activity(self, **kwargs: object) -> ActivityPage:
         self.calls.append(("krab.activity", kwargs))
-        return ActivityPage("hex-project", 0, 0, ())
+        return ActivityPage("box-project", 0, 0, ())
 
     def register_project(self, **kwargs: object) -> dict[str, object]:
         return self._called("project.add", **kwargs)
@@ -87,7 +88,7 @@ class CLITests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.database = Path(self.temporary.name) / "hex.db"
+        self.database = Path(self.temporary.name) / "control-plane.db"
 
     def invoke(self, *arguments: str) -> tuple[int, dict[str, object], str]:
         stdout = io.StringIO()
@@ -119,7 +120,7 @@ class CLITests(unittest.TestCase):
 
     def test_all_administrative_routes_dispatch(self) -> None:
         context = Path(self.temporary.name) / "context.json"
-        context.write_text('{"purpose":"Build Hex"}', encoding="utf-8")
+        context.write_text('{"purpose":"Build Magic Glass Box"}', encoding="utf-8")
         spec = Path(self.temporary.name) / "profile.json"
         spec.write_text(
             '{"image":"agent@sha256:abc","command":["agent"]}',
@@ -153,7 +154,7 @@ class CLITests(unittest.TestCase):
                     "local",
                     "--token-file",
                     "/private/token",
-                    "--hex-user",
+                    "--local-user",
                     "operator",
                 ],
                 (
@@ -161,7 +162,7 @@ class CLITests(unittest.TestCase):
                     {
                         "instance_name": "local",
                         "credential_path": Path("/private/token"),
-                        "hex_user_handle": "operator",
+                        "local_user_handle": "operator",
                     },
                 ),
                 {"operation": "krab.identity-add"},
@@ -172,7 +173,7 @@ class CLITests(unittest.TestCase):
                     "krab",
                     "activity",
                     "local",
-                    "hex-project",
+                    "box-project",
                     "--as-user",
                     "agent_one",
                     "--after",
@@ -187,7 +188,7 @@ class CLITests(unittest.TestCase):
                     {
                         "instance_name": "local",
                         "krab_handle": "agent_one",
-                        "project_key": "hex-project",
+                        "project_key": "box-project",
                         "after": 7,
                         "limit": 23,
                         "wait": 9,
@@ -197,7 +198,7 @@ class CLITests(unittest.TestCase):
                     "after": 0,
                     "events": [],
                     "next_cursor": 0,
-                    "project_key": "hex-project",
+                    "project_key": "box-project",
                 },
             ),
             (
@@ -205,13 +206,13 @@ class CLITests(unittest.TestCase):
                 [
                     "project",
                     "add",
-                    "hex-project",
+                    "box-project",
                     "--instance",
                     "local",
                     "--as-user",
                     "agent_one",
                     "--name",
-                    "Hex",
+                    "Magic Glass Box",
                     "--context",
                     str(context),
                     "--created-by",
@@ -222,10 +223,10 @@ class CLITests(unittest.TestCase):
                     {
                         "instance_name": "local",
                         "krab_handle": "agent_one",
-                        "project_key": "hex-project",
-                        "display_name": "Hex",
+                        "project_key": "box-project",
+                        "display_name": "Magic Glass Box",
                         "context": ProjectContext.from_mapping(
-                            {"purpose": "Build Hex"}
+                            {"purpose": "Build Magic Glass Box"}
                         ),
                         "created_by_handle": "operator",
                     },
@@ -237,7 +238,7 @@ class CLITests(unittest.TestCase):
                 [
                     "project",
                     "revise",
-                    "hex-project",
+                    "box-project",
                     "--context",
                     str(context),
                     "--created-by",
@@ -246,9 +247,9 @@ class CLITests(unittest.TestCase):
                 (
                     "project.revise",
                     {
-                        "project_key": "hex-project",
+                        "project_key": "box-project",
                         "context": ProjectContext.from_mapping(
-                            {"purpose": "Build Hex"}
+                            {"purpose": "Build Magic Glass Box"}
                         ),
                         "created_by_handle": "operator",
                     },
@@ -319,7 +320,7 @@ class CLITests(unittest.TestCase):
                     "run",
                     "create",
                     "--project",
-                    "hex-project",
+                    "box-project",
                     "--profile",
                     "Worker",
                     "--requested-by",
@@ -334,7 +335,7 @@ class CLITests(unittest.TestCase):
                 (
                     "run.create",
                     {
-                        "project_key": "hex-project",
+                        "project_key": "box-project",
                         "profile_name": "Worker",
                         "requested_by_handle": "operator",
                         "source_revision": "abc123",
@@ -378,7 +379,7 @@ class CLITests(unittest.TestCase):
             with self.subTest(expected=expected):
                 stdout = io.StringIO()
                 with (
-                    mock.patch("hexadecapus.cli.ControlPlane", return_value=fake),
+                    mock.patch("magic_glass_box.cli.ControlPlane", return_value=fake),
                     redirect_stdout(stdout),
                 ):
                     status = main(["--db", str(self.database), *arguments])
@@ -391,8 +392,10 @@ class CLITests(unittest.TestCase):
 
     def test_parser_contract_and_activity_defaults(self) -> None:
         parser = build_parser()
-        self.assertEqual(parser.prog, "hex")
-        self.assertEqual(parser.description, "Hexadecapus control-plane administration")
+        self.assertEqual(parser.prog, "magic-glass-box")
+        self.assertEqual(
+            parser.description, "Magic Glass Box control-plane administration"
+        )
         parsed = parser.parse_args(
             [
                 "--db",
@@ -400,7 +403,7 @@ class CLITests(unittest.TestCase):
                 "krab",
                 "activity",
                 "local",
-                "hex-project",
+                "box-project",
                 "--as-user",
                 "agent_one",
             ]
@@ -410,6 +413,47 @@ class CLITests(unittest.TestCase):
         self.assertEqual(parsed.limit, 50)
         self.assertEqual(parsed.wait, 0)
         self.assertEqual(parsed.krab_handle, "agent_one")
+
+        root = Path(self.temporary.name)
+        home = root / "home"
+        cases = (
+            (
+                {"MAGIC_GLASS_BOX_DB": str(root / "current.db")},
+                root / "current.db",
+            ),
+            ({"HEX_DB": str(root / "legacy.db")}, root / "legacy.db"),
+            (
+                {
+                    "MAGIC_GLASS_BOX_DB": str(root / "current.db"),
+                    "HEX_DB": str(root / "legacy.db"),
+                },
+                root / "current.db",
+            ),
+            (
+                {"MAGIC_GLASS_BOX_STATE_DIR": str(root / "current-state")},
+                root / "current-state" / "control-plane.db",
+            ),
+            (
+                {"HEX_STATE_DIR": str(root / "legacy-state")},
+                root / "legacy-state" / "hex.db",
+            ),
+            (
+                {"XDG_STATE_HOME": str(root / "xdg")},
+                root / "xdg" / "magic-glass-box" / "control-plane.db",
+            ),
+            (
+                {},
+                home / ".local" / "state" / "magic-glass-box" / "control-plane.db",
+            ),
+        )
+        for environment, expected in cases:
+            with (
+                self.subTest(environment=environment),
+                mock.patch.dict(os.environ, environment, clear=True),
+                mock.patch("magic_glass_box.db.Path.home", return_value=home),
+            ):
+                parsed = build_parser().parse_args(["status"])
+            self.assertEqual(parsed.db, expected)
 
     def test_execution_and_reconciliation_routes_use_the_run_coordinator(self) -> None:
         control = FakeControlPlane()
@@ -430,9 +474,11 @@ class CLITests(unittest.TestCase):
             with self.subTest(arguments=arguments):
                 stdout = io.StringIO()
                 with (
-                    mock.patch("hexadecapus.cli.ControlPlane", return_value=control),
                     mock.patch(
-                        "hexadecapus.cli._build_run_coordinator",
+                        "magic_glass_box.cli.ControlPlane", return_value=control
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_run_coordinator",
                         return_value=coordinator,
                     ),
                     redirect_stdout(stdout),

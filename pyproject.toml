@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hexadecapus"
+name = "magic-glass-box"
 version = "0.1.0"
 description = "A local-first control plane for sandboxed coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [{name = "Hexadecapus contributors"}]
+authors = [{name = "Magic Glass Box contributors"}]
 dependencies = []
 
 [project.optional-dependencies]
@@ -21,7 +21,7 @@ development = [
 ]
 
 [project.scripts]
-hex = "hexadecapus.cli:main"
+magic-glass-box = "magic_glass_box.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -40,18 +40,18 @@ ignore = ["S101"]
 
 [tool.coverage.run]
 branch = true
-source = ["hexadecapus"]
+source = ["magic_glass_box"]
 
 [tool.coverage.report]
 fail_under = 85
 show_missing = true
 
 [tool.mutmut]
-source_paths = ["src/hexadecapus"]
+source_paths = ["src/magic_glass_box"]
 also_copy = ["scripts/"]
 do_not_mutate = [
-    "src/hexadecapus/__init__.py",
-    "src/hexadecapus/__main__.py",
+    "src/magic_glass_box/__init__.py",
+    "src/magic_glass_box/__main__.py",
 ]
 mutate_only_covered_lines = true
 pytest_add_cli_args_test_selection = ["tests"]

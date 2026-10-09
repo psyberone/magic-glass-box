@@ -230,7 +230,7 @@ class KrabClient:
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self._token}",
-            "User-Agent": f"hexadecapus/{__version__}",
+            "User-Agent": f"magic-glass-box/{__version__}",
         }
         connection = self._connection_factory(self.host, self.port, self.timeout)
         try:

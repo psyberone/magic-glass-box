@@ -14,7 +14,7 @@ ClientFactory = Callable[[str, str], KrabClient]
 
 
 class ControlPlane:
-    """Application service coordinating durable Hex state with Krab identity."""
+    """Coordinate durable local state with Krab identity and messaging."""
 
     def __init__(
         self,
@@ -45,7 +45,7 @@ class ControlPlane:
         *,
         instance_name: str,
         credential_path: Path,
-        hex_user_handle: str | None = None,
+        local_user_handle: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(self.credential_resolver, PrivateFileCredentialResolver):
             raise TypeError(
@@ -56,8 +56,8 @@ class ControlPlane:
         instance = self.database.get_krab_instance(instance_name)
         identity = self.client_factory(instance["base_url"], token).whoami()
         user_id = None
-        if hex_user_handle is not None:
-            user_id = self.database.get_user(hex_user_handle)["id"]
+        if local_user_handle is not None:
+            user_id = self.database.get_user(local_user_handle)["id"]
         return self.database.store_krab_identity(
             instance["id"], identity, reference, user_id=user_id
         )

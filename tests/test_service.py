@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from hexadecapus.credentials import PrivateFileCredentialResolver
-from hexadecapus.db import Database
-from hexadecapus.domain import AgentProfileSpec, ProjectContext, RunState
-from hexadecapus.krab import ActivityPage, KrabError, KrabIdentity, KrabProject
-from hexadecapus.service import (
+from magic_glass_box.credentials import PrivateFileCredentialResolver
+from magic_glass_box.db import Database
+from magic_glass_box.domain import AgentProfileSpec, ProjectContext, RunState
+from magic_glass_box.krab import ActivityPage, KrabError, KrabIdentity, KrabProject
+from magic_glass_box.service import (
     ControlPlane,
     activity_to_dict,
     context_from_mapping,
@@ -53,11 +53,11 @@ class ControlPlaneTests(unittest.TestCase):
         self.token_path = self.root / "krab.token"
         self.token_path.write_text(TOKEN + "\n", encoding="ascii")
         os.chmod(self.token_path, 0o600)
-        self.database = Database(self.root / "hex.db")
+        self.database = Database(self.root / "control-plane.db")
         self.identity = KrabIdentity(USER_ID, "agent_one", 1)
         self.project = KrabProject(
             project_id=PROJECT_ID,
-            project_key="hex-project",
+            project_key="box-project",
             role="member",
             label="Untrusted label",
             content_risk_flags=(),
@@ -84,11 +84,11 @@ class ControlPlaneTests(unittest.TestCase):
         stored = self.control.add_krab_identity(
             instance_name="Local Krab",
             credential_path=self.token_path,
-            hex_user_handle="operator",
+            local_user_handle="operator",
         )
         self.assertEqual(stored["krab_user_id"], USER_ID)
         self.assertEqual(
-            stored["hex_user_id"], self.database.get_user("operator")["id"]
+            stored["local_user_id"], self.database.get_user("operator")["id"]
         )
         self.assertEqual(stored["credential_ref"], "file:" + str(self.token_path))
         self.assertNotIn(TOKEN.encode("ascii"), self.database.path.read_bytes())
@@ -123,13 +123,13 @@ class ControlPlaneTests(unittest.TestCase):
         project = self.control.register_project(
             instance_name="Local Krab",
             krab_handle="agent_one",
-            project_key="hex-project",
-            display_name="Trusted Hex Name",
-            context=ProjectContext.from_mapping({"purpose": "Build Hex"}),
+            project_key="box-project",
+            display_name="Trusted Box Name",
+            context=ProjectContext.from_mapping({"purpose": "Build Magic Glass Box"}),
             created_by_handle="operator",
         )
         self.assertEqual(project["krab_project_id"], PROJECT_ID)
-        self.assertEqual(project["display_name"], "Trusted Hex Name")
+        self.assertEqual(project["display_name"], "Trusted Box Name")
         self.assertNotEqual(project["display_name"], self.project.label)
 
     def test_project_registration_rejects_invisible_project(self) -> None:
@@ -153,14 +153,16 @@ class ControlPlaneTests(unittest.TestCase):
         self.control.register_project(
             instance_name="Local Krab",
             krab_handle="agent_one",
-            project_key="hex-project",
-            display_name="Hex",
-            context=ProjectContext.from_mapping({"purpose": "Build Hex"}),
+            project_key="box-project",
+            display_name="Magic Glass Box",
+            context=ProjectContext.from_mapping({"purpose": "Build Magic Glass Box"}),
             created_by_handle="operator",
         )
         revised = self.control.revise_project_context(
-            project_key="hex-project",
-            context=ProjectContext.from_mapping({"purpose": "Build Hex safely"}),
+            project_key="box-project",
+            context=ProjectContext.from_mapping(
+                {"purpose": "Build Magic Glass Box safely"}
+            ),
             created_by_handle="operator",
         )
         self.assertEqual(revised["context_version"], 2)
@@ -184,7 +186,7 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(revised_profile["profile_version"], 2)
         run = self.control.create_run(
-            project_key="hex-project",
+            project_key="box-project",
             profile_name="Worker",
             requested_by_handle="operator",
             source_revision="abc123",
@@ -202,30 +204,30 @@ class ControlPlaneTests(unittest.TestCase):
         default_page = self.control.project_activity(
             instance_name="Local Krab",
             krab_handle="agent_one",
-            project_key="hex-project",
+            project_key="box-project",
         )
-        self.assertEqual(default_page, ActivityPage("hex-project", 0, 0, ()))
+        self.assertEqual(default_page, ActivityPage("box-project", 0, 0, ()))
         self.assertEqual(
             self.clients[-1].activity_calls,
-            [("hex-project", {"after": 0, "limit": 50, "wait": 0})],
+            [("box-project", {"after": 0, "limit": 50, "wait": 0})],
         )
         page = self.control.project_activity(
             instance_name="Local Krab",
             krab_handle="agent_one",
-            project_key="hex-project",
+            project_key="box-project",
             after=7,
             limit=23,
             wait=9,
         )
-        self.assertEqual(activity_to_dict(page)["project_key"], "hex-project")
+        self.assertEqual(activity_to_dict(page)["project_key"], "box-project")
         self.assertEqual(page.after, 7)
         self.assertEqual(
             self.clients[-1].activity_calls,
-            [("hex-project", {"after": 7, "limit": 23, "wait": 9})],
+            [("box-project", {"after": 7, "limit": 23, "wait": 9})],
         )
         self.assertEqual(
-            context_from_mapping({"purpose": "Hex"}).purpose,
-            "Hex",
+            context_from_mapping({"purpose": "Magic Glass Box"}).purpose,
+            "Magic Glass Box",
         )
         self.assertEqual(
             profile_from_mapping({"image": "agent", "command": ["run"]}).image,
@@ -241,7 +243,7 @@ class ControlPlaneTests(unittest.TestCase):
             self.control.project_activity(
                 instance_name="Local Krab",
                 krab_handle="agent_one",
-                project_key="hex-project",
+                project_key="box-project",
             )
 
 

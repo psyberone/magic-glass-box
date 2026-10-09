@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hexadecapus.workspace import (
+from magic_glass_box.workspace import (
     GitSnapshotter,
     WorkspaceError,
     WorkspaceManager,
@@ -123,7 +123,7 @@ class WorkspaceManagerTests(unittest.TestCase):
         destination.mkdir(mode=0o700)
         with (
             mock.patch(
-                "hexadecapus.workspace.shutil.rmtree",
+                "magic_glass_box.workspace.shutil.rmtree",
                 side_effect=OSError("busy"),
             ),
             self.assertRaisesRegex(WorkspaceError, "cannot remove"),
@@ -131,7 +131,9 @@ class WorkspaceManagerTests(unittest.TestCase):
             manager.cleanup(RUN_ID)
 
         with (
-            mock.patch("hexadecapus.workspace.os.getuid", return_value=os.getuid() + 1),
+            mock.patch(
+                "magic_glass_box.workspace.os.getuid", return_value=os.getuid() + 1
+            ),
             self.assertRaisesRegex(WorkspaceError, "root is not owned"),
         ):
             manager.ensure_root()
@@ -178,12 +180,12 @@ class GitSnapshotterTests(unittest.TestCase):
 
     def test_constructor_discovers_git_and_rejects_unsafe_settings(self) -> None:
         with mock.patch(
-            "hexadecapus.workspace.shutil.which", return_value="/usr/bin/git"
+            "magic_glass_box.workspace.shutil.which", return_value="/usr/bin/git"
         ):
             discovered = GitSnapshotter(runner=mock.Mock())
         self.assertEqual(discovered.binary, Path("/usr/bin/git"))
         with (
-            mock.patch("hexadecapus.workspace.shutil.which", return_value=None),
+            mock.patch("magic_glass_box.workspace.shutil.which", return_value=None),
             self.assertRaisesRegex(WorkspaceError, "not found"),
         ):
             GitSnapshotter(runner=mock.Mock())
@@ -364,10 +366,10 @@ class GitSnapshotterTests(unittest.TestCase):
                 )
                 snapshotter = GitSnapshotter(binary=Path("/usr/bin/git"), runner=runner)
                 patcher = (
-                    mock.patch(f"hexadecapus.workspace.{patch_target}", 0)
+                    mock.patch(f"magic_glass_box.workspace.{patch_target}", 0)
                     if patch_target is not None
                     else mock.patch(
-                        "hexadecapus.workspace.MAX_ARCHIVE_BYTES",
+                        "magic_glass_box.workspace.MAX_ARCHIVE_BYTES",
                         512 * 1024 * 1024,
                     )
                 )
