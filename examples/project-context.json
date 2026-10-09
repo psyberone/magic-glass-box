@@ -1,0 +1,25 @@
+{
+  "allowed_tools": [
+    "git",
+    "python"
+  ],
+  "build_commands": [],
+  "default_branch": "main",
+  "instructions": [
+    "Preserve unrelated user changes.",
+    "Run the focused test suite before reporting completion."
+  ],
+  "purpose": "Develop and maintain this project safely.",
+  "repository_path": "/absolute/path/to/local/git-checkout",
+  "test_commands": [
+    [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-v"
+    ]
+  ]
+}

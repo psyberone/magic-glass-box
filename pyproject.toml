@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hexadecapus"
+version = "0.1.0"
+description = "A local-first control plane for sandboxed coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Hexadecapus contributors"}]
+dependencies = []
+
+[project.optional-dependencies]
+development = [
+    "coverage[toml]",
+    "mutmut",
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+hex = "hexadecapus.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+extend-exclude = ["mutants"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+ignore = ["S101"]
+
+[tool.coverage.run]
+branch = true
+source = ["hexadecapus"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
+[tool.mutmut]
+source_paths = ["src/hexadecapus"]
+also_copy = ["scripts/"]
+do_not_mutate = [
+    "src/hexadecapus/__init__.py",
+    "src/hexadecapus/__main__.py",
+]
+mutate_only_covered_lines = true
+pytest_add_cli_args_test_selection = ["tests"]
+timeout_multiplier = 15.0
+timeout_constant = 1.0

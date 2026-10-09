@@ -1,0 +1,486 @@
+from __future__ import annotations
+
+import io
+import json
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+from hexadecapus.cli import InputError, _emit, _json_file, build_parser, main
+from hexadecapus.domain import AgentProfileSpec, ProjectContext, RunState
+from hexadecapus.krab import ActivityPage
+
+
+class FakeDatabase:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def status(self) -> dict[str, object]:
+        self.calls.append(("status", {}))
+        return {"operation": "status"}
+
+    def get_run(self, run_id: str) -> dict[str, object]:
+        self.calls.append(("run.show", {"run_id": run_id}))
+        return {"operation": "run.show", "run_id": run_id}
+
+
+class FakeControlPlane:
+    def __init__(self) -> None:
+        self.database = FakeDatabase()
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def _called(self, operation: str, **kwargs: object) -> dict[str, object]:
+        self.calls.append((operation, kwargs))
+        return {"operation": operation}
+
+    def initialize(self) -> dict[str, object]:
+        return self._called("init")
+
+    def create_user(self, handle: str, display_name: str | None) -> dict[str, object]:
+        return self._called("user.add", handle=handle, display_name=display_name)
+
+    def add_krab_instance(self, name: str, url: str) -> dict[str, object]:
+        return self._called("krab.instance-add", name=name, url=url)
+
+    def add_krab_identity(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.identity-add", **kwargs)
+
+    def project_activity(self, **kwargs: object) -> ActivityPage:
+        self.calls.append(("krab.activity", kwargs))
+        return ActivityPage("hex-project", 0, 0, ())
+
+    def register_project(self, **kwargs: object) -> dict[str, object]:
+        return self._called("project.add", **kwargs)
+
+    def revise_project_context(self, **kwargs: object) -> dict[str, object]:
+        return self._called("project.revise", **kwargs)
+
+    def create_agent_profile(self, **kwargs: object) -> dict[str, object]:
+        return self._called("profile.add", **kwargs)
+
+    def revise_agent_profile(self, **kwargs: object) -> dict[str, object]:
+        return self._called("profile.revise", **kwargs)
+
+    def create_run(self, **kwargs: object) -> dict[str, object]:
+        return self._called("run.create", **kwargs)
+
+    def transition_run(self, run_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("run.transition", run_id=run_id, **kwargs)
+
+
+class FakeRunCoordinator:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def execute(self, run_id: str) -> dict[str, object]:
+        self.calls.append(("execute", run_id))
+        return {"operation": "run.execute", "run_id": run_id}
+
+    def reconcile(self) -> list[dict[str, object]]:
+        self.calls.append(("reconcile", {}))
+        return [{"operation": "run.reconcile"}]
+
+
+class CLITests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.database = Path(self.temporary.name) / "hex.db"
+
+    def invoke(self, *arguments: str) -> tuple[int, dict[str, object], str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            status = main(["--db", str(self.database), *arguments])
+        output = stdout.getvalue() or stderr.getvalue()
+        return status, json.loads(output), stderr.getvalue()
+
+    def test_init_user_and_status(self) -> None:
+        status, initialized, _ = self.invoke("init")
+        self.assertEqual(status, 0)
+        self.assertEqual(initialized["schema_version"], 1)
+        status, user, _ = self.invoke(
+            "user", "add", "operator", "--display-name", "Local Operator"
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(user["handle"], "operator")
+        status, state, _ = self.invoke("status")
+        self.assertEqual(status, 0)
+        self.assertEqual(state["counts"]["users"], 1)
+
+    def test_error_is_structured_and_nonzero(self) -> None:
+        self.invoke("init")
+        status, error, stderr = self.invoke("user", "add", "x")
+        self.assertEqual(status, 2)
+        self.assertIn("error", error)
+        self.assertIn("ValidationError", stderr)
+
+    def test_all_administrative_routes_dispatch(self) -> None:
+        context = Path(self.temporary.name) / "context.json"
+        context.write_text('{"purpose":"Build Hex"}', encoding="utf-8")
+        spec = Path(self.temporary.name) / "profile.json"
+        spec.write_text(
+            '{"image":"agent@sha256:abc","command":["agent"]}',
+            encoding="utf-8",
+        )
+        fake = FakeControlPlane()
+        cases: tuple[
+            tuple[
+                str,
+                list[str],
+                tuple[str, dict[str, object]],
+                dict[str, object],
+            ],
+            ...,
+        ] = (
+            ("status", ["status"], ("status", {}), {"operation": "status"}),
+            (
+                "krab.instance-add",
+                ["krab", "instance-add", "local", "--url", "http://localhost:8765"],
+                (
+                    "krab.instance-add",
+                    {"name": "local", "url": "http://localhost:8765"},
+                ),
+                {"operation": "krab.instance-add"},
+            ),
+            (
+                "krab.identity-add",
+                [
+                    "krab",
+                    "identity-add",
+                    "local",
+                    "--token-file",
+                    "/private/token",
+                    "--hex-user",
+                    "operator",
+                ],
+                (
+                    "krab.identity-add",
+                    {
+                        "instance_name": "local",
+                        "credential_path": Path("/private/token"),
+                        "hex_user_handle": "operator",
+                    },
+                ),
+                {"operation": "krab.identity-add"},
+            ),
+            (
+                "krab.activity",
+                [
+                    "krab",
+                    "activity",
+                    "local",
+                    "hex-project",
+                    "--as-user",
+                    "agent_one",
+                    "--after",
+                    "7",
+                    "--limit",
+                    "23",
+                    "--wait",
+                    "9",
+                ],
+                (
+                    "krab.activity",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "hex-project",
+                        "after": 7,
+                        "limit": 23,
+                        "wait": 9,
+                    },
+                ),
+                {
+                    "after": 0,
+                    "events": [],
+                    "next_cursor": 0,
+                    "project_key": "hex-project",
+                },
+            ),
+            (
+                "project.add",
+                [
+                    "project",
+                    "add",
+                    "hex-project",
+                    "--instance",
+                    "local",
+                    "--as-user",
+                    "agent_one",
+                    "--name",
+                    "Hex",
+                    "--context",
+                    str(context),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "project.add",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "hex-project",
+                        "display_name": "Hex",
+                        "context": ProjectContext.from_mapping(
+                            {"purpose": "Build Hex"}
+                        ),
+                        "created_by_handle": "operator",
+                    },
+                ),
+                {"operation": "project.add"},
+            ),
+            (
+                "project.revise",
+                [
+                    "project",
+                    "revise",
+                    "hex-project",
+                    "--context",
+                    str(context),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "project.revise",
+                    {
+                        "project_key": "hex-project",
+                        "context": ProjectContext.from_mapping(
+                            {"purpose": "Build Hex"}
+                        ),
+                        "created_by_handle": "operator",
+                    },
+                ),
+                {"operation": "project.revise"},
+            ),
+            (
+                "profile.add",
+                [
+                    "profile",
+                    "add",
+                    "Worker",
+                    "--instance",
+                    "local",
+                    "--krab-user",
+                    "agent_one",
+                    "--spec",
+                    str(spec),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "profile.add",
+                    {
+                        "name": "Worker",
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "spec": AgentProfileSpec.from_mapping(
+                            {"image": "agent@sha256:abc", "command": ["agent"]}
+                        ),
+                        "created_by_handle": "operator",
+                    },
+                ),
+                {"operation": "profile.add"},
+            ),
+            (
+                "profile.revise",
+                [
+                    "profile",
+                    "revise",
+                    "Worker",
+                    "--instance",
+                    "local",
+                    "--krab-user",
+                    "agent_one",
+                    "--spec",
+                    str(spec),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "profile.revise",
+                    {
+                        "name": "Worker",
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "spec": AgentProfileSpec.from_mapping(
+                            {"image": "agent@sha256:abc", "command": ["agent"]}
+                        ),
+                        "created_by_handle": "operator",
+                    },
+                ),
+                {"operation": "profile.revise"},
+            ),
+            (
+                "run.create",
+                [
+                    "run",
+                    "create",
+                    "--project",
+                    "hex-project",
+                    "--profile",
+                    "Worker",
+                    "--requested-by",
+                    "operator",
+                    "--source-revision",
+                    "abc123",
+                    "--krab-session",
+                    "ses_" + "4" * 32,
+                    "--krab-claim",
+                    "clm_" + "5" * 32,
+                ],
+                (
+                    "run.create",
+                    {
+                        "project_key": "hex-project",
+                        "profile_name": "Worker",
+                        "requested_by_handle": "operator",
+                        "source_revision": "abc123",
+                        "krab_session_id": "ses_" + "4" * 32,
+                        "krab_claim_id": "clm_" + "5" * 32,
+                    },
+                ),
+                {"operation": "run.create"},
+            ),
+            (
+                "run.transition",
+                [
+                    "run",
+                    "transition",
+                    "run_123",
+                    "preparing",
+                    "--expected-version",
+                    "1",
+                    "--reason",
+                    "operator approved",
+                ],
+                (
+                    "run.transition",
+                    {
+                        "run_id": "run_123",
+                        "target": RunState.PREPARING,
+                        "expected_version": 1,
+                        "reason": "operator approved",
+                    },
+                ),
+                {"operation": "run.transition"},
+            ),
+            (
+                "run.show",
+                ["run", "show", "run_123"],
+                ("run.show", {"run_id": "run_123"}),
+                {"operation": "run.show", "run_id": "run_123"},
+            ),
+        )
+        for expected, arguments, expected_call, expected_result in cases:
+            with self.subTest(expected=expected):
+                stdout = io.StringIO()
+                with (
+                    mock.patch("hexadecapus.cli.ControlPlane", return_value=fake),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(json.loads(stdout.getvalue()), expected_result)
+                if expected in {"status", "run.show"}:
+                    self.assertEqual(fake.database.calls[-1], expected_call)
+                else:
+                    self.assertEqual(fake.calls[-1], expected_call)
+
+    def test_parser_contract_and_activity_defaults(self) -> None:
+        parser = build_parser()
+        self.assertEqual(parser.prog, "hex")
+        self.assertEqual(parser.description, "Hexadecapus control-plane administration")
+        parsed = parser.parse_args(
+            [
+                "--db",
+                str(self.database),
+                "krab",
+                "activity",
+                "local",
+                "hex-project",
+                "--as-user",
+                "agent_one",
+            ]
+        )
+        self.assertEqual(parsed.db, self.database)
+        self.assertEqual(parsed.after, 0)
+        self.assertEqual(parsed.limit, 50)
+        self.assertEqual(parsed.wait, 0)
+        self.assertEqual(parsed.krab_handle, "agent_one")
+
+    def test_execution_and_reconciliation_routes_use_the_run_coordinator(self) -> None:
+        control = FakeControlPlane()
+        coordinator = FakeRunCoordinator()
+        cases = (
+            (
+                ["run", "execute", "run_" + "1" * 32],
+                ("execute", "run_" + "1" * 32),
+                {"operation": "run.execute", "run_id": "run_" + "1" * 32},
+            ),
+            (
+                ["run", "reconcile"],
+                ("reconcile", {}),
+                [{"operation": "run.reconcile"}],
+            ),
+        )
+        for arguments, expected_call, expected_output in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch("hexadecapus.cli.ControlPlane", return_value=control),
+                    mock.patch(
+                        "hexadecapus.cli._build_run_coordinator",
+                        return_value=coordinator,
+                    ),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(coordinator.calls[-1], expected_call)
+                self.assertEqual(json.loads(stdout.getvalue()), expected_output)
+
+    def test_emit_has_stable_readable_json(self) -> None:
+        output = io.StringIO()
+        _emit({"z": "å", "a": 1}, stream=output)
+        self.assertEqual(output.getvalue(), '{\n  "a": 1,\n  "z": "å"\n}\n')
+
+    def test_json_input_rejects_empty_duplicate_and_non_object_documents(self) -> None:
+        path = Path(self.temporary.name) / "input.json"
+        for raw, message in (
+            (b"", "between 1 byte"),
+            (b'{"a":1,"a":2}', "duplicate JSON key"),
+            (b"[]", "must contain an object"),
+            (b"{", "malformed JSON"),
+            (b'"\xff"', "UTF-8"),
+            (b'{"number":NaN}', "invalid JSON number"),
+        ):
+            with self.subTest(message=message):
+                path.write_bytes(raw)
+                with self.assertRaisesRegex(InputError, message):
+                    _json_file(path)
+
+    def test_json_input_preserves_unicode_and_accepts_exact_size_limit(self) -> None:
+        path = Path(self.temporary.name) / "input.json"
+        prefix = '{"value":"å'.encode()
+        suffix = b'"}'
+        raw = prefix + (b"x" * (1024 * 1024 - len(prefix) - len(suffix))) + suffix
+        path.write_bytes(raw)
+        value = _json_file(path)
+        self.assertTrue(value["value"].startswith("å"))
+        self.assertEqual(len(raw), 1024 * 1024)
+
+    def test_json_input_rejects_missing_and_oversized_files(self) -> None:
+        missing = Path(self.temporary.name) / "missing.json"
+        with self.assertRaisesRegex(InputError, "cannot read"):
+            _json_file(missing)
+        oversized = Path(self.temporary.name) / "oversized.json"
+        oversized.write_bytes(b" " * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(InputError, "1 MiB"):
+            _json_file(oversized)
+
+
+if __name__ == "__main__":
+    unittest.main()

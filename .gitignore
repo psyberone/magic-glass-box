@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+.mutmut-cache/
+mutants/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.db
+*.db-shm
+*.db-wal
