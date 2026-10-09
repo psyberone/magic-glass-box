@@ -53,10 +53,24 @@ project-activity projection.
   optimistic concurrency.
 - A human interaction records only its type, lifecycle, recipient, run, and
   Krab item IDs. Its question and answer remain private content in Krab.
+- Opening an interaction sends an idempotent Krab session item only after the
+  run, pinned agent identity, session, and active human binding pass local
+  preflight checks. The returned project, session, creator, recipient, status,
+  version, event sequence, and optional work-claim link are verified before
+  the local transition is accepted.
 - Opening an interaction atomically moves its run to `waiting_for_input`.
   Answering records the response item ID and re-queues the durable run so a
   replacement worker can resume it; terminal run transitions cancel any open
   interaction.
+- A response is accepted only when its project and session match the run and
+  its route reverses the request route from the authorized human to the pinned
+  agent identity. Its title, body, and risk flags exist in memory only for the
+  caller to deliver onward; Magic Glass Box does not write them to SQLite.
+
+The Krab POST and the local SQLite transition cannot be one transaction. The
+caller must retain and reuse its stable idempotency key until local correlation
+succeeds. A retry then resolves to the same Krab item rather than sending a
+duplicate private request.
 
 ## Execution lifecycle
 
@@ -87,5 +101,5 @@ scoped relay is absent.
 
 Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
-exit proofs. The metadata-only durable interaction ledger is complete. The next
-slice is its Krab transport, followed by the run-scoped agent gateway.
+exit proofs. The metadata-only durable interaction ledger and its verified Krab
+transport are complete. The next slice is the run-scoped agent gateway.

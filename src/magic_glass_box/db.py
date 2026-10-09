@@ -625,9 +625,11 @@ class Database:
             row = connection.execute(
                 "SELECT ki.id, ki.krab_instance_id, ki.krab_user_id, ki.handle, "
                 "ki.token_version, ki.credential_ref, ki.verified_at, "
-                "ki.created_at, ki.updated_at, ub.user_id AS local_user_id "
+                "ki.created_at, ki.updated_at, ub.user_id AS local_user_id, "
+                "u.active AS local_user_active "
                 "FROM krab_identities ki "
                 "LEFT JOIN user_krab_bindings ub ON ub.krab_identity_id = ki.id "
+                "LEFT JOIN users u ON u.id = ub.user_id "
                 "WHERE ki.krab_instance_id = ? AND ki.handle = ?",
                 (instance_id, handle),
             ).fetchone()
@@ -1426,6 +1428,29 @@ class Database:
             raise StorageError("pinned run data is invalid") from exc
         result["credential_references"] = {"krab": result.pop("credential_ref")}
         return result
+
+    def get_run_transport(self, run_id: str) -> dict[str, Any]:
+        """Load trusted Krab routing metadata pinned by a run."""
+
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT r.id, r.state, r.version, r.krab_session_id, "
+                "r.krab_claim_id, p.krab_project_key AS project_key, "
+                "p.krab_instance_id, ksi.name AS krab_instance_name, "
+                "ki.id AS agent_krab_identity_id, "
+                "ki.krab_user_id AS agent_krab_user_id, "
+                "ki.handle AS agent_krab_handle "
+                "FROM runs r JOIN projects p ON p.id = r.project_id "
+                "JOIN krab_instances ksi ON ksi.id = p.krab_instance_id "
+                "JOIN agent_profile_versions av "
+                "ON av.id = r.profile_version_id "
+                "JOIN krab_identities ki ON ki.id = av.krab_identity_id "
+                "WHERE r.id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"run not found: {run_id}")
+        return dict(row)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with closing(self.connect()) as connection:

@@ -13,8 +13,10 @@ This repository currently contains the first executable vertical slice:
 - run records that pin both versions and enforce a state machine;
 - a durable, metadata-only interaction ledger for typed questions, approvals,
   and choices, with atomic run-state transitions and optimistic concurrency;
-- a bounded, typed Krab client for `whoami`, project inventory, and project
-  activity;
+- a bounded, typed Krab client for `whoami`, project inventory, project
+  activity, and idempotent session-item write/read operations;
+- verified human-interaction routing that correlates Krab item IDs while
+  keeping private question and response content out of control-plane storage;
 - a private-file credential resolver that never copies token values into the
   database;
 - a Docker execution adapter that resolves images to immutable digests,
@@ -29,9 +31,11 @@ This repository currently contains the first executable vertical slice:
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
 the source checkout remains untouched and the container and snapshot are
-removed afterward. `krab_only` deliberately fails closed until Magic Glass Box
-has a scoped Krab relay. The relay, credential broker, and human-question
-workflow are the next vertical slices.
+removed afterward. The interaction transport has also been exercised over HTTP
+against a real local `imitation-krab`: idempotent question delivery,
+reverse-route response verification, and metadata-only local persistence all
+pass. The run-scoped agent gateway is next. `krab_only` continues to fail closed
+until its scoped relay exists.
 
 ## Quick start
 
@@ -83,6 +87,15 @@ mutation kill-rate floor. The repeatable gates are:
 make quality
 make mutation
 ```
+
+With the sister repository checked out beside this one, the repeatable live
+transport proof is:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_krab_transport.py
+```
+
+Use `--krab-source /path/to/imitation-krab/src` for another checkout layout.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the exact scoring rules and workflow.
 

@@ -32,7 +32,7 @@ Make a question part of durable work rather than a terminal call.
 
 ### 1B. Krab transport
 
-**Status: next**
+**Status: complete**
 
 - Add strictly validated, idempotent session-item write and read operations.
 - Correlate request and response item IDs in Magic Glass Box.
@@ -41,6 +41,8 @@ Make a question part of durable work rather than a terminal call.
 - Treat all titles and bodies as untrusted content.
 
 ### 1C. Agent interaction gateway
+
+**Status: next**
 
 - Give a sandbox a run-scoped local capability, not a reusable Krab token.
 - Accept typed `question`, `approval`, and `choice` requests.

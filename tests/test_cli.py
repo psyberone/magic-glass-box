@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -447,13 +448,87 @@ class CLITests(unittest.TestCase):
             ),
         )
         for environment, expected in cases:
+            isolated_environment = dict(environment)
+            mutant = os.environ.get("MUTANT_UNDER_TEST")
+            if mutant is not None:
+                isolated_environment["MUTANT_UNDER_TEST"] = mutant
             with (
                 self.subTest(environment=environment),
-                mock.patch.dict(os.environ, environment, clear=True),
+                mock.patch.dict(os.environ, isolated_environment, clear=True),
                 mock.patch("magic_glass_box.db.Path.home", return_value=home),
             ):
                 parsed = build_parser().parse_args(["status"])
             self.assertEqual(parsed.db, expected)
+
+    def test_complete_parser_surface_is_an_explicit_contract(self) -> None:
+        parser = build_parser()
+
+        def command_help(
+            current: argparse.ArgumentParser,
+        ) -> tuple[dict[str, str | None], dict[str, argparse.ArgumentParser]]:
+            subcommands = next(
+                (
+                    action
+                    for action in current._actions
+                    if isinstance(action, argparse._SubParsersAction)
+                ),
+                None,
+            )
+            if subcommands is None:
+                return {}, {}
+            helps = {
+                choice.dest: choice.help for choice in subcommands._choices_actions
+            }
+            return helps, dict(subcommands.choices)
+
+        root_help, root_commands = command_help(parser)
+        self.assertEqual(
+            root_help,
+            {
+                "init": "initialize the private state database",
+                "status": "validate state and show object counts",
+                "user": "manage local users",
+                "krab": "manage and query Krab connections",
+                "project": "manage project context",
+                "profile": "manage agent profiles",
+                "run": "manage agent runs",
+            },
+        )
+        expected_nested = {
+            "user": {"add": "add a local user"},
+            "krab": {
+                "instance-add": "add a Krab origin",
+                "identity-add": "verify and retain a Krab credential reference",
+                "activity": "read metadata-only project activity",
+            },
+            "project": {
+                "add": "verify and register a visible Krab project",
+                "revise": "append an immutable project-context revision",
+            },
+            "profile": {
+                "add": "create a versioned agent profile",
+                "revise": "append an immutable profile revision",
+            },
+            "run": {
+                "create": "create a pinned run record",
+                "transition": "apply an optimistic run-state transition",
+                "show": "show a run and its event stream",
+                "execute": "execute one queued run in its pinned sandbox",
+                "reconcile": (
+                    "clean and fail runs interrupted by an orchestrator restart"
+                ),
+            },
+        }
+        for command, expected_help in expected_nested.items():
+            with self.subTest(command=command):
+                nested_help, _ = command_help(root_commands[command])
+                self.assertEqual(nested_help, expected_help)
+
+        db_action = next(action for action in parser._actions if action.dest == "db")
+        self.assertEqual(db_action.option_strings, ["--db"])
+        self.assertIs(db_action.type, Path)
+        self.assertIsInstance(db_action.default, Path)
+        self.assertEqual(db_action.help, "control-plane database path")
 
     def test_execution_and_reconciliation_routes_use_the_run_coordinator(self) -> None:
         control = FakeControlPlane()

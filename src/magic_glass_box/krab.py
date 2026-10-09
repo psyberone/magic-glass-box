@@ -14,7 +14,13 @@ from .domain import validate_krab_id, validate_project_key
 
 DEFAULT_KRAB_PORT = 8765
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_REQUEST_BYTES = 32 * 1024
+MAX_TITLE_BYTES = 512
+MAX_BODY_BYTES = 16 * 1024
+MAX_NOTE_BYTES = 4 * 1024
+MAX_HISTORY_EVENTS = 128
 KRAB_HANDLE_RE = re.compile(r"^[a-z][a-z0-9_-]{2,31}$")
+IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 ITEM_STATUS = {
     "open.pending",
     "open.in_progress",
@@ -93,6 +99,37 @@ class ActivityPage:
     after: int
     next_cursor: int
     events: tuple[ActivityEvent, ...]
+
+
+@dataclass(frozen=True)
+class SessionItemHistoryEvent:
+    event_seq: int
+    kind: str
+    actor: KrabUserRef
+    from_status: str | None
+    to_status: str | None
+    created_at: str
+    untrusted_note: str | None
+    content_risk_flags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SessionItem:
+    item_id: str
+    project_key: str
+    session_id: str
+    creator: KrabUserRef
+    recipient: KrabUserRef
+    work_claim: WorkClaimRef | None
+    status: str
+    version: int
+    created_at: str
+    updated_at: str
+    event_seq: int | None
+    untrusted_title: str
+    untrusted_body: str
+    content_risk_flags: tuple[str, ...]
+    history: tuple[SessionItemHistoryEvent, ...]
 
 
 ConnectionFactory = Callable[[str, int, float], http.client.HTTPConnection]
@@ -199,6 +236,198 @@ def _user_ref(value: object, label: str) -> KrabUserRef:
     return KrabUserRef(user_id=user_id, handle=_handle(item["handle"]))
 
 
+def _risk_flags(value: object, *, label: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or len(value) > 64
+        or any(
+            not isinstance(flag, str)
+            or not flag
+            or "\x00" in flag
+            or len(flag.encode("utf-8")) > 64
+            for flag in value
+        )
+        or len(set(value)) != len(value)
+    ):
+        raise KrabError(f"invalid {label} risk flags")
+    return tuple(value)
+
+
+def _work_claim(value: object) -> WorkClaimRef | None:
+    if value is None:
+        return None
+    item = _exact_object(
+        value,
+        fields={"claim_id", "kind", "external_id"},
+        label="work claim",
+    )
+    try:
+        claim_id = validate_krab_id(item["claim_id"], "clm")
+    except ValueError as exc:
+        raise KrabError("invalid work-claim ID") from exc
+    kind = item["kind"]
+    if not isinstance(kind, str) or kind not in {"issue", "pull_request"}:
+        raise KrabError("invalid work-claim kind")
+    return WorkClaimRef(
+        claim_id=claim_id,
+        kind=kind,
+        external_id=_text(
+            item["external_id"], label="work-claim external ID", max_bytes=256
+        ),
+    )
+
+
+def _item_status(value: object, *, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or value not in ITEM_STATUS:
+        raise KrabError("invalid session-item status")
+    return value
+
+
+def _session_item_history(value: object) -> SessionItemHistoryEvent:
+    event = _exact_object(
+        value,
+        fields={"trusted_metadata", "untrusted_text", "content_risk_flags"},
+        label="session-item history event",
+    )
+    metadata = _exact_object(
+        event["trusted_metadata"],
+        fields={
+            "event_seq",
+            "kind",
+            "actor",
+            "from_status",
+            "to_status",
+            "created_at",
+        },
+        label="session-item history metadata",
+    )
+    text = _exact_object(
+        event["untrusted_text"],
+        fields={"note"},
+        label="session-item history text",
+    )
+    kind = metadata["kind"]
+    if not isinstance(kind, str) or kind not in EVENT_KINDS:
+        raise KrabError("invalid session-item history event kind")
+    note_value = text["note"]
+    note = (
+        None
+        if note_value is None
+        else _text(
+            note_value, label="session-item history note", max_bytes=MAX_NOTE_BYTES
+        )
+    )
+    return SessionItemHistoryEvent(
+        event_seq=_integer(
+            metadata["event_seq"], minimum=1, label="history event sequence"
+        ),
+        kind=kind,
+        actor=_user_ref(metadata["actor"], "history actor"),
+        from_status=_item_status(metadata["from_status"], nullable=True),
+        to_status=_item_status(metadata["to_status"], nullable=True),
+        created_at=_timestamp(metadata["created_at"], label="history timestamp"),
+        untrusted_note=note,
+        content_risk_flags=_risk_flags(event["content_risk_flags"], label="history"),
+    )
+
+
+def _session_item(
+    value: object,
+    *,
+    project_key: str,
+    session_id: str,
+    item_id: str | None,
+    created: bool,
+) -> SessionItem:
+    response_fields = {"trusted_metadata", "untrusted_text", "content_risk_flags"}
+    if not created:
+        response_fields.add("history")
+    response = _exact_object(
+        value, fields=response_fields, label="session-item response"
+    )
+    metadata_fields = {
+        "item_id",
+        "project_key",
+        "session_id",
+        "creator",
+        "recipient",
+        "work_claim",
+        "status",
+        "version",
+        "created_at",
+        "updated_at",
+    }
+    if created:
+        metadata_fields.add("event_seq")
+    metadata = _exact_object(
+        response["trusted_metadata"],
+        fields=metadata_fields,
+        label="session-item metadata",
+    )
+    text = _exact_object(
+        response["untrusted_text"],
+        fields={"title", "body"},
+        label="session-item text",
+    )
+    if metadata["project_key"] != project_key:
+        raise KrabError("session-item project does not match the request")
+    try:
+        response_session_id = validate_krab_id(metadata["session_id"], "ses")
+        response_item_id = validate_krab_id(metadata["item_id"], "itm")
+    except ValueError as exc:
+        raise KrabError("invalid session-item object ID") from exc
+    if response_session_id != session_id:
+        raise KrabError("session-item session does not match the request")
+    if item_id is not None and response_item_id != item_id:
+        raise KrabError("session-item item does not match the request")
+
+    history: tuple[SessionItemHistoryEvent, ...] = ()
+    if not created:
+        history_values = response["history"]
+        if (
+            not isinstance(history_values, list)
+            or not history_values
+            or len(history_values) > MAX_HISTORY_EVENTS
+        ):
+            raise KrabError("invalid session-item history")
+        history = tuple(_session_item_history(event) for event in history_values)
+        if any(
+            current.event_seq <= previous.event_seq
+            for previous, current in zip(history, history[1:], strict=False)
+        ):
+            raise KrabError("session-item history is not strictly ordered")
+
+    return SessionItem(
+        item_id=response_item_id,
+        project_key=project_key,
+        session_id=response_session_id,
+        creator=_user_ref(metadata["creator"], "session-item creator"),
+        recipient=_user_ref(metadata["recipient"], "session-item recipient"),
+        work_claim=_work_claim(metadata["work_claim"]),
+        status=_item_status(metadata["status"]) or "",
+        version=_integer(metadata["version"], minimum=1, label="session-item version"),
+        created_at=_timestamp(metadata["created_at"], label="item creation timestamp"),
+        updated_at=_timestamp(metadata["updated_at"], label="item update timestamp"),
+        event_seq=(
+            _integer(metadata["event_seq"], minimum=1, label="item event sequence")
+            if created
+            else None
+        ),
+        untrusted_title=_text(
+            text["title"], label="session-item title", max_bytes=MAX_TITLE_BYTES
+        ),
+        untrusted_body=_text(
+            text["body"], label="session-item body", max_bytes=MAX_BODY_BYTES
+        ),
+        content_risk_flags=_risk_flags(
+            response["content_risk_flags"], label="session-item"
+        ),
+        history=history,
+    )
+
+
 class KrabClient:
     def __init__(
         self,
@@ -222,7 +451,14 @@ class KrabClient:
         return http.client.HTTPConnection(host, port, timeout=timeout)
 
     def _request(
-        self, path: str, query: Mapping[str, int] | None = None
+        self,
+        path: str,
+        query: Mapping[str, int] | None = None,
+        *,
+        method: str = "GET",
+        payload: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        expected_status: int = 200,
     ) -> dict[str, Any]:
         target = path
         if query:
@@ -232,9 +468,31 @@ class KrabClient:
             "Authorization": f"Bearer {self._token}",
             "User-Agent": f"magic-glass-box/{__version__}",
         }
+        body: bytes | None = None
+        if payload is not None:
+            try:
+                body = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise KrabError("invalid Krab request body") from exc
+            if not body or len(body) > MAX_REQUEST_BYTES:
+                raise KrabError("Krab request exceeds the size limit")
+            headers.update(
+                {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                }
+            )
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
         connection = self._connection_factory(self.host, self.port, self.timeout)
         try:
-            connection.request("GET", target, headers=headers)
+            connection.request(method, target, body=body, headers=headers)
             response = connection.getresponse()
             declared = response.getheader("Content-Length")
             if declared is not None:
@@ -251,7 +509,13 @@ class KrabClient:
         except KrabError:
             raise
         except (OSError, TimeoutError, http.client.HTTPException) as exc:
-            raise KrabError(f"Krab is unavailable: {exc}") from None
+            retry = (
+                "; mutation outcome may be unknown; retry with Idempotency-Key "
+                + idempotency_key
+                if idempotency_key is not None
+                else ""
+            )
+            raise KrabError(f"Krab is unavailable: {exc}{retry}") from None
         finally:
             connection.close()
         payload = _strict_json(raw)
@@ -263,7 +527,7 @@ class KrabClient:
             else:
                 code, message = "http_error", f"HTTP {status}"
             raise KrabHTTPError(status, str(code), str(message))
-        if not 200 <= status < 300:
+        if status != expected_status:
             raise KrabError(f"Krab returned unexpected HTTP status {status}")
         return payload
 
@@ -314,21 +578,18 @@ class KrabClient:
             untrusted = _exact_object(
                 item["untrusted_text"], fields={"label"}, label="project text"
             )
-            flags = item["content_risk_flags"]
-            if (
-                not isinstance(flags, list)
-                or len(flags) > 64
-                or any(not isinstance(flag, str) for flag in flags)
-                or len(set(flags)) != len(flags)
-            ):
-                raise KrabError("invalid project risk flags")
+            flags = _risk_flags(item["content_risk_flags"], label="project")
             try:
                 project_id = validate_krab_id(metadata["project_id"], "prj")
                 project_key = validate_project_key(metadata["project_key"])
             except ValueError as exc:
                 raise KrabError("invalid project identifier") from exc
             role = metadata["role"]
-            if role not in {"member", "coordinator", "admin"}:
+            if not isinstance(role, str) or role not in {
+                "member",
+                "coordinator",
+                "admin",
+            }:
                 raise KrabError("invalid project role")
             projects.append(
                 KrabProject(
@@ -338,10 +599,94 @@ class KrabClient:
                     label=_text(
                         untrusted["label"], label="project label", max_bytes=256
                     ),
-                    content_risk_flags=tuple(flags),
+                    content_risk_flags=flags,
                 )
             )
         return tuple(projects)
+
+    def create_session_item(
+        self,
+        project_key: str,
+        session_id: str,
+        *,
+        recipient_handle: str,
+        title: str,
+        body: str,
+        idempotency_key: str,
+        claim_id: str | None = None,
+    ) -> SessionItem:
+        try:
+            key = validate_project_key(project_key)
+            session = validate_krab_id(session_id, "ses")
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        recipient = _handle(recipient_handle)
+        request_title = _text(
+            title, label="session-item title", max_bytes=MAX_TITLE_BYTES
+        )
+        request_body = _text(body, label="session-item body", max_bytes=MAX_BODY_BYTES)
+        if not request_title:
+            raise KrabError("invalid session-item title")
+        if not request_body:
+            raise KrabError("invalid session-item body")
+        if (
+            not isinstance(idempotency_key, str)
+            or IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None
+        ):
+            raise KrabError("invalid idempotency key")
+        request: dict[str, Any] = {
+            "to": recipient,
+            "title": request_title,
+            "body": request_body,
+        }
+        if claim_id is not None:
+            try:
+                request["claim_id"] = validate_krab_id(claim_id, "clm")
+            except ValueError as exc:
+                raise KrabError(str(exc)) from exc
+        response = self._request(
+            "/v1/projects/"
+            + quote(key, safe="")
+            + "/sessions/"
+            + quote(session, safe="")
+            + "/items",
+            method="POST",
+            payload=request,
+            idempotency_key=idempotency_key,
+            expected_status=201,
+        )
+        return _session_item(
+            response,
+            project_key=key,
+            session_id=session,
+            item_id=None,
+            created=True,
+        )
+
+    def get_session_item(
+        self, project_key: str, session_id: str, item_id: str
+    ) -> SessionItem:
+        try:
+            key = validate_project_key(project_key)
+            session = validate_krab_id(session_id, "ses")
+            item = validate_krab_id(item_id, "itm")
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        response = self._request(
+            "/v1/projects/"
+            + quote(key, safe="")
+            + "/sessions/"
+            + quote(session, safe="")
+            + "/items/"
+            + quote(item, safe="")
+        )
+        return _session_item(
+            response,
+            project_key=key,
+            session_id=session,
+            item_id=item,
+            created=False,
+        )
 
     def activity(
         self,
@@ -439,40 +784,8 @@ class KrabClient:
         if metadata["project_key"] != project_key:
             raise KrabError("activity event belongs to another project")
         kind = metadata["kind"]
-        if kind not in EVENT_KINDS:
+        if not isinstance(kind, str) or kind not in EVENT_KINDS:
             raise KrabError("invalid activity event kind")
-
-        def status(value: object, *, nullable: bool) -> str | None:
-            if value is None and nullable:
-                return None
-            if value not in ITEM_STATUS:
-                raise KrabError("invalid activity item status")
-            return str(value)
-
-        claim_value = metadata["work_claim"]
-        claim: WorkClaimRef | None = None
-        if claim_value is not None:
-            claim_item = _exact_object(
-                claim_value,
-                fields={"claim_id", "kind", "external_id"},
-                label="work claim",
-            )
-            try:
-                claim_id = validate_krab_id(claim_item["claim_id"], "clm")
-            except ValueError as exc:
-                raise KrabError("invalid work-claim ID") from exc
-            claim_kind = claim_item["kind"]
-            if claim_kind not in {"issue", "pull_request"}:
-                raise KrabError("invalid work-claim kind")
-            claim = WorkClaimRef(
-                claim_id=claim_id,
-                kind=claim_kind,
-                external_id=_text(
-                    claim_item["external_id"],
-                    label="work-claim external ID",
-                    max_bytes=256,
-                ),
-            )
         try:
             session_id = validate_krab_id(metadata["session_id"], "ses")
             item_id = validate_krab_id(metadata["item_id"], "itm")
@@ -489,10 +802,10 @@ class KrabClient:
             actor=_user_ref(metadata["actor"], "event actor"),
             creator=_user_ref(metadata["creator"], "event creator"),
             recipient=_user_ref(metadata["recipient"], "event recipient"),
-            work_claim=claim,
-            from_status=status(metadata["from_status"], nullable=True),
-            to_status=status(metadata["to_status"], nullable=True),
-            current_status=status(metadata["current_status"], nullable=False) or "",
+            work_claim=_work_claim(metadata["work_claim"]),
+            from_status=_item_status(metadata["from_status"], nullable=True),
+            to_status=_item_status(metadata["to_status"], nullable=True),
+            current_status=_item_status(metadata["current_status"]) or "",
             version=_integer(metadata["version"], minimum=1, label="item version"),
             created_at=_timestamp(metadata["created_at"], label="event timestamp"),
             untrusted_title=_text(

@@ -1,16 +1,44 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from .credentials import CredentialResolver, PrivateFileCredentialResolver
-from .db import Database
-from .domain import AgentProfileSpec, ProjectContext, RunState
-from .krab import ActivityPage, KrabClient, KrabError
+from .db import (
+    ConcurrentUpdateError,
+    ConflictError,
+    Database,
+    NotFoundError,
+)
+from .domain import (
+    AgentProfileSpec,
+    InteractionKind,
+    ProjectContext,
+    RunState,
+    ValidationError,
+    validate_krab_id,
+)
+from .krab import ActivityPage, KrabClient, KrabError, SessionItem
 
 ClientFactory = Callable[[str, str], KrabClient]
+
+
+@dataclass(frozen=True)
+class AcceptedInteractionResponse:
+    """Transient private response content paired with its durable correlation."""
+
+    interaction_id: str
+    run_id: str
+    response_item_id: str
+    interaction_state: str
+    interaction_version: int
+    run_state: str
+    run_version: int
+    untrusted_title: str
+    untrusted_body: str
+    content_risk_flags: tuple[str, ...]
 
 
 class ControlPlane:
@@ -176,6 +204,143 @@ class ControlPlane:
             reason=reason,
         )
 
+    def open_interaction(
+        self,
+        run_id: str,
+        *,
+        kind: InteractionKind,
+        recipient_krab_handle: str,
+        title: str,
+        body: str,
+        idempotency_key: str,
+        expected_run_version: int,
+    ) -> dict[str, Any]:
+        if not isinstance(kind, InteractionKind):
+            raise ValidationError("interaction kind is invalid")
+        if (
+            isinstance(expected_run_version, bool)
+            or not isinstance(expected_run_version, int)
+            or expected_run_version < 1
+        ):
+            raise ValidationError("expected_run_version must be a positive integer")
+        route = self.database.get_run_transport(run_id)
+        if route["version"] != expected_run_version:
+            raise ConcurrentUpdateError(
+                f"run version is {route['version']}, expected {expected_run_version}"
+            )
+        if route["state"] != RunState.RUNNING.value:
+            raise ConflictError(f"run is not running: {route['state']}")
+        if route["krab_session_id"] is None:
+            raise ConflictError("run has no Krab session")
+        recipient = self.database.get_krab_identity(
+            route["krab_instance_id"], recipient_krab_handle
+        )
+        if recipient["local_user_id"] is None or not recipient["local_user_active"]:
+            raise NotFoundError(
+                "recipient Krab identity has no active bound local user"
+            )
+        _, agent, client = self._authenticated_client(
+            route["krab_instance_name"], route["agent_krab_handle"]
+        )
+        request: dict[str, Any] = {
+            "recipient_handle": recipient["handle"],
+            "title": title,
+            "body": body,
+            "idempotency_key": idempotency_key,
+        }
+        if route["krab_claim_id"] is not None:
+            request["claim_id"] = route["krab_claim_id"]
+        item = client.create_session_item(
+            route["project_key"], route["krab_session_id"], **request
+        )
+        self._verify_interaction_item(
+            item,
+            project_key=route["project_key"],
+            session_id=route["krab_session_id"],
+            creator_user_id=agent["krab_user_id"],
+            recipient_user_id=recipient["krab_user_id"],
+            item_id=None,
+            created=True,
+        )
+        expected_claim_id = route["krab_claim_id"]
+        actual_claim_id = (
+            item.work_claim.claim_id if item.work_claim is not None else None
+        )
+        if actual_claim_id != expected_claim_id:
+            raise KrabError("interaction request has an unexpected work-claim link")
+        return self.database.open_interaction(
+            run_id,
+            kind=kind,
+            recipient_krab_identity_id=recipient["id"],
+            request_item_id=item.item_id,
+            expected_run_version=expected_run_version,
+        )
+
+    def accept_interaction_response(
+        self,
+        interaction_id: str,
+        *,
+        response_item_id: str,
+        expected_version: int,
+    ) -> AcceptedInteractionResponse:
+        try:
+            response_item_id = validate_krab_id(response_item_id, "itm")
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            raise ValidationError("expected_version must be a positive integer")
+        interaction = self.database.get_interaction(interaction_id)
+        if interaction["version"] != expected_version:
+            raise ConcurrentUpdateError(
+                f"interaction version is {interaction['version']}, "
+                f"expected {expected_version}"
+            )
+        if interaction["state"] != "open":
+            raise ConflictError(f"interaction is not open: {interaction['state']}")
+        if interaction["run_state"] != RunState.WAITING_FOR_INPUT.value:
+            raise ConflictError(
+                "interaction run is not waiting for input: " + interaction["run_state"]
+            )
+        route = self.database.get_run_transport(interaction["run_id"])
+        if route["krab_session_id"] is None:
+            raise ConflictError("run has no Krab session")
+        _, agent, client = self._authenticated_client(
+            route["krab_instance_name"], route["agent_krab_handle"]
+        )
+        item = client.get_session_item(
+            route["project_key"], route["krab_session_id"], response_item_id
+        )
+        self._verify_interaction_item(
+            item,
+            project_key=route["project_key"],
+            session_id=route["krab_session_id"],
+            creator_user_id=interaction["recipient"]["krab_user_id"],
+            recipient_user_id=agent["krab_user_id"],
+            item_id=response_item_id,
+            created=False,
+        )
+        answered = self.database.answer_interaction(
+            interaction_id,
+            response_item_id=response_item_id,
+            expected_version=expected_version,
+        )
+        return AcceptedInteractionResponse(
+            interaction_id=answered["id"],
+            run_id=answered["run_id"],
+            response_item_id=response_item_id,
+            interaction_state=answered["state"],
+            interaction_version=answered["version"],
+            run_state=answered["run_state"],
+            run_version=answered["run_version"],
+            untrusted_title=item.untrusted_title,
+            untrusted_body=item.untrusted_body,
+            content_risk_flags=item.content_risk_flags,
+        )
+
     def project_activity(
         self,
         *,
@@ -203,6 +368,37 @@ class ControlPlane:
             instance["id"], actual, stored["credential_ref"]
         )
         return instance, refreshed, client
+
+    @staticmethod
+    def _verify_interaction_item(
+        item: SessionItem,
+        *,
+        project_key: str,
+        session_id: str,
+        creator_user_id: str,
+        recipient_user_id: str,
+        item_id: str | None,
+        created: bool,
+    ) -> None:
+        if item.project_key != project_key:
+            raise KrabError("interaction item belongs to another project")
+        if item.session_id != session_id:
+            raise KrabError("interaction item belongs to another session")
+        if item_id is not None and item.item_id != item_id:
+            raise KrabError("interaction response returned another item")
+        if item.creator.user_id != creator_user_id:
+            raise KrabError("interaction item has an unexpected creator")
+        if item.recipient.user_id != recipient_user_id:
+            raise KrabError("interaction item has an unexpected recipient")
+        if created:
+            if item.status != "open.pending":
+                raise KrabError("interaction request is not pending")
+            if item.version != 1:
+                raise KrabError("interaction request has an unexpected version")
+            if item.event_seq is None:
+                raise KrabError("interaction request has no event sequence")
+        elif not item.status.startswith("open."):
+            raise KrabError("interaction response item is not open")
 
 
 def activity_to_dict(page: ActivityPage) -> dict[str, Any]:
