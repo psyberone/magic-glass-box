@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
 from .db import Database
-from .domain import AgentProfileSpec, ProjectContext, RunState
+from .domain import (
+    AgentProfileSpec,
+    GatewayCapability,
+    NetworkMode,
+    ProjectContext,
+    RunState,
+)
 from .executor import SandboxPlan, SandboxRequest, SandboxResult
+from .gateway import GatewayEndpoint
 from .workspace import PreparedWorkspace
 
 
@@ -37,6 +44,18 @@ class CredentialPathResolver(Protocol):
     def resolve_path(self, reference: str) -> Path: ...
 
 
+class RunGatewayManager(Protocol):
+    def open(
+        self,
+        run_id: str,
+        *,
+        capabilities: Sequence[GatewayCapability],
+        credential_names: Sequence[str],
+    ) -> GatewayEndpoint: ...
+
+    def cleanup(self, run_id: str) -> bool: ...
+
+
 class RunCoordinator:
     def __init__(
         self,
@@ -44,11 +63,13 @@ class RunCoordinator:
         executor: SandboxExecutor,
         workspaces: RunWorkspaceManager,
         credential_resolver: CredentialPathResolver,
+        gateway_manager: RunGatewayManager | None = None,
     ):
         self.database = database
         self.executor = executor
         self.workspaces = workspaces
         self.credential_resolver = credential_resolver
+        self.gateway_manager = gateway_manager
 
     def execute(self, run_id: str) -> dict[str, Any]:
         inputs = self.database.get_run_execution(run_id)
@@ -80,14 +101,32 @@ class RunCoordinator:
                 Path(context.repository_path),
                 inputs["source_revision"],
             )
-            credentials = self._credential_files(
-                profile, inputs["credential_references"]
-            )
+            gateway_directory = None
+            if profile.network_mode is NetworkMode.GATEWAY_ONLY:
+                credential_names = self._gateway_credential_names(
+                    profile, inputs["credential_references"]
+                )
+                if self.gateway_manager is None:
+                    raise RunOrchestrationError(
+                        "gateway_only profile has no gateway manager"
+                    )
+                endpoint = self.gateway_manager.open(
+                    run_id,
+                    capabilities=profile.gateway_capabilities,
+                    credential_names=credential_names,
+                )
+                gateway_directory = endpoint.directory
+                credentials = {}
+            else:
+                credentials = self._credential_files(
+                    profile, inputs["credential_references"]
+                )
             request = SandboxRequest(
                 run_id=run_id,
                 profile=profile,
                 workspace=prepared.path,
                 credential_files=credentials,
+                gateway_directory=gateway_directory,
             )
 
             def before_start(plan: SandboxPlan, container_id: str) -> None:
@@ -126,6 +165,21 @@ class RunCoordinator:
         cleanup_failures = self._cleanup(run_id)
         if cleanup_failures:
             self._raise_cleanup_incomplete(cleanup_failures)
+
+        current = self.database.get_run(run_id)
+        if current["state"] in {
+            RunState.WAITING_FOR_INPUT.value,
+            RunState.QUEUED.value,
+            RunState.CANCELLED.value,
+        }:
+            return current
+        if (
+            current["state"] != RunState.RUNNING.value
+            or current["version"] != running["version"]
+        ):
+            raise RunOrchestrationError(
+                "sandbox finished after an unexpected run lifecycle change"
+            )
 
         terminal = RunState.SUCCEEDED if result.exit_code == 0 else RunState.FAILED
         reason = (
@@ -166,12 +220,31 @@ class RunCoordinator:
             files[name] = self.credential_resolver.resolve_path(reference)
         return files
 
+    @staticmethod
+    def _gateway_credential_names(
+        profile: AgentProfileSpec,
+        references: object,
+    ) -> tuple[str, ...]:
+        if not isinstance(references, Mapping):
+            raise RunOrchestrationError("pinned credential references are invalid")
+        for name in profile.credential_names:
+            if not isinstance(references.get(name), str):
+                raise RunOrchestrationError(
+                    f"pinned profile credential is unavailable: {name}"
+                )
+        return profile.credential_names
+
     def _cleanup(self, run_id: str) -> list[BaseException]:
         failures: list[BaseException] = []
         try:
             self.executor.cleanup_run(run_id)
         except BaseException as exc:
             failures.append(exc)
+        if self.gateway_manager is not None:
+            try:
+                self.gateway_manager.cleanup(run_id)
+            except BaseException as exc:
+                failures.append(exc)
         try:
             self.workspaces.cleanup(run_id)
         except BaseException as exc:
@@ -217,12 +290,15 @@ class RunCoordinator:
         reconciled: list[dict[str, Any]] = []
         failures: list[tuple[str, BaseException]] = []
         for candidate in self.database.iter_active_runs():
-            if candidate["state"] == RunState.QUEUED.value:
-                continue
             run_id = candidate["id"]
             cleanup_failures = self._cleanup(run_id)
             if cleanup_failures:
                 failures.extend((run_id, failure) for failure in cleanup_failures)
+                continue
+            if candidate["state"] in {
+                RunState.QUEUED.value,
+                RunState.WAITING_FOR_INPUT.value,
+            }:
                 continue
             try:
                 reconciled.append(

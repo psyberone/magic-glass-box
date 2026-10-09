@@ -57,29 +57,38 @@ Make a question part of durable work rather than a terminal call.
 
 ### 1C. Agent interaction gateway
 
-**Status: next**
+**Status: complete**
 
 - Give a sandbox a run-scoped local capability, not a reusable Krab token.
 - Accept typed `question`, `approval`, and `choice` requests.
 - Route the request to the authorized human through Krab.
 - Permit only the response for that run and interaction to return to the
   worker.
+- Keep Docker networking disabled and expose only a bounded committed-file
+  mailbox whose run identity and capability allowlist are fixed by the
+  orchestrator.
 
 **Exit proof:** a run can wait for a private human response without Magic Glass
 Box retaining its content, and the pending interaction survives an orchestrator
-restart.
+restart. Unit tests cover both directions and restart reconciliation; the live
+Docker proof confirms direct egress is denied while `run.describe` crosses the
+gateway.
 
-## Milestone 2: scoped authority broker
+## Milestone 2: scoped provider broker
 
-- Exchange a short-lived run capability for only the named credentials in the
-  pinned profile.
-- Implement the `krab_only` network path through a bounded local relay.
-- Deny arbitrary bridge networking and direct access to administrator tokens.
+- Add provider/model operations to the same run-scoped gateway contract.
+- Resolve only credentials named by the pinned profile inside the trusted
+  orchestrator; never copy reusable provider secrets into a worker.
+- Give provider adapters explicit destination, method, model, request-size,
+  response-size, timeout, and concurrency policy.
+- Keep arbitrary bridge networking and administrator tokens unavailable to the
+  worker.
 - Record grants, revocation, and expiry as metadata without storing secret
   values.
 
-**Exit proof:** a worker can use one permitted service while attempts to reach
-other network destinations or credentials fail closed.
+**Exit proof:** a worker with Docker networking disabled can use one permitted
+provider/model through the gateway while undeclared providers, destinations,
+credentials, and direct network attempts fail closed.
 
 ## Milestone 3: worker replacement and handoff
 

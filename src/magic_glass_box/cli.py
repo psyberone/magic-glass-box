@@ -17,6 +17,7 @@ from .domain import (
     WorkItemEnvelope,
 )
 from .executor import DockerCLI, DockerExecutor, ExecutionError
+from .gateway import FileGatewayManager, default_gateway_root
 from .krab import KrabError
 from .orchestration import RunCoordinator, RunOrchestrationError
 from .service import ControlPlane, activity_to_dict
@@ -202,6 +203,10 @@ def _build_run_coordinator(control: ControlPlane) -> RunCoordinator:
         DockerExecutor(DockerCLI()),
         workspaces,
         control.credential_resolver,
+        FileGatewayManager(
+            default_gateway_root(control.database.path),
+            control,
+        ),
     )
 
 

@@ -8,7 +8,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from magic_glass_box.domain import AgentProfileSpec, NetworkMode, WorkspaceMode
+from magic_glass_box.domain import (
+    AgentProfileSpec,
+    GatewayCapability,
+    NetworkMode,
+    WorkspaceMode,
+)
 from magic_glass_box.executor import (
     DockerCLI,
     DockerExecutor,
@@ -19,6 +24,12 @@ from magic_glass_box.executor import (
     SandboxRequest,
     SandboxResult,
     build_sandbox_plan,
+)
+from magic_glass_box.gateway import (
+    GATEWAY_REQUEST_NAME,
+    GATEWAY_REQUEST_READY_NAME,
+    GATEWAY_RESPONSE_NAME,
+    GATEWAY_RESPONSE_READY_NAME,
 )
 
 RUN_ID = "run_" + "1" * 32
@@ -45,6 +56,8 @@ class SandboxPlanTests(unittest.TestCase):
         network_mode: NetworkMode = NetworkMode.NONE,
         credential_names: tuple[str, ...] = ("krab",),
         credential_files: dict[str, Path] | None = None,
+        gateway_capabilities: tuple[GatewayCapability, ...] = (),
+        gateway_directory: Path | None = None,
     ) -> SandboxRequest:
         profile = AgentProfileSpec.create(
             image="agent:local",
@@ -52,6 +65,7 @@ class SandboxPlanTests(unittest.TestCase):
             workspace_mode=workspace_mode,
             network_mode=network_mode,
             credential_names=credential_names,
+            gateway_capabilities=gateway_capabilities,
         )
         return SandboxRequest(
             run_id=RUN_ID,
@@ -60,7 +74,22 @@ class SandboxPlanTests(unittest.TestCase):
             credential_files=(
                 {"krab": self.token} if credential_files is None else credential_files
             ),
+            gateway_directory=gateway_directory,
         )
+
+    def private_gateway_directory(self) -> Path:
+        root = self.root / "gateway"
+        root.mkdir(mode=0o700)
+        for name in (
+            GATEWAY_REQUEST_NAME,
+            GATEWAY_REQUEST_READY_NAME,
+            GATEWAY_RESPONSE_NAME,
+            GATEWAY_RESPONSE_READY_NAME,
+        ):
+            path = root / name
+            path.touch(mode=0o600)
+            os.chmod(path, 0o600)
+        return root
 
     def test_read_only_plan_has_complete_security_policy(self) -> None:
         plan = build_sandbox_plan(
@@ -170,14 +199,170 @@ class SandboxPlanTests(unittest.TestCase):
             "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab", plan.create_args
         )
 
+    def test_gateway_only_plan_mounts_only_the_mailbox_and_no_credentials(
+        self,
+    ) -> None:
+        gateway_directory = self.private_gateway_directory()
+        plan = build_sandbox_plan(
+            self.request(
+                network_mode=NetworkMode.GATEWAY_ONLY,
+                credential_names=("krab",),
+                credential_files={},
+                gateway_capabilities=(
+                    GatewayCapability.RUN_DESCRIBE,
+                    GatewayCapability.INTERACTION_OPEN,
+                    GatewayCapability.INTERACTION_READ,
+                ),
+                gateway_directory=gateway_directory,
+            ),
+            DockerImage(IMAGE_ID, ()),
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+
+        arguments = "\n".join(plan.create_args)
+        self.assertIn(
+            "MAGIC_GLASS_BOX_GATEWAY_DIR=/run/magic-glass-box",
+            plan.create_args,
+        )
+        self.assertIn(
+            f"type=bind,src={gateway_directory.resolve()},"
+            "dst=/run/magic-glass-box,readonly",
+            plan.create_args,
+        )
+        for name in (GATEWAY_REQUEST_NAME, GATEWAY_REQUEST_READY_NAME):
+            self.assertIn(
+                f"type=bind,src={gateway_directory.resolve() / name},"
+                f"dst=/run/magic-glass-box/{name}",
+                plan.create_args,
+            )
+        for name in (GATEWAY_RESPONSE_NAME, GATEWAY_RESPONSE_READY_NAME):
+            self.assertNotIn(
+                f"type=bind,src={gateway_directory.resolve() / name},"
+                f"dst=/run/magic-glass-box/{name}",
+                plan.create_args,
+            )
+        self.assertNotIn("KRAB_TOKEN_FILE", arguments)
+        self.assertNotIn("MAGIC_GLASS_BOX_CREDENTIAL_DIR", arguments)
+        self.assertNotIn(str(self.token), arguments)
+        network_index = plan.create_args.index("--network")
+        self.assertEqual(plan.create_args[network_index + 1], "none")
+
+    def test_gateway_policy_rejects_missing_or_competing_authority_paths(self) -> None:
+        gateway_directory = self.private_gateway_directory()
+        gateway_profile = {
+            "network_mode": NetworkMode.GATEWAY_ONLY,
+            "credential_names": ("krab",),
+            "gateway_capabilities": (GatewayCapability.RUN_DESCRIBE,),
+        }
+        cases = (
+            (
+                self.request(
+                    **gateway_profile,
+                    credential_files={},
+                ),
+                "gateway endpoint is required",
+            ),
+            (
+                self.request(
+                    **gateway_profile,
+                    gateway_directory=gateway_directory,
+                ),
+                "must not receive credential files",
+            ),
+            (
+                self.request(
+                    network_mode=NetworkMode.NONE,
+                    credential_names=(),
+                    credential_files={},
+                    gateway_directory=gateway_directory,
+                ),
+                "requires gateway_only",
+            ),
+            (
+                self.request(network_mode=NetworkMode.KRAB_ONLY),
+                "krab_only networking is retired",
+            ),
+        )
+        for candidate, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ExecutionError, message),
+            ):
+                build_sandbox_plan(
+                    candidate,
+                    DockerImage(IMAGE_ID, ()),
+                    uid=os.getuid(),
+                    gid=os.getgid(),
+                )
+
+    def test_gateway_mailbox_rejects_unsafe_filesystem_shapes(self) -> None:
+        def request_for(path: Path) -> SandboxRequest:
+            return self.request(
+                network_mode=NetworkMode.GATEWAY_ONLY,
+                credential_names=("krab",),
+                credential_files={},
+                gateway_capabilities=(GatewayCapability.RUN_DESCRIBE,),
+                gateway_directory=path,
+            )
+
+        missing = self.root / "missing-gateway"
+        with self.assertRaisesRegex(ExecutionError, "endpoint is unavailable"):
+            build_sandbox_plan(
+                request_for(missing),
+                DockerImage(IMAGE_ID, ()),
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+
+        regular = self.root / "gateway-file"
+        regular.touch()
+        with self.assertRaisesRegex(ExecutionError, "private directory"):
+            build_sandbox_plan(
+                request_for(regular),
+                DockerImage(IMAGE_ID, ()),
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+
+        gateway = self.private_gateway_directory()
+        os.chmod(gateway, 0o755)  # noqa: S103 - exercise rejection
+        with self.assertRaisesRegex(ExecutionError, "mode 0700"):
+            build_sandbox_plan(
+                request_for(gateway),
+                DockerImage(IMAGE_ID, ()),
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+        os.chmod(gateway, 0o700)
+
+        response = gateway / GATEWAY_RESPONSE_NAME
+        os.chmod(response, 0o644)
+        with self.assertRaisesRegex(ExecutionError, "mode 0600"):
+            build_sandbox_plan(
+                request_for(gateway),
+                DockerImage(IMAGE_ID, ()),
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+        os.chmod(response, 0o600)
+
+        response.unlink()
+        with self.assertRaisesRegex(ExecutionError, "mailbox shape"):
+            build_sandbox_plan(
+                request_for(gateway),
+                DockerImage(IMAGE_ID, ()),
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+
     def test_plan_rejects_network_or_identity_policy_weakening(self) -> None:
         for request, uid, gid, message in (
             (
                 self.request(network_mode=NetworkMode.KRAB_ONLY),
                 501,
                 20,
-                "krab_only networking requires the scoped relay and cannot use "
-                "bridge networking",
+                "krab_only networking is retired; use the run-scoped gateway",
             ),
             (self.request(), 0, 20, "sandbox user must not be root"),
             (self.request(), 501, 0, "sandbox group must not be root"),

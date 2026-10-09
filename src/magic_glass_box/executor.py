@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Protocol
 
 from .domain import AgentProfileSpec, NetworkMode, WorkspaceMode
+from .gateway import (
+    CONTAINER_GATEWAY_ROOT,
+    GATEWAY_FILE_NAMES,
+    GATEWAY_WRITABLE_NAMES,
+)
 
 RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -88,6 +93,7 @@ class SandboxRequest:
     profile: AgentProfileSpec
     workspace: Path
     credential_files: Mapping[str, Path] = field(default_factory=dict)
+    gateway_directory: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +165,39 @@ def _credential_path(path: Path, *, uid: int, workspace: Path) -> Path:
     return resolved
 
 
+def _gateway_directory(path: Path, *, uid: int, workspace: Path) -> Path:
+    candidate = Path(path).expanduser().absolute()
+    try:
+        info = candidate.lstat()
+    except OSError as exc:
+        raise ExecutionError(f"gateway endpoint is unavailable: {candidate}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ExecutionError("gateway endpoint must be a private directory")
+    if info.st_uid != uid:
+        raise ExecutionError("gateway endpoint must be owned by the run user")
+    if info.st_mode & 0o777 != 0o700:
+        raise ExecutionError("gateway endpoint must use mode 0700")
+    resolved = candidate.resolve(strict=True)
+    if "," in str(resolved):
+        raise ExecutionError("gateway path must not contain a comma")
+    if resolved.is_relative_to(workspace):
+        raise ExecutionError("gateway endpoint must remain outside the workspace")
+    entries = {entry.name: entry for entry in resolved.iterdir()}
+    if set(entries) != GATEWAY_FILE_NAMES:
+        raise ExecutionError("gateway endpoint has an invalid mailbox shape")
+    for entry in entries.values():
+        entry_info = entry.lstat()
+        if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(entry_info.st_mode):
+            raise ExecutionError("gateway mailbox entries must be regular files")
+        if entry_info.st_uid != uid:
+            raise ExecutionError("gateway mailbox must be owned by the run user")
+        if entry_info.st_nlink != 1:
+            raise ExecutionError("gateway mailbox files must not be hard-linked")
+        if entry_info.st_mode & 0o777 != 0o600:
+            raise ExecutionError("gateway mailbox files must use mode 0600")
+    return resolved
+
+
 def build_sandbox_plan(
     request: SandboxRequest,
     image: DockerImage,
@@ -176,10 +215,9 @@ def build_sandbox_plan(
         raise ExecutionError("sandbox user must not be root")
     if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
         raise ExecutionError("sandbox group must not be root")
-    if request.profile.network_mode is not NetworkMode.NONE:
+    if request.profile.network_mode is NetworkMode.KRAB_ONLY:
         raise ExecutionError(
-            "krab_only networking requires the scoped relay and cannot use "
-            "bridge networking"
+            "krab_only networking is retired; use the run-scoped gateway"
         )
     if (
         not isinstance(image.image_id, str)
@@ -188,9 +226,22 @@ def build_sandbox_plan(
         raise ExecutionError("Docker returned an invalid immutable image ID")
     if image.declared_volumes:
         raise ExecutionError("agent image declares writable volumes")
-    expected_credentials = set(request.profile.credential_names)
-    if set(request.credential_files) != expected_credentials:
-        raise ExecutionError("credential set does not match the pinned agent profile")
+    gateway_enabled = request.profile.network_mode is NetworkMode.GATEWAY_ONLY
+    if gateway_enabled:
+        if request.gateway_directory is None:
+            raise ExecutionError("gateway endpoint is required for gateway_only")
+        if request.credential_files:
+            raise ExecutionError(
+                "gateway-only sandboxes must not receive credential files"
+            )
+    else:
+        if request.gateway_directory is not None:
+            raise ExecutionError("gateway endpoint requires gateway_only networking")
+        expected_credentials = set(request.profile.credential_names)
+        if set(request.credential_files) != expected_credentials:
+            raise ExecutionError(
+                "credential set does not match the pinned agent profile"
+            )
 
     policy = limits or DockerLimits()
     workspace = _workspace_path(
@@ -198,10 +249,19 @@ def build_sandbox_plan(
         writable=request.profile.workspace_mode is WorkspaceMode.COPY_ON_WRITE,
         uid=uid,
     )
-    credentials = {
-        name: _credential_path(path, uid=uid, workspace=workspace)
-        for name, path in request.credential_files.items()
-    }
+    credentials = (
+        {}
+        if gateway_enabled
+        else {
+            name: _credential_path(path, uid=uid, workspace=workspace)
+            for name, path in request.credential_files.items()
+        }
+    )
+    gateway = (
+        _gateway_directory(request.gateway_directory, uid=uid, workspace=workspace)
+        if request.gateway_directory is not None
+        else None
+    )
     container_name = "magic-glass-box-" + request.run_id.removeprefix("run_")
     workspace_mount = f"type=bind,src={workspace},dst=/workspace"
     if request.profile.workspace_mode is WorkspaceMode.READ_ONLY:
@@ -259,12 +319,33 @@ def build_sandbox_plan(
         "HOME=/tmp",
         "--env",
         f"MAGIC_GLASS_BOX_RUN_ID={request.run_id}",
-        "--env",
-        "MAGIC_GLASS_BOX_CREDENTIAL_DIR=/run/secrets/magic-glass-box",
     ]
+    if gateway is not None:
+        args.extend(("--env", f"MAGIC_GLASS_BOX_GATEWAY_DIR={CONTAINER_GATEWAY_ROOT}"))
+    elif credentials:
+        args.extend(
+            ("--env", "MAGIC_GLASS_BOX_CREDENTIAL_DIR=/run/secrets/magic-glass-box")
+        )
     if "krab" in credentials:
         args.extend(("--env", "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab"))
     args.extend(("--mount", workspace_mount))
+    if gateway is not None:
+        args.extend(
+            (
+                "--mount",
+                f"type=bind,src={gateway},dst={CONTAINER_GATEWAY_ROOT},readonly",
+            )
+        )
+        for name in GATEWAY_WRITABLE_NAMES:
+            args.extend(
+                (
+                    "--mount",
+                    (
+                        f"type=bind,src={gateway / name},"
+                        f"dst={CONTAINER_GATEWAY_ROOT}/{name}"
+                    ),
+                )
+            )
     for name in sorted(credentials):
         args.extend(
             (

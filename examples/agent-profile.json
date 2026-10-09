@@ -3,8 +3,15 @@
     "codex",
     "exec"
   ],
-  "credential_names": [],
+  "credential_names": [
+    "krab"
+  ],
+  "gateway_capabilities": [
+    "run.describe",
+    "interaction.open",
+    "interaction.read"
+  ],
   "image": "magic-glass-box/codex-agent@sha256:replace-with-a-pinned-digest",
-  "network_mode": "none",
+  "network_mode": "gateway_only",
   "workspace_mode": "copy_on_write"
 }

@@ -10,7 +10,14 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from magic_glass_box.cli import InputError, _emit, _json_file, build_parser, main
+from magic_glass_box.cli import (
+    InputError,
+    _build_run_coordinator,
+    _emit,
+    _json_file,
+    build_parser,
+    main,
+)
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
@@ -619,6 +626,53 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(status, 0)
                 self.assertEqual(coordinator.calls[-1], expected_call)
                 self.assertEqual(json.loads(stdout.getvalue()), expected_output)
+
+    def test_run_coordinator_builder_wires_the_run_scoped_gateway(self) -> None:
+        control = mock.Mock()
+        control.database.path = self.database
+        credential_resolver = object()
+        control.credential_resolver = credential_resolver
+        workspace = object()
+        executor = object()
+        gateway = object()
+        coordinator = object()
+        runtime_root = Path(self.temporary.name) / "runtime"
+        with (
+            mock.patch("magic_glass_box.cli.GitSnapshotter", return_value="git"),
+            mock.patch(
+                "magic_glass_box.cli.WorkspaceManager", return_value=workspace
+            ) as workspace_type,
+            mock.patch("magic_glass_box.cli.DockerCLI", return_value="docker"),
+            mock.patch(
+                "magic_glass_box.cli.DockerExecutor", return_value=executor
+            ) as executor_type,
+            mock.patch(
+                "magic_glass_box.cli.default_gateway_root",
+                return_value=runtime_root,
+            ) as gateway_root,
+            mock.patch(
+                "magic_glass_box.cli.FileGatewayManager", return_value=gateway
+            ) as gateway_type,
+            mock.patch(
+                "magic_glass_box.cli.RunCoordinator", return_value=coordinator
+            ) as coordinator_type,
+        ):
+            result = _build_run_coordinator(control)
+
+        self.assertIs(result, coordinator)
+        workspace_type.assert_called_once_with(
+            self.database.parent / "workspaces", "git"
+        )
+        executor_type.assert_called_once_with("docker")
+        gateway_root.assert_called_once_with(self.database)
+        gateway_type.assert_called_once_with(runtime_root, control)
+        coordinator_type.assert_called_once_with(
+            control.database,
+            executor,
+            workspace,
+            credential_resolver,
+            gateway,
+        )
 
     def test_emit_has_stable_readable_json(self) -> None:
         output = io.StringIO()

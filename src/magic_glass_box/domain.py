@@ -424,7 +424,14 @@ class WorkspaceMode(StrEnum):
 
 class NetworkMode(StrEnum):
     NONE = "none"
+    GATEWAY_ONLY = "gateway_only"
     KRAB_ONLY = "krab_only"
+
+
+class GatewayCapability(StrEnum):
+    RUN_DESCRIBE = "run.describe"
+    INTERACTION_OPEN = "interaction.open"
+    INTERACTION_READ = "interaction.read"
 
 
 @dataclass(frozen=True)
@@ -432,8 +439,9 @@ class AgentProfileSpec:
     image: str
     command: tuple[str, ...]
     workspace_mode: WorkspaceMode = WorkspaceMode.COPY_ON_WRITE
-    network_mode: NetworkMode = NetworkMode.KRAB_ONLY
+    network_mode: NetworkMode = NetworkMode.GATEWAY_ONLY
     credential_names: tuple[str, ...] = ()
+    gateway_capabilities: tuple[GatewayCapability, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> AgentProfileSpec:
@@ -445,6 +453,7 @@ class AgentProfileSpec:
             "workspace_mode",
             "network_mode",
             "credential_names",
+            "gateway_capabilities",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -460,8 +469,9 @@ class AgentProfileSpec:
             workspace_mode=value.get(
                 "workspace_mode", WorkspaceMode.COPY_ON_WRITE.value
             ),
-            network_mode=value.get("network_mode", NetworkMode.KRAB_ONLY.value),
+            network_mode=value.get("network_mode", NetworkMode.GATEWAY_ONLY.value),
             credential_names=value.get("credential_names", ()),
+            gateway_capabilities=value.get("gateway_capabilities", ()),
         )
 
     @classmethod
@@ -471,8 +481,9 @@ class AgentProfileSpec:
         image: object,
         command: Sequence[object],
         workspace_mode: str = WorkspaceMode.COPY_ON_WRITE,
-        network_mode: str = NetworkMode.KRAB_ONLY,
+        network_mode: str = NetworkMode.GATEWAY_ONLY,
         credential_names: Sequence[object] = (),
+        gateway_capabilities: Sequence[object] = (),
     ) -> AgentProfileSpec:
         image_text = require_string(image, field="image", max_bytes=512)
         if not isinstance(command, (list, tuple)) or not 1 <= len(command) <= 64:
@@ -496,27 +507,59 @@ class AgentProfileSpec:
             raise ValidationError(
                 "credential names must contain at most 32 unique handles"
             )
+        if not isinstance(gateway_capabilities, (list, tuple)) or len(
+            gateway_capabilities
+        ) > len(GatewayCapability):
+            raise ValidationError("gateway capabilities must be a bounded sequence")
+        try:
+            capability_tuple = tuple(
+                GatewayCapability(capability) for capability in gateway_capabilities
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("gateway capability is invalid") from exc
+        if len(set(capability_tuple)) != len(capability_tuple):
+            raise ValidationError("gateway capabilities must be unique")
         try:
             workspace = WorkspaceMode(workspace_mode)
             network = NetworkMode(network_mode)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
+        if capability_tuple and network is not NetworkMode.GATEWAY_ONLY:
+            raise ValidationError(
+                "gateway capabilities require gateway_only networking"
+            )
+        interaction_capabilities = {
+            GatewayCapability.INTERACTION_OPEN,
+            GatewayCapability.INTERACTION_READ,
+        }
+        if interaction_capabilities.intersection(capability_tuple) and (
+            "krab" not in credential_tuple
+        ):
+            raise ValidationError(
+                "interaction gateway capabilities require the krab credential"
+            )
         return cls(
             image=image_text,
             command=command_tuple,
             workspace_mode=workspace,
             network_mode=network,
             credential_names=credential_tuple,
+            gateway_capabilities=capability_tuple,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "command": list(self.command),
             "credential_names": list(self.credential_names),
             "image": self.image,
             "network_mode": self.network_mode.value,
             "workspace_mode": self.workspace_mode.value,
         }
+        if self.gateway_capabilities:
+            result["gateway_capabilities"] = [
+                capability.value for capability in self.gateway_capabilities
+            ]
+        return result
 
     @property
     def canonical(self) -> str:

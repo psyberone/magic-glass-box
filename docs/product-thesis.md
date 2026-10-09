@@ -20,7 +20,8 @@ Magic Glass Box should preserve five guarantees:
 1. **Work outlives workers.** Assignments, pinned context, pending questions,
    decisions, and outcomes remain durable when an agent or container exits.
 2. **Authority is explicit.** Each run receives only its declared source
-   snapshot, tools, network path, identity, and named credentials. Authority is
+   snapshot, tools, gateway operations, identity, and named authorities.
+   Reusable credentials stay on the trusted side of the gateway. Authority is
    scoped, revocable, and never inferred from message text.
 3. **Human interaction is asynchronous.** A question belongs to the work item,
    not a terminal prompt. A person can answer later and a different compatible
@@ -55,8 +56,8 @@ state and cannot grant itself additional access.
 The product thesis is proven when one local demonstration can:
 
 1. assign a run to one agent runtime with a pinned repository snapshot;
-2. grant one named credential and deny undeclared credentials and network
-   access;
+2. authorize one named service through the gateway while denying undeclared
+   credentials and direct network access;
 3. turn a structured agent question into a durable pending interaction and a
    private Krab delivery;
 4. terminate the original worker without losing the interaction;

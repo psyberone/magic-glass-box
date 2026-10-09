@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from magic_glass_box.domain import (
     AgentProfileSpec,
+    GatewayCapability,
     InteractionKind,
     InteractionState,
     NetworkMode,
@@ -210,6 +213,15 @@ class ProjectContextTests(unittest.TestCase):
 
 
 class AgentProfileTests(unittest.TestCase):
+    def test_published_profile_uses_the_run_scoped_gateway(self) -> None:
+        path = Path(__file__).parents[1] / "examples" / "agent-profile.json"
+        profile = AgentProfileSpec.from_mapping(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        self.assertEqual(profile.network_mode, NetworkMode.GATEWAY_ONLY)
+        self.assertEqual(profile.credential_names, ("krab",))
+        self.assertEqual(profile.gateway_capabilities, tuple(GatewayCapability))
+
     def test_profile_uses_argv_and_named_credentials(self) -> None:
         profile = AgentProfileSpec.from_mapping(
             {
@@ -221,17 +233,83 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(profile.command, ("codex", "exec"))
         self.assertEqual(profile.credential_names, ("gh", "krab"))
         self.assertEqual(profile.workspace_mode, WorkspaceMode.COPY_ON_WRITE)
-        self.assertEqual(profile.network_mode, NetworkMode.KRAB_ONLY)
+        self.assertEqual(profile.network_mode, NetworkMode.GATEWAY_ONLY)
+        self.assertEqual(profile.gateway_capabilities, ())
         self.assertEqual(
             profile.to_dict(),
             {
                 "command": ["codex", "exec"],
                 "credential_names": ["gh", "krab"],
                 "image": "agent@sha256:abc",
-                "network_mode": "krab_only",
+                "network_mode": "gateway_only",
                 "workspace_mode": "copy_on_write",
             },
         )
+
+    def test_gateway_capabilities_are_explicit_and_require_gateway_authority(
+        self,
+    ) -> None:
+        profile = AgentProfileSpec.from_mapping(
+            {
+                "image": "agent@sha256:abc",
+                "command": ["agent"],
+                "credential_names": ["krab"],
+                "gateway_capabilities": [
+                    "run.describe",
+                    "interaction.open",
+                    "interaction.read",
+                ],
+            }
+        )
+        self.assertEqual(
+            profile.gateway_capabilities,
+            (
+                GatewayCapability.RUN_DESCRIBE,
+                GatewayCapability.INTERACTION_OPEN,
+                GatewayCapability.INTERACTION_READ,
+            ),
+        )
+
+        for value, message in (
+            (
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "network_mode": "none",
+                    "gateway_capabilities": ["run.describe"],
+                },
+                "require gateway_only",
+            ),
+            (
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "gateway_capabilities": ["interaction.open"],
+                },
+                "require the krab credential",
+            ),
+            (
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "gateway_capabilities": ["provider.anywhere"],
+                },
+                "gateway capability is invalid",
+            ),
+            (
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "gateway_capabilities": ["run.describe", "run.describe"],
+                },
+                "unique",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValidationError, message),
+            ):
+                AgentProfileSpec.from_mapping(value)
 
     def test_profile_rejects_unknown_policy(self) -> None:
         with self.assertRaises(ValidationError):

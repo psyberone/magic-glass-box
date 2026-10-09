@@ -1,0 +1,144 @@
+# Agent gateway
+
+The agent gateway is the only control-plane capability exposed to a
+`gateway_only` worker. Docker networking remains `none`; no Krab or provider
+token enters the container. The orchestrator fixes the run identity,
+credential-name policy, and operation allowlist before the worker starts.
+
+## Profile contract
+
+A profile opts into each operation explicitly:
+
+```json
+{
+  "image": "agent@sha256:<digest>",
+  "command": ["agent", "run"],
+  "workspace_mode": "copy_on_write",
+  "network_mode": "gateway_only",
+  "credential_names": ["krab"],
+  "gateway_capabilities": [
+    "run.describe",
+    "interaction.open",
+    "interaction.read"
+  ]
+}
+```
+
+`credential_names` are authority references, not container mounts. Interaction
+operations require the `krab` name, and the orchestrator resolves the pinned
+Krab identity only while performing that operation. Unknown capabilities,
+duplicates, and interaction capabilities without `krab` fail validation.
+
+## Carrier contract
+
+The container receives `MAGIC_GLASS_BOX_GATEWAY_DIR=/run/magic-glass-box`.
+That directory contains four mode-0600 regular files:
+
+| File | Worker access | Purpose |
+| --- | --- | --- |
+| `request.json` | read/write | One UTF-8 JSON request followed by `\n` |
+| `request.ready` | read/write | Commit for the complete request |
+| `response.json` | read-only | One UTF-8 JSON response followed by `\n` |
+| `response.ready` | read-only | Commit for the complete response |
+
+The directory itself is mounted read-only. Docker overlays only the two request
+files as writable bind mounts, so the worker cannot add paths or replace the
+response files. This regular-file carrier works across native Linux and Docker
+Desktop, where host Unix sockets do not cross the VM-backed bind boundary.
+
+A commit is a newline-terminated, canonical JSON object:
+
+```json
+{"sequence":1,"sha256":"<64 lowercase hex characters>","size":123}
+```
+
+The worker writes and flushes `request.json`, then writes and flushes
+`request.ready`. Sequences are positive, strictly increasing safe integers.
+The orchestrator reads a request only when its exact byte length and SHA-256
+match the commit. It writes and flushes `response.json` before publishing the
+matching sequence in `response.ready`. Requests are limited to 32 KiB and
+responses to 1 MiB. Malformed frames, duplicate JSON keys, non-finite numbers,
+torn commits, oversized files, and replayed sequences fail closed.
+
+Mailbox content is ephemeral transport state, never SQLite state. Normal run
+cleanup removes it. Restart reconciliation removes abandoned mailbox files
+while preserving durable `queued` and `waiting_for_input` run state.
+
+## Request envelope
+
+Every request has exactly four fields:
+
+```json
+{
+  "version": 1,
+  "request_id": "agent-generated-stable-id",
+  "operation": "run.describe",
+  "payload": {}
+}
+```
+
+The request never carries a run ID, credential reference, URL, or token. Run
+identity is bound to the mailbox by the orchestrator. A successful response
+echoes `version` and `request_id`, sets `ok` to `true`, and contains `result`.
+A failure sets `ok` to `false` and contains a bounded `{code, message}` error.
+Unexpected storage, transport, and implementation errors are redacted.
+
+## Operations
+
+### `run.describe`
+
+Payload: `{}`.
+
+Returns the current run state and version, pinned project key and source
+revision, sanitized project context, immutable work item, authority summary,
+and bounded interaction metadata. It omits the host repository path, image and
+command details, credential references, and secret values.
+
+### `interaction.open`
+
+Payload fields:
+
+- `kind`: `question`, `approval`, or `choice`;
+- `recipient_handle`: the bound human's Krab handle;
+- `title` and `body`: private untrusted content sent to Krab; and
+- `idempotency_key`: a stable retry key.
+
+The gateway obtains the run's current optimistic version itself. A verified
+Krab delivery opens durable metadata, transitions the run to
+`waiting_for_input`, and returns `agent_action: "exit"`. The worker should exit
+successfully; its container, mailbox, and workspace are then removed.
+
+### `interaction.read`
+
+Payload: `{"interaction_id":"int_<id>"}`.
+
+Only an answered interaction belonging to the mailbox's bound run is accepted.
+The orchestrator re-fetches the response from Krab and re-verifies project,
+session, creator, recipient, item ID, and status before returning transient
+untrusted title/body content. The response body is not written to SQLite.
+
+## Resume and recovery
+
+When the human response is accepted, the interaction becomes `answered` and
+the durable run returns to `queued`. A replacement worker receives a fresh
+mailbox, calls `run.describe` to discover the answered interaction, then calls
+`interaction.read`. The original worker is not kept alive while a person is
+thinking.
+
+If the orchestrator restarts, reconciliation removes containers, snapshots,
+and mailbox files. It leaves `waiting_for_input` interactions intact. Preparing
+or running work without a durable wait is failed explicitly because its live
+worker can no longer be proven.
+
+## Current boundary
+
+This slice brokers run context and Krab interactions only. It deliberately does
+not grant transparent Internet access or relay arbitrary URLs. Provider/model
+operations will extend this same typed, run-bound gateway in the next milestone
+while Docker networking remains disabled.
+
+Run the carrier and isolation proof with:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_gateway.py
+```

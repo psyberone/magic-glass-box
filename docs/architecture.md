@@ -14,9 +14,10 @@ duplicate private message bodies or transcripts.
 
 Docker workers are disposable and untrusted. A worker receives one
 tracked-files-only snapshot, one pinned context version, one pinned profile
-version, and only the credentials authorized for that run. It never receives
-the Docker socket, a Krab admin token, the control-plane database, another
-run's workspace, or the source repository's Git metadata.
+version, and one run-scoped gateway endpoint. A gateway-only worker never
+receives reusable credentials. It also never receives the Docker socket, a Krab
+admin token, the control-plane database, another run's workspace, or the source
+repository's Git metadata.
 
 ## Trust flow
 
@@ -26,7 +27,7 @@ operator/browser
       v
 Magic Glass Box ------ stable IDs / metadata ----> imitation-krab
       |
-      +---- short-lived, scoped material ----> sandboxed worker
+      +---- run-scoped typed capability ----> sandboxed worker
       |
       <---- structured events/questions -----+
 ```
@@ -81,10 +82,11 @@ For an execution request, Magic Glass Box:
 
 1. atomically claims a queued run by transitioning it to `preparing`;
 2. resolves its requested revision and exports only tracked Git files;
-3. resolves exactly the credential names in the pinned profile;
+3. validates the named authorities and opens the run-scoped gateway;
 4. resolves the image reference to an immutable digest and creates the sandbox;
 5. records the commit, image, and container identity before starting it;
-6. waits for the agent, removes all labeled containers and the snapshot, then
+6. waits for the agent, removes all labeled containers, gateway files, and the
+   snapshot, then
    records the exit status and terminal state.
 
 Operational failures become audited `failed` runs only after cleanup succeeds.
@@ -96,9 +98,21 @@ retired label namespace so an upgrade can clean interrupted legacy containers.
 The Docker boundary rejects images with Dockerfile-declared volumes, validates
 host paths before mounting them, runs as the host's non-root numeric identity,
 uses a read-only root filesystem, drops all capabilities, applies resource
-ceilings, and bounds local logs. It currently supports network policy `none`.
-`krab_only` fails closed rather than granting a general bridge network while a
-scoped relay is absent.
+ceilings, and bounds local logs. Both `none` and `gateway_only` use Docker
+network policy `none`; `gateway_only` adds a private committed-file mailbox.
+The mailbox directory and response files are read-only in the container. Only
+the fixed request payload and request commit files are writable. Sequence,
+size, and SHA-256 commitments prevent torn reads and stale response confusion.
+The retired `krab_only` mode fails closed.
+
+The gateway binds run identity outside the agent-controlled request. Its
+allowlist comes from the immutable profile revision. The current operations are
+`run.describe`, `interaction.open`, and `interaction.read`; none accepts a run
+ID or credential value. Opening an interaction tells the original worker to
+exit, cleanup removes its resources, and the durable run remains
+`waiting_for_input`. A verified response re-queues the run, and a replacement
+worker may retrieve only the response correlated to that run. See
+[agent-gateway.md](agent-gateway.md).
 
 ## Work-item boundary
 
@@ -113,5 +127,6 @@ therefore never an authority channel.
 
 Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
-exit proofs. The metadata-only durable interaction ledger and its verified Krab
-transport are complete. The next slice is the run-scoped agent gateway.
+exit proofs. The durable interaction path and run-scoped gateway are complete.
+The next slice extends the same authority boundary into a scoped provider
+broker without restoring direct worker egress.

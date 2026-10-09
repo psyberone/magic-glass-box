@@ -25,6 +25,9 @@ This repository currently contains the first executable vertical slice:
 - a Docker execution adapter that resolves images to immutable digests,
   validates workspaces and credential files, applies resource and privilege
   ceilings, and always attempts container cleanup;
+- a run-scoped capability gateway that gives networkless workers typed access
+  to pinned run context and asynchronous Krab interactions without mounting a
+  reusable token;
 - tracked-files-only Git snapshots that resolve each run to an immutable commit;
 - a run coordinator that records preparation, container identity, resolved
   source revision, exit status, and terminal state; and
@@ -37,8 +40,9 @@ the source checkout remains untouched and the container and snapshot are
 removed afterward. The interaction transport has also been exercised over HTTP
 against a real local `imitation-krab`: idempotent question delivery,
 reverse-route response verification, and metadata-only local persistence all
-pass. The run-scoped agent gateway is next. `krab_only` continues to fail closed
-until its scoped relay exists.
+pass. The gateway carrier has been exercised through the real Docker executor:
+the worker has `--network none`, direct egress fails, and a typed request still
+reaches the orchestrator. The retired `krab_only` mode continues to fail closed.
 
 ## Quick start
 
@@ -53,7 +57,7 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db user add op
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db status
 ```
 
-Once a project, networkless profile, and run have been registered, execute or
+Once a project, gateway-only profile, and run have been registered, execute or
 recover its lifecycle with:
 
 ```console
@@ -76,9 +80,11 @@ published input schema.
 The pinned project context must name an absolute path to a local Git repository.
 If no source revision was supplied when the run was created, Magic Glass Box
 resolves `HEAD`; either way, the full commit ID is persisted before the
-container starts. Only credentials named by the pinned profile are mounted.
-Agent output, question and answer bodies, and transcripts are not persisted by
-this slice.
+container starts. A `gateway_only` worker receives no credential files: names
+in its profile authorize specific host-side gateway operations. Agent output,
+question and answer bodies, and transcripts are not durable control-plane
+state. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability and
+carrier contracts.
 
 When running directly from a checkout, set `PYTHONPATH=src` or install the
 package into a virtual environment.
@@ -111,6 +117,15 @@ PYTHONPATH=src python3.11 scripts/check_live_krab_transport.py
 ```
 
 Use `--krab-source /path/to/imitation-krab/src` for another checkout layout.
+
+The network-isolation and gateway-carrier proof uses a local Python image and
+the real Docker executor:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_gateway.py
+```
+
+Use `--image` to select another local, volume-free image with Python installed.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the exact scoring rules and workflow.
 

@@ -358,6 +358,51 @@ class ControlPlane:
             content_risk_flags=item.content_risk_flags,
         )
 
+    def read_interaction_response(
+        self, run_id: str, interaction_id: str
+    ) -> AcceptedInteractionResponse:
+        """Re-read transient response content for one explicitly bound run."""
+
+        interaction = self.database.get_interaction(interaction_id)
+        if interaction["run_id"] != run_id:
+            raise NotFoundError("interaction response not found for run")
+        if (
+            interaction["state"] != "answered"
+            or interaction["response_item_id"] is None
+        ):
+            raise ConflictError("interaction has no accepted response")
+        route = self.database.get_run_transport(run_id)
+        if route["krab_session_id"] is None:
+            raise ConflictError("run has no Krab session")
+        _, agent, client = self._authenticated_client(
+            route["krab_instance_name"], route["agent_krab_handle"]
+        )
+        response_item_id = interaction["response_item_id"]
+        item = client.get_session_item(
+            route["project_key"], route["krab_session_id"], response_item_id
+        )
+        self._verify_interaction_item(
+            item,
+            project_key=route["project_key"],
+            session_id=route["krab_session_id"],
+            creator_user_id=interaction["recipient"]["krab_user_id"],
+            recipient_user_id=agent["krab_user_id"],
+            item_id=response_item_id,
+            created=False,
+        )
+        return AcceptedInteractionResponse(
+            interaction_id=interaction["id"],
+            run_id=run_id,
+            response_item_id=response_item_id,
+            interaction_state=interaction["state"],
+            interaction_version=interaction["version"],
+            run_state=interaction["run_state"],
+            run_version=interaction["run_version"],
+            untrusted_title=item.untrusted_title,
+            untrusted_body=item.untrusted_body,
+            content_risk_flags=item.content_risk_flags,
+        )
+
     def project_activity(
         self,
         *,

@@ -10,6 +10,8 @@ from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
+    GatewayCapability,
+    InteractionKind,
     NetworkMode,
     ProjectContext,
     RunState,
@@ -17,6 +19,7 @@ from magic_glass_box.domain import (
     WorkspaceMode,
 )
 from magic_glass_box.executor import SandboxPlan, SandboxRequest, SandboxResult
+from magic_glass_box.gateway import GatewayEndpoint
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import RunCoordinator, RunOrchestrationError
 from magic_glass_box.workspace import PreparedWorkspace
@@ -66,6 +69,7 @@ class FakeExecutor:
         self.skip_callback = False
         self.inconsistent_result = False
         self.cleanup_error: Exception | None = None
+        self.during_execute = None
         self.requests: list[SandboxRequest] = []
         self.cleanup_calls: list[str] = []
 
@@ -81,6 +85,8 @@ class FakeExecutor:
         )
         if not self.skip_callback and before_start is not None:
             before_start(plan, CONTAINER_ID)
+        if self.during_execute is not None:
+            self.during_execute(request)
         if self.execute_error is not None:
             raise self.execute_error
         return SandboxResult(
@@ -95,6 +101,33 @@ class FakeExecutor:
         if self.cleanup_error is not None:
             raise self.cleanup_error
         return 0
+
+
+class FakeGatewayManager:
+    def __init__(self, root: Path):
+        self.root = root
+        self.open_error: Exception | None = None
+        self.cleanup_error: Exception | None = None
+        self.open_calls: list[tuple[str, tuple[object, ...], tuple[str, ...]]] = []
+        self.cleanup_calls: list[str] = []
+
+    def open(
+        self,
+        run_id: str,
+        *,
+        capabilities: tuple[object, ...],
+        credential_names: tuple[str, ...],
+    ) -> GatewayEndpoint:
+        self.open_calls.append((run_id, capabilities, credential_names))
+        if self.open_error is not None:
+            raise self.open_error
+        return GatewayEndpoint(self.root / run_id)
+
+    def cleanup(self, run_id: str) -> bool:
+        self.cleanup_calls.append(run_id)
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+        return True
 
 
 class RunCoordinatorTests(unittest.TestCase):
@@ -114,10 +147,11 @@ class RunCoordinatorTests(unittest.TestCase):
         instance = self.database.create_krab_instance(
             "Local Krab", "http://127.0.0.1:8765"
         )
-        identity = self.database.store_krab_identity(
+        self.identity = self.database.store_krab_identity(
             instance["id"],
             KrabIdentity(USER_ID, "agent_one", 1),
             "file:" + str(self.token),
+            user_id=self.user["id"],
         )
         self.database.create_project(
             instance_id=instance["id"],
@@ -152,33 +186,46 @@ class RunCoordinatorTests(unittest.TestCase):
                 image="agent:local",
                 command=["agent", "run"],
                 workspace_mode=WorkspaceMode.COPY_ON_WRITE,
-                network_mode=NetworkMode.NONE,
+                network_mode=NetworkMode.GATEWAY_ONLY,
                 credential_names=["krab"],
+                gateway_capabilities=[
+                    GatewayCapability.RUN_DESCRIBE,
+                    GatewayCapability.INTERACTION_OPEN,
+                    GatewayCapability.INTERACTION_READ,
+                ],
             ),
-            krab_identity_id=identity["id"],
+            krab_identity_id=self.identity["id"],
             created_by=self.user["id"],
         )
         self.workspaces = FakeWorkspaceManager(self.root / "workspaces")
         self.workspaces.root.mkdir(mode=0o700)
         self.executor = FakeExecutor()
+        self.gateways = FakeGatewayManager(self.root / "gateways")
         self.coordinator = RunCoordinator(
             self.database,
             self.executor,
             self.workspaces,
             PrivateFileCredentialResolver(),
+            self.gateways,
         )
 
-    def create_run(self, revision: str | None = "main") -> dict[str, object]:
+    def create_run(
+        self,
+        revision: str | None = "main",
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
         return self.database.create_run(
             project_key="box-project",
             profile_name="Worker",
             work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
             source_revision=revision,
+            krab_session_id=session_id,
         )
 
     def test_success_runs_pinned_inputs_and_records_structured_events(self) -> None:
-        run = self.create_run()
+        run = self.create_run(session_id="ses_" + "4" * 32)
 
         finished = self.coordinator.execute(run["id"])
 
@@ -205,13 +252,58 @@ class RunCoordinatorTests(unittest.TestCase):
         request = self.executor.requests[0]
         self.assertEqual(request.run_id, run["id"])
         self.assertEqual(request.workspace, self.workspaces.root / run["id"])
-        self.assertEqual(request.credential_files, {"krab": self.token.resolve()})
+        self.assertEqual(request.credential_files, {})
+        self.assertEqual(
+            request.gateway_directory,
+            self.gateways.root / run["id"],
+        )
+        self.assertEqual(
+            self.gateways.open_calls,
+            [
+                (
+                    run["id"],
+                    (
+                        GatewayCapability.RUN_DESCRIBE,
+                        GatewayCapability.INTERACTION_OPEN,
+                        GatewayCapability.INTERACTION_READ,
+                    ),
+                    ("krab",),
+                )
+            ],
+        )
         self.assertEqual(
             self.workspaces.prepare_calls,
             [(run["id"], self.repository, "main")],
         )
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.workspaces.cleanup_calls, [run["id"]])
+        self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
+
+    def test_gateway_interaction_suspends_instead_of_completing_the_run(self) -> None:
+        run = self.create_run(session_id="ses_" + "4" * 32)
+
+        def open_interaction(_request: SandboxRequest) -> None:
+            current = self.database.get_run(run["id"])
+            self.database.open_interaction(
+                run["id"],
+                kind=InteractionKind.QUESTION,
+                recipient_krab_identity_id=self.identity["id"],
+                request_item_id="itm_" + "9" * 32,
+                expected_run_version=current["version"],
+            )
+
+        self.executor.during_execute = open_interaction
+        suspended = self.coordinator.execute(run["id"])
+
+        self.assertEqual(suspended["state"], "waiting_for_input")
+        self.assertEqual(suspended["version"], 4)
+        self.assertEqual(suspended["events"][-1]["kind"], "run.transitioned")
+        self.assertEqual(
+            suspended["interactions"][0]["events"][-1]["kind"],
+            "interaction.opened",
+        )
+        self.assertEqual(self.executor.cleanup_calls, [run["id"]])
+        self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
 
     def test_nonzero_agent_exit_is_a_durable_failed_run(self) -> None:
         run = self.create_run(None)
@@ -311,10 +403,11 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.database.get_run(run["id"])["state"], "preparing")
         self.assertEqual(self.workspaces.cleanup_calls, [run["id"]])
 
-    def test_both_cleanup_boundaries_are_attempted_and_reported(self) -> None:
+    def test_all_cleanup_boundaries_are_attempted_and_reported(self) -> None:
         run = self.create_run()
         self.executor.execute_error = RuntimeError("docker broke")
         self.executor.cleanup_error = RuntimeError("daemon unavailable")
+        self.gateways.cleanup_error = RuntimeError("gateway busy")
         self.workspaces.cleanup_error = RuntimeError("workspace busy")
 
         with self.assertRaisesRegex(
@@ -322,9 +415,10 @@ class RunCoordinatorTests(unittest.TestCase):
         ) as raised:
             self.coordinator.execute(run["id"])
 
-        self.assertEqual(len(raised.exception.__notes__), 2)
+        self.assertEqual(len(raised.exception.__notes__), 3)
         self.assertIn("daemon unavailable", raised.exception.__notes__[0])
-        self.assertIn("workspace busy", raised.exception.__notes__[1])
+        self.assertIn("gateway busy", raised.exception.__notes__[1])
+        self.assertIn("workspace busy", raised.exception.__notes__[2])
         self.assertEqual(self.database.get_run(run["id"])["state"], "preparing")
 
     def test_executor_contract_violations_fail_the_run(self) -> None:
@@ -426,6 +520,35 @@ class RunCoordinatorTests(unittest.TestCase):
                     "reconciled": True,
                 },
             )
+
+    def test_reconcile_preserves_a_pending_interaction_without_live_resources(
+        self,
+    ) -> None:
+        run = self.create_run(session_id="ses_" + "4" * 32)
+        self.database.transition_run(
+            run["id"], target=RunState.PREPARING, expected_version=1
+        )
+        running = self.database.transition_run(
+            run["id"], target=RunState.RUNNING, expected_version=2
+        )
+        interaction = self.database.open_interaction(
+            run["id"],
+            kind=InteractionKind.QUESTION,
+            recipient_krab_identity_id=self.identity["id"],
+            request_item_id="itm_" + "8" * 32,
+            expected_run_version=running["version"],
+        )
+        (self.workspaces.root / run["id"]).mkdir(mode=0o700)
+
+        self.assertEqual(self.coordinator.reconcile(), [])
+
+        preserved = self.database.get_run(run["id"])
+        self.assertEqual(preserved["state"], "waiting_for_input")
+        self.assertEqual(preserved["interactions"][0]["id"], interaction["id"])
+        self.assertEqual(preserved["interactions"][0]["state"], "open")
+        self.assertEqual(self.executor.cleanup_calls, [run["id"]])
+        self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
+        self.assertFalse((self.workspaces.root / run["id"]).exists())
 
     def test_reconcile_leaves_cleanup_failures_active_and_reports_them(self) -> None:
         run = self.create_run()

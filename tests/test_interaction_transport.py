@@ -267,9 +267,21 @@ class InteractionTransportTests(unittest.TestCase):
             self.client.get_calls,
             [("box-project", SESSION_ID, RESPONSE_ITEM_ID)],
         )
+        reread = self.control.read_interaction_response(run["id"], opened["id"])
+        self.assertEqual(reread.untrusted_body, "SECRET HUMAN RESPONSE")
+        self.assertEqual(reread.interaction_id, opened["id"])
+        self.assertEqual(reread.run_id, run["id"])
+        self.assertEqual(
+            self.client.get_calls,
+            [
+                ("box-project", SESSION_ID, RESPONSE_ITEM_ID),
+                ("box-project", SESSION_ID, RESPONSE_ITEM_ID),
+            ],
+        )
         self.assertEqual(
             self.factory_calls,
             [
+                ("http://127.0.0.1:8765", AGENT_TOKEN),
                 ("http://127.0.0.1:8765", AGENT_TOKEN),
                 ("http://127.0.0.1:8765", AGENT_TOKEN),
             ],
@@ -279,6 +291,23 @@ class InteractionTransportTests(unittest.TestCase):
         )
         self.assertNotIn(b"SECRET QUESTION BODY", database_bytes)
         self.assertNotIn(b"SECRET HUMAN RESPONSE", database_bytes)
+
+    def test_response_read_is_bound_to_an_answered_interaction_and_run(self) -> None:
+        run = self.running_run()
+        opened = self.open_interaction(run)
+
+        with self.assertRaisesRegex(ConflictError, "no accepted response"):
+            self.control.read_interaction_response(run["id"], opened["id"])
+        self.assertEqual(self.client.get_calls, [])
+
+        self.control.accept_interaction_response(
+            opened["id"], response_item_id=RESPONSE_ITEM_ID, expected_version=1
+        )
+        other = self.running_run(session_id="ses_" + "8" * 32)
+        calls_before = list(self.client.get_calls)
+        with self.assertRaisesRegex(NotFoundError, "not found for run"):
+            self.control.read_interaction_response(other["id"], opened["id"])
+        self.assertEqual(self.client.get_calls, calls_before)
 
     def test_request_metadata_must_match_the_pinned_run_and_recipient(self) -> None:
         run = self.running_run()
