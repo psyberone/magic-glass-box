@@ -18,6 +18,7 @@ from .db import (
 )
 from .domain import (
     AgentProfileSpec,
+    HandoffEnvelope,
     InteractionKind,
     ProjectContext,
     ProviderGrantSpec,
@@ -393,6 +394,11 @@ class ControlPlane:
             expected_version=expected_version,
             reason=reason,
         )
+
+    def submit_handoff(self, run_id: str, handoff: HandoffEnvelope) -> dict[str, Any]:
+        """Persist bounded replacement state for the run's active attempt."""
+
+        return self.database.create_attempt_handoff(run_id, handoff)
 
     def open_interaction(
         self,

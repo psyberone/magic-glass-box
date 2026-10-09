@@ -381,6 +381,8 @@ class DockerEngine(Protocol):
 
 
 class DockerExecutor:
+    runtime_adapter = "docker"
+
     def __init__(
         self,
         engine: DockerEngine,

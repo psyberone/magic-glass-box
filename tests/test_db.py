@@ -4,7 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -87,6 +87,20 @@ class DatabaseTests(unittest.TestCase):
             created_by=self.user["id"],
         )
 
+    def test_database_timestamps_are_explicitly_utc(self) -> None:
+        self.assertEqual(
+            datetime.fromisoformat(Database.now()).utcoffset(),
+            timedelta(0),
+        )
+
+    def test_get_krab_instance_validates_with_the_public_field_name(self) -> None:
+        with self.assertRaises(ValidationError) as invalid:
+            self.database.get_krab_instance("not/valid")
+        self.assertEqual(
+            str(invalid.exception),
+            "instance name must be 1 to 64 restricted display characters",
+        )
+
     def create_run(self) -> dict[str, object]:
         return self.database.create_run(
             project_key="box-project",
@@ -99,7 +113,7 @@ class DatabaseTests(unittest.TestCase):
     def test_database_is_private_and_reports_counts(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 4)
+        self.assertEqual(status["schema_version"], 5)
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
 

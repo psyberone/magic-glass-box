@@ -94,6 +94,8 @@ credentials, and direct network attempts fail closed.
 
 ## Milestone 3: worker replacement and handoff
 
+**Status: complete**
+
 - Define a bounded, structured handoff envelope containing work state,
   decisions, artifacts, and pending interaction IDs—not a transcript.
 - Re-queue interrupted waiting work after its response arrives.
@@ -103,7 +105,9 @@ credentials, and direct network attempts fail closed.
   remains auditable.
 
 **Exit proof:** terminate Agent A while it waits, answer later, and complete the
-same run with Agent B.
+same run with Agent B. The automated vertical proof uses two distinct runtime
+adapter identities, reconstructs Agent B's workspace from the commit pinned by
+Agent A, and retains only the bounded handoff and interaction metadata.
 
 ## Milestone 4: local control room
 

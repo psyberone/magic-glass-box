@@ -1,0 +1,20 @@
+{
+  "artifacts": [
+    {
+      "description": "The coordinator boundary inspected before asking for input.",
+      "path": "src/magic_glass_box/orchestration.py"
+    }
+  ],
+  "decisions": [
+    "Keep the replacement on the run's pinned source revision and authority."
+  ],
+  "next_steps": [
+    "Read the accepted interaction response and apply the selected policy."
+  ],
+  "pending_interaction_ids": [
+    "int_11111111111111111111111111111111"
+  ],
+  "schema_version": 1,
+  "summary": "Implementation is paused at a policy decision.",
+  "work_state": "waiting_for_input"
+}

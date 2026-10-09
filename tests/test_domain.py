@@ -7,6 +7,7 @@ from pathlib import Path
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
+    HandoffEnvelope,
     InteractionKind,
     InteractionState,
     NetworkMode,
@@ -21,6 +22,7 @@ from magic_glass_box.domain import (
     validate_krab_id,
     validate_name,
     validate_project_key,
+    validate_provider_name,
     validate_transition,
 )
 
@@ -103,6 +105,21 @@ class ScalarValidationTests(unittest.TestCase):
                 self.assertRaisesRegex(ValidationError, "finite JSON data"),
             ):
                 canonical_json(value)
+
+        with self.assertRaises(ValidationError) as non_finite:
+            canonical_json(float("nan"))
+        self.assertEqual(
+            str(non_finite.exception),
+            "value must be finite JSON data",
+        )
+
+    def test_provider_name_default_field_is_part_of_the_contract(self) -> None:
+        with self.assertRaises(ValidationError) as invalid:
+            validate_provider_name("NOT VALID")
+        self.assertEqual(
+            str(invalid.exception),
+            "provider name must match [a-z][a-z0-9_-]{0,63}",
+        )
 
 
 class ProjectContextTests(unittest.TestCase):
@@ -382,6 +399,96 @@ class AgentProfileTests(unittest.TestCase):
                 self.assertRaisesRegex(ValidationError, message),
             ):
                 AgentProfileSpec.from_mapping(value)
+
+
+class HandoffEnvelopeTests(unittest.TestCase):
+    def valid(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "work_state": "waiting_for_input",
+            "summary": "Implementation is paused at a bounded decision.",
+            "decisions": ["Keep the source checkout immutable."],
+            "artifacts": [
+                {
+                    "path": "src/magic_glass_box/domain.py",
+                    "description": "Domain contract inspected by the worker.",
+                }
+            ],
+            "next_steps": ["Read the accepted response and continue."],
+            "pending_interaction_ids": ["int_" + "1" * 32],
+        }
+
+    def test_round_trip_is_canonical_bounded_work_state(self) -> None:
+        value = self.valid()
+
+        handoff = HandoffEnvelope.from_mapping(value)
+
+        self.assertEqual(handoff.to_dict(), value)
+        self.assertEqual(json.loads(handoff.canonical), value)
+        self.assertEqual(handoff.digest, content_sha256(handoff.canonical))
+
+    def test_published_schema_and_example_match_the_v1_contract(self) -> None:
+        root = Path(__file__).parents[1]
+        schema = json.loads(
+            (root / "schemas" / "handoff-v1.schema.json").read_text(encoding="utf-8")
+        )
+        example = json.loads(
+            (root / "examples" / "handoff.json").read_text(encoding="utf-8")
+        )
+
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(schema["properties"]["schema_version"]["const"], 1)
+        self.assertEqual(set(schema["required"]), set(example))
+        self.assertEqual(HandoffEnvelope.from_mapping(example).to_dict(), example)
+
+    def test_rejects_transcript_fields_and_unbounded_or_unsafe_content(self) -> None:
+        valid = self.valid()
+        cases = (
+            ({**valid, "transcript": ["secret"]}, "unknown fields"),
+            ({key: item for key, item in valid.items() if key != "summary"}, "missing"),
+            ({**valid, "schema_version": True}, "schema_version"),
+            ({**valid, "work_state": "chat_log"}, "work_state"),
+            ({**valid, "summary": "   "}, "blank"),
+            ({**valid, "decisions": ["same", "same"]}, "unique"),
+            ({**valid, "next_steps": [""]}, "empty"),
+            (
+                {
+                    **valid,
+                    "artifacts": [{"path": "../outside", "description": "unsafe"}],
+                },
+                "safe relative POSIX path",
+            ),
+            (
+                {
+                    **valid,
+                    "artifacts": [
+                        {"path": "same.py", "description": "one"},
+                        {"path": "same.py", "description": "two"},
+                    ],
+                },
+                "unique paths",
+            ),
+            (
+                {**valid, "pending_interaction_ids": ["int_bad"]},
+                "interaction identifier",
+            ),
+            (
+                {
+                    **valid,
+                    "pending_interaction_ids": [
+                        "int_" + "1" * 32,
+                        "int_" + "1" * 32,
+                    ],
+                },
+                "unique",
+            ),
+        )
+        for candidate, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValidationError, message),
+            ):
+                HandoffEnvelope.from_mapping(candidate)
 
 
 class RunStateTests(unittest.TestCase):

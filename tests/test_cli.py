@@ -133,7 +133,7 @@ class CLITests(unittest.TestCase):
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 4)
+        self.assertEqual(initialized["schema_version"], 5)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -562,6 +562,21 @@ class CLITests(unittest.TestCase):
         self.assertEqual(parsed.limit, 50)
         self.assertEqual(parsed.wait, 0)
         self.assertEqual(parsed.krab_handle, "agent_one")
+
+        with (
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as missing_importer,
+        ):
+            parser.parse_args(
+                [
+                    "work-item",
+                    "import",
+                    "work-item.json",
+                    "--project",
+                    "box-project",
+                ]
+            )
+        self.assertEqual(missing_importer.exception.code, 2)
 
         root = Path(self.temporary.name)
         home = root / "home"

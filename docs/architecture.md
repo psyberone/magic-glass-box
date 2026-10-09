@@ -112,13 +112,14 @@ The retired `krab_only` mode fails closed.
 
 The gateway binds run identity outside the agent-controlled request. Its
 allowlist comes from the immutable profile revision. The current operations are
-`run.describe`, `interaction.open`, `interaction.read`, and `provider.invoke`;
-none accepts a run ID or credential value. Provider calls additionally pin the
+`run.describe`, `interaction.open`, `interaction.read`, `handoff.submit`, and
+`provider.invoke`; none accepts a run ID or credential value. Provider calls additionally pin the
 destination, method, model, headers, byte limits, timeout, and concurrency in
-administrator-owned policy. Opening an interaction tells the original worker
-to exit, cleanup removes its resources, and the durable run remains
-`waiting_for_input`. A verified response re-queues the run, and a replacement
-worker may retrieve only the response correlated to that run. See
+administrator-owned policy. Opening an interaction tells a handoff-capable
+worker to submit bounded replacement state and exit. Cleanup removes its
+resources, and the durable run remains `waiting_for_input`. A verified response
+re-queues the run, and a replacement worker may retrieve only the response
+correlated to that run. See
 [agent-gateway.md](agent-gateway.md) and
 [provider-broker.md](provider-broker.md).
 
@@ -135,6 +136,8 @@ therefore never an authority channel.
 
 Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
-exit proofs. The durable interaction path, run-scoped gateway, and scoped
-provider broker are complete. The next slice adds structured worker replacement
-and handoff without turning transcripts into durable state.
+exit proofs. The durable interaction path, run-scoped gateway, scoped provider
+broker, and structured worker replacement are complete. The next slice is the
+local control room: an operator view over projects, authority, runs, attempts,
+interactions, and recovery actions without private message bodies or
+transcripts. See [worker-handoffs.md](worker-handoffs.md).

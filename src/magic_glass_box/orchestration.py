@@ -22,6 +22,8 @@ class RunOrchestrationError(RuntimeError):
 
 
 class SandboxExecutor(Protocol):
+    runtime_adapter: str
+
     def execute(
         self,
         request: SandboxRequest,
@@ -75,18 +77,23 @@ class RunCoordinator:
         inputs = self.database.get_run_execution(run_id)
         if inputs["state"] != RunState.QUEUED.value:
             raise RunOrchestrationError(f"run is not queued: {inputs['state']}")
+        runtime_adapter = getattr(self.executor, "runtime_adapter", None)
+        if not isinstance(runtime_adapter, str):
+            raise RunOrchestrationError(
+                "sandbox executor has no runtime adapter identity"
+            )
         try:
-            preparing = self.database.transition_run(
+            attempt = self.database.begin_run_attempt(
                 run_id,
-                target=RunState.PREPARING,
-                expected_version=inputs["version"],
+                runtime_adapter=runtime_adapter,
+                expected_run_version=inputs["version"],
             )
         except Exception as exc:
             raise RunOrchestrationError(
                 "run could not be claimed for execution"
             ) from exc
 
-        running: dict[str, Any] | None = None
+        running_attempt: dict[str, Any] | None = None
         prepared: PreparedWorkspace | None = None
         started_container: tuple[SandboxPlan, str] | None = None
         try:
@@ -130,23 +137,20 @@ class RunCoordinator:
             )
 
             def before_start(plan: SandboxPlan, container_id: str) -> None:
-                nonlocal running, started_container
+                nonlocal running_attempt, started_container
                 started_container = (plan, container_id)
-                running = self.database.transition_run(
-                    run_id,
-                    target=RunState.RUNNING,
-                    expected_version=preparing["version"],
+                running_attempt = self.database.start_run_attempt(
+                    attempt["id"],
+                    expected_attempt_version=attempt["version"],
+                    expected_run_version=attempt["run_version"],
                     source_revision=prepared.revision,
-                    metadata={
-                        "container_id": container_id,
-                        "container_name": plan.container_name,
-                        "image_id": plan.image_id,
-                        "source_revision": prepared.revision,
-                    },
+                    container_id=container_id,
+                    container_name=plan.container_name,
+                    image_id=plan.image_id,
                 )
 
             result = self.executor.execute(request, before_start=before_start)
-            if running is None or started_container is None:
+            if running_attempt is None or started_container is None:
                 raise RunOrchestrationError(
                     "sandbox executor returned before recording container start"
                 )
@@ -160,48 +164,24 @@ class RunCoordinator:
                     "sandbox executor returned inconsistent container identity"
                 )
         except Exception as exc:
-            self._abort(run_id, exc)
+            self._abort(run_id, attempt["id"], exc)
 
         cleanup_failures = self._cleanup(run_id)
         if cleanup_failures:
             self._raise_cleanup_incomplete(cleanup_failures)
 
-        current = self.database.get_run(run_id)
-        if current["state"] in {
-            RunState.WAITING_FOR_INPUT.value,
-            RunState.QUEUED.value,
-            RunState.CANCELLED.value,
-        }:
-            return current
-        if (
-            current["state"] != RunState.RUNNING.value
-            or current["version"] != running["version"]
-        ):
-            raise RunOrchestrationError(
-                "sandbox finished after an unexpected run lifecycle change"
-            )
-
-        terminal = RunState.SUCCEEDED if result.exit_code == 0 else RunState.FAILED
-        reason = (
-            None
-            if result.exit_code == 0
-            else f"agent exited with code {result.exit_code}"
-        )
         try:
-            return self.database.transition_run(
-                run_id,
-                target=terminal,
-                expected_version=running["version"],
-                reason=reason,
-                metadata={
-                    "exit_code": result.exit_code,
-                    "image_id": result.image_id,
-                },
+            self.database.complete_run_attempt(
+                running_attempt["id"],
+                expected_attempt_version=running_attempt["version"],
+                exit_code=result.exit_code,
+                image_id=result.image_id,
             )
         except Exception as exc:
             raise RunOrchestrationError(
-                "sandbox finished but its terminal state could not be recorded"
+                "sandbox finished but its outcome could not be recorded"
             ) from exc
+        return self.database.get_run(run_id)
 
     def _credential_files(
         self,
@@ -260,24 +240,22 @@ class RunCoordinator:
             error.add_note(f"cleanup failed: {type(failure).__name__}: {failure}")
         raise error
 
-    def _abort(self, run_id: str, cause: Exception) -> None:
+    def _abort(self, run_id: str, attempt_id: str, cause: Exception) -> None:
         cleanup_failures = self._cleanup(run_id)
         if cleanup_failures:
             try:
                 self._raise_cleanup_incomplete(cleanup_failures)
             except RunOrchestrationError as error:
                 raise error from cause
-        current = self.database.get_run(run_id)
-        if current["state"] in {
-            RunState.PREPARING.value,
-            RunState.RUNNING.value,
-            RunState.WAITING_FOR_INPUT.value,
+        attempt = self.database.get_run_attempt(attempt_id)
+        if attempt["state"] in {
+            "preparing",
+            "running",
         }:
             try:
-                self.database.transition_run(
-                    run_id,
-                    target=RunState.FAILED,
-                    expected_version=current["version"],
+                self.database.fail_run_attempt(
+                    attempt_id,
+                    expected_attempt_version=attempt["version"],
                     reason=f"execution failed: {type(cause).__name__}",
                 )
             except Exception as exc:
@@ -298,18 +276,40 @@ class RunCoordinator:
             if candidate["state"] in {
                 RunState.QUEUED.value,
                 RunState.WAITING_FOR_INPUT.value,
-            }:
+            } and not any(
+                attempt["state"] in {"preparing", "running"}
+                for attempt in candidate["attempts"]
+            ):
                 continue
             try:
-                reconciled.append(
-                    self.database.transition_run(
-                        run_id,
-                        target=RunState.FAILED,
-                        expected_version=candidate["version"],
-                        reason="orchestrator restart reconciliation",
-                        metadata={"reconciled": True},
-                    )
+                active_attempt = next(
+                    (
+                        attempt
+                        for attempt in reversed(candidate["attempts"])
+                        if attempt["state"] in {"preparing", "running"}
+                    ),
+                    None,
                 )
+                if active_attempt is not None:
+                    self.database.fail_run_attempt(
+                        active_attempt["id"],
+                        expected_attempt_version=active_attempt["version"],
+                        reason="orchestrator restart reconciliation",
+                        interrupted=True,
+                    )
+                    current = self.database.get_run(run_id)
+                    if current["state"] == RunState.FAILED.value:
+                        reconciled.append(current)
+                else:
+                    reconciled.append(
+                        self.database.transition_run(
+                            run_id,
+                            target=RunState.FAILED,
+                            expected_version=candidate["version"],
+                            reason="orchestrator restart reconciliation",
+                            metadata={"reconciled": True},
+                        )
+                    )
             except Exception as exc:
                 failures.append((run_id, exc))
         if failures:

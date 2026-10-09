@@ -24,6 +24,9 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 WORK_ITEM_SOURCE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 WORK_ITEM_SCHEMA_VERSION = 1
 MAX_WORK_ITEM_CONTENT_BYTES = 256 * 1024
+HANDOFF_SCHEMA_VERSION = 1
+MAX_HANDOFF_CONTENT_BYTES = 24 * 1024
+INTERACTION_ID_RE = re.compile(r"^int_[0-9a-f]{32}$")
 
 
 def require_string(
@@ -336,6 +339,171 @@ class WorkItemEnvelope:
         return content_sha256(self.canonical)
 
 
+class HandoffWorkState(StrEnum):
+    IN_PROGRESS = "in_progress"
+    WAITING_FOR_INPUT = "waiting_for_input"
+    BLOCKED = "blocked"
+    READY_FOR_REVIEW = "ready_for_review"
+
+
+@dataclass(frozen=True)
+class HandoffArtifact:
+    path: str
+    description: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any], *, index: int) -> HandoffArtifact:
+        field = f"artifacts[{index}]"
+        if not isinstance(value, dict):
+            raise ValidationError(f"{field} must be an object")
+        unknown = set(value) - {"path", "description"}
+        if unknown:
+            raise ValidationError(
+                f"{field} contains unknown fields: " + ", ".join(sorted(unknown))
+            )
+        missing = {"path", "description"} - set(value)
+        if missing:
+            raise ValidationError(
+                f"{field} is missing fields: " + ", ".join(sorted(missing))
+            )
+        path_text = _nonblank_string(
+            value["path"], field=f"{field} path", max_bytes=1024
+        )
+        path = PurePosixPath(path_text)
+        if (
+            path_text.startswith("/")
+            or "\\" in path_text
+            or path_text != path.as_posix()
+            or path.as_posix() == "."
+            or any(part in {".", ".."} for part in path.parts)
+        ):
+            raise ValidationError(f"{field} path must be a safe relative POSIX path")
+        return cls(
+            path=path_text,
+            description=_nonblank_string(
+                value["description"],
+                field=f"{field} description",
+                max_bytes=2048,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "description": self.description}
+
+
+@dataclass(frozen=True)
+class HandoffEnvelope:
+    """Bounded durable state for a replacement worker, never a transcript."""
+
+    schema_version: int
+    work_state: HandoffWorkState
+    summary: str
+    decisions: tuple[str, ...] = ()
+    artifacts: tuple[HandoffArtifact, ...] = ()
+    next_steps: tuple[str, ...] = ()
+    pending_interaction_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> HandoffEnvelope:
+        if not isinstance(value, dict):
+            raise ValidationError("handoff must be an object")
+        fields = {
+            "schema_version",
+            "work_state",
+            "summary",
+            "decisions",
+            "artifacts",
+            "next_steps",
+            "pending_interaction_ids",
+        }
+        unknown = set(value) - fields
+        if unknown:
+            raise ValidationError(
+                "handoff contains unknown fields: " + ", ".join(sorted(unknown))
+            )
+        missing = fields - set(value)
+        if missing:
+            raise ValidationError(
+                "handoff is missing fields: " + ", ".join(sorted(missing))
+            )
+        schema_version = value["schema_version"]
+        if isinstance(schema_version, bool) or schema_version != HANDOFF_SCHEMA_VERSION:
+            raise ValidationError(f"schema_version must be {HANDOFF_SCHEMA_VERSION}")
+        try:
+            work_state = HandoffWorkState(value["work_state"])
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("work_state is invalid") from exc
+        summary = _nonblank_string(value["summary"], field="summary", max_bytes=4096)
+        decisions = _nonblank_tuple(
+            value["decisions"],
+            field="decisions",
+            maximum=32,
+            item_bytes=2048,
+        )
+        raw_artifacts = value["artifacts"]
+        if not isinstance(raw_artifacts, list) or len(raw_artifacts) > 64:
+            raise ValidationError("artifacts must be a list of at most 64 entries")
+        artifacts = tuple(
+            HandoffArtifact.from_mapping(item, index=index)
+            for index, item in enumerate(raw_artifacts)
+        )
+        if len({artifact.path for artifact in artifacts}) != len(artifacts):
+            raise ValidationError("artifacts must use unique paths")
+        next_steps = _nonblank_tuple(
+            value["next_steps"],
+            field="next_steps",
+            maximum=32,
+            item_bytes=2048,
+        )
+        raw_pending = value["pending_interaction_ids"]
+        if not isinstance(raw_pending, list) or len(raw_pending) > 16:
+            raise ValidationError(
+                "pending_interaction_ids must be a list of at most 16 entries"
+            )
+        pending = tuple(raw_pending)
+        if any(
+            not isinstance(interaction_id, str)
+            or INTERACTION_ID_RE.fullmatch(interaction_id) is None
+            for interaction_id in pending
+        ):
+            raise ValidationError("pending interaction identifier is invalid")
+        if len(set(pending)) != len(pending):
+            raise ValidationError("pending_interaction_ids must be unique")
+        result = cls(
+            schema_version=schema_version,
+            work_state=work_state,
+            summary=summary,
+            decisions=decisions,
+            artifacts=artifacts,
+            next_steps=next_steps,
+            pending_interaction_ids=pending,
+        )
+        if len(result.canonical.encode("utf-8")) > MAX_HANDOFF_CONTENT_BYTES:
+            raise ValidationError(
+                f"handoff content exceeds {MAX_HANDOFF_CONTENT_BYTES} UTF-8 bytes"
+            )
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "work_state": self.work_state.value,
+            "summary": self.summary,
+            "decisions": list(self.decisions),
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "next_steps": list(self.next_steps),
+            "pending_interaction_ids": list(self.pending_interaction_ids),
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
 @dataclass(frozen=True)
 class ProjectContext:
     purpose: str
@@ -433,6 +601,7 @@ class GatewayCapability(StrEnum):
     RUN_DESCRIBE = "run.describe"
     INTERACTION_OPEN = "interaction.open"
     INTERACTION_READ = "interaction.read"
+    HANDOFF_SUBMIT = "handoff.submit"
     PROVIDER_INVOKE = "provider.invoke"
 
 
@@ -816,6 +985,16 @@ class RunState(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class AttemptState(StrEnum):
+    PREPARING = "preparing"
+    RUNNING = "running"
+    HANDED_OFF = "handed_off"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 class InteractionKind(StrEnum):

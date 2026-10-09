@@ -33,6 +33,17 @@ class PrivateFileCredentialResolverTests(unittest.TestCase):
         self.assertEqual(self.resolver.resolve_path(reference), self.path.resolve())
         self.assertNotIn(TOKEN, reference)
 
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "platform has no O_NOFOLLOW")
+    def test_private_file_open_refuses_to_follow_links_at_the_syscall(self) -> None:
+        real_open = os.open
+        with mock.patch(
+            "magic_glass_box.credentials.os.open", wraps=real_open
+        ) as opened:
+            self.assertEqual(self.resolver.resolve("file:" + str(self.path)), TOKEN)
+
+        flags = opened.call_args.args[1]
+        self.assertTrue(flags & os.O_NOFOLLOW)
+
     def test_provider_secret_uses_the_same_private_file_boundary(self) -> None:
         self.path.write_text("sk-provider-secret\n", encoding="ascii")
         reference = self.resolver.secret_reference(self.path)
@@ -53,6 +64,14 @@ class PrivateFileCredentialResolverTests(unittest.TestCase):
                 self.path.write_bytes(raw)
                 with self.assertRaisesRegex(CredentialError, message):
                     self.resolver.secret_reference(self.path)
+
+        self.path.write_bytes(b"A" * 4097)
+        with self.assertRaises(CredentialError) as oversized:
+            self.resolver.secret_reference(self.path)
+        self.assertEqual(
+            str(oversized.exception),
+            "credential file is unexpectedly large",
+        )
 
     def test_rejects_public_file(self) -> None:
         os.chmod(self.path, 0o644)
@@ -85,16 +104,24 @@ class PrivateFileCredentialResolverTests(unittest.TestCase):
         with self.assertRaisesRegex(CredentialError, "not found"):
             self.resolver.resolve("file:" + str(self.root / "missing"))
         self.path.write_text("not-a-token\n", encoding="ascii")
-        with self.assertRaisesRegex(CredentialError, "does not contain"):
+        with self.assertRaises(CredentialError) as invalid:
             self.resolver.reference(self.path)
+        self.assertEqual(
+            str(invalid.exception),
+            "credential file does not contain a Krab token",
+        )
 
     def test_rejects_non_ascii_and_oversized_files(self) -> None:
         self.path.write_bytes("å".encode() + b"\n")
         with self.assertRaisesRegex(CredentialError, "not ASCII"):
             self.resolver.reference(self.path)
         self.path.write_bytes(b"A" * 513)
-        with self.assertRaisesRegex(CredentialError, "unexpectedly large"):
+        with self.assertRaises(CredentialError) as oversized:
             self.resolver.reference(self.path)
+        self.assertEqual(
+            str(oversized.exception),
+            "credential file is unexpectedly large",
+        )
 
     def test_rejects_non_directory_parent(self) -> None:
         parent = self.root / "not-a-directory"

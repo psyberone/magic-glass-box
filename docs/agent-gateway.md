@@ -20,6 +20,7 @@ A profile opts into each operation explicitly:
     "run.describe",
     "interaction.open",
     "interaction.read",
+    "handoff.submit",
     "provider.invoke"
   ]
 }
@@ -95,8 +96,9 @@ Payload: `{}`.
 
 Returns the current run state and version, pinned project key and source
 revision, sanitized project context, immutable work item, authority summary,
-and bounded interaction metadata. It omits the host repository path, image and
-command details, credential references, and secret values.
+bounded interaction metadata, and the latest structured handoff when one
+exists. It omits the host repository path, image and command details,
+credential references, and secret values.
 
 ### `interaction.open`
 
@@ -109,8 +111,23 @@ Payload fields:
 
 The gateway obtains the run's current optimistic version itself. A verified
 Krab delivery opens durable metadata, transitions the run to
-`waiting_for_input`, and returns `agent_action: "exit"`. The worker should exit
-successfully; its container, mailbox, and workspace are then removed.
+`waiting_for_input`, and returns
+`agent_action: "submit_handoff_then_exit"` when the profile also authorizes
+`handoff.submit`. Profiles without that capability retain the legacy `exit`
+instruction; their attempt is explicitly marked interrupted because no
+replacement state was supplied.
+
+### `handoff.submit`
+
+The payload is exactly the bounded v1 document published at
+[`schemas/handoff-v1.schema.json`](../schemas/handoff-v1.schema.json). It names
+the interaction ID returned by `interaction.open`, contains work-state metadata
+rather than messages or a transcript, and has a 24 KiB canonical limit.
+
+The handoff must match the active attempt and its interaction. An identical
+retry is idempotent; different content cannot replace an accepted handoff. The
+gateway returns `agent_action: "exit"`. The worker should then exit
+successfully; its container, mailbox, and mutable workspace are removed.
 
 ### `interaction.read`
 
@@ -144,20 +161,23 @@ grant/run IDs are durable. See [provider-broker.md](provider-broker.md).
 
 When the human response is accepted, the interaction becomes `answered` and
 the durable run returns to `queued`. A replacement worker receives a fresh
-mailbox, calls `run.describe` to discover the answered interaction, then calls
-`interaction.read`. The original worker is not kept alive while a person is
-thinking.
+mailbox and a clean workspace reconstructed from the already pinned commit. It
+calls `run.describe` to discover the prior handoff and answered interaction,
+then calls `interaction.read`. The original worker is not kept alive while a
+person is thinking, and its mutable filesystem is not inherited.
 
 If the orchestrator restarts, reconciliation removes containers, snapshots,
 and mailbox files. It leaves `waiting_for_input` interactions intact. Preparing
 or running work without a durable wait is failed explicitly because its live
-worker can no longer be proven.
+worker can no longer be proven. An active attempt attached to a durable wait is
+closed as interrupted while its handoff remains available.
 
 ## Current boundary
 
-The gateway brokers run context, Krab interactions, and named provider grants.
-It does not grant transparent Internet access, relay arbitrary URLs, expose
-administrator credentials, or accept destinations selected by the worker.
+The gateway brokers run context, Krab interactions, structured handoffs, and
+named provider grants. It does not grant transparent Internet access, relay
+arbitrary URLs, expose administrator credentials, accept destinations selected
+by the worker, or store transcripts.
 
 Run the carrier and isolation proof with:
 

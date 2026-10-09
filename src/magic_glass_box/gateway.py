@@ -16,6 +16,7 @@ from .db import ConcurrentUpdateError, ConflictError, NotFoundError, StorageErro
 from .domain import (
     PROVIDER_NAME_RE,
     GatewayCapability,
+    HandoffEnvelope,
     InteractionKind,
     ValidationError,
     canonical_json,
@@ -71,6 +72,10 @@ class GatewayControlPlane(Protocol):
     def invoke_provider(
         self, run_id: str, *, grant_name: str, request: dict[str, Any]
     ) -> AcceptedProviderResponse: ...
+
+    def submit_handoff(
+        self, run_id: str, handoff: HandoffEnvelope
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -239,6 +244,8 @@ class RunGateway:
                 result = self._open_interaction(value["payload"])
             elif operation is GatewayCapability.INTERACTION_READ:
                 result = self._read_interaction(value["payload"])
+            elif operation is GatewayCapability.HANDOFF_SUBMIT:
+                result = self._submit_handoff(value["payload"])
             else:
                 result = self._invoke_provider(value["payload"])
             return self._success(request_id, result)
@@ -302,6 +309,7 @@ class RunGateway:
             "source_revision": execution["source_revision"],
             "context": context,
             "work_item": execution["work_item"],
+            "handoff": execution["handoff"],
             "authority": {
                 "workspace_mode": profile["workspace_mode"],
                 "network_mode": profile["network_mode"],
@@ -361,7 +369,11 @@ class RunGateway:
             "request_item_id": opened["request_item_id"],
             "run_state": opened["run_state"],
             "run_version": opened["run_version"],
-            "agent_action": "exit",
+            "agent_action": (
+                "submit_handoff_then_exit"
+                if GatewayCapability.HANDOFF_SUBMIT in self.capabilities
+                else "exit"
+            ),
         }
 
     def _read_interaction(self, payload: object) -> dict[str, Any]:
@@ -373,6 +385,18 @@ class RunGateway:
             raise _RequestFailure("invalid_request", "invalid interaction_id")
         delivery = self.control.read_interaction_response(self.run_id, interaction_id)
         return asdict(delivery)
+
+    def _submit_handoff(self, payload: object) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise _RequestFailure("invalid_request", "invalid operation payload")
+        handoff = HandoffEnvelope.from_mapping(payload)
+        stored = self.control.submit_handoff(self.run_id, handoff)
+        return {
+            "handoff_id": stored["id"],
+            "attempt_id": stored["attempt_id"],
+            "content_sha256": stored["content_sha256"],
+            "agent_action": "exit",
+        }
 
     def _invoke_provider(self, payload: object) -> dict[str, Any]:
         item = _exact_payload(payload, {"grant", "request"})

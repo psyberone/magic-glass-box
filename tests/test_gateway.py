@@ -12,7 +12,12 @@ from typing import Any
 from unittest import mock
 
 from magic_glass_box.db import ConflictError, NotFoundError, StorageError
-from magic_glass_box.domain import GatewayCapability, ValidationError, canonical_json
+from magic_glass_box.domain import (
+    GatewayCapability,
+    HandoffEnvelope,
+    ValidationError,
+    canonical_json,
+)
 from magic_glass_box.gateway import (
     GATEWAY_REQUEST_NAME,
     GATEWAY_REQUEST_READY_NAME,
@@ -38,6 +43,8 @@ from magic_glass_box.service import (
 RUN_ID = "run_" + "1" * 32
 OTHER_RUN_ID = "run_" + "2" * 32
 INTERACTION_ID = "int_" + "3" * 32
+ATTEMPT_ID = "att_" + "4" * 32
+HANDOFF_ID = "hof_" + "5" * 32
 
 
 class FakeGatewayDatabase:
@@ -103,6 +110,17 @@ class FakeGatewayDatabase:
                 "priority": "normal",
             },
             "credential_references": {"krab": "file:/private/agent.token"},
+            "handoff": {
+                "id": HANDOFF_ID,
+                "attempt_id": ATTEMPT_ID,
+                "schema_version": 1,
+                "work_state": "waiting_for_input",
+                "summary": "Continue after the accepted response.",
+                "decisions": [],
+                "artifacts": [],
+                "next_steps": ["Read the response."],
+                "pending_interaction_ids": [INTERACTION_ID],
+            },
         }
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -127,6 +145,7 @@ class FakeGatewayControl:
         self.open_calls: list[tuple[str, dict[str, Any]]] = []
         self.read_calls: list[tuple[str, str]] = []
         self.provider_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.handoff_calls: list[tuple[str, HandoffEnvelope]] = []
         self.provider_failure: Exception | None = None
 
     def open_interaction(self, run_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -174,6 +193,15 @@ class FakeGatewayControl:
             untrusted_response={"output_text": "done"},
         )
 
+    def submit_handoff(self, run_id: str, handoff: HandoffEnvelope) -> dict[str, Any]:
+        self.handoff_calls.append((run_id, handoff))
+        return {
+            "id": HANDOFF_ID,
+            "attempt_id": ATTEMPT_ID,
+            "content_sha256": handoff.digest,
+            **handoff.to_dict(),
+        }
+
 
 def request(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
@@ -204,6 +232,7 @@ class RunGatewayTests(unittest.TestCase):
         self.assertEqual(result["version"], 4)
         self.assertEqual(result["work_item"]["title"], "Build the gateway")
         self.assertEqual(result["context"]["purpose"], "Build the box")
+        self.assertEqual(result["handoff"]["id"], HANDOFF_ID)
         self.assertEqual(
             result["interactions"],
             [
@@ -261,7 +290,7 @@ class RunGatewayTests(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         self.assertEqual(response["result"]["interaction_id"], INTERACTION_ID)
-        self.assertEqual(response["result"]["agent_action"], "exit")
+        self.assertEqual(response["result"]["agent_action"], "submit_handoff_then_exit")
         self.assertEqual(
             self.control.open_calls,
             [
@@ -278,6 +307,33 @@ class RunGatewayTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_submit_handoff_uses_bound_run_and_returns_exit_instruction(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "work_state": "waiting_for_input",
+            "summary": "Waiting for the reviewer to choose a policy.",
+            "decisions": ["Retain network isolation."],
+            "artifacts": [
+                {
+                    "path": "docs/architecture.md",
+                    "description": "Relevant boundary documentation.",
+                }
+            ],
+            "next_steps": ["Read the response and apply the choice."],
+            "pending_interaction_ids": [INTERACTION_ID],
+        }
+
+        response = self.gateway.handle(request("handoff.submit", payload))
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["handoff_id"], HANDOFF_ID)
+        self.assertEqual(response["result"]["attempt_id"], ATTEMPT_ID)
+        self.assertEqual(response["result"]["agent_action"], "exit")
+        self.assertEqual(len(self.control.handoff_calls), 1)
+        run_id, handoff = self.control.handoff_calls[0]
+        self.assertEqual(run_id, RUN_ID)
+        self.assertEqual(handoff.to_dict(), payload)
 
     def test_read_can_only_request_a_response_for_the_bound_run(self) -> None:
         response = self.gateway.handle(

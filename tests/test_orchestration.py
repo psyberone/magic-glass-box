@@ -11,6 +11,7 @@ from magic_glass_box.db import Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
+    HandoffEnvelope,
     InteractionKind,
     NetworkMode,
     ProjectContext,
@@ -62,7 +63,8 @@ class FakeWorkspaceManager:
 
 
 class FakeExecutor:
-    def __init__(self):
+    def __init__(self, runtime_adapter: str = "docker"):
+        self.runtime_adapter = runtime_adapter
         self.exit_code = 0
         self.execute_error: Exception | None = None
         self.error_after_callback = False
@@ -192,6 +194,7 @@ class RunCoordinatorTests(unittest.TestCase):
                     GatewayCapability.RUN_DESCRIBE,
                     GatewayCapability.INTERACTION_OPEN,
                     GatewayCapability.INTERACTION_READ,
+                    GatewayCapability.HANDOFF_SUBMIT,
                 ],
             ),
             krab_identity_id=self.identity["id"],
@@ -249,6 +252,8 @@ class RunCoordinatorTests(unittest.TestCase):
             finished["events"][3]["metadata"],
             {"exit_code": 0, "image_id": IMAGE_ID},
         )
+        self.assertEqual(finished["events"][3]["kind"], "run.transitioned")
+        self.assertEqual(finished["events"][3]["from_state"], "running")
         request = self.executor.requests[0]
         self.assertEqual(request.run_id, run["id"])
         self.assertEqual(request.workspace, self.workspaces.root / run["id"])
@@ -266,6 +271,7 @@ class RunCoordinatorTests(unittest.TestCase):
                         GatewayCapability.RUN_DESCRIBE,
                         GatewayCapability.INTERACTION_OPEN,
                         GatewayCapability.INTERACTION_READ,
+                        GatewayCapability.HANDOFF_SUBMIT,
                     ),
                     ("krab",),
                 )
@@ -304,6 +310,88 @@ class RunCoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
+
+    def test_answered_handoff_resumes_same_run_with_a_replacement_worker(self) -> None:
+        run = self.create_run(session_id="ses_" + "4" * 32)
+
+        def hand_off(_request: SandboxRequest) -> None:
+            current = self.database.get_run(run["id"])
+            interaction = self.database.open_interaction(
+                run["id"],
+                kind=InteractionKind.CHOICE,
+                recipient_krab_identity_id=self.identity["id"],
+                request_item_id="itm_" + "7" * 32,
+                expected_run_version=current["version"],
+            )
+            self.database.create_attempt_handoff(
+                run["id"],
+                HandoffEnvelope.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "work_state": "waiting_for_input",
+                        "summary": "The implementation is ready for a policy choice.",
+                        "decisions": ["Keep the source repository untouched."],
+                        "artifacts": [
+                            {
+                                "path": "src/magic_glass_box/orchestration.py",
+                                "description": "Coordinator area inspected by Agent A.",
+                            }
+                        ],
+                        "next_steps": ["Apply the accepted policy and run tests."],
+                        "pending_interaction_ids": [interaction["id"]],
+                    }
+                ),
+            )
+
+        self.executor.runtime_adapter = "agent-a"
+        self.executor.during_execute = hand_off
+        waiting = self.coordinator.execute(run["id"])
+
+        self.assertEqual(waiting["state"], "waiting_for_input")
+        self.assertEqual(len(waiting["attempts"]), 1)
+        first_attempt = waiting["attempts"][0]
+        self.assertEqual(first_attempt["state"], "handed_off")
+        self.assertEqual(first_attempt["runtime_adapter"], "agent-a")
+        self.assertEqual(
+            first_attempt["handoff"]["pending_interaction_ids"],
+            [waiting["interactions"][0]["id"]],
+        )
+
+        answered = self.database.answer_interaction(
+            waiting["interactions"][0]["id"],
+            response_item_id="itm_" + "8" * 32,
+            expected_version=1,
+        )
+        self.assertEqual(answered["run_state"], "queued")
+
+        replacement_executor = FakeExecutor("agent-b")
+        replacement_workspaces = FakeWorkspaceManager(self.workspaces.root)
+        replacement = RunCoordinator(
+            self.database,
+            replacement_executor,
+            replacement_workspaces,
+            PrivateFileCredentialResolver(),
+            self.gateways,
+        )
+        finished = replacement.execute(run["id"])
+
+        self.assertEqual(finished["id"], run["id"])
+        self.assertEqual(finished["state"], "succeeded")
+        self.assertEqual(
+            replacement_workspaces.prepare_calls,
+            [(run["id"], self.repository, COMMIT)],
+        )
+        self.assertEqual(
+            [
+                (attempt["sequence"], attempt["runtime_adapter"], attempt["state"])
+                for attempt in finished["attempts"]
+            ],
+            [(1, "agent-a", "handed_off"), (2, "agent-b", "succeeded")],
+        )
+        self.assertEqual(
+            replacement_executor.requests[0].profile,
+            self.executor.requests[0].profile,
+        )
 
     def test_nonzero_agent_exit_is_a_durable_failed_run(self) -> None:
         run = self.create_run(None)
@@ -436,7 +524,7 @@ class RunCoordinatorTests(unittest.TestCase):
         with (
             mock.patch.object(
                 self.database,
-                "transition_run",
+                "begin_run_attempt",
                 side_effect=RuntimeError("database busy"),
             ),
             self.assertRaisesRegex(RunOrchestrationError, "could not be claimed"),
@@ -445,19 +533,14 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.database.get_run(claim["id"])["state"], "queued")
 
         terminal = self.create_run()
-        transition = self.database.transition_run
-
-        def fail_terminal(run_id: str, **kwargs: object):
-            if kwargs["target"] is RunState.SUCCEEDED:
-                raise RuntimeError("database busy")
-            return transition(run_id, **kwargs)
-
         with (
             mock.patch.object(
-                self.database, "transition_run", side_effect=fail_terminal
+                self.database,
+                "complete_run_attempt",
+                side_effect=RuntimeError("database busy"),
             ),
             self.assertRaisesRegex(
-                RunOrchestrationError, "terminal state could not be recorded"
+                RunOrchestrationError, "outcome could not be recorded"
             ),
         ):
             self.coordinator.execute(terminal["id"])
@@ -549,6 +632,57 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
         self.assertFalse((self.workspaces.root / run["id"]).exists())
+
+    def test_reconcile_closes_crashed_attempt_without_losing_its_handoff(self) -> None:
+        run = self.create_run(session_id="ses_" + "4" * 32)
+        attempt = self.database.begin_run_attempt(
+            run["id"], runtime_adapter="agent-a", expected_run_version=1
+        )
+        running = self.database.start_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            expected_run_version=attempt["run_version"],
+            source_revision=COMMIT,
+            container_id=CONTAINER_ID,
+            container_name="magic-glass-box-crashed",
+            image_id=IMAGE_ID,
+        )
+        interaction = self.database.open_interaction(
+            run["id"],
+            kind=InteractionKind.QUESTION,
+            recipient_krab_identity_id=self.identity["id"],
+            request_item_id="itm_" + "6" * 32,
+            expected_run_version=running["run_version"],
+        )
+        self.database.create_attempt_handoff(
+            run["id"],
+            HandoffEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "work_state": "waiting_for_input",
+                    "summary": "The worker stopped after asking for input.",
+                    "decisions": [],
+                    "artifacts": [],
+                    "next_steps": ["Read the response."],
+                    "pending_interaction_ids": [interaction["id"]],
+                }
+            ),
+        )
+        (self.workspaces.root / run["id"]).mkdir(mode=0o700)
+
+        self.assertEqual(self.coordinator.reconcile(), [])
+
+        preserved = self.database.get_run(run["id"])
+        self.assertEqual(preserved["state"], "waiting_for_input")
+        self.assertEqual(preserved["attempts"][0]["state"], "interrupted")
+        self.assertEqual(
+            preserved["attempts"][0]["handoff"]["pending_interaction_ids"],
+            [interaction["id"]],
+        )
+        self.assertEqual(
+            preserved["attempts"][0]["events"][-1]["kind"],
+            "attempt.interrupted",
+        )
 
     def test_reconcile_leaves_cleanup_failures_active_and_reports_them(self) -> None:
         run = self.create_run()

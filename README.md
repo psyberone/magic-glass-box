@@ -33,7 +33,10 @@ This repository currently contains the first executable vertical slice:
   resolving provider secrets only inside the trusted orchestrator;
 - tracked-files-only Git snapshots that resolve each run to an immutable commit;
 - a run coordinator that records preparation, container identity, resolved
-  source revision, exit status, and terminal state; and
+  source revision, exit status, and terminal state;
+- a durable attempt ledger and bounded structured handoff that let a clean
+  replacement worker resume the same run from its pinned commit without a
+  transcript or inherited mutable sandbox; and
 - an administrative CLI that can execute queued runs and reconcile interrupted
   ones.
 
@@ -100,7 +103,9 @@ in its profile authorize specific host-side gateway operations. Agent output,
 question and answer bodies, and transcripts are not durable control-plane
 state. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability and
 carrier contracts and [docs/provider-broker.md](docs/provider-broker.md) for
-provider policy and secret-handling details.
+provider policy and secret-handling details. The replacement contract and
+handoff schema are documented in
+[docs/worker-handoffs.md](docs/worker-handoffs.md).
 
 When running directly from a checkout, set `PYTHONPATH=src` or install the
 package into a virtual environment.

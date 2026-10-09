@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:handoff:v1",
+  "title": "Magic Glass Box Worker Handoff v1",
+  "description": "Bounded durable work state for a replacement worker. The canonical UTF-8 document is additionally limited to 24576 bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "work_state",
+    "summary",
+    "decisions",
+    "artifacts",
+    "next_steps",
+    "pending_interaction_ids"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "work_state": {
+      "enum": [
+        "in_progress",
+        "waiting_for_input",
+        "blocked",
+        "ready_for_review"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "decisions": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "description"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "A normalized relative POSIX path without dot segments or backslashes. Paths must be unique within the envelope."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        }
+      }
+    },
+    "next_steps": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      }
+    },
+    "pending_interaction_ids": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^int_[0-9a-f]{32}$"
+      }
+    }
+  }
+}
