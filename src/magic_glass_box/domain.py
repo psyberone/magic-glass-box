@@ -319,6 +319,18 @@ class RunState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class InteractionKind(StrEnum):
+    QUESTION = "question"
+    APPROVAL = "approval"
+    CHOICE = "choice"
+
+
+class InteractionState(StrEnum):
+    OPEN = "open"
+    ANSWERED = "answered"
+    CANCELLED = "cancelled"
+
+
 RUN_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.QUEUED: frozenset({RunState.PREPARING, RunState.CANCELLED}),
     RunState.PREPARING: frozenset(
@@ -333,7 +345,12 @@ RUN_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
         }
     ),
     RunState.WAITING_FOR_INPUT: frozenset(
-        {RunState.RUNNING, RunState.FAILED, RunState.CANCELLED}
+        {
+            RunState.QUEUED,
+            RunState.RUNNING,
+            RunState.FAILED,
+            RunState.CANCELLED,
+        }
     ),
     RunState.SUCCEEDED: frozenset(),
     RunState.FAILED: frozenset(),

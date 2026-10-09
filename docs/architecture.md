@@ -51,6 +51,12 @@ project-activity projection.
   in the transition to `running`.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
+- A human interaction records only its type, lifecycle, recipient, run, and
+  Krab item IDs. Its question and answer remain private content in Krab.
+- Opening an interaction atomically moves its run to `waiting_for_input`.
+  Answering records the response item ID and re-queues the durable run so a
+  replacement worker can resume it; terminal run transitions cancel any open
+  interaction.
 
 ## Execution lifecycle
 
@@ -79,11 +85,7 @@ scoped relay is absent.
 
 ## Planned slices
 
-The next slices are:
-
-1. Add a scoped Krab relay plus a local credential broker that exchanges a
-   run-scoped capability for only the secrets permitted by the pinned profile.
-2. Typed human-interaction requests persisted by Magic Glass Box and mirrored
-   as Krab work items, replacing terminal-only question prompts.
-3. Activity projector and web console for users, roles, profiles, runs,
-   pending interactions, queues, and claim/assignment titles.
+Implementation is ordered around demonstrable product guarantees rather than
+independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
+exit proofs. The metadata-only durable interaction ledger is complete. The next
+slice is its Krab transport, followed by the run-scoped agent gateway.

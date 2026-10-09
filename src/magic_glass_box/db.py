@@ -13,6 +13,8 @@ from typing import Any
 
 from .domain import (
     AgentProfileSpec,
+    InteractionKind,
+    InteractionState,
     ProjectContext,
     RunState,
     ValidationError,
@@ -26,14 +28,14 @@ from .domain import (
 )
 from .krab import KrabIdentity, validate_base_url
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
 LEGACY_DATABASE_FILENAME = "hex.db"
 
 
-SCHEMA = """
+SCHEMA_V1 = """
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
     handle TEXT NOT NULL UNIQUE,
@@ -211,6 +213,79 @@ BEGIN
 END;
 """
 
+INTERACTION_SCHEMA = """
+CREATE TABLE interactions (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('question', 'approval', 'choice')),
+    state TEXT NOT NULL CHECK (state IN ('open', 'answered', 'cancelled')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    recipient_krab_identity_id TEXT NOT NULL,
+    request_item_id TEXT NOT NULL UNIQUE,
+    response_item_id TEXT UNIQUE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (recipient_krab_identity_id)
+        REFERENCES krab_identities(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'open' AND response_item_id IS NULL AND resolved_at IS NULL)
+        OR (
+            state = 'answered'
+            AND response_item_id IS NOT NULL
+            AND resolved_at IS NOT NULL
+        )
+        OR (
+            state = 'cancelled'
+            AND response_item_id IS NULL
+            AND resolved_at IS NOT NULL
+        )
+    )
+) STRICT;
+
+CREATE TABLE interaction_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    interaction_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'interaction.opened', 'interaction.answered',
+            'interaction.cancelled'
+        )
+    ),
+    from_state TEXT CHECK (
+        from_state IS NULL OR from_state IN ('open', 'answered', 'cancelled')
+    ),
+    to_state TEXT NOT NULL CHECK (to_state IN ('open', 'answered', 'cancelled')),
+    krab_item_id TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (interaction_id, sequence),
+    FOREIGN KEY (interaction_id) REFERENCES interactions(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE UNIQUE INDEX interaction_open_run
+    ON interactions(run_id) WHERE state = 'open';
+CREATE INDEX interaction_run_created ON interactions(run_id, created_at);
+CREATE INDEX interaction_state_created ON interactions(state, created_at);
+CREATE INDEX interaction_event_stream
+    ON interaction_events(interaction_id, sequence);
+
+CREATE TRIGGER interaction_event_immutable_update
+BEFORE UPDATE ON interaction_events
+BEGIN
+    SELECT RAISE(ABORT, 'interaction events are immutable');
+END;
+CREATE TRIGGER interaction_event_immutable_delete
+BEFORE DELETE ON interaction_events
+BEGIN
+    SELECT RAISE(ABORT, 'interaction events are immutable');
+END;
+"""
+
+SCHEMA = SCHEMA_V1 + INTERACTION_SCHEMA
+MIGRATIONS = {1: INTERACTION_SCHEMA}
+
 
 class StorageError(RuntimeError):
     """Control-plane persistence failed."""
@@ -285,9 +360,31 @@ class Database:
                 except sqlite3.Error as exc:
                     connection.rollback()
                     raise StorageError(f"cannot initialize database: {exc}") from exc
+            elif version < SCHEMA_VERSION:
+                self._migrate(connection, version)
             self._check_schema(connection)
         os.chmod(self.path, 0o600)
         return self.status()
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection, version: int) -> None:
+        while version < SCHEMA_VERSION:
+            migration = MIGRATIONS.get(version)
+            if migration is None:
+                raise StorageError(f"no migration from database schema {version}")
+            target = version + 1
+            try:
+                connection.executescript(
+                    "BEGIN EXCLUSIVE;\n"
+                    + migration
+                    + f"\nPRAGMA user_version = {target};\nCOMMIT;"
+                )
+            except sqlite3.Error as exc:
+                connection.rollback()
+                raise StorageError(
+                    f"cannot migrate database from schema {version} to {target}: {exc}"
+                ) from exc
+            version = target
 
     def _prepare_file(self) -> None:
         parent_exists = self.path.parent.exists()
@@ -367,6 +464,7 @@ class Database:
                 ("projects", "SELECT COUNT(*) FROM projects"),
                 ("agent_profiles", "SELECT COUNT(*) FROM agent_profiles"),
                 ("runs", "SELECT COUNT(*) FROM runs"),
+                ("interactions", "SELECT COUNT(*) FROM interactions"),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]
@@ -920,6 +1018,47 @@ class Database:
                     )
                 source = RunState(row["state"])
                 validate_transition(source, target)
+                open_interactions = connection.execute(
+                    "SELECT id, version FROM interactions "
+                    "WHERE run_id = ? AND state = 'open'",
+                    (run_id,),
+                ).fetchall()
+                if open_interactions and target in {
+                    RunState.QUEUED,
+                    RunState.RUNNING,
+                }:
+                    raise ConflictError(
+                        "run cannot resume while it has an open interaction"
+                    )
+                if open_interactions and target in {
+                    RunState.FAILED,
+                    RunState.CANCELLED,
+                }:
+                    for interaction in open_interactions:
+                        interaction_version = interaction["version"]
+                        connection.execute(
+                            "UPDATE interactions SET state = 'cancelled', "
+                            "version = version + 1, updated_at = ?, resolved_at = ? "
+                            "WHERE id = ? AND version = ?",
+                            (
+                                now,
+                                now,
+                                interaction["id"],
+                                interaction_version,
+                            ),
+                        )
+                        connection.execute(
+                            "INSERT INTO interaction_events "
+                            "(interaction_id, sequence, kind, from_state, to_state, "
+                            "krab_item_id, created_at) "
+                            "VALUES (?, ?, 'interaction.cancelled', 'open', "
+                            "'cancelled', NULL, ?)",
+                            (
+                                interaction["id"],
+                                interaction_version + 1,
+                                now,
+                            ),
+                        )
                 terminal = target in {
                     RunState.SUCCEEDED,
                     RunState.FAILED,
@@ -965,13 +1104,302 @@ class Database:
                     ),
                 )
                 connection.commit()
-            except (NotFoundError, ConcurrentUpdateError, ValidationError):
+            except (NotFoundError, ConflictError, ValidationError):
                 connection.rollback()
                 raise
             except sqlite3.IntegrityError as exc:
                 connection.rollback()
                 raise ConflictError("run transition could not be recorded") from exc
         return self.get_run(run_id)
+
+    def open_interaction(
+        self,
+        run_id: str,
+        *,
+        kind: InteractionKind,
+        recipient_krab_identity_id: str,
+        request_item_id: str,
+        expected_run_version: int,
+    ) -> dict[str, Any]:
+        if not isinstance(kind, InteractionKind):
+            raise ValidationError("interaction kind is invalid")
+        recipient_krab_identity_id = require_string(
+            recipient_krab_identity_id,
+            field="recipient_krab_identity_id",
+            max_bytes=64,
+        )
+        request_item_id = validate_krab_id(request_item_id, "itm")
+        if (
+            isinstance(expected_run_version, bool)
+            or not isinstance(expected_run_version, int)
+            or expected_run_version < 1
+        ):
+            raise ValidationError("expected_run_version must be a positive integer")
+
+        interaction_id = self.new_id("int")
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                run = connection.execute(
+                    "SELECT r.state, r.version, r.krab_session_id, "
+                    "p.krab_instance_id FROM runs r "
+                    "JOIN projects p ON p.id = r.project_id WHERE r.id = ?",
+                    (run_id,),
+                ).fetchone()
+                if run is None:
+                    raise NotFoundError(f"run not found: {run_id}")
+                if run["version"] != expected_run_version:
+                    raise ConcurrentUpdateError(
+                        f"run version is {run['version']}, "
+                        f"expected {expected_run_version}"
+                    )
+                if run["state"] != RunState.RUNNING.value:
+                    raise ConflictError(f"run is not running: {run['state']}")
+                if run["krab_session_id"] is None:
+                    raise ConflictError("run has no Krab session")
+
+                recipient = connection.execute(
+                    "SELECT ki.krab_instance_id, ki.krab_user_id, "
+                    "ub.user_id, u.handle AS local_user_handle, u.active "
+                    "FROM krab_identities ki "
+                    "LEFT JOIN user_krab_bindings ub "
+                    "ON ub.krab_identity_id = ki.id "
+                    "LEFT JOIN users u ON u.id = ub.user_id WHERE ki.id = ?",
+                    (recipient_krab_identity_id,),
+                ).fetchone()
+                if recipient is None:
+                    raise NotFoundError("recipient Krab identity not found")
+                if recipient["krab_instance_id"] != run["krab_instance_id"]:
+                    raise ConflictError(
+                        "recipient belongs to a different Krab instance"
+                    )
+                if recipient["user_id"] is None or not recipient["active"]:
+                    raise NotFoundError(
+                        "recipient Krab identity has no active bound local user"
+                    )
+
+                connection.execute(
+                    "INSERT INTO interactions "
+                    "(id, run_id, kind, state, version, "
+                    "recipient_krab_identity_id, request_item_id, response_item_id, "
+                    "created_at, updated_at, resolved_at) "
+                    "VALUES (?, ?, ?, 'open', 1, ?, ?, NULL, ?, ?, NULL)",
+                    (
+                        interaction_id,
+                        run_id,
+                        kind.value,
+                        recipient_krab_identity_id,
+                        request_item_id,
+                        now,
+                        now,
+                    ),
+                )
+                changed = connection.execute(
+                    "UPDATE runs SET state = 'waiting_for_input', "
+                    "version = version + 1, updated_at = ? "
+                    "WHERE id = ? AND version = ?",
+                    (now, run_id, expected_run_version),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError("run changed concurrently")
+                connection.execute(
+                    "INSERT INTO interaction_events "
+                    "(interaction_id, sequence, kind, from_state, to_state, "
+                    "krab_item_id, created_at) "
+                    "VALUES (?, 1, 'interaction.opened', NULL, 'open', ?, ?)",
+                    (interaction_id, request_item_id, now),
+                )
+                metadata = canonical_json(
+                    {
+                        "interaction_id": interaction_id,
+                        "interaction_kind": kind.value,
+                        "recipient_krab_user_id": recipient["krab_user_id"],
+                        "request_item_id": request_item_id,
+                    }
+                )
+                connection.execute(
+                    "INSERT INTO run_events "
+                    "(run_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) "
+                    "VALUES (?, ?, 'run.transitioned', 'running', "
+                    "'waiting_for_input', ?, ?)",
+                    (run_id, expected_run_version + 1, metadata, now),
+                )
+                connection.commit()
+            except (NotFoundError, ConflictError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("interaction could not be opened") from exc
+        return self.get_interaction(interaction_id)
+
+    def answer_interaction(
+        self,
+        interaction_id: str,
+        *,
+        response_item_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        response_item_id = validate_krab_id(response_item_id, "itm")
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            raise ValidationError("expected_version must be a positive integer")
+
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                interaction = connection.execute(
+                    "SELECT i.state, i.version, i.request_item_id, i.run_id, "
+                    "r.state AS run_state, r.version AS run_version "
+                    "FROM interactions i JOIN runs r ON r.id = i.run_id "
+                    "WHERE i.id = ?",
+                    (interaction_id,),
+                ).fetchone()
+                if interaction is None:
+                    raise NotFoundError(f"interaction not found: {interaction_id}")
+                if interaction["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        f"interaction version is {interaction['version']}, "
+                        f"expected {expected_version}"
+                    )
+                if interaction["state"] != InteractionState.OPEN.value:
+                    raise ConflictError(
+                        f"interaction is not open: {interaction['state']}"
+                    )
+                if response_item_id == interaction["request_item_id"]:
+                    raise ValidationError(
+                        "response item must differ from the request item"
+                    )
+                if interaction["run_state"] != RunState.WAITING_FOR_INPUT.value:
+                    raise ConflictError(
+                        "interaction run is not waiting for input: "
+                        + interaction["run_state"]
+                    )
+
+                changed = connection.execute(
+                    "UPDATE interactions SET state = 'answered', "
+                    "version = version + 1, response_item_id = ?, updated_at = ?, "
+                    "resolved_at = ? WHERE id = ? AND version = ?",
+                    (
+                        response_item_id,
+                        now,
+                        now,
+                        interaction_id,
+                        expected_version,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError("interaction changed concurrently")
+                run_changed = connection.execute(
+                    "UPDATE runs SET state = 'queued', version = version + 1, "
+                    "updated_at = ? WHERE id = ? AND version = ?",
+                    (
+                        now,
+                        interaction["run_id"],
+                        interaction["run_version"],
+                    ),
+                ).rowcount
+                if run_changed != 1:
+                    raise ConcurrentUpdateError("run changed concurrently")
+                connection.execute(
+                    "INSERT INTO interaction_events "
+                    "(interaction_id, sequence, kind, from_state, to_state, "
+                    "krab_item_id, created_at) "
+                    "VALUES (?, ?, 'interaction.answered', 'open', 'answered', ?, ?)",
+                    (
+                        interaction_id,
+                        expected_version + 1,
+                        response_item_id,
+                        now,
+                    ),
+                )
+                metadata = canonical_json(
+                    {
+                        "interaction_id": interaction_id,
+                        "response_item_id": response_item_id,
+                    }
+                )
+                connection.execute(
+                    "INSERT INTO run_events "
+                    "(run_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) "
+                    "VALUES (?, ?, 'run.transitioned', 'waiting_for_input', "
+                    "'queued', ?, ?)",
+                    (
+                        interaction["run_id"],
+                        interaction["run_version"] + 1,
+                        metadata,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (NotFoundError, ConflictError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("interaction could not be answered") from exc
+        return self.get_interaction(interaction_id)
+
+    def get_interaction(self, interaction_id: str) -> dict[str, Any]:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT i.id, i.run_id, i.kind, i.state, i.version, "
+                "i.request_item_id, i.response_item_id, i.created_at, "
+                "i.updated_at, i.resolved_at, r.state AS run_state, "
+                "r.version AS run_version, r.krab_session_id, "
+                "p.krab_project_key AS project_key, "
+                "ki.id AS recipient_krab_identity_id, "
+                "ki.krab_user_id AS recipient_krab_user_id, "
+                "ki.handle AS recipient_krab_handle, "
+                "u.id AS recipient_local_user_id, "
+                "u.handle AS recipient_local_user_handle "
+                "FROM interactions i JOIN runs r ON r.id = i.run_id "
+                "JOIN projects p ON p.id = r.project_id "
+                "JOIN krab_identities ki "
+                "ON ki.id = i.recipient_krab_identity_id "
+                "JOIN user_krab_bindings ub "
+                "ON ub.krab_identity_id = ki.id "
+                "JOIN users u ON u.id = ub.user_id WHERE i.id = ?",
+                (interaction_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"interaction not found: {interaction_id}")
+            events = connection.execute(
+                "SELECT sequence, kind, from_state, to_state, krab_item_id, "
+                "created_at FROM interaction_events "
+                "WHERE interaction_id = ? ORDER BY sequence",
+                (interaction_id,),
+            ).fetchall()
+        result = dict(row)
+        result["recipient"] = {
+            "local_user_id": result.pop("recipient_local_user_id"),
+            "local_user_handle": result.pop("recipient_local_user_handle"),
+            "krab_identity_id": result.pop("recipient_krab_identity_id"),
+            "krab_user_id": result.pop("recipient_krab_user_id"),
+            "krab_handle": result.pop("recipient_krab_handle"),
+        }
+        result["events"] = [dict(event) for event in events]
+        return result
+
+    def list_run_interactions(self, run_id: str) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if exists is None:
+                raise NotFoundError(f"run not found: {run_id}")
+            rows = connection.execute(
+                "SELECT id FROM interactions WHERE run_id = ? ORDER BY created_at, id",
+                (run_id,),
+            ).fetchall()
+        return [self.get_interaction(row["id"]) for row in rows]
 
     def get_run_execution(self, run_id: str) -> dict[str, Any]:
         """Load the immutable context, profile, and identity pinned by a run."""
@@ -1029,6 +1457,7 @@ class Database:
         ]
         for event in result["events"]:
             event.pop("metadata_json")
+        result["interactions"] = self.list_run_interactions(run_id)
         return result
 
     def iter_active_runs(self) -> Iterator[dict[str, Any]]:

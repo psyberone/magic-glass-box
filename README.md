@@ -11,6 +11,8 @@ This repository currently contains the first executable vertical slice:
 - local users linked to stable Krab user IDs rather than bearer tokens;
 - versioned project context and versioned agent profiles;
 - run records that pin both versions and enforce a state machine;
+- a durable, metadata-only interaction ledger for typed questions, approvals,
+  and choices, with atomic run-state transitions and optimistic concurrency;
 - a bounded, typed Krab client for `whoami`, project inventory, and project
   activity;
 - a private-file credential resolver that never copies token values into the
@@ -56,7 +58,8 @@ The pinned project context must name an absolute path to a local Git repository.
 If no source revision was supplied when the run was created, Magic Glass Box
 resolves `HEAD`; either way, the full commit ID is persisted before the
 container starts. Only credentials named by the pinned profile are mounted.
-Agent output and transcripts are not persisted by this slice.
+Agent output, question and answer bodies, and transcripts are not persisted by
+this slice.
 
 When running directly from a checkout, set `PYTHONPATH=src` or install the
 package into a virtual environment.
@@ -83,5 +86,7 @@ make mutation
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the exact scoring rules and workflow.
 
-See [docs/architecture.md](docs/architecture.md) for the trust boundaries and
-the planned execution flow.
+See [docs/product-thesis.md](docs/product-thesis.md) for the product contract,
+[docs/roadmap.md](docs/roadmap.md) for the proof-oriented milestones, and
+[docs/architecture.md](docs/architecture.md) for the trust boundaries and
+execution flow.
