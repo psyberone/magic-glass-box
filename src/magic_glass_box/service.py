@@ -18,6 +18,7 @@ from .domain import (
     ProjectContext,
     RunState,
     ValidationError,
+    WorkItemEnvelope,
     validate_krab_id,
 )
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
@@ -169,11 +170,26 @@ class ControlPlane:
             created_by=creator["id"],
         )
 
+    def import_work_item(
+        self,
+        *,
+        project_key: str,
+        envelope: WorkItemEnvelope,
+        imported_by_handle: str,
+    ) -> dict[str, Any]:
+        importer = self.database.get_user(imported_by_handle)
+        return self.database.import_work_item(
+            project_key=project_key,
+            envelope=envelope,
+            imported_by=importer["id"],
+        )
+
     def create_run(
         self,
         *,
         project_key: str,
         profile_name: str,
+        work_item_id: str,
         requested_by_handle: str,
         source_revision: str | None = None,
         krab_session_id: str | None = None,
@@ -183,6 +199,7 @@ class ControlPlane:
         return self.database.create_run(
             project_key=project_key,
             profile_name=profile_name,
+            work_item_id=work_item_id,
             requested_by=requester["id"],
             source_revision=source_revision,
             krab_session_id=krab_session_id,

@@ -48,7 +48,7 @@ show_missing = true
 
 [tool.mutmut]
 source_paths = ["src/magic_glass_box"]
-also_copy = ["scripts/"]
+also_copy = ["scripts/", "schemas/", "examples/"]
 do_not_mutate = [
     "src/magic_glass_box/__init__.py",
     "src/magic_glass_box/__main__.py",

@@ -37,6 +37,11 @@ Magic Glass Box should preserve five guarantees:
 Magic Glass Box owns execution policy, immutable run inputs, lifecycle state,
 interaction correlation, credential grants, cleanup, and audit metadata.
 
+External work enters through a versioned, forge-neutral import document. Its
+text is untrusted input, not authority: it cannot choose a project, profile,
+credential, network policy, or lifecycle transition. Magic Glass Box does not
+export or synchronize work items back to their source.
+
 Imitation Krab owns identities, project roles, private message content,
 sessions, work claims, delivery, and message status. Magic Glass Box may retain
 stable Krab object IDs and trusted lifecycle metadata, but not duplicate bodies

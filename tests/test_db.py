@@ -21,6 +21,7 @@ from magic_glass_box.domain import (
     ProjectContext,
     RunState,
     ValidationError,
+    WorkItemEnvelope,
 )
 from magic_glass_box.krab import KrabIdentity
 
@@ -60,6 +61,20 @@ class DatabaseTests(unittest.TestCase):
             context=self.context,
             created_by=self.user["id"],
         )
+        self.work_item = self.database.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "database-test-item",
+                    "source_updated_at": "2026-10-09T12:00:00Z",
+                    "title": "Exercise database runs",
+                    "brief": "Provide a pinned assignment to database tests.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
         self.spec = AgentProfileSpec.create(
             image="agent@sha256:abc",
             command=["codex", "exec"],
@@ -76,6 +91,7 @@ class DatabaseTests(unittest.TestCase):
         return self.database.create_run(
             project_key="box-project",
             profile_name="Codex Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
             source_revision="abc123",
         )
@@ -83,7 +99,7 @@ class DatabaseTests(unittest.TestCase):
     def test_database_is_private_and_reports_counts(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 2)
+        self.assertEqual(status["schema_version"], 3)
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
 
@@ -236,6 +252,7 @@ class DatabaseTests(unittest.TestCase):
         run = self.database.create_run(
             project_key="box-project",
             profile_name="Codex Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
             source_revision="abc123",
             krab_session_id=session_id,
@@ -359,6 +376,7 @@ class DatabaseTests(unittest.TestCase):
         accepted = self.database.create_run(
             project_key="box-project",
             profile_name="Codex Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
             source_revision="x" * 512,
         )
@@ -369,6 +387,7 @@ class DatabaseTests(unittest.TestCase):
             self.database.create_run(
                 project_key="box-project",
                 profile_name="Codex Worker",
+                work_item_id=self.work_item["id"],
                 requested_by=self.user["id"],
                 source_revision="x" * 513,
             )
@@ -490,6 +509,7 @@ class DatabaseTests(unittest.TestCase):
             self.database.create_run(
                 project_key="box-project",
                 profile_name="Wrong Instance",
+                work_item_id=self.work_item["id"],
                 requested_by=self.user["id"],
             )
 

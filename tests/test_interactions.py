@@ -23,6 +23,7 @@ from magic_glass_box.domain import (
     ProjectContext,
     RunState,
     ValidationError,
+    WorkItemEnvelope,
 )
 from magic_glass_box.krab import KrabIdentity
 
@@ -60,6 +61,20 @@ class InteractionDatabaseTests(unittest.TestCase):
             context=context,
             created_by=self.operator["id"],
         )
+        self.work_item = self.database.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "interaction-test-item",
+                    "source_updated_at": "2026-10-09T12:00:00Z",
+                    "title": "Exercise durable interactions",
+                    "brief": "Provide a pinned assignment for interaction tests.",
+                }
+            ),
+            imported_by=self.operator["id"],
+        )
         self.database.create_agent_profile(
             name="Disposable Worker",
             spec=AgentProfileSpec.create(
@@ -75,6 +90,7 @@ class InteractionDatabaseTests(unittest.TestCase):
         run = self.database.create_run(
             project_key="box-project",
             profile_name="Disposable Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.operator["id"],
             krab_session_id=("ses_" + "4" * 32) if with_session else None,
         )
@@ -216,6 +232,7 @@ class InteractionDatabaseTests(unittest.TestCase):
         queued = self.database.create_run(
             project_key="box-project",
             profile_name="Disposable Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.operator["id"],
             krab_session_id="ses_" + "7" * 32,
         )
@@ -493,10 +510,11 @@ class InteractionMigrationTests(unittest.TestCase):
         database = Database(path)
         first = database.initialize()
         second = database.initialize()
-        self.assertEqual(first["schema_version"], 2)
+        self.assertEqual(first["schema_version"], 3)
         self.assertEqual(second, first)
         self.assertEqual(first["counts"]["users"], 1)
         self.assertEqual(first["counts"]["interactions"], 0)
+        self.assertEqual(first["counts"]["work_items"], 0)
         with closing(database.connect()) as migrated:
             tables = {
                 row[0]
@@ -506,6 +524,7 @@ class InteractionMigrationTests(unittest.TestCase):
             }
         self.assertIn("interactions", tables)
         self.assertIn("interaction_events", tables)
+        self.assertIn("work_items", tables)
 
     def test_missing_and_broken_migrations_fail_closed(self) -> None:
         connection = mock.Mock()

@@ -43,10 +43,13 @@ project-activity projection.
 - A credential reference points to an external secret source. The current
   implementation supports private token files and never persists the token.
 - Project context revisions are append-only and content-addressed.
+- Forge-neutral work-item imports are keyed by project, source, and external
+  ID. Changed content appends an immutable version; identical imports are
+  idempotent and stale source revisions fail closed.
 - Agent profile revisions are append-only and contain an image reference,
   argv-form command, workspace/network policy, and a dedicated Krab identity.
-- A run pins exact context and profile revisions. Later edits cannot change an
-  in-flight or historical run.
+- A run pins exact context, profile, and work-item revisions. Later imports or
+  edits cannot change an in-flight or historical run.
 - The requested source revision is resolved to a full Git commit and persisted
   in the transition to `running`.
 - Every run transition is appended to an immutable event stream and guarded by
@@ -96,6 +99,15 @@ uses a read-only root filesystem, drops all capabilities, applies resource
 ceilings, and bounds local logs. It currently supports network policy `none`.
 `krab_only` fails closed rather than granting a general bridge network while a
 scoped relay is absent.
+
+## Work-item boundary
+
+The core accepts only the normalized v1 document described in
+[work-items.md](work-items.md). It has no forge client and performs no outbound
+work-item action. Source adapters run outside the control plane and may only
+submit content; project selection, assignment, profiles, credentials, network
+policy, and lifecycle remain trusted local decisions. Imported content is
+therefore never an authority channel.
 
 ## Planned slices
 

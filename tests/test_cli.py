@@ -11,7 +11,12 @@ from pathlib import Path
 from unittest import mock
 
 from magic_glass_box.cli import InputError, _emit, _json_file, build_parser, main
-from magic_glass_box.domain import AgentProfileSpec, ProjectContext, RunState
+from magic_glass_box.domain import (
+    AgentProfileSpec,
+    ProjectContext,
+    RunState,
+    WorkItemEnvelope,
+)
 from magic_glass_box.krab import ActivityPage
 
 
@@ -65,6 +70,9 @@ class FakeControlPlane:
     def revise_agent_profile(self, **kwargs: object) -> dict[str, object]:
         return self._called("profile.revise", **kwargs)
 
+    def import_work_item(self, **kwargs: object) -> dict[str, object]:
+        return self._called("work-item.import", **kwargs)
+
     def create_run(self, **kwargs: object) -> dict[str, object]:
         return self._called("run.create", **kwargs)
 
@@ -99,10 +107,15 @@ class CLITests(unittest.TestCase):
         output = stdout.getvalue() or stderr.getvalue()
         return status, json.loads(output), stderr.getvalue()
 
+    def test_json_output_preserves_unicode_for_human_readability(self) -> None:
+        stream = io.StringIO()
+        _emit({"message": "café"}, stream=stream)
+        self.assertEqual(stream.getvalue(), '{\n  "message": "café"\n}\n')
+
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 2)
+        self.assertEqual(initialized["schema_version"], 3)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -125,6 +138,20 @@ class CLITests(unittest.TestCase):
         spec = Path(self.temporary.name) / "profile.json"
         spec.write_text(
             '{"image":"agent@sha256:abc","command":["agent"]}',
+            encoding="utf-8",
+        )
+        work_item = Path(self.temporary.name) / "work-item.json"
+        work_item.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "source": "github",
+                    "external_id": "psyberone/magic-glass-box#42",
+                    "source_updated_at": "2026-10-09T12:00:00Z",
+                    "title": "Import work items",
+                    "brief": "Add a forge-neutral upsert boundary.",
+                }
+            ),
             encoding="utf-8",
         )
         fake = FakeControlPlane()
@@ -316,6 +343,29 @@ class CLITests(unittest.TestCase):
                 {"operation": "profile.revise"},
             ),
             (
+                "work-item.import",
+                [
+                    "work-item",
+                    "import",
+                    str(work_item),
+                    "--project",
+                    "box-project",
+                    "--imported-by",
+                    "operator",
+                ],
+                (
+                    "work-item.import",
+                    {
+                        "project_key": "box-project",
+                        "envelope": WorkItemEnvelope.from_mapping(
+                            json.loads(work_item.read_text(encoding="utf-8"))
+                        ),
+                        "imported_by_handle": "operator",
+                    },
+                ),
+                {"operation": "work-item.import"},
+            ),
+            (
                 "run.create",
                 [
                     "run",
@@ -324,6 +374,8 @@ class CLITests(unittest.TestCase):
                     "box-project",
                     "--profile",
                     "Worker",
+                    "--work-item",
+                    "wki_" + "6" * 32,
                     "--requested-by",
                     "operator",
                     "--source-revision",
@@ -338,6 +390,7 @@ class CLITests(unittest.TestCase):
                     {
                         "project_key": "box-project",
                         "profile_name": "Worker",
+                        "work_item_id": "wki_" + "6" * 32,
                         "requested_by_handle": "operator",
                         "source_revision": "abc123",
                         "krab_session_id": "ses_" + "4" * 32,
@@ -491,6 +544,7 @@ class CLITests(unittest.TestCase):
                 "krab": "manage and query Krab connections",
                 "project": "manage project context",
                 "profile": "manage agent profiles",
+                "work-item": "import durable work items",
                 "run": "manage agent runs",
             },
         )
@@ -508,6 +562,9 @@ class CLITests(unittest.TestCase):
             "profile": {
                 "add": "create a versioned agent profile",
                 "revise": "append an immutable profile revision",
+            },
+            "work-item": {
+                "import": "create or update a normalized work item",
             },
             "run": {
                 "create": "create a pinned run record",

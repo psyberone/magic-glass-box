@@ -16,6 +16,21 @@ one demonstrable vertical slice and preserve the product contract in
 - Krab identity and metadata-only activity integration; and
 - restart reconciliation and cleanup.
 
+## Foundation extension: forge-neutral work intake
+
+**Status: complete**
+
+- Publish a strict, versioned work-item JSON contract.
+- Atomically insert, update, or recognize unchanged imported work.
+- Reject stale and same-revision conflicting imports.
+- Preserve immutable content versions without provider payloads or outbound
+  synchronization.
+- Require every new run to pin one exact work-item version.
+
+**Exit proof:** repeated import is idempotent, a newer import appends a version,
+and a run created before that update continues to resolve its original title
+and brief.
+
 ## Milestone 1: durable human interactions
 
 Make a question part of durable work rather than a terminal call.

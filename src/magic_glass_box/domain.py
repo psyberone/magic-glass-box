@@ -5,7 +5,9 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any
 
 
@@ -18,6 +20,9 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
 KRAB_PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]{2,31}$")
 KRAB_OBJECT_ID_RE = re.compile(r"^(?:usr|prj|ses|itm|clm)_[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+WORK_ITEM_SOURCE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+WORK_ITEM_SCHEMA_VERSION = 1
+MAX_WORK_ITEM_CONTENT_BYTES = 256 * 1024
 
 
 def require_string(
@@ -115,6 +120,219 @@ def _commands(value: object, *, field: str) -> tuple[tuple[str, ...], ...]:
             )
         )
     return tuple(commands)
+
+
+def _nonblank_string(value: object, *, field: str, max_bytes: int) -> str:
+    result = require_string(value, field=field, max_bytes=max_bytes)
+    if not result.strip():
+        raise ValidationError(f"{field} must not be blank")
+    return result
+
+
+def _nonblank_tuple(
+    value: object, *, field: str, maximum: int, item_bytes: int
+) -> tuple[str, ...]:
+    result = _string_tuple(
+        value,
+        field=field,
+        maximum=maximum,
+        item_bytes=item_bytes,
+    )
+    if any(not entry.strip() for entry in result):
+        raise ValidationError(f"{field} entries must not be blank")
+    return result
+
+
+class WorkItemPriority(StrEnum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
+@dataclass(frozen=True)
+class WorkItemContext:
+    kind: str
+    value: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any], *, index: int) -> WorkItemContext:
+        field = f"context[{index}]"
+        if not isinstance(value, dict):
+            raise ValidationError(f"{field} must be an object")
+        unknown = set(value) - {"type", "value"}
+        if unknown:
+            raise ValidationError(
+                f"{field} contains unknown fields: " + ", ".join(sorted(unknown))
+            )
+        kind = value.get("type")
+        if kind not in {"note", "workspace_path"}:
+            raise ValidationError(f"{field} type is invalid")
+        maximum = 8192 if kind == "note" else 1024
+        content = _nonblank_string(
+            value.get("value"), field=f"{field} value", max_bytes=maximum
+        )
+        if kind == "workspace_path":
+            path = PurePosixPath(content)
+            if (
+                content.startswith("/")
+                or "\\" in content
+                or content != path.as_posix()
+                or path.as_posix() == "."
+                or any(part in {".", ".."} for part in path.parts)
+            ):
+                raise ValidationError(
+                    f"{field} value must be a safe relative POSIX path"
+                )
+        return cls(kind=kind, value=content)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"type": self.kind, "value": self.value}
+
+
+@dataclass(frozen=True)
+class WorkItemEnvelope:
+    schema_version: int
+    source: str
+    external_id: str
+    source_updated_at: str
+    title: str
+    brief: str
+    acceptance_criteria: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    context: tuple[WorkItemContext, ...] = ()
+    labels: tuple[str, ...] = ()
+    priority: WorkItemPriority = WorkItemPriority.NORMAL
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> WorkItemEnvelope:
+        if not isinstance(value, dict):
+            raise ValidationError("work item must be an object")
+        allowed = {
+            "schema_version",
+            "source",
+            "external_id",
+            "source_updated_at",
+            "title",
+            "brief",
+            "acceptance_criteria",
+            "constraints",
+            "context",
+            "labels",
+            "priority",
+        }
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValidationError(
+                "work item contains unknown fields: " + ", ".join(sorted(unknown))
+            )
+        schema_version = value.get("schema_version")
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != WORK_ITEM_SCHEMA_VERSION
+        ):
+            raise ValidationError(f"schema_version must be {WORK_ITEM_SCHEMA_VERSION}")
+        source = value.get("source")
+        if not isinstance(source, str) or WORK_ITEM_SOURCE_RE.fullmatch(source) is None:
+            raise ValidationError("source must match [a-z][a-z0-9_.-]{0,63}")
+        external_id = _nonblank_string(
+            value.get("external_id"), field="external_id", max_bytes=512
+        )
+        source_updated_at = cls._timestamp(value.get("source_updated_at"))
+        title = _nonblank_string(value.get("title"), field="title", max_bytes=512)
+        brief = _nonblank_string(value.get("brief"), field="brief", max_bytes=65536)
+        raw_context = value.get("context", [])
+        if not isinstance(raw_context, list) or len(raw_context) > 128:
+            raise ValidationError("context must be a list of at most 128 entries")
+        context = tuple(
+            WorkItemContext.from_mapping(entry, index=index)
+            for index, entry in enumerate(raw_context)
+        )
+        if len(set(context)) != len(context):
+            raise ValidationError("context entries must be unique")
+        try:
+            priority = WorkItemPriority(value.get("priority", "normal"))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("priority is invalid") from exc
+        result = cls(
+            schema_version=schema_version,
+            source=source,
+            external_id=external_id,
+            source_updated_at=source_updated_at,
+            title=title,
+            brief=brief,
+            acceptance_criteria=_nonblank_tuple(
+                value.get("acceptance_criteria", []),
+                field="acceptance_criteria",
+                maximum=128,
+                item_bytes=4096,
+            ),
+            constraints=_nonblank_tuple(
+                value.get("constraints", []),
+                field="constraints",
+                maximum=128,
+                item_bytes=4096,
+            ),
+            context=context,
+            labels=_nonblank_tuple(
+                value.get("labels", []),
+                field="labels",
+                maximum=64,
+                item_bytes=128,
+            ),
+            priority=priority,
+        )
+        if len(result.canonical.encode("utf-8")) > MAX_WORK_ITEM_CONTENT_BYTES:
+            raise ValidationError(
+                f"work item content exceeds {MAX_WORK_ITEM_CONTENT_BYTES} UTF-8 bytes"
+            )
+        return result
+
+    @staticmethod
+    def _timestamp(value: object) -> str:
+        text = require_string(value, field="source_updated_at", max_bytes=64)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (ValueError, OverflowError) as exc:
+            raise ValidationError(
+                "source_updated_at must be a valid RFC 3339 timestamp"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValidationError("source_updated_at must include a timezone")
+        return (
+            parsed.astimezone(UTC)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
+
+    @property
+    def content(self) -> dict[str, Any]:
+        return {
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "brief": self.brief,
+            "constraints": list(self.constraints),
+            "context": [entry.to_dict() for entry in self.context],
+            "labels": list(self.labels),
+            "priority": self.priority.value,
+            "schema_version": self.schema_version,
+            "title": self.title,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.content,
+            "external_id": self.external_id,
+            "source": self.source,
+            "source_updated_at": self.source_updated_at,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.content)
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
 
 
 @dataclass(frozen=True)

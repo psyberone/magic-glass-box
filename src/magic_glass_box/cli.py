@@ -14,6 +14,7 @@ from .domain import (
     ProjectContext,
     RunState,
     ValidationError,
+    WorkItemEnvelope,
 )
 from .executor import DockerCLI, DockerExecutor, ExecutionError
 from .krab import KrabError
@@ -151,11 +152,23 @@ def build_parser() -> argparse.ArgumentParser:
         profile_action.add_argument("--spec", required=True, type=Path)
         profile_action.add_argument("--created-by", required=True)
 
+    work_item = commands.add_parser("work-item", help="import durable work items")
+    work_item_commands = work_item.add_subparsers(
+        dest="work_item_command", required=True
+    )
+    work_item_import = work_item_commands.add_parser(
+        "import", help="create or update a normalized work item"
+    )
+    work_item_import.add_argument("document", type=Path)
+    work_item_import.add_argument("--project", required=True)
+    work_item_import.add_argument("--imported-by", required=True)
+
     run = commands.add_parser("run", help="manage agent runs")
     run_commands = run.add_subparsers(dest="run_command", required=True)
     run_create = run_commands.add_parser("create", help="create a pinned run record")
     run_create.add_argument("--project", required=True)
     run_create.add_argument("--profile", required=True)
+    run_create.add_argument("--work-item", required=True)
     run_create.add_argument("--requested-by", required=True)
     run_create.add_argument("--source-revision")
     run_create.add_argument("--krab-session")
@@ -253,11 +266,18 @@ def _dispatch(
             return control.create_agent_profile(**kwargs)
         if args.profile_command == "revise":
             return control.revise_agent_profile(**kwargs)
+    if args.command == "work-item" and args.work_item_command == "import":
+        return control.import_work_item(
+            project_key=args.project,
+            envelope=WorkItemEnvelope.from_mapping(_json_file(args.document)),
+            imported_by_handle=args.imported_by,
+        )
     if args.command == "run":
         if args.run_command == "create":
             return control.create_run(
                 project_key=args.project,
                 profile_name=args.profile,
+                work_item_id=args.work_item,
                 requested_by_handle=args.requested_by,
                 source_revision=args.source_revision,
                 krab_session_id=args.krab_session,

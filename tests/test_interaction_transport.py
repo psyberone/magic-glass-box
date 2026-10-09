@@ -21,6 +21,7 @@ from magic_glass_box.domain import (
     ProjectContext,
     RunState,
     ValidationError,
+    WorkItemEnvelope,
 )
 from magic_glass_box.krab import (
     KrabError,
@@ -146,6 +147,20 @@ class InteractionTransportTests(unittest.TestCase):
             ),
             created_by=self.operator["id"],
         )
+        self.work_item = self.database.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "transport-test-item",
+                    "source_updated_at": "2026-10-09T12:00:00Z",
+                    "title": "Exercise interaction transport",
+                    "brief": "Provide a pinned assignment for transport tests.",
+                }
+            ),
+            imported_by=self.operator["id"],
+        )
         self.database.create_agent_profile(
             name="Disposable Worker",
             spec=AgentProfileSpec.create(image="agent@sha256:abc", command=["agent"]),
@@ -174,6 +189,7 @@ class InteractionTransportTests(unittest.TestCase):
         run = self.database.create_run(
             project_key="box-project",
             profile_name="Disposable Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.operator["id"],
             krab_session_id=session_id,
             krab_claim_id=claim_id,
@@ -273,28 +289,41 @@ class InteractionTransportTests(unittest.TestCase):
                     original,
                     creator=KrabUserRef("usr_" + "9" * 32, "agent_nine"),
                 ),
-                "creator",
+                "interaction item has an unexpected creator",
             ),
             (
                 replace(
                     original,
                     recipient=KrabUserRef("usr_" + "8" * 32, "reviewer_eight"),
                 ),
-                "recipient",
+                "interaction item has an unexpected recipient",
             ),
-            (replace(original, project_key="other-project"), "project"),
-            (replace(original, session_id="ses_" + "7" * 32), "session"),
-            (replace(original, status="open.in_progress"), "pending"),
-            (replace(original, version=2), "version"),
-            (replace(original, event_seq=None), "event sequence"),
+            (
+                replace(original, project_key="other-project"),
+                "interaction item belongs to another project",
+            ),
+            (
+                replace(original, session_id="ses_" + "7" * 32),
+                "interaction item belongs to another session",
+            ),
+            (
+                replace(original, status="open.in_progress"),
+                "interaction request is not pending",
+            ),
+            (
+                replace(original, version=2),
+                "interaction request has an unexpected version",
+            ),
+            (
+                replace(original, event_seq=None),
+                "interaction request has no event sequence",
+            ),
         )
         for candidate, message in cases:
-            with (
-                self.subTest(message=message),
-                self.assertRaisesRegex(KrabError, message),
-            ):
+            with self.subTest(message=message), self.assertRaises(KrabError) as caught:
                 self.client.request_item = candidate
                 self.open_interaction(run)
+            self.assertEqual(str(caught.exception), message)
             current = self.database.get_run(run["id"])
             self.assertEqual((current["state"], current["version"]), ("running", 3))
             self.assertEqual(current["interactions"], [])
@@ -410,6 +439,7 @@ class InteractionTransportTests(unittest.TestCase):
         queued = self.database.create_run(
             project_key="box-project",
             profile_name="Disposable Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.operator["id"],
             krab_session_id="ses_" + "8" * 32,
         )

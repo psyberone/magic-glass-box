@@ -8,7 +8,12 @@ from typing import Any
 
 from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import Database
-from magic_glass_box.domain import AgentProfileSpec, ProjectContext, RunState
+from magic_glass_box.domain import (
+    AgentProfileSpec,
+    ProjectContext,
+    RunState,
+    WorkItemEnvelope,
+)
 from magic_glass_box.krab import ActivityPage, KrabError, KrabIdentity, KrabProject
 from magic_glass_box.service import (
     ControlPlane,
@@ -185,12 +190,29 @@ class ControlPlaneTests(unittest.TestCase):
             created_by_handle="operator",
         )
         self.assertEqual(revised_profile["profile_version"], 2)
+        work_item = self.control.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "service-test-1",
+                    "source_updated_at": "2026-10-09T12:00:00Z",
+                    "title": "Exercise the control plane",
+                    "brief": "Create a run from a pinned imported assignment.",
+                }
+            ),
+            imported_by_handle="operator",
+        )
+        self.assertEqual(work_item["import_status"], "created")
         run = self.control.create_run(
             project_key="box-project",
             profile_name="Worker",
+            work_item_id=work_item["id"],
             requested_by_handle="operator",
             source_revision="abc123",
         )
+        self.assertEqual(run["work_item_version"], 1)
         transitioned = self.control.transition_run(
             run["id"], target=RunState.PREPARING, expected_version=1
         )

@@ -18,6 +18,7 @@ from .domain import (
     ProjectContext,
     RunState,
     ValidationError,
+    WorkItemEnvelope,
     canonical_json,
     require_string,
     validate_handle,
@@ -28,7 +29,7 @@ from .domain import (
 )
 from .krab import KrabIdentity, validate_base_url
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -283,8 +284,66 @@ BEGIN
 END;
 """
 
-SCHEMA = SCHEMA_V1 + INTERACTION_SCHEMA
-MIGRATIONS = {1: INTERACTION_SCHEMA}
+WORK_ITEM_SCHEMA = """
+CREATE TABLE work_items (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    source_updated_at TEXT NOT NULL,
+    last_imported_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (project_id, source, external_id),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (last_imported_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE work_item_versions (
+    id TEXT PRIMARY KEY,
+    work_item_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    content_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    source_updated_at TEXT NOT NULL,
+    imported_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (work_item_id, version),
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (imported_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+ALTER TABLE runs ADD COLUMN work_item_version_id TEXT
+    REFERENCES work_item_versions(id) ON DELETE RESTRICT;
+
+CREATE INDEX work_item_project_updated
+    ON work_items(project_id, updated_at DESC);
+CREATE INDEX work_item_version_item_version
+    ON work_item_versions(work_item_id, version DESC);
+CREATE INDEX run_work_item_version ON runs(work_item_version_id);
+
+CREATE TRIGGER work_item_identity_immutable
+BEFORE UPDATE OF project_id, source, external_id ON work_items
+WHEN OLD.project_id != NEW.project_id
+    OR OLD.source != NEW.source
+    OR OLD.external_id != NEW.external_id
+BEGIN
+    SELECT RAISE(ABORT, 'work item identity is immutable');
+END;
+CREATE TRIGGER work_item_version_immutable_update
+BEFORE UPDATE ON work_item_versions
+BEGIN
+    SELECT RAISE(ABORT, 'work item versions are immutable');
+END;
+CREATE TRIGGER work_item_version_immutable_delete
+BEFORE DELETE ON work_item_versions
+BEGIN
+    SELECT RAISE(ABORT, 'work item versions are immutable');
+END;
+"""
+
+SCHEMA = SCHEMA_V1 + INTERACTION_SCHEMA + WORK_ITEM_SCHEMA
+MIGRATIONS = {1: INTERACTION_SCHEMA, 2: WORK_ITEM_SCHEMA}
 
 
 class StorageError(RuntimeError):
@@ -465,6 +524,7 @@ class Database:
                 ("agent_profiles", "SELECT COUNT(*) FROM agent_profiles"),
                 ("runs", "SELECT COUNT(*) FROM runs"),
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
+                ("work_items", "SELECT COUNT(*) FROM work_items"),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]
@@ -709,6 +769,168 @@ class Database:
         result["context"] = json.loads(result.pop("context_json"))
         return result
 
+    @staticmethod
+    def _work_item_record(
+        connection: sqlite3.Connection, work_item_id: str
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT wi.id, p.krab_project_key AS project_key, wi.source, "
+            "wi.external_id, wi.source_updated_at, "
+            "wiv.id AS work_item_version_id, wiv.version, wiv.content_json, "
+            "wiv.content_sha256, "
+            "wiv.source_updated_at AS version_source_updated_at, "
+            "u.handle AS imported_by, wi.created_at, wi.updated_at "
+            "FROM work_items wi JOIN projects p ON p.id = wi.project_id "
+            "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
+            "JOIN users u ON u.id = wi.last_imported_by "
+            "WHERE wi.id = ? ORDER BY wiv.version DESC LIMIT 1",
+            (work_item_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"work item not found: {work_item_id}")
+        result = dict(row)
+        try:
+            content = json.loads(result.pop("content_json"))
+            envelope = WorkItemEnvelope.from_mapping(
+                {
+                    **content,
+                    "source": result["source"],
+                    "external_id": result["external_id"],
+                    "source_updated_at": result.pop("version_source_updated_at"),
+                }
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored work item is invalid") from exc
+        if envelope.digest != result["content_sha256"]:
+            raise StorageError("stored work item content digest does not match")
+        result["content"] = envelope.content
+        return result
+
+    def get_work_item(self, work_item_id: str) -> dict[str, Any]:
+        work_item_id = require_string(work_item_id, field="work_item_id", max_bytes=64)
+        with closing(self.connect()) as connection:
+            return self._work_item_record(connection, work_item_id)
+
+    def import_work_item(
+        self,
+        *,
+        project_key: str,
+        envelope: WorkItemEnvelope,
+        imported_by: str,
+    ) -> dict[str, Any]:
+        project_key = validate_project_key(project_key)
+        if not isinstance(envelope, WorkItemEnvelope):
+            raise ValidationError("envelope must be a WorkItemEnvelope")
+        imported_by = require_string(imported_by, field="imported_by", max_bytes=64)
+        work_item_id = self.new_id("wki")
+        version_id = self.new_id("wiv")
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                project = connection.execute(
+                    "SELECT id FROM projects WHERE krab_project_key = ? AND active = 1",
+                    (project_key,),
+                ).fetchone()
+                if project is None:
+                    raise NotFoundError(f"active project not found: {project_key}")
+                existing = connection.execute(
+                    "SELECT id, source_updated_at FROM work_items "
+                    "WHERE project_id = ? AND source = ? AND external_id = ?",
+                    (project["id"], envelope.source, envelope.external_id),
+                ).fetchone()
+                if existing is None:
+                    connection.execute(
+                        "INSERT INTO work_items "
+                        "(id, project_id, source, external_id, source_updated_at, "
+                        "last_imported_by, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            work_item_id,
+                            project["id"],
+                            envelope.source,
+                            envelope.external_id,
+                            envelope.source_updated_at,
+                            imported_by,
+                            now,
+                            now,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO work_item_versions "
+                        "(id, work_item_id, version, content_json, content_sha256, "
+                        "source_updated_at, imported_by, created_at) "
+                        "VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
+                        (
+                            version_id,
+                            work_item_id,
+                            envelope.canonical,
+                            envelope.digest,
+                            envelope.source_updated_at,
+                            imported_by,
+                            now,
+                        ),
+                    )
+                    import_status = "created"
+                else:
+                    work_item_id = existing["id"]
+                    current = connection.execute(
+                        "SELECT version, content_sha256 FROM work_item_versions "
+                        "WHERE work_item_id = ? ORDER BY version DESC LIMIT 1",
+                        (work_item_id,),
+                    ).fetchone()
+                    if current is None:
+                        raise StorageError("work item has no content version")
+                    if envelope.source_updated_at < existing["source_updated_at"]:
+                        raise ConflictError("work item import is stale")
+                    if (
+                        envelope.source_updated_at == existing["source_updated_at"]
+                        and envelope.digest != current["content_sha256"]
+                    ):
+                        raise ConflictError(
+                            "work item import changed at the same source revision"
+                        )
+                    if envelope.digest == current["content_sha256"]:
+                        import_status = "unchanged"
+                    else:
+                        connection.execute(
+                            "INSERT INTO work_item_versions "
+                            "(id, work_item_id, version, content_json, "
+                            "content_sha256, source_updated_at, imported_by, "
+                            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                version_id,
+                                work_item_id,
+                                current["version"] + 1,
+                                envelope.canonical,
+                                envelope.digest,
+                                envelope.source_updated_at,
+                                imported_by,
+                                now,
+                            ),
+                        )
+                        import_status = "updated"
+                    connection.execute(
+                        "UPDATE work_items SET source_updated_at = ?, "
+                        "last_imported_by = ?, updated_at = ? WHERE id = ?",
+                        (
+                            envelope.source_updated_at,
+                            imported_by,
+                            now,
+                            work_item_id,
+                        ),
+                    )
+                result = self._work_item_record(connection, work_item_id)
+                connection.commit()
+            except (ConflictError, NotFoundError, StorageError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("work item could not be imported") from exc
+        result["import_status"] = import_status
+        return result
+
     def add_project_context(
         self, project_key: str, context: ProjectContext, created_by: str
     ) -> dict[str, Any]:
@@ -877,6 +1099,7 @@ class Database:
         *,
         project_key: str,
         profile_name: str,
+        work_item_id: str,
         requested_by: str,
         source_revision: str | None = None,
         krab_session_id: str | None = None,
@@ -884,6 +1107,7 @@ class Database:
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
+        work_item_id = require_string(work_item_id, field="work_item_id", max_bytes=64)
         if source_revision is not None:
             source_revision = require_string(
                 source_revision, field="source_revision", max_bytes=512
@@ -909,6 +1133,18 @@ class Database:
                     "ORDER BY version DESC LIMIT 1",
                     (project["id"],),
                 ).fetchone()
+                work_item_version = connection.execute(
+                    "SELECT wiv.id FROM work_items wi "
+                    "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
+                    "WHERE wi.id = ? AND wi.project_id = ? "
+                    "ORDER BY wiv.version DESC LIMIT 1",
+                    (work_item_id, project["id"]),
+                ).fetchone()
+                if work_item_version is None:
+                    raise NotFoundError(
+                        "work item not found for project: " + work_item_id
+                    )
+                work_item_version_id = work_item_version["id"]
                 profile = connection.execute(
                     "SELECT id, active FROM agent_profiles WHERE name = ?",
                     (profile_name,),
@@ -931,14 +1167,16 @@ class Database:
                 connection.execute(
                     "INSERT INTO runs "
                     "(id, project_id, context_version_id, profile_version_id, "
-                    "requested_by, state, version, source_revision, krab_session_id, "
-                    "krab_claim_id, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?)",
+                    "work_item_version_id, requested_by, state, version, "
+                    "source_revision, krab_session_id, krab_claim_id, created_at, "
+                    "updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?)",
                     (
                         run_id,
                         project["id"],
                         context["id"],
                         profile_version["id"],
+                        work_item_version_id,
                         requested_by,
                         source_revision,
                         krab_session_id,
@@ -1404,17 +1642,27 @@ class Database:
         return [self.get_interaction(row["id"]) for row in rows]
 
     def get_run_execution(self, run_id: str) -> dict[str, Any]:
-        """Load the immutable context, profile, and identity pinned by a run."""
+        """Load every immutable input and identity pinned by a run."""
 
         with closing(self.connect()) as connection:
             row = connection.execute(
                 "SELECT r.id, r.state, r.version, r.source_revision, "
                 "p.krab_project_key AS project_key, c.context_json, "
-                "av.spec_json, ki.credential_ref "
+                "av.spec_json, ki.credential_ref, wi.id AS work_item_id, "
+                "wi.source AS work_item_source, "
+                "wi.external_id AS work_item_external_id, "
+                "wiv.id AS work_item_version_id, "
+                "wiv.version AS work_item_version, "
+                "wiv.source_updated_at AS work_item_source_updated_at, "
+                "wiv.content_json AS work_item_json, "
+                "wiv.content_sha256 AS work_item_sha256 "
                 "FROM runs r JOIN projects p ON p.id = r.project_id "
                 "JOIN project_context_versions c ON c.id = r.context_version_id "
                 "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
                 "JOIN krab_identities ki ON ki.id = av.krab_identity_id "
+                "LEFT JOIN work_item_versions wiv "
+                "ON wiv.id = r.work_item_version_id "
+                "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
@@ -1424,7 +1672,35 @@ class Database:
         try:
             result["context"] = json.loads(result.pop("context_json"))
             result["profile"] = json.loads(result.pop("spec_json"))
-        except (json.JSONDecodeError, TypeError) as exc:
+            work_item_json = result.pop("work_item_json")
+            if work_item_json is None:
+                result["work_item"] = None
+            else:
+                content = json.loads(work_item_json)
+                work_item = WorkItemEnvelope.from_mapping(
+                    {
+                        **content,
+                        "source": result.pop("work_item_source"),
+                        "external_id": result.pop("work_item_external_id"),
+                        "source_updated_at": result.pop("work_item_source_updated_at"),
+                    }
+                )
+                if work_item.digest != result.pop("work_item_sha256"):
+                    raise ValidationError("work item digest does not match")
+                result["work_item"] = {
+                    "id": result["work_item_id"],
+                    "version": result["work_item_version"],
+                    "source": work_item.source,
+                    "external_id": work_item.external_id,
+                    "source_updated_at": work_item.source_updated_at,
+                    **work_item.content,
+                }
+            if work_item_json is None:
+                result.pop("work_item_source")
+                result.pop("work_item_external_id")
+                result.pop("work_item_source_updated_at")
+                result.pop("work_item_sha256")
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
             raise StorageError("pinned run data is invalid") from exc
         result["credential_references"] = {"krab": result.pop("credential_ref")}
         return result
@@ -1460,12 +1736,19 @@ class Database:
                 "r.started_at, r.finished_at, p.krab_project_key AS project_key, "
                 "c.id AS context_version_id, c.version AS context_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
-                "av.version AS profile_version, u.handle AS requested_by "
+                "av.version AS profile_version, u.handle AS requested_by, "
+                "wi.id AS work_item_id, wiv.id AS work_item_version_id, "
+                "wiv.version AS work_item_version, "
+                "wiv.content_json AS work_item_json "
                 "FROM runs r JOIN projects p ON p.id = r.project_id "
                 "JOIN project_context_versions c ON c.id = r.context_version_id "
                 "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
                 "JOIN agent_profiles ap ON ap.id = av.profile_id "
-                "JOIN users u ON u.id = r.requested_by WHERE r.id = ?",
+                "JOIN users u ON u.id = r.requested_by "
+                "LEFT JOIN work_item_versions wiv "
+                "ON wiv.id = r.work_item_version_id "
+                "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
+                "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
             if row is None:
@@ -1476,6 +1759,13 @@ class Database:
                 (run_id,),
             ).fetchall()
         result = dict(row)
+        try:
+            work_item_json = result.pop("work_item_json")
+            result["work_item_title"] = (
+                None if work_item_json is None else json.loads(work_item_json)["title"]
+            )
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise StorageError("pinned work item data is invalid") from exc
         result["events"] = [
             {**dict(event), "metadata": json.loads(event["metadata_json"])}
             for event in events

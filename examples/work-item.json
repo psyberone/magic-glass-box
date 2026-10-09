@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "source": "manual",
+  "external_id": "credential-broker-1",
+  "source_updated_at": "2026-10-09T12:00:00Z",
+  "title": "Add run-scoped credential grants",
+  "brief": "Implement a broker that keeps reusable credentials outside agent containers.",
+  "acceptance_criteria": [
+    "A run can use only credentials named by its pinned profile",
+    "Expired and revoked grants fail closed",
+    "Secret values never enter the control-plane database"
+  ],
+  "constraints": [
+    "Do not grant arbitrary bridge networking",
+    "Do not expose administrator credentials"
+  ],
+  "context": [
+    {
+      "type": "workspace_path",
+      "value": "docs/architecture.md"
+    },
+    {
+      "type": "note",
+      "value": "Keep imitation-krab independently useful."
+    }
+  ],
+  "labels": [
+    "security",
+    "orchestration"
+  ],
+  "priority": "high"
+}

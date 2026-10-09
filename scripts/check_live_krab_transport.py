@@ -42,6 +42,7 @@ def main() -> int:
         InteractionKind,
         ProjectContext,
         RunState,
+        WorkItemEnvelope,
     )
     from magic_glass_box.krab import KrabClient, KrabIdentity
     from magic_glass_box.service import ControlPlane
@@ -119,6 +120,20 @@ def main() -> int:
                 ),
                 created_by=operator["id"],
             )
+            work_item = database.import_work_item(
+                project_key="box-project",
+                envelope=WorkItemEnvelope.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "source": "manual",
+                        "external_id": "live-transport-proof",
+                        "source_updated_at": "2026-10-09T12:00:00Z",
+                        "title": "Exercise live interaction transport",
+                        "brief": "Prove private question and response routing.",
+                    }
+                ),
+                imported_by=operator["id"],
+            )
             database.create_agent_profile(
                 name="Live Worker",
                 spec=AgentProfileSpec.create(
@@ -130,6 +145,7 @@ def main() -> int:
             run = database.create_run(
                 project_key="box-project",
                 profile_name="Live Worker",
+                work_item_id=work_item["id"],
                 requested_by=operator["id"],
                 krab_session_id=session,
             )

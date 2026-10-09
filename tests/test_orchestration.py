@@ -13,6 +13,7 @@ from magic_glass_box.domain import (
     NetworkMode,
     ProjectContext,
     RunState,
+    WorkItemEnvelope,
     WorkspaceMode,
 )
 from magic_glass_box.executor import SandboxPlan, SandboxRequest, SandboxResult
@@ -131,6 +132,20 @@ class RunCoordinatorTests(unittest.TestCase):
             ),
             created_by=self.user["id"],
         )
+        self.work_item = self.database.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "orchestration-test-item",
+                    "source_updated_at": "2026-10-09T12:00:00Z",
+                    "title": "Exercise run orchestration",
+                    "brief": "Provide a pinned assignment for execution tests.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
         self.database.create_agent_profile(
             name="Worker",
             spec=AgentProfileSpec.create(
@@ -157,6 +172,7 @@ class RunCoordinatorTests(unittest.TestCase):
         return self.database.create_run(
             project_key="box-project",
             profile_name="Worker",
+            work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
             source_revision=revision,
         )

@@ -10,7 +10,10 @@ This repository currently contains the first executable vertical slice:
 - private SQLite control-plane state with immutable schema migrations;
 - local users linked to stable Krab user IDs rather than bearer tokens;
 - versioned project context and versioned agent profiles;
-- run records that pin both versions and enforce a state machine;
+- a strict, forge-neutral work-item import contract with atomic create, update,
+  unchanged, and stale-revision behavior;
+- run records that pin context, profile, and immutable work-item versions while
+  enforcing a state machine;
 - a durable, metadata-only interaction ledger for typed questions, approvals,
   and choices, with atomic run-state transitions and optimistic concurrency;
 - a bounded, typed Krab client for `whoami`, project inventory, project
@@ -54,9 +57,21 @@ Once a project, networkless profile, and run have been registered, execute or
 recover its lifecycle with:
 
 ```console
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  work-item import examples/work-item.json \
+  --project box-project --imported-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  run create --project box-project --profile Worker \
+  --work-item wki_<id> --requested-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run execute run_<id>
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run reconcile
 ```
+
+Work-item import is an idempotent upsert keyed by project, source, and external
+ID. Magic Glass Box does not connect to, synchronize with, or mutate a source
+forge. See [docs/work-items.md](docs/work-items.md) for the adapter contract and
+[`schemas/work-item-v1.schema.json`](schemas/work-item-v1.schema.json) for the
+published input schema.
 
 The pinned project context must name an absolute path to a local Git repository.
 If no source revision was supplied when the run was created, Magic Glass Box

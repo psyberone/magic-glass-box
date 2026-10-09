@@ -172,13 +172,19 @@ class SandboxPlanTests(unittest.TestCase):
 
     def test_plan_rejects_network_or_identity_policy_weakening(self) -> None:
         for request, uid, gid, message in (
-            (self.request(network_mode=NetworkMode.KRAB_ONLY), 501, 20, "relay"),
-            (self.request(), 0, 20, "root"),
-            (self.request(), 501, 0, "root"),
+            (
+                self.request(network_mode=NetworkMode.KRAB_ONLY),
+                501,
+                20,
+                "krab_only networking requires the scoped relay and cannot use "
+                "bridge networking",
+            ),
+            (self.request(), 0, 20, "sandbox user must not be root"),
+            (self.request(), 501, 0, "sandbox group must not be root"),
         ):
             with (
                 self.subTest(message=message),
-                self.assertRaisesRegex(ExecutionError, message),
+                self.assertRaises(ExecutionError) as caught,
             ):
                 build_sandbox_plan(
                     request,
@@ -186,6 +192,34 @@ class SandboxPlanTests(unittest.TestCase):
                     uid=uid,
                     gid=gid,
                 )
+            self.assertEqual(str(caught.exception), message)
+
+    def test_positive_numeric_id_boundaries_and_types_are_enforced(self) -> None:
+        request = self.request(credential_names=(), credential_files={})
+        plan = build_sandbox_plan(
+            request,
+            DockerImage(IMAGE_ID, ()),
+            uid=1,
+            gid=1,
+        )
+        user_index = plan.create_args.index("--user")
+        self.assertEqual(plan.create_args[user_index + 1], "1:1")
+
+        for uid, gid, message in (
+            (1.5, 1, "sandbox user must not be root"),
+            (1, "20", "sandbox group must not be root"),
+        ):
+            with (
+                self.subTest(uid=uid, gid=gid),
+                self.assertRaises(ExecutionError) as caught,
+            ):
+                build_sandbox_plan(
+                    request,
+                    DockerImage(IMAGE_ID, ()),
+                    uid=uid,  # type: ignore[arg-type]
+                    gid=gid,  # type: ignore[arg-type]
+                )
+            self.assertEqual(str(caught.exception), message)
 
     def test_plan_rejects_bad_run_workspace_and_credential_shapes(self) -> None:
         missing_workspace = self.root / "missing"
@@ -206,7 +240,7 @@ class SandboxPlanTests(unittest.TestCase):
                     self.workspace,
                     {"krab": self.token},
                 ),
-                "run identifier",
+                "invalid run identifier",
             ),
             (
                 SandboxRequest(
@@ -215,7 +249,7 @@ class SandboxPlanTests(unittest.TestCase):
                     missing_workspace,
                     {"krab": self.token},
                 ),
-                "workspace",
+                f"workspace is unavailable: {missing_workspace.absolute()}",
             ),
             (
                 SandboxRequest(
@@ -224,7 +258,7 @@ class SandboxPlanTests(unittest.TestCase):
                     workspace_link,
                     {"krab": self.token},
                 ),
-                "symlink",
+                "workspace must not be a symlink",
             ),
             (
                 SandboxRequest(
@@ -233,7 +267,7 @@ class SandboxPlanTests(unittest.TestCase):
                     workspace_file,
                     {"krab": self.token},
                 ),
-                "directory",
+                "workspace must be a directory",
             ),
             (
                 SandboxRequest(
@@ -242,7 +276,7 @@ class SandboxPlanTests(unittest.TestCase):
                     Path("/"),
                     {},
                 ),
-                "filesystem root",
+                "workspace must not be a filesystem root",
             ),
             (
                 SandboxRequest(
@@ -251,24 +285,27 @@ class SandboxPlanTests(unittest.TestCase):
                     comma_workspace,
                     {},
                 ),
-                "comma",
+                "workspace path must not contain a comma",
             ),
-            (self.request(credential_files={}), "credential set"),
+            (
+                self.request(credential_files={}),
+                "credential set does not match the pinned agent profile",
+            ),
             (
                 self.request(
                     credential_files={"krab": self.token, "extra": self.token}
                 ),
-                "credential set",
+                "credential set does not match the pinned agent profile",
             ),
             (
                 self.request(credential_files={"krab": insecure}),
-                "mode 0600",
+                "credential file must use mode 0600",
             ),
         )
         for request, message in cases:
             with (
                 self.subTest(message=message),
-                self.assertRaisesRegex(ExecutionError, message),
+                self.assertRaises(ExecutionError) as caught,
             ):
                 build_sandbox_plan(
                     request,
@@ -276,6 +313,7 @@ class SandboxPlanTests(unittest.TestCase):
                     uid=os.getuid(),
                     gid=os.getgid(),
                 )
+            self.assertEqual(str(caught.exception), message)
 
     def test_plan_rejects_unsafe_credential_files(self) -> None:
         missing = self.root / "missing.token"
@@ -300,45 +338,53 @@ class SandboxPlanTests(unittest.TestCase):
         linked_parent.symlink_to(private_parent, target_is_directory=True)
 
         cases = (
-            (missing, "unavailable"),
-            (symlink, "symlink"),
-            (directory, "regular file"),
-            (hard_link, "hard-linked"),
-            (comma, "comma"),
-            (inside_workspace, "outside the workspace"),
-            (linked_parent / "token", "private directory"),
+            (
+                missing,
+                f"credential file is unavailable: {missing.absolute()}",
+            ),
+            (symlink, "credential must be a regular file, not a symlink"),
+            (directory, "credential must be a regular file, not a symlink"),
+            (hard_link, "credential file must not be hard-linked"),
+            (comma, "credential path must not contain a comma"),
+            (inside_workspace, "credential files must remain outside the workspace"),
+            (
+                linked_parent / "token",
+                "credential parent must be a private directory",
+            ),
         )
         for path, message in cases:
-            with (
-                self.subTest(path=path),
-                self.assertRaisesRegex(ExecutionError, message),
-            ):
+            with self.subTest(path=path), self.assertRaises(ExecutionError) as caught:
                 build_sandbox_plan(
                     self.request(credential_files={"krab": path}),
                     DockerImage(IMAGE_ID, ()),
                     uid=os.getuid(),
                     gid=os.getgid(),
                 )
+            self.assertEqual(str(caught.exception), message)
 
     def test_plan_rejects_wrong_ownership_and_parent_mode(self) -> None:
-        with self.assertRaisesRegex(ExecutionError, "owned by the run user"):
+        with self.assertRaises(ExecutionError) as caught:
             build_sandbox_plan(
                 self.request(),
                 DockerImage(IMAGE_ID, ()),
                 uid=os.getuid() + 1,
                 gid=os.getgid(),
             )
+        self.assertEqual(
+            str(caught.exception), "credential path must be owned by the run user"
+        )
         os.chmod(self.root, 0o755)  # noqa: S103 - deliberately insecure fixture
-        with self.assertRaisesRegex(ExecutionError, "parent must use mode 0700"):
+        with self.assertRaises(ExecutionError) as caught:
             build_sandbox_plan(
                 self.request(),
                 DockerImage(IMAGE_ID, ()),
                 uid=os.getuid(),
                 gid=os.getgid(),
             )
+        self.assertEqual(str(caught.exception), "credential parent must use mode 0700")
 
     def test_copy_on_write_workspace_must_be_owned_and_writable(self) -> None:
-        with self.assertRaisesRegex(ExecutionError, "not writable"):
+        with self.assertRaises(ExecutionError) as caught:
             build_sandbox_plan(
                 self.request(
                     workspace_mode=WorkspaceMode.COPY_ON_WRITE,
@@ -349,23 +395,34 @@ class SandboxPlanTests(unittest.TestCase):
                 uid=os.getuid() + 1,
                 gid=os.getgid(),
             )
+        self.assertEqual(
+            str(caught.exception),
+            "copy-on-write workspace is not writable by the run user",
+        )
 
     def test_plan_rejects_invalid_or_volume_declaring_image(self) -> None:
         for image, message in (
-            (DockerImage("not-an-image-id", ()), "image ID"),
-            (DockerImage(None, ()), "image ID"),  # type: ignore[arg-type]
-            (DockerImage(IMAGE_ID, ("/data",)), "writable volumes"),
+            (
+                DockerImage("not-an-image-id", ()),
+                "Docker returned an invalid immutable image ID",
+            ),
+            (
+                DockerImage(None, ()),  # type: ignore[arg-type]
+                "Docker returned an invalid immutable image ID",
+            ),
+            (
+                DockerImage(IMAGE_ID, ("/data",)),
+                "agent image declares writable volumes",
+            ),
         ):
-            with (
-                self.subTest(image=image),
-                self.assertRaisesRegex(ExecutionError, message),
-            ):
+            with self.subTest(image=image), self.assertRaises(ExecutionError) as caught:
                 build_sandbox_plan(
                     self.request(),
                     image,
                     uid=os.getuid(),
                     gid=os.getgid(),
                 )
+            self.assertEqual(str(caught.exception), message)
 
     def test_limits_reject_values_outside_hard_policy_bounds(self) -> None:
         invalid = (
@@ -380,10 +437,29 @@ class SandboxPlanTests(unittest.TestCase):
             {"tmpfs_bytes": 4 * 1024 * 1024 * 1024 + 1},
             {"stop_timeout": 0},
             {"stop_timeout": 301},
+            {"memory_bytes": "67108864"},
         )
         for kwargs in invalid:
             with self.subTest(kwargs=kwargs), self.assertRaises(ExecutionError):
                 DockerLimits(**kwargs)
+
+    def test_limits_accept_the_inclusive_policy_boundaries(self) -> None:
+        minimum = DockerLimits(
+            memory_bytes=64 * 1024 * 1024,
+            cpus=0.1,
+            pids_limit=16,
+            tmpfs_bytes=16 * 1024 * 1024,
+            stop_timeout=1,
+        )
+        maximum = DockerLimits(
+            memory_bytes=64 * 1024 * 1024 * 1024,
+            cpus=64,
+            pids_limit=4096,
+            tmpfs_bytes=4 * 1024 * 1024 * 1024,
+            stop_timeout=300,
+        )
+        self.assertEqual(minimum.pids_limit, 16)
+        self.assertEqual(maximum.pids_limit, 4096)
 
 
 class FakeDockerEngine:
