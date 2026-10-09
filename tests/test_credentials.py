@@ -33,6 +33,27 @@ class PrivateFileCredentialResolverTests(unittest.TestCase):
         self.assertEqual(self.resolver.resolve_path(reference), self.path.resolve())
         self.assertNotIn(TOKEN, reference)
 
+    def test_provider_secret_uses_the_same_private_file_boundary(self) -> None:
+        self.path.write_text("sk-provider-secret\n", encoding="ascii")
+        reference = self.resolver.secret_reference(self.path)
+        self.assertEqual(reference, "file:" + str(self.path))
+        self.assertEqual(
+            self.resolver.resolve_secret(reference),
+            "sk-provider-secret",
+        )
+        self.assertNotIn("sk-provider-secret", reference)
+
+    def test_provider_secret_rejects_empty_control_and_oversized_values(self) -> None:
+        for raw, message in (
+            (b"\n", "empty"),
+            (b"secret\nsecond", "printable ASCII"),
+            (b"A" * 4097, "unexpectedly large"),
+        ):
+            with self.subTest(message=message):
+                self.path.write_bytes(raw)
+                with self.assertRaisesRegex(CredentialError, message):
+                    self.resolver.secret_reference(self.path)
+
     def test_rejects_public_file(self) -> None:
         os.chmod(self.path, 0o644)
         with self.assertRaisesRegex(CredentialError, "group or other"):

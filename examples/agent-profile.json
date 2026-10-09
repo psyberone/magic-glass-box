@@ -4,12 +4,14 @@
     "exec"
   ],
   "credential_names": [
-    "krab"
+    "krab",
+    "openai-main"
   ],
   "gateway_capabilities": [
     "run.describe",
     "interaction.open",
-    "interaction.read"
+    "interaction.read",
+    "provider.invoke"
   ],
   "image": "magic-glass-box/codex-agent@sha256:replace-with-a-pinned-digest",
   "network_mode": "gateway_only",

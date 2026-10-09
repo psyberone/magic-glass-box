@@ -5,7 +5,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .credentials import CredentialResolver, PrivateFileCredentialResolver
+from .credentials import (
+    CredentialError,
+    CredentialResolver,
+    PrivateFileCredentialResolver,
+)
 from .db import (
     ConcurrentUpdateError,
     ConflictError,
@@ -16,12 +20,19 @@ from .domain import (
     AgentProfileSpec,
     InteractionKind,
     ProjectContext,
+    ProviderGrantSpec,
     RunState,
     ValidationError,
     WorkItemEnvelope,
     validate_krab_id,
 )
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
+from .provider import (
+    ProviderBroker,
+    ProviderBusyError,
+    ProviderError,
+    ProviderUpstreamError,
+)
 
 ClientFactory = Callable[[str, str], KrabClient]
 
@@ -42,6 +53,20 @@ class AcceptedInteractionResponse:
     content_risk_flags: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class AcceptedProviderResponse:
+    """Transient untrusted provider output paired with durable audit metadata."""
+
+    invocation_id: str
+    grant_name: str
+    provider: str
+    model: str
+    status_code: int
+    request_bytes: int
+    response_bytes: int
+    untrusted_response: dict[str, Any]
+
+
 class ControlPlane:
     """Coordinate durable local state with Krab identity and messaging."""
 
@@ -51,12 +76,14 @@ class ControlPlane:
         *,
         credential_resolver: CredentialResolver | None = None,
         client_factory: ClientFactory | None = None,
+        provider_broker: ProviderBroker | None = None,
     ):
         self.database = database
         self.credential_resolver = (
             credential_resolver or PrivateFileCredentialResolver()
         )
         self.client_factory = client_factory or KrabClient
+        self.provider_broker = provider_broker or ProviderBroker()
 
     def initialize(self) -> dict[str, Any]:
         return self.database.initialize()
@@ -89,6 +116,152 @@ class ControlPlane:
             user_id = self.database.get_user(local_user_handle)["id"]
         return self.database.store_krab_identity(
             instance["id"], identity, reference, user_id=user_id
+        )
+
+    def add_provider_grant(
+        self,
+        *,
+        name: str,
+        spec: ProviderGrantSpec,
+        credential_path: Path,
+        expires_at: str | None,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        if not isinstance(self.credential_resolver, PrivateFileCredentialResolver):
+            raise TypeError(
+                "add_provider_grant with a path requires a private-file resolver"
+            )
+        reference = self.credential_resolver.secret_reference(credential_path)
+        creator = self.database.get_user(created_by_handle)
+        return self.database.create_provider_grant(
+            name=name,
+            spec=spec,
+            credential_ref=reference,
+            expires_at=expires_at,
+            created_by=creator["id"],
+        )
+
+    def revoke_provider_grant(
+        self,
+        name: str,
+        *,
+        expected_version: int,
+        revoked_by_handle: str,
+    ) -> dict[str, Any]:
+        revoker = self.database.get_user(revoked_by_handle)
+        return self.database.revoke_provider_grant(
+            name,
+            expected_version=expected_version,
+            revoked_by=revoker["id"],
+        )
+
+    def invoke_provider(
+        self,
+        run_id: str,
+        *,
+        grant_name: str,
+        request: dict[str, Any],
+    ) -> AcceptedProviderResponse:
+        route = self.database.get_run_transport(run_id)
+        if route["state"] != RunState.RUNNING.value:
+            raise ConflictError(f"run is not running: {route['state']}")
+        grant = self.database.get_run_provider_grant(run_id, grant_name)
+        try:
+            spec = ProviderGrantSpec.from_mapping(grant["policy"])
+        except (KeyError, TypeError, ValidationError) as exc:
+            raise ConflictError("provider grant policy is unavailable") from exc
+        started_at = self.database.now()
+        try:
+            credential = self.credential_resolver.resolve_secret(
+                grant["credential_ref"]
+            )
+            result = self.provider_broker.invoke(
+                grant_id=grant["id"],
+                spec=spec,
+                credential=credential,
+                request=request,
+            )
+        except CredentialError as exc:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                outcome="denied",
+                error_code="credential_unavailable",
+                started_at=started_at,
+            )
+            raise ProviderError("provider credential is unavailable") from exc
+        except ProviderBusyError:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                outcome="busy",
+                error_code="concurrency_limit",
+                started_at=started_at,
+            )
+            raise
+        except ProviderUpstreamError as exc:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                outcome="failed",
+                error_code="upstream_error",
+                started_at=started_at,
+                request_bytes=exc.request_bytes,
+                response_bytes=exc.response_bytes,
+                http_status=exc.status_code,
+            )
+            raise
+        except ProviderError:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                outcome="denied",
+                error_code="request_denied",
+                started_at=started_at,
+            )
+            raise
+        invocation = self.database.record_provider_invocation(
+            run_id=run_id,
+            provider_grant_id=grant["id"],
+            outcome="succeeded",
+            request_bytes=result.request_bytes,
+            response_bytes=result.response_bytes,
+            http_status=result.status_code,
+            error_code=None,
+            started_at=started_at,
+        )
+        return AcceptedProviderResponse(
+            invocation_id=invocation["id"],
+            grant_name=grant_name,
+            provider=spec.provider,
+            model=spec.model,
+            status_code=result.status_code,
+            request_bytes=result.request_bytes,
+            response_bytes=result.response_bytes,
+            untrusted_response=result.untrusted_response,
+        )
+
+    def _record_provider_failure(
+        self,
+        *,
+        run_id: str,
+        grant_id: str,
+        outcome: str,
+        error_code: str,
+        started_at: str,
+        request_bytes: int = 0,
+        response_bytes: int = 0,
+        http_status: int | None = None,
+    ) -> None:
+        self.database.record_provider_invocation(
+            run_id=run_id,
+            provider_grant_id=grant_id,
+            outcome=outcome,
+            request_bytes=request_bytes,
+            response_bytes=response_bytes,
+            http_status=http_status,
+            error_code=error_code,
+            started_at=started_at,
         )
 
     def register_project(

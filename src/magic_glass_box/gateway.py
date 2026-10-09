@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .db import ConcurrentUpdateError, ConflictError, NotFoundError, StorageError
-from .domain import GatewayCapability, InteractionKind, ValidationError, canonical_json
+from .domain import (
+    PROVIDER_NAME_RE,
+    GatewayCapability,
+    InteractionKind,
+    ValidationError,
+    canonical_json,
+)
 from .krab import (
     IDEMPOTENCY_KEY_RE,
     KRAB_HANDLE_RE,
@@ -21,7 +27,8 @@ from .krab import (
     MAX_TITLE_BYTES,
     KrabError,
 )
-from .service import AcceptedInteractionResponse
+from .provider import ProviderBusyError, ProviderError, ProviderUpstreamError
+from .service import AcceptedInteractionResponse, AcceptedProviderResponse
 
 GATEWAY_PROTOCOL_VERSION = 1
 MAX_GATEWAY_REQUEST_BYTES = 32 * 1024
@@ -60,6 +67,10 @@ class GatewayControlPlane(Protocol):
     def read_interaction_response(
         self, run_id: str, interaction_id: str
     ) -> AcceptedInteractionResponse: ...
+
+    def invoke_provider(
+        self, run_id: str, *, grant_name: str, request: dict[str, Any]
+    ) -> AcceptedProviderResponse: ...
 
 
 @dataclass(frozen=True)
@@ -226,8 +237,10 @@ class RunGateway:
                 result = self._describe(value["payload"])
             elif operation is GatewayCapability.INTERACTION_OPEN:
                 result = self._open_interaction(value["payload"])
-            else:
+            elif operation is GatewayCapability.INTERACTION_READ:
                 result = self._read_interaction(value["payload"])
+            else:
+                result = self._invoke_provider(value["payload"])
             return self._success(request_id, result)
         except _RequestFailure as exc:
             return self._failure(request_id, exc.code, str(exc))
@@ -241,6 +254,16 @@ class RunGateway:
             return self._failure(
                 request_id, "upstream_error", "gateway upstream request failed"
             )
+        except ProviderBusyError:
+            return self._failure(
+                request_id, "busy", "provider concurrency limit is reached"
+            )
+        except ProviderUpstreamError:
+            return self._failure(
+                request_id, "upstream_error", "provider request failed"
+            )
+        except ProviderError:
+            return self._failure(request_id, "forbidden", "provider request was denied")
         except (StorageError, KeyError, TypeError, ValueError):
             return self._failure(
                 request_id, "internal_error", "gateway operation failed"
@@ -350,6 +373,35 @@ class RunGateway:
             raise _RequestFailure("invalid_request", "invalid interaction_id")
         delivery = self.control.read_interaction_response(self.run_id, interaction_id)
         return asdict(delivery)
+
+    def _invoke_provider(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"grant", "request"})
+        grant = _text(item["grant"], field="grant", max_bytes=64)
+        if PROVIDER_NAME_RE.fullmatch(grant) is None or grant == "krab":
+            raise _RequestFailure("invalid_request", "invalid provider grant")
+        if grant not in self.credential_names:
+            raise _RequestFailure(
+                "forbidden", "provider grant is not authorized for this run"
+            )
+        provider_request = item["request"]
+        if not isinstance(provider_request, dict):
+            raise _RequestFailure(
+                "invalid_request", "provider request must be an object"
+            )
+        if "model" in provider_request:
+            raise _RequestFailure(
+                "invalid_request", "provider request cannot select a model"
+            )
+        try:
+            canonical_json(provider_request)
+        except ValidationError as exc:
+            raise _RequestFailure("invalid_request", str(exc)) from exc
+        accepted = self.control.invoke_provider(
+            self.run_id,
+            grant_name=grant,
+            request=provider_request,
+        )
+        return asdict(accepted)
 
 
 def _strict_json_document(raw: bytes, *, max_bytes: int, subject: str) -> object:

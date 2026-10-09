@@ -25,7 +25,15 @@ from magic_glass_box.gateway import (
     default_gateway_root,
 )
 from magic_glass_box.krab import KrabError
-from magic_glass_box.service import AcceptedInteractionResponse
+from magic_glass_box.provider import (
+    ProviderBusyError,
+    ProviderError,
+    ProviderUpstreamError,
+)
+from magic_glass_box.service import (
+    AcceptedInteractionResponse,
+    AcceptedProviderResponse,
+)
 
 RUN_ID = "run_" + "1" * 32
 OTHER_RUN_ID = "run_" + "2" * 32
@@ -118,6 +126,8 @@ class FakeGatewayControl:
         self.database = FakeGatewayDatabase()
         self.open_calls: list[tuple[str, dict[str, Any]]] = []
         self.read_calls: list[tuple[str, str]] = []
+        self.provider_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.provider_failure: Exception | None = None
 
     def open_interaction(self, run_id: str, **kwargs: Any) -> dict[str, Any]:
         self.open_calls.append((run_id, kwargs))
@@ -147,6 +157,23 @@ class FakeGatewayControl:
             content_risk_flags=("untrusted_text",),
         )
 
+    def invoke_provider(
+        self, run_id: str, *, grant_name: str, request: dict[str, Any]
+    ) -> AcceptedProviderResponse:
+        self.provider_calls.append((run_id, grant_name, request))
+        if self.provider_failure is not None:
+            raise self.provider_failure
+        return AcceptedProviderResponse(
+            invocation_id="pinv_" + "8" * 32,
+            grant_name=grant_name,
+            provider="openai",
+            model="gpt-test",
+            status_code=200,
+            request_bytes=41,
+            response_bytes=36,
+            untrusted_response={"output_text": "done"},
+        )
+
 
 def request(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
@@ -164,7 +191,7 @@ class RunGatewayTests(unittest.TestCase):
             self.control,
             RUN_ID,
             capabilities=tuple(GatewayCapability),
-            credential_names=("krab",),
+            credential_names=("krab", "openai-main"),
         )
 
     def test_describe_exposes_pinned_agent_inputs_without_host_authority(self) -> None:
@@ -272,6 +299,71 @@ class RunGatewayTests(unittest.TestCase):
         self.assertFalse(cross_run["ok"])
         self.assertEqual(cross_run["error"]["code"], "invalid_request")
         self.assertEqual(self.control.read_calls, [(RUN_ID, INTERACTION_ID)])
+
+    def test_provider_invoke_uses_only_a_declared_run_grant(self) -> None:
+        response = self.gateway.handle(
+            request(
+                "provider.invoke",
+                {"grant": "openai-main", "request": {"input": "hello"}},
+            )
+        )
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["provider"], "openai")
+        self.assertEqual(response["result"]["model"], "gpt-test")
+        self.assertEqual(
+            response["result"]["untrusted_response"], {"output_text": "done"}
+        )
+        self.assertEqual(
+            self.control.provider_calls,
+            [(RUN_ID, "openai-main", {"input": "hello"})],
+        )
+
+        denied = self.gateway.handle(
+            request(
+                "provider.invoke",
+                {"grant": "other-provider", "request": {"input": "hello"}},
+            )
+        )
+        self.assertFalse(denied["ok"])
+        self.assertEqual(denied["error"]["code"], "forbidden")
+        self.assertEqual(len(self.control.provider_calls), 1)
+
+    def test_provider_payload_and_failures_are_bounded_and_redacted(self) -> None:
+        for payload in (
+            {"grant": "openai-main", "request": []},
+            {
+                "grant": "openai-main",
+                "request": {"model": "worker-selected"},
+            },
+            {
+                "grant": "openai-main",
+                "request": {"input": "hello"},
+                "destination": "https://attacker.example",
+            },
+        ):
+            with self.subTest(payload=payload):
+                response = self.gateway.handle(request("provider.invoke", payload))
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertEqual(self.control.provider_calls, [])
+
+        failures = (
+            (ProviderBusyError("SECRET busy"), "busy"),
+            (ProviderUpstreamError("SECRET upstream"), "upstream_error"),
+            (ProviderError("SECRET denied"), "forbidden"),
+        )
+        for failure, code in failures:
+            with self.subTest(code=code):
+                self.control.provider_failure = failure
+                response = self.gateway.handle(
+                    request(
+                        "provider.invoke",
+                        {"grant": "openai-main", "request": {"input": "hello"}},
+                    )
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"]["code"], code)
+                self.assertNotIn("SECRET", json.dumps(response))
 
     def test_protocol_and_capability_errors_fail_closed(self) -> None:
         limited = RunGateway(

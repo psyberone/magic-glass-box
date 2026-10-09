@@ -12,6 +12,7 @@ from .db import Database, StorageError, default_db_path
 from .domain import (
     AgentProfileSpec,
     ProjectContext,
+    ProviderGrantSpec,
     RunState,
     ValidationError,
     WorkItemEnvelope,
@@ -20,6 +21,7 @@ from .executor import DockerCLI, DockerExecutor, ExecutionError
 from .gateway import FileGatewayManager, default_gateway_root
 from .krab import KrabError
 from .orchestration import RunCoordinator, RunOrchestrationError
+from .provider import ProviderError
 from .service import ControlPlane, activity_to_dict
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
@@ -153,6 +155,27 @@ def build_parser() -> argparse.ArgumentParser:
         profile_action.add_argument("--spec", required=True, type=Path)
         profile_action.add_argument("--created-by", required=True)
 
+    provider = commands.add_parser("provider", help="manage scoped provider grants")
+    provider_commands = provider.add_subparsers(dest="provider_command", required=True)
+    provider_add = provider_commands.add_parser(
+        "add", help="add an immutable provider policy and credential reference"
+    )
+    provider_add.add_argument("name")
+    provider_add.add_argument("--policy", required=True, type=Path)
+    provider_add.add_argument("--credential-file", required=True, type=Path)
+    provider_add.add_argument("--expires-at")
+    provider_add.add_argument("--created-by", required=True)
+    provider_show = provider_commands.add_parser(
+        "show", help="show provider policy and lifecycle metadata"
+    )
+    provider_show.add_argument("name")
+    provider_revoke = provider_commands.add_parser(
+        "revoke", help="revoke a provider grant"
+    )
+    provider_revoke.add_argument("name")
+    provider_revoke.add_argument("--expected-version", required=True, type=int)
+    provider_revoke.add_argument("--revoked-by", required=True)
+
     work_item = commands.add_parser("work-item", help="import durable work items")
     work_item_commands = work_item.add_subparsers(
         dest="work_item_command", required=True
@@ -271,6 +294,23 @@ def _dispatch(
             return control.create_agent_profile(**kwargs)
         if args.profile_command == "revise":
             return control.revise_agent_profile(**kwargs)
+    if args.command == "provider":
+        if args.provider_command == "add":
+            return control.add_provider_grant(
+                name=args.name,
+                spec=ProviderGrantSpec.from_mapping(_json_file(args.policy)),
+                credential_path=args.credential_file,
+                expires_at=args.expires_at,
+                created_by_handle=args.created_by,
+            )
+        if args.provider_command == "show":
+            return control.database.get_provider_grant(args.name)
+        if args.provider_command == "revoke":
+            return control.revoke_provider_grant(
+                args.name,
+                expected_version=args.expected_version,
+                revoked_by_handle=args.revoked_by,
+            )
     if args.command == "work-item" and args.work_item_command == "import":
         return control.import_work_item(
             project_key=args.project,
@@ -318,6 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ExecutionError,
         InputError,
         KrabError,
+        ProviderError,
         RunOrchestrationError,
         StorageError,
         ValidationError,

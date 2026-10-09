@@ -28,6 +28,9 @@ This repository currently contains the first executable vertical slice:
 - a run-scoped capability gateway that gives networkless workers typed access
   to pinned run context and asynchronous Krab interactions without mounting a
   reusable token;
+- immutable, revocable, and expiring provider grants that pin destination,
+  method, model, request/response limits, timeout, and concurrency while
+  resolving provider secrets only inside the trusted orchestrator;
 - tracked-files-only Git snapshots that resolve each run to an immutable commit;
 - a run coordinator that records preparation, container identity, resolved
   source revision, exit status, and terminal state; and
@@ -42,7 +45,10 @@ against a real local `imitation-krab`: idempotent question delivery,
 reverse-route response verification, and metadata-only local persistence all
 pass. The gateway carrier has been exercised through the real Docker executor:
 the worker has `--network none`, direct egress fails, and a typed request still
-reaches the orchestrator. The retired `krab_only` mode continues to fail closed.
+reaches the orchestrator. A second live proof reaches one policy-pinned local
+provider while undeclared grants, destinations, models, direct networking, and
+credential exposure all fail closed. The retired `krab_only` mode continues to
+fail closed.
 
 ## Quick start
 
@@ -55,6 +61,15 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db init
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db user add operator \
   --display-name "Local Operator"
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db status
+```
+
+Register an externally stored provider credential and immutable policy before
+creating a profile that names the grant:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  provider add openai-main --policy examples/provider-policy.json \
+  --credential-file ./private-credentials/openai.key --created-by operator
 ```
 
 Once a project, gateway-only profile, and run have been registered, execute or
@@ -84,7 +99,8 @@ container starts. A `gateway_only` worker receives no credential files: names
 in its profile authorize specific host-side gateway operations. Agent output,
 question and answer bodies, and transcripts are not durable control-plane
 state. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability and
-carrier contracts.
+carrier contracts and [docs/provider-broker.md](docs/provider-broker.md) for
+provider policy and secret-handling details.
 
 When running directly from a checkout, set `PYTHONPATH=src` or install the
 package into a virtual environment.
@@ -123,6 +139,7 @@ the real Docker executor:
 
 ```console
 PYTHONPATH=src python3.11 scripts/check_live_gateway.py
+PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
 ```
 
 Use `--image` to select another local, volume-free image with Python installed.

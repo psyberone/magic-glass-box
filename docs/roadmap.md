@@ -76,6 +76,8 @@ gateway.
 
 ## Milestone 2: scoped provider broker
 
+**Status: complete**
+
 - Add provider/model operations to the same run-scoped gateway contract.
 - Resolve only credentials named by the pinned profile inside the trusted
   orchestrator; never copy reusable provider secrets into a worker.

@@ -13,9 +13,11 @@ from typing import Any
 
 from .domain import (
     AgentProfileSpec,
+    GatewayCapability,
     InteractionKind,
     InteractionState,
     ProjectContext,
+    ProviderGrantSpec,
     RunState,
     ValidationError,
     WorkItemEnvelope,
@@ -25,11 +27,12 @@ from .domain import (
     validate_krab_id,
     validate_name,
     validate_project_key,
+    validate_provider_name,
     validate_transition,
 )
 from .krab import KrabIdentity, validate_base_url
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -342,8 +345,129 @@ BEGIN
 END;
 """
 
-SCHEMA = SCHEMA_V1 + INTERACTION_SCHEMA + WORK_ITEM_SCHEMA
-MIGRATIONS = {1: INTERACTION_SCHEMA, 2: WORK_ITEM_SCHEMA}
+PROVIDER_SCHEMA = """
+CREATE TABLE provider_grants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    policy_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    credential_ref TEXT NOT NULL,
+    expires_at TEXT,
+    revoked_at TEXT,
+    revoked_by TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (revoked_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND revoked_at IS NULL AND revoked_by IS NULL)
+        OR (state = 'revoked' AND revoked_at IS NOT NULL AND revoked_by IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE provider_grant_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_grant_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('provider_grant.created', 'provider_grant.revoked')
+    ),
+    actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (provider_grant_id, sequence),
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE run_provider_grants (
+    run_id TEXT NOT NULL,
+    authority_name TEXT NOT NULL,
+    provider_grant_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, authority_name),
+    UNIQUE (run_id, provider_grant_id),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE provider_invocations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    provider_grant_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (
+        outcome IN ('succeeded', 'failed', 'denied', 'busy')
+    ),
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 0),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+    http_status INTEGER CHECK (http_status BETWEEN 100 AND 599),
+    error_code TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX provider_grant_state ON provider_grants(state, expires_at);
+CREATE INDEX provider_grant_event_stream
+    ON provider_grant_events(provider_grant_id, sequence);
+CREATE INDEX run_provider_grant_grant
+    ON run_provider_grants(provider_grant_id, run_id);
+CREATE INDEX provider_invocation_run
+    ON provider_invocations(run_id, started_at, id);
+
+CREATE TRIGGER provider_grant_policy_immutable
+BEFORE UPDATE OF
+    name, policy_json, content_sha256, credential_ref, expires_at,
+    created_by, created_at
+ON provider_grants
+BEGIN
+    SELECT RAISE(ABORT, 'provider grant policy is immutable');
+END;
+CREATE TRIGGER provider_grant_immutable_delete
+BEFORE DELETE ON provider_grants
+BEGIN
+    SELECT RAISE(ABORT, 'provider grants cannot be deleted');
+END;
+CREATE TRIGGER provider_grant_event_immutable_update
+BEFORE UPDATE ON provider_grant_events
+BEGIN
+    SELECT RAISE(ABORT, 'provider grant events are immutable');
+END;
+CREATE TRIGGER provider_grant_event_immutable_delete
+BEFORE DELETE ON provider_grant_events
+BEGIN
+    SELECT RAISE(ABORT, 'provider grant events are immutable');
+END;
+CREATE TRIGGER run_provider_grant_immutable_update
+BEFORE UPDATE ON run_provider_grants
+BEGIN
+    SELECT RAISE(ABORT, 'run provider grants are immutable');
+END;
+CREATE TRIGGER run_provider_grant_immutable_delete
+BEFORE DELETE ON run_provider_grants
+BEGIN
+    SELECT RAISE(ABORT, 'run provider grants are immutable');
+END;
+CREATE TRIGGER provider_invocation_immutable_update
+BEFORE UPDATE ON provider_invocations
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+CREATE TRIGGER provider_invocation_immutable_delete
+BEFORE DELETE ON provider_invocations
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+"""
+
+SCHEMA = SCHEMA_V1 + INTERACTION_SCHEMA + WORK_ITEM_SCHEMA + PROVIDER_SCHEMA
+MIGRATIONS = {1: INTERACTION_SCHEMA, 2: WORK_ITEM_SCHEMA, 3: PROVIDER_SCHEMA}
 
 
 class StorageError(RuntimeError):
@@ -522,6 +646,7 @@ class Database:
                 ("krab_identities", "SELECT COUNT(*) FROM krab_identities"),
                 ("projects", "SELECT COUNT(*) FROM projects"),
                 ("agent_profiles", "SELECT COUNT(*) FROM agent_profiles"),
+                ("provider_grants", "SELECT COUNT(*) FROM provider_grants"),
                 ("runs", "SELECT COUNT(*) FROM runs"),
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
                 ("work_items", "SELECT COUNT(*) FROM work_items"),
@@ -566,6 +691,173 @@ class Database:
         if row is None:
             raise NotFoundError(f"local user not found: {handle}")
         return dict(row)
+
+    @staticmethod
+    def _timestamp(value: object, *, field: str) -> str:
+        text = require_string(value, field=field, max_bytes=64)
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValidationError(
+                f"{field} must be a valid RFC 3339 timestamp"
+            ) from exc
+        if parsed.tzinfo is None:
+            raise ValidationError(f"{field} must include a timezone")
+        return parsed.astimezone(UTC).isoformat(timespec="microseconds")
+
+    @staticmethod
+    def _provider_grant_record(
+        connection: sqlite3.Connection,
+        *,
+        name: str | None = None,
+        grant_id: str | None = None,
+        include_reference: bool = False,
+    ) -> dict[str, Any]:
+        if (name is None) == (grant_id is None):
+            raise TypeError("select a provider grant by exactly one identifier")
+        row = connection.execute(
+            "SELECT pg.id, pg.name, pg.state, pg.version, pg.policy_json, "
+            "pg.content_sha256, pg.credential_ref, pg.expires_at, "
+            "pg.revoked_at, creator.handle AS created_by, "
+            "revoker.handle AS revoked_by, pg.created_at, pg.updated_at "
+            "FROM provider_grants pg "
+            "JOIN users creator ON creator.id = pg.created_by "
+            "LEFT JOIN users revoker ON revoker.id = pg.revoked_by "
+            "WHERE (? IS NOT NULL AND pg.name = ?) "
+            "OR (? IS NOT NULL AND pg.id = ?)",
+            (name, name, grant_id, grant_id),
+        ).fetchone()
+        if row is None:
+            identifier = name if name is not None else grant_id
+            raise NotFoundError(f"provider grant not found: {identifier}")
+        result = dict(row)
+        try:
+            spec = ProviderGrantSpec.from_mapping(json.loads(result.pop("policy_json")))
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored provider grant policy is invalid") from exc
+        if spec.digest != result["content_sha256"]:
+            raise StorageError("stored provider grant policy digest does not match")
+        result["policy"] = spec.to_dict()
+        if not include_reference:
+            result.pop("credential_ref")
+        events = connection.execute(
+            "SELECT e.sequence, e.kind, u.handle AS actor, e.created_at "
+            "FROM provider_grant_events e "
+            "JOIN users u ON u.id = e.actor_id "
+            "WHERE e.provider_grant_id = ? ORDER BY e.sequence",
+            (result["id"],),
+        ).fetchall()
+        result["events"] = [dict(event) for event in events]
+        return result
+
+    def create_provider_grant(
+        self,
+        *,
+        name: str,
+        spec: ProviderGrantSpec,
+        credential_ref: str,
+        expires_at: str | None,
+        created_by: str,
+    ) -> dict[str, Any]:
+        name = validate_provider_name(name, field="provider grant name")
+        if not isinstance(spec, ProviderGrantSpec):
+            raise ValidationError("spec must be a ProviderGrantSpec")
+        credential_ref = require_string(
+            credential_ref, field="credential_ref", max_bytes=4096
+        )
+        if expires_at is not None:
+            expires_at = self._timestamp(expires_at, field="expires_at")
+        grant_id = self.new_id("pgr")
+        now = self.now()
+        try:
+            with closing(self.connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO provider_grants "
+                    "(id, name, state, version, policy_json, content_sha256, "
+                    "credential_ref, expires_at, created_by, created_at, "
+                    "updated_at) VALUES (?, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        grant_id,
+                        name,
+                        spec.canonical,
+                        spec.digest,
+                        credential_ref,
+                        expires_at,
+                        created_by,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO provider_grant_events "
+                    "(provider_grant_id, sequence, kind, actor_id, created_at) "
+                    "VALUES (?, 1, 'provider_grant.created', ?, ?)",
+                    (grant_id, created_by, now),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("provider grant already exists or is invalid") from exc
+        return self.get_provider_grant(name)
+
+    def get_provider_grant(self, name: str) -> dict[str, Any]:
+        name = validate_provider_name(name, field="provider grant name")
+        with closing(self.connect()) as connection:
+            return self._provider_grant_record(connection, name=name)
+
+    def revoke_provider_grant(
+        self,
+        name: str,
+        *,
+        expected_version: int,
+        revoked_by: str,
+    ) -> dict[str, Any]:
+        name = validate_provider_name(name, field="provider grant name")
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            raise ValidationError("expected_version must be a positive integer")
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                current = connection.execute(
+                    "SELECT id, state, version FROM provider_grants WHERE name = ?",
+                    (name,),
+                ).fetchone()
+                if current is None:
+                    raise NotFoundError(f"provider grant not found: {name}")
+                if current["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        f"provider grant version is {current['version']}, "
+                        f"expected {expected_version}"
+                    )
+                if current["state"] != "active":
+                    raise ConflictError("provider grant is already revoked")
+                cursor = connection.execute(
+                    "UPDATE provider_grants SET state = 'revoked', "
+                    "version = version + 1, revoked_at = ?, revoked_by = ?, "
+                    "updated_at = ? WHERE id = ? AND version = ?",
+                    (now, revoked_by, now, current["id"], expected_version),
+                )
+                if cursor.rowcount != 1:
+                    raise ConcurrentUpdateError("provider grant changed concurrently")
+                connection.execute(
+                    "INSERT INTO provider_grant_events "
+                    "(provider_grant_id, sequence, kind, actor_id, created_at) "
+                    "VALUES (?, ?, 'provider_grant.revoked', ?, ?)",
+                    (current["id"], expected_version + 1, revoked_by, now),
+                )
+                connection.commit()
+            except (NotFoundError, ConflictError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("provider grant could not be revoked") from exc
+        return self.get_provider_grant(name)
 
     def create_krab_instance(self, name: str, base_url: str) -> dict[str, Any]:
         name = validate_name(name, field="instance name")
@@ -978,6 +1270,32 @@ class Database:
                 raise ConflictError("identical project context already exists") from exc
         return self.get_project(project_key)
 
+    def _available_provider_grants(
+        self,
+        connection: sqlite3.Connection,
+        spec: AgentProfileSpec,
+    ) -> list[sqlite3.Row]:
+        if GatewayCapability.PROVIDER_INVOKE not in spec.gateway_capabilities:
+            return []
+        result: list[sqlite3.Row] = []
+        now = self.now()
+        for name in spec.credential_names:
+            if name == "krab":
+                continue
+            row = connection.execute(
+                "SELECT id, name, state, expires_at FROM provider_grants "
+                "WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if (
+                row is None
+                or row["state"] != "active"
+                or (row["expires_at"] is not None and row["expires_at"] <= now)
+            ):
+                raise ConflictError(f"provider grant is unavailable: {name}")
+            result.append(row)
+        return result
+
     def create_agent_profile(
         self,
         *,
@@ -993,6 +1311,7 @@ class Database:
         try:
             with closing(self.connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                self._available_provider_grants(connection, spec)
                 connection.execute(
                     "INSERT INTO agent_profiles "
                     "(id, name, created_by, created_at, updated_at) "
@@ -1063,6 +1382,7 @@ class Database:
                     "FROM agent_profile_versions WHERE profile_id = ?",
                     (profile["id"],),
                 ).fetchone()["version"]
+                self._available_provider_grants(connection, spec)
                 connection.execute(
                     "INSERT INTO agent_profile_versions "
                     "(id, profile_id, version, spec_json, content_sha256, "
@@ -1154,7 +1474,7 @@ class Database:
                         f"active agent profile not found: {profile_name}"
                     )
                 profile_version = connection.execute(
-                    "SELECT av.id, ki.krab_instance_id "
+                    "SELECT av.id, av.spec_json, ki.krab_instance_id "
                     "FROM agent_profile_versions av "
                     "JOIN krab_identities ki ON ki.id = av.krab_identity_id "
                     "WHERE av.profile_id = ? ORDER BY av.version DESC LIMIT 1",
@@ -1164,6 +1484,15 @@ class Database:
                     raise ConflictError(
                         "agent profile and project belong to different Krab instances"
                     )
+                try:
+                    profile_spec = AgentProfileSpec.from_mapping(
+                        json.loads(profile_version["spec_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError("stored agent profile is invalid") from exc
+                provider_grants = self._available_provider_grants(
+                    connection, profile_spec
+                )
                 connection.execute(
                     "INSERT INTO runs "
                     "(id, project_id, context_version_id, profile_version_id, "
@@ -1191,8 +1520,15 @@ class Database:
                     "created_at) VALUES (?, 1, 'run.created', NULL, 'queued', '{}', ?)",
                     (run_id, now),
                 )
+                for grant in provider_grants:
+                    connection.execute(
+                        "INSERT INTO run_provider_grants "
+                        "(run_id, authority_name, provider_grant_id, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (run_id, grant["name"], grant["id"], now),
+                    )
                 connection.commit()
-            except (NotFoundError, ConflictError):
+            except (NotFoundError, ConflictError, StorageError):
                 connection.rollback()
                 raise
             except (sqlite3.IntegrityError, TypeError) as exc:
@@ -1641,6 +1977,180 @@ class Database:
             ).fetchall()
         return [self.get_interaction(row["id"]) for row in rows]
 
+    def get_run_provider_grant(
+        self, run_id: str, authority_name: str
+    ) -> dict[str, Any]:
+        authority_name = validate_provider_name(
+            authority_name, field="provider authority name"
+        )
+        with closing(self.connect()) as connection:
+            mapping = connection.execute(
+                "SELECT provider_grant_id FROM run_provider_grants "
+                "WHERE run_id = ? AND authority_name = ?",
+                (run_id, authority_name),
+            ).fetchone()
+            if mapping is None:
+                raise NotFoundError(
+                    f"provider grant is not authorized for run: {authority_name}"
+                )
+            result = self._provider_grant_record(
+                connection,
+                grant_id=mapping["provider_grant_id"],
+                include_reference=True,
+            )
+        if result["state"] != "active" or (
+            result["expires_at"] is not None and result["expires_at"] <= self.now()
+        ):
+            raise ConflictError(f"provider grant is unavailable: {authority_name}")
+        result["authority_name"] = authority_name
+        return result
+
+    def list_run_provider_grants(self, run_id: str) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if exists is None:
+                raise NotFoundError(f"run not found: {run_id}")
+            rows = connection.execute(
+                "SELECT rpg.authority_name, pg.id AS grant_id, pg.name, "
+                "pg.state, pg.expires_at, pg.policy_json, pg.content_sha256 "
+                "FROM run_provider_grants rpg JOIN provider_grants pg "
+                "ON pg.id = rpg.provider_grant_id WHERE rpg.run_id = ? "
+                "ORDER BY rpg.authority_name",
+                (run_id,),
+            ).fetchall()
+        now = self.now()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                spec = ProviderGrantSpec.from_mapping(json.loads(row["policy_json"]))
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError("stored provider grant policy is invalid") from exc
+            if spec.digest != row["content_sha256"]:
+                raise StorageError("stored provider grant policy digest does not match")
+            state = row["state"]
+            if (
+                state == "active"
+                and row["expires_at"] is not None
+                and row["expires_at"] <= now
+            ):
+                state = "expired"
+            result.append(
+                {
+                    "authority_name": row["authority_name"],
+                    "grant_id": row["grant_id"],
+                    "name": row["name"],
+                    "provider": spec.provider,
+                    "model": spec.model,
+                    "state": state,
+                    "expires_at": row["expires_at"],
+                }
+            )
+        return result
+
+    def record_provider_invocation(
+        self,
+        *,
+        run_id: str,
+        provider_grant_id: str,
+        outcome: str,
+        request_bytes: int,
+        response_bytes: int,
+        http_status: int | None,
+        error_code: str | None,
+        started_at: str,
+    ) -> dict[str, Any]:
+        if outcome not in {"succeeded", "failed", "denied", "busy"}:
+            raise ValidationError("provider invocation outcome is invalid")
+        for field, value in (
+            ("request_bytes", request_bytes),
+            ("response_bytes", response_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValidationError(f"{field} must be a non-negative integer")
+        if http_status is not None and (
+            isinstance(http_status, bool)
+            or not isinstance(http_status, int)
+            or not 100 <= http_status <= 599
+        ):
+            raise ValidationError("http_status must be between 100 and 599")
+        if error_code is not None:
+            error_code = require_string(error_code, field="error_code", max_bytes=64)
+        if outcome == "succeeded":
+            if http_status is None or not 200 <= http_status < 300 or error_code:
+                raise ValidationError("successful provider invocation is inconsistent")
+        elif error_code is None:
+            raise ValidationError("failed provider invocation requires an error_code")
+        started_at = self._timestamp(started_at, field="started_at")
+        invocation_id = self.new_id("pinv")
+        finished_at = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                authority = connection.execute(
+                    "SELECT 1 FROM run_provider_grants "
+                    "WHERE run_id = ? AND provider_grant_id = ?",
+                    (run_id, provider_grant_id),
+                ).fetchone()
+                if authority is None:
+                    raise ConflictError(
+                        "provider grant is not pinned to the requested run"
+                    )
+                connection.execute(
+                    "INSERT INTO provider_invocations "
+                    "(id, run_id, provider_grant_id, outcome, request_bytes, "
+                    "response_bytes, http_status, error_code, started_at, "
+                    "finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        invocation_id,
+                        run_id,
+                        provider_grant_id,
+                        outcome,
+                        request_bytes,
+                        response_bytes,
+                        http_status,
+                        error_code,
+                        started_at,
+                        finished_at,
+                    ),
+                )
+                connection.commit()
+            except ConflictError:
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "provider invocation could not be recorded"
+                ) from exc
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT id, run_id, provider_grant_id, outcome, request_bytes, "
+                "response_bytes, http_status, error_code, started_at, finished_at "
+                "FROM provider_invocations WHERE id = ?",
+                (invocation_id,),
+            ).fetchone()
+        if row is None:
+            raise StorageError("provider invocation was not recorded")
+        return dict(row)
+
+    def list_provider_invocations(self, run_id: str) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if exists is None:
+                raise NotFoundError(f"run not found: {run_id}")
+            rows = connection.execute(
+                "SELECT id, run_id, provider_grant_id, outcome, request_bytes, "
+                "response_bytes, http_status, error_code, started_at, finished_at "
+                "FROM provider_invocations WHERE run_id = ? "
+                "ORDER BY started_at, id",
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_run_execution(self, run_id: str) -> dict[str, Any]:
         """Load every immutable input and identity pinned by a run."""
 
@@ -1666,6 +2176,13 @@ class Database:
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
+            provider_references = connection.execute(
+                "SELECT rpg.authority_name, pg.credential_ref "
+                "FROM run_provider_grants rpg JOIN provider_grants pg "
+                "ON pg.id = rpg.provider_grant_id WHERE rpg.run_id = ? "
+                "ORDER BY rpg.authority_name",
+                (run_id,),
+            ).fetchall()
         if row is None:
             raise NotFoundError(f"run not found: {run_id}")
         result = dict(row)
@@ -1702,7 +2219,13 @@ class Database:
                 result.pop("work_item_sha256")
         except (json.JSONDecodeError, TypeError, ValidationError) as exc:
             raise StorageError("pinned run data is invalid") from exc
-        result["credential_references"] = {"krab": result.pop("credential_ref")}
+        result["credential_references"] = {
+            "krab": result.pop("credential_ref"),
+            **{
+                provider["authority_name"]: provider["credential_ref"]
+                for provider in provider_references
+            },
+        }
         return result
 
     def get_run_transport(self, run_id: str) -> dict[str, Any]:
@@ -1773,6 +2296,8 @@ class Database:
         for event in result["events"]:
             event.pop("metadata_json")
         result["interactions"] = self.list_run_interactions(run_id)
+        result["provider_grants"] = self.list_run_provider_grants(run_id)
+        result["provider_invocations"] = self.list_provider_invocations(run_id)
         return result
 
     def iter_active_runs(self) -> Iterator[dict[str, Any]]:

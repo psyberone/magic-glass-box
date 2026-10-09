@@ -15,11 +15,12 @@ A profile opts into each operation explicitly:
   "command": ["agent", "run"],
   "workspace_mode": "copy_on_write",
   "network_mode": "gateway_only",
-  "credential_names": ["krab"],
+  "credential_names": ["krab", "openai-main"],
   "gateway_capabilities": [
     "run.describe",
     "interaction.open",
-    "interaction.read"
+    "interaction.read",
+    "provider.invoke"
   ]
 }
 ```
@@ -28,6 +29,9 @@ A profile opts into each operation explicitly:
 operations require the `krab` name, and the orchestrator resolves the pinned
 Krab identity only while performing that operation. Unknown capabilities,
 duplicates, and interaction capabilities without `krab` fail validation.
+`provider.invoke` requires at least one non-Krab grant name. Grant existence,
+state, and expiry are checked when a profile revision is created, when a run
+pins it, and again for every invocation.
 
 ## Carrier contract
 
@@ -117,6 +121,25 @@ The orchestrator re-fetches the response from Krab and re-verifies project,
 session, creator, recipient, item ID, and status before returning transient
 untrusted title/body content. The response body is not written to SQLite.
 
+### `provider.invoke`
+
+Payload:
+
+```json
+{
+  "grant": "openai-main",
+  "request": {"input": "hello"}
+}
+```
+
+The grant must be named by the pinned profile. The payload has no run ID,
+destination, method, credential, or worker-selected model. The orchestrator
+checks run state and grant revocation/expiry, resolves the external credential
+reference, injects the pinned model, and applies the grant's byte, timeout, and
+concurrency limits. The JSON object response is transient and explicitly
+untrusted. Only status, byte counts, outcome, error category, timestamps, and
+grant/run IDs are durable. See [provider-broker.md](provider-broker.md).
+
 ## Resume and recovery
 
 When the human response is accepted, the interaction becomes `answered` and
@@ -132,13 +155,13 @@ worker can no longer be proven.
 
 ## Current boundary
 
-This slice brokers run context and Krab interactions only. It deliberately does
-not grant transparent Internet access or relay arbitrary URLs. Provider/model
-operations will extend this same typed, run-bound gateway in the next milestone
-while Docker networking remains disabled.
+The gateway brokers run context, Krab interactions, and named provider grants.
+It does not grant transparent Internet access, relay arbitrary URLs, expose
+administrator credentials, or accept destinations selected by the worker.
 
 Run the carrier and isolation proof with:
 
 ```console
 PYTHONPATH=src python3.11 scripts/check_live_gateway.py
+PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
 ```

@@ -219,7 +219,7 @@ class AgentProfileTests(unittest.TestCase):
             json.loads(path.read_text(encoding="utf-8"))
         )
         self.assertEqual(profile.network_mode, NetworkMode.GATEWAY_ONLY)
-        self.assertEqual(profile.credential_names, ("krab",))
+        self.assertEqual(profile.credential_names, ("krab", "openai-main"))
         self.assertEqual(profile.gateway_capabilities, tuple(GatewayCapability))
 
     def test_profile_uses_argv_and_named_credentials(self) -> None:
@@ -245,6 +245,29 @@ class AgentProfileTests(unittest.TestCase):
                 "workspace_mode": "copy_on_write",
             },
         )
+
+    def test_provider_gateway_capability_requires_a_named_provider_grant(self) -> None:
+        profile = AgentProfileSpec.from_mapping(
+            {
+                "image": "agent@sha256:abc",
+                "command": ["agent"],
+                "credential_names": ["krab", "openai-main"],
+                "gateway_capabilities": ["provider.invoke"],
+            }
+        )
+        self.assertEqual(
+            profile.gateway_capabilities,
+            (GatewayCapability.PROVIDER_INVOKE,),
+        )
+        with self.assertRaisesRegex(ValidationError, "provider grant"):
+            AgentProfileSpec.from_mapping(
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "credential_names": ["krab"],
+                    "gateway_capabilities": ["provider.invoke"],
+                }
+            )
 
     def test_gateway_capabilities_are_explicit_and_require_gateway_authority(
         self,

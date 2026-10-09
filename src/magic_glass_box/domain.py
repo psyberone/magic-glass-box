@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class ValidationError(ValueError):
@@ -432,6 +433,237 @@ class GatewayCapability(StrEnum):
     RUN_DESCRIBE = "run.describe"
     INTERACTION_OPEN = "interaction.open"
     INTERACTION_READ = "interaction.read"
+    PROVIDER_INVOKE = "provider.invoke"
+
+
+PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
+PROVIDER_RESERVED_HEADERS = {
+    "accept",
+    "authorization",
+    "connection",
+    "content-length",
+    "content-type",
+    "host",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+}
+
+
+def validate_provider_name(value: object, *, field: str = "provider name") -> str:
+    if not isinstance(value, str) or PROVIDER_NAME_RE.fullmatch(value) is None:
+        raise ValidationError(f"{field} must match [a-z][a-z0-9_-]{{0,63}}")
+    return value
+
+
+def _bounded_integer(value: object, *, field: str, minimum: int, maximum: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= maximum
+    ):
+        raise ValidationError(f"{field} must be between {minimum} and {maximum}")
+    return value
+
+
+@dataclass(frozen=True)
+class ProviderGrantSpec:
+    """Immutable outbound policy selected by a named provider grant."""
+
+    provider: str
+    adapter: str
+    destination: str
+    method: str
+    model: str
+    credential_header: str
+    credential_prefix: str
+    static_headers: tuple[tuple[str, str], ...]
+    request_bytes: int
+    response_bytes: int
+    timeout_ms: int
+    max_concurrency: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> ProviderGrantSpec:
+        if not isinstance(value, dict):
+            raise ValidationError("provider grant spec must be an object")
+        fields = {
+            "provider",
+            "adapter",
+            "destination",
+            "method",
+            "model",
+            "credential_header",
+            "credential_prefix",
+            "static_headers",
+            "request_bytes",
+            "response_bytes",
+            "timeout_ms",
+            "max_concurrency",
+        }
+        unknown = set(value) - fields
+        if unknown:
+            raise ValidationError(
+                "provider grant spec contains unknown fields: "
+                + ", ".join(sorted(unknown))
+            )
+        missing = fields - set(value)
+        if missing:
+            raise ValidationError(
+                "provider grant spec is missing fields: " + ", ".join(sorted(missing))
+            )
+
+        provider = validate_provider_name(value["provider"], field="provider")
+        adapter = require_string(value["adapter"], field="adapter", max_bytes=32)
+        if adapter != "json_http":
+            raise ValidationError("provider adapter must be json_http")
+
+        destination = require_string(
+            value["destination"], field="destination", max_bytes=2048
+        )
+        parsed = urlsplit(destination)
+        if parsed.username is not None or parsed.password is not None:
+            raise ValidationError("provider destination must not contain credentials")
+        if parsed.fragment:
+            raise ValidationError("provider destination must not contain a fragment")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValidationError("provider destination has an invalid port") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or not parsed.hostname.isascii()
+            or any(character.isspace() for character in destination)
+            or not parsed.path.startswith("/")
+            or port == 0
+        ):
+            raise ValidationError("provider destination must be an absolute HTTP URL")
+        if parsed.scheme != "https" and parsed.hostname not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise ValidationError(
+                "provider destination must use HTTPS unless it is loopback"
+            )
+
+        method = require_string(value["method"], field="method", max_bytes=16)
+        if method != "POST":
+            raise ValidationError("provider method must be POST")
+        model = _nonblank_string(value["model"], field="model", max_bytes=256)
+
+        header = require_string(
+            value["credential_header"],
+            field="credential_header",
+            max_bytes=64,
+        ).lower()
+        if HTTP_HEADER_NAME_RE.fullmatch(
+            header
+        ) is None or header in PROVIDER_RESERVED_HEADERS - {"authorization"}:
+            raise ValidationError("provider credential header is invalid")
+        prefix = require_string(
+            value["credential_prefix"],
+            field="credential_prefix",
+            max_bytes=64,
+            allow_empty=True,
+        )
+        if any(not 0x20 <= ord(character) <= 0x7E for character in prefix):
+            raise ValidationError("provider credential prefix must be printable ASCII")
+
+        header_values = value["static_headers"]
+        if not isinstance(header_values, dict) or len(header_values) > 16:
+            raise ValidationError(
+                "provider static_headers must be an object of at most 16 entries"
+            )
+        normalized_headers: dict[str, str] = {}
+        for raw_name, raw_value in header_values.items():
+            if not isinstance(raw_name, str):
+                raise ValidationError("provider static header name is invalid")
+            name = raw_name.lower()
+            if (
+                HTTP_HEADER_NAME_RE.fullmatch(name) is None
+                or name in PROVIDER_RESERVED_HEADERS
+                or name == header
+                or name in normalized_headers
+            ):
+                raise ValidationError(
+                    "provider static header is reserved or duplicated"
+                )
+            content = require_string(
+                raw_value,
+                field=f"provider static header {name}",
+                max_bytes=512,
+                allow_empty=True,
+            )
+            if any(not 0x20 <= ord(character) <= 0x7E for character in content):
+                raise ValidationError(
+                    "provider static header value must be printable ASCII"
+                )
+            normalized_headers[name] = content
+
+        return cls(
+            provider=provider,
+            adapter=adapter,
+            destination=destination,
+            method=method,
+            model=model,
+            credential_header=header,
+            credential_prefix=prefix,
+            static_headers=tuple(sorted(normalized_headers.items())),
+            request_bytes=_bounded_integer(
+                value["request_bytes"],
+                field="request_bytes",
+                minimum=1,
+                maximum=32 * 1024,
+            ),
+            response_bytes=_bounded_integer(
+                value["response_bytes"],
+                field="response_bytes",
+                minimum=1,
+                maximum=1024 * 1024,
+            ),
+            timeout_ms=_bounded_integer(
+                value["timeout_ms"],
+                field="timeout_ms",
+                minimum=100,
+                maximum=120_000,
+            ),
+            max_concurrency=_bounded_integer(
+                value["max_concurrency"],
+                field="max_concurrency",
+                minimum=1,
+                maximum=16,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "adapter": self.adapter,
+            "credential_header": self.credential_header,
+            "credential_prefix": self.credential_prefix,
+            "destination": self.destination,
+            "max_concurrency": self.max_concurrency,
+            "method": self.method,
+            "model": self.model,
+            "provider": self.provider,
+            "request_bytes": self.request_bytes,
+            "response_bytes": self.response_bytes,
+            "static_headers": dict(self.static_headers),
+            "timeout_ms": self.timeout_ms,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
 
 
 @dataclass(frozen=True)
@@ -537,6 +769,12 @@ class AgentProfileSpec:
         ):
             raise ValidationError(
                 "interaction gateway capabilities require the krab credential"
+            )
+        if GatewayCapability.PROVIDER_INVOKE in capability_tuple and not set(
+            credential_tuple
+        ).difference({"krab"}):
+            raise ValidationError(
+                "provider.invoke requires at least one named provider grant"
             )
         return cls(
             image=image_text,

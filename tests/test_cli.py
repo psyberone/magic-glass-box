@@ -21,6 +21,7 @@ from magic_glass_box.cli import (
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
+    ProviderGrantSpec,
     RunState,
     WorkItemEnvelope,
 )
@@ -38,6 +39,10 @@ class FakeDatabase:
     def get_run(self, run_id: str) -> dict[str, object]:
         self.calls.append(("run.show", {"run_id": run_id}))
         return {"operation": "run.show", "run_id": run_id}
+
+    def get_provider_grant(self, name: str) -> dict[str, object]:
+        self.calls.append(("provider.show", {"name": name}))
+        return {"operation": "provider.show", "name": name}
 
 
 class FakeControlPlane:
@@ -76,6 +81,12 @@ class FakeControlPlane:
 
     def revise_agent_profile(self, **kwargs: object) -> dict[str, object]:
         return self._called("profile.revise", **kwargs)
+
+    def add_provider_grant(self, **kwargs: object) -> dict[str, object]:
+        return self._called("provider.add", **kwargs)
+
+    def revoke_provider_grant(self, name: str, **kwargs: object) -> dict[str, object]:
+        return self._called("provider.revoke", name=name, **kwargs)
 
     def import_work_item(self, **kwargs: object) -> dict[str, object]:
         return self._called("work-item.import", **kwargs)
@@ -122,7 +133,7 @@ class CLITests(unittest.TestCase):
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 3)
+        self.assertEqual(initialized["schema_version"], 4)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -160,6 +171,29 @@ class CLITests(unittest.TestCase):
                 }
             ),
             encoding="utf-8",
+        )
+        provider_policy = Path(self.temporary.name) / "provider.json"
+        provider_policy.write_text(
+            json.dumps(
+                {
+                    "provider": "openai",
+                    "adapter": "json_http",
+                    "destination": "https://api.openai.com/v1/responses",
+                    "method": "POST",
+                    "model": "gpt-test",
+                    "credential_header": "Authorization",
+                    "credential_prefix": "Bearer ",
+                    "static_headers": {},
+                    "request_bytes": 32768,
+                    "response_bytes": 1048576,
+                    "timeout_ms": 30000,
+                    "max_concurrency": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+        parsed_provider_policy = ProviderGrantSpec.from_mapping(
+            json.loads(provider_policy.read_text(encoding="utf-8"))
         )
         fake = FakeControlPlane()
         cases: tuple[
@@ -350,6 +384,60 @@ class CLITests(unittest.TestCase):
                 {"operation": "profile.revise"},
             ),
             (
+                "provider.add",
+                [
+                    "provider",
+                    "add",
+                    "openai-main",
+                    "--policy",
+                    str(provider_policy),
+                    "--credential-file",
+                    "/private/openai.secret",
+                    "--expires-at",
+                    "2027-01-01T00:00:00Z",
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "provider.add",
+                    {
+                        "name": "openai-main",
+                        "spec": parsed_provider_policy,
+                        "credential_path": Path("/private/openai.secret"),
+                        "expires_at": "2027-01-01T00:00:00Z",
+                        "created_by_handle": "operator",
+                    },
+                ),
+                {"operation": "provider.add"},
+            ),
+            (
+                "provider.show",
+                ["provider", "show", "openai-main"],
+                ("provider.show", {"name": "openai-main"}),
+                {"operation": "provider.show", "name": "openai-main"},
+            ),
+            (
+                "provider.revoke",
+                [
+                    "provider",
+                    "revoke",
+                    "openai-main",
+                    "--expected-version",
+                    "1",
+                    "--revoked-by",
+                    "operator",
+                ],
+                (
+                    "provider.revoke",
+                    {
+                        "name": "openai-main",
+                        "expected_version": 1,
+                        "revoked_by_handle": "operator",
+                    },
+                ),
+                {"operation": "provider.revoke"},
+            ),
+            (
                 "work-item.import",
                 [
                     "work-item",
@@ -446,7 +534,7 @@ class CLITests(unittest.TestCase):
                     status = main(["--db", str(self.database), *arguments])
                 self.assertEqual(status, 0)
                 self.assertEqual(json.loads(stdout.getvalue()), expected_result)
-                if expected in {"status", "run.show"}:
+                if expected in {"status", "run.show", "provider.show"}:
                     self.assertEqual(fake.database.calls[-1], expected_call)
                 else:
                     self.assertEqual(fake.calls[-1], expected_call)
@@ -551,6 +639,7 @@ class CLITests(unittest.TestCase):
                 "krab": "manage and query Krab connections",
                 "project": "manage project context",
                 "profile": "manage agent profiles",
+                "provider": "manage scoped provider grants",
                 "work-item": "import durable work items",
                 "run": "manage agent runs",
             },
@@ -569,6 +658,11 @@ class CLITests(unittest.TestCase):
             "profile": {
                 "add": "create a versioned agent profile",
                 "revise": "append an immutable profile revision",
+            },
+            "provider": {
+                "add": "add an immutable provider policy and credential reference",
+                "show": "show provider policy and lifecycle metadata",
+                "revoke": "revoke a provider grant",
             },
             "work-item": {
                 "import": "create or update a normalized work item",

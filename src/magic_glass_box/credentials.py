@@ -16,6 +16,8 @@ class CredentialError(RuntimeError):
 class CredentialResolver(Protocol):
     def resolve(self, reference: str) -> str: ...
 
+    def resolve_secret(self, reference: str) -> str: ...
+
 
 class PrivateFileCredentialResolver:
     """Resolve `file:` references without following links or weakening modes."""
@@ -32,6 +34,17 @@ class PrivateFileCredentialResolver:
         path = self._path_from_reference(reference)
         self._validate_parent(path.parent)
         return self._read(path)
+
+    def secret_reference(self, path: Path) -> str:
+        resolved = path.expanduser().absolute()
+        self._validate_parent(resolved.parent)
+        self._read_secret(resolved)
+        return self.scheme + str(resolved)
+
+    def resolve_secret(self, reference: str) -> str:
+        path = self._path_from_reference(reference)
+        self._validate_parent(path.parent)
+        return self._read_secret(path)
 
     def resolve_path(self, reference: str) -> Path:
         """Return a validated credential path for a read-only sandbox mount."""
@@ -66,6 +79,32 @@ class PrivateFileCredentialResolver:
 
     @staticmethod
     def _read(path: Path) -> str:
+        raw = PrivateFileCredentialResolver._read_bytes(path, 512)
+        try:
+            token = raw.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise CredentialError("credential file is not ASCII") from exc
+        if KRAB_TOKEN_RE.fullmatch(token) is None:
+            raise CredentialError("credential file does not contain a Krab token")
+        return token
+
+    @staticmethod
+    def _read_secret(path: Path) -> str:
+        raw = PrivateFileCredentialResolver._read_bytes(path, 4096)
+        try:
+            secret = raw.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise CredentialError("credential file is not ASCII") from exc
+        if not secret:
+            raise CredentialError("credential file contains an empty provider secret")
+        if any(not 0x21 <= ord(character) <= 0x7E for character in secret):
+            raise CredentialError(
+                "credential file must contain one printable ASCII provider secret"
+            )
+        return secret
+
+    @staticmethod
+    def _read_bytes(path: Path, limit: int) -> bytes:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -89,15 +128,9 @@ class PrivateFileCredentialResolver:
                 raise CredentialError(
                     "credential file must not be accessible by group or other users"
                 )
-            raw = os.read(descriptor, 512)
+            raw = os.read(descriptor, limit)
             if os.read(descriptor, 1):
                 raise CredentialError("credential file is unexpectedly large")
         finally:
             os.close(descriptor)
-        try:
-            token = raw.decode("ascii").strip()
-        except UnicodeDecodeError as exc:
-            raise CredentialError("credential file is not ASCII") from exc
-        if KRAB_TOKEN_RE.fullmatch(token) is None:
-            raise CredentialError("credential file does not contain a Krab token")
-        return token
+        return raw

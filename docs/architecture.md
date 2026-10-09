@@ -43,6 +43,9 @@ project-activity projection.
   immutable Krab `user_id`; handles are cached only for display.
 - A credential reference points to an external secret source. The current
   implementation supports private token files and never persists the token.
+- A provider grant is an immutable, content-addressed outbound policy with a
+  named external credential reference. Creation and revocation are audited;
+  expiry is enforced without storing the secret value.
 - Project context revisions are append-only and content-addressed.
 - Forge-neutral work-item imports are keyed by project, source, and external
   ID. Changed content appends an immutable version; identical imports are
@@ -51,6 +54,8 @@ project-activity projection.
   argv-form command, workspace/network policy, and a dedicated Krab identity.
 - A run pins exact context, profile, and work-item revisions. Later imports or
   edits cannot change an in-flight or historical run.
+- A provider-capable run also pins each exact grant ID named by its profile.
+  Revocation and expiry remain live kill switches for already-pinned runs.
 - The requested source revision is resolved to a full Git commit and persisted
   in the transition to `running`.
 - Every run transition is appended to an immutable event stream and guarded by
@@ -107,12 +112,15 @@ The retired `krab_only` mode fails closed.
 
 The gateway binds run identity outside the agent-controlled request. Its
 allowlist comes from the immutable profile revision. The current operations are
-`run.describe`, `interaction.open`, and `interaction.read`; none accepts a run
-ID or credential value. Opening an interaction tells the original worker to
-exit, cleanup removes its resources, and the durable run remains
+`run.describe`, `interaction.open`, `interaction.read`, and `provider.invoke`;
+none accepts a run ID or credential value. Provider calls additionally pin the
+destination, method, model, headers, byte limits, timeout, and concurrency in
+administrator-owned policy. Opening an interaction tells the original worker
+to exit, cleanup removes its resources, and the durable run remains
 `waiting_for_input`. A verified response re-queues the run, and a replacement
 worker may retrieve only the response correlated to that run. See
-[agent-gateway.md](agent-gateway.md).
+[agent-gateway.md](agent-gateway.md) and
+[provider-broker.md](provider-broker.md).
 
 ## Work-item boundary
 
@@ -127,6 +135,6 @@ therefore never an authority channel.
 
 Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
-exit proofs. The durable interaction path and run-scoped gateway are complete.
-The next slice extends the same authority boundary into a scoped provider
-broker without restoring direct worker egress.
+exit proofs. The durable interaction path, run-scoped gateway, and scoped
+provider broker are complete. The next slice adds structured worker replacement
+and handoff without turning transcripts into durable state.
