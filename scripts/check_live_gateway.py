@@ -178,7 +178,12 @@ def main() -> int:
                 credential_names=(),
                 gateway_capabilities=(GatewayCapability.RUN_DESCRIBE,),
             )
-            result = DockerExecutor(DockerCLI(timeout=args.docker_timeout)).execute(
+            result = DockerExecutor(
+                DockerCLI(
+                    command_timeout=args.docker_timeout,
+                    run_timeout=args.docker_timeout,
+                )
+            ).execute(
                 SandboxRequest(
                     run_id=RUN_ID,
                     profile=profile,

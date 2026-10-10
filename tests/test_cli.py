@@ -22,7 +22,6 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
     ProviderGrantSpec,
-    RunState,
     WorkItemEnvelope,
 )
 from magic_glass_box.krab import ActivityPage
@@ -30,6 +29,7 @@ from magic_glass_box.krab import ActivityPage
 
 class FakeDatabase:
     def __init__(self) -> None:
+        self.path = Path("fake-control-plane.db")
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def status(self) -> dict[str, object]:
@@ -43,6 +43,14 @@ class FakeDatabase:
     def get_provider_grant(self, name: str) -> dict[str, object]:
         self.calls.append(("provider.show", {"name": name}))
         return {"operation": "provider.show", "name": name}
+
+    def get_attempt_result(self, attempt_id: str) -> dict[str, object]:
+        self.calls.append(("result.show", {"attempt_id": attempt_id}))
+        return {
+            "attempt_id": attempt_id,
+            "content_sha256": "a" * 64,
+            "operation": "result.show",
+        }
 
 
 class FakeControlPlane:
@@ -107,8 +115,10 @@ class FakeControlPlane:
     def create_run(self, **kwargs: object) -> dict[str, object]:
         return self._called("run.create", **kwargs)
 
-    def transition_run(self, run_id: str, **kwargs: object) -> dict[str, object]:
-        return self._called("run.transition", run_id=run_id, **kwargs)
+    def request_run_cancellation(
+        self, run_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("run.cancel", run_id=run_id, **kwargs)
 
 
 class FakeRunCoordinator:
@@ -119,9 +129,29 @@ class FakeRunCoordinator:
         self.calls.append(("execute", run_id))
         return {"operation": "run.execute", "run_id": run_id}
 
-    def reconcile(self) -> list[dict[str, object]]:
-        self.calls.append(("reconcile", {}))
+    def reconcile(self, run_id: str | None = None) -> list[dict[str, object]]:
+        self.calls.append(("reconcile", {} if run_id is None else run_id))
         return [{"operation": "run.reconcile"}]
+
+
+class FakeResultStore:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def inspect(self, attempt_id: str, **kwargs: object) -> object:
+        self.calls.append(("inspect", {"attempt_id": attempt_id, **kwargs}))
+        return object()
+
+    def apply(
+        self, attempt_id: str, repository: Path, **kwargs: object
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "apply",
+                {"attempt_id": attempt_id, "repository": repository, **kwargs},
+            )
+        )
+        return {"operation": "result.apply", "attempt_id": attempt_id}
 
 
 class CLITests(unittest.TestCase):
@@ -169,6 +199,7 @@ class CLITests(unittest.TestCase):
                     ("provider", "manage scoped provider grants"),
                     ("work-item", "manage durable work items"),
                     ("run", "manage agent runs"),
+                    ("result", "inspect and apply retained work"),
                 ),
             ),
             ("user",): (
@@ -231,10 +262,7 @@ class CLITests(unittest.TestCase):
                 True,
                 (
                     ("create", "create a pinned run record"),
-                    (
-                        "transition",
-                        "apply an optimistic run-state transition",
-                    ),
+                    ("cancel", "request stop for a queued or active run"),
                     ("show", "show a run and its event stream"),
                     (
                         "execute",
@@ -243,6 +271,17 @@ class CLITests(unittest.TestCase):
                     (
                         "reconcile",
                         "clean and fail runs interrupted by an orchestrator restart",
+                    ),
+                ),
+            ),
+            ("result",): (
+                "result_command",
+                True,
+                (
+                    ("show", "verify and show one retained attempt result"),
+                    (
+                        "apply",
+                        "apply one retained result after conflict preflight",
                     ),
                 ),
             ),
@@ -342,22 +381,20 @@ class CLITests(unittest.TestCase):
                     "--work-item",
                     "--requested-by",
                 ),
-                ("run", "transition"): ("--expected-version",),
+                ("run", "cancel"): (
+                    "--expected-version",
+                    "--requested-by",
+                    "--reason",
+                ),
+                ("result", "apply"): ("--repository",),
             },
         )
-        self.assertEqual(
-            choices,
-            {
-                (("run", "transition"), "state"): tuple(
-                    state.value for state in RunState
-                )
-            },
-        )
+        self.assertEqual(choices, {})
 
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 7)
+        self.assertEqual(initialized["schema_version"], 8)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -773,29 +810,6 @@ class CLITests(unittest.TestCase):
                 {"operation": "run.create"},
             ),
             (
-                "run.transition",
-                [
-                    "run",
-                    "transition",
-                    "run_123",
-                    "preparing",
-                    "--expected-version",
-                    "1",
-                    "--reason",
-                    "operator approved",
-                ],
-                (
-                    "run.transition",
-                    {
-                        "run_id": "run_123",
-                        "target": RunState.PREPARING,
-                        "expected_version": 1,
-                        "reason": "operator approved",
-                    },
-                ),
-                {"operation": "run.transition"},
-            ),
-            (
                 "run.show",
                 ["run", "show", "run_123"],
                 ("run.show", {"run_id": "run_123"}),
@@ -855,6 +869,27 @@ class CLITests(unittest.TestCase):
                 ]
             )
         self.assertEqual(missing_importer.exception.code, 2)
+
+        timed = parser.parse_args(
+            ["run", "execute", "run_" + "1" * 32, "--run-timeout", "12.5"]
+        )
+        self.assertEqual(timed.run_timeout, 12.5)
+        for invalid_timeout in ("0", "-1", "nan", "inf", "not-a-number"):
+            with (
+                self.subTest(invalid_timeout=invalid_timeout),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as invalid,
+            ):
+                parser.parse_args(
+                    [
+                        "run",
+                        "execute",
+                        "run_" + "1" * 32,
+                        "--run-timeout",
+                        invalid_timeout,
+                    ]
+                )
+            self.assertEqual(invalid.exception.code, 2)
 
         root = Path(self.temporary.name)
         home = root / "home"
@@ -935,6 +970,7 @@ class CLITests(unittest.TestCase):
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "run": "manage agent runs",
+                "result": "inspect and apply retained work",
             },
         )
         expected_nested = {
@@ -965,12 +1001,16 @@ class CLITests(unittest.TestCase):
             },
             "run": {
                 "create": "create a pinned run record",
-                "transition": "apply an optimistic run-state transition",
+                "cancel": "request stop for a queued or active run",
                 "show": "show a run and its event stream",
                 "execute": "execute one queued run in its pinned sandbox",
                 "reconcile": (
                     "clean and fail runs interrupted by an orchestrator restart"
                 ),
+            },
+            "result": {
+                "show": "verify and show one retained attempt result",
+                "apply": "apply one retained result after conflict preflight",
             },
         }
         for command, expected_help in expected_nested.items():
@@ -984,9 +1024,12 @@ class CLITests(unittest.TestCase):
         self.assertIsInstance(db_action.default, Path)
         self.assertEqual(db_action.help, "control-plane database path")
 
-    def test_execution_and_reconciliation_routes_use_the_run_coordinator(self) -> None:
+    def test_execution_cancellation_and_reconciliation_use_the_coordinator(
+        self,
+    ) -> None:
         control = FakeControlPlane()
         coordinator = FakeRunCoordinator()
+        result_store = FakeResultStore()
         cases = (
             (
                 ["run", "execute", "run_" + "1" * 32],
@@ -997,6 +1040,21 @@ class CLITests(unittest.TestCase):
                 ["run", "reconcile"],
                 ("reconcile", {}),
                 [{"operation": "run.reconcile"}],
+            ),
+            (
+                [
+                    "run",
+                    "cancel",
+                    "run_" + "2" * 32,
+                    "--expected-version",
+                    "3",
+                    "--requested-by",
+                    "operator",
+                    "--reason",
+                    "operator requested stop",
+                ],
+                ("reconcile", "run_" + "2" * 32),
+                {"operation": "run.show", "run_id": "run_" + "2" * 32},
             ),
         )
         for arguments, expected_call, expected_output in cases:
@@ -1010,12 +1068,87 @@ class CLITests(unittest.TestCase):
                         "magic_glass_box.cli._build_run_coordinator",
                         return_value=coordinator,
                     ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_result_store",
+                        return_value=result_store,
+                    ),
                     redirect_stdout(stdout),
                 ):
                     status = main(["--db", str(self.database), *arguments])
                 self.assertEqual(status, 0)
                 self.assertEqual(coordinator.calls[-1], expected_call)
                 self.assertEqual(json.loads(stdout.getvalue()), expected_output)
+
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "run.cancel",
+                {
+                    "run_id": "run_" + "2" * 32,
+                    "requested_by_handle": "operator",
+                    "expected_run_version": 3,
+                    "reason": "operator requested stop",
+                },
+            ),
+        )
+
+    def test_result_routes_verify_database_binding_before_show_or_apply(self) -> None:
+        control = FakeControlPlane()
+        result_store = FakeResultStore()
+        attempt_id = "att_" + "3" * 32
+        cases = (
+            (
+                ["result", "show", attempt_id],
+                (
+                    "inspect",
+                    {"attempt_id": attempt_id, "expected_digest": "a" * 64},
+                ),
+                {
+                    "attempt_id": attempt_id,
+                    "content_sha256": "a" * 64,
+                    "operation": "result.show",
+                },
+            ),
+            (
+                [
+                    "result",
+                    "apply",
+                    attempt_id,
+                    "--repository",
+                    str(self.database.parent),
+                ],
+                (
+                    "apply",
+                    {
+                        "attempt_id": attempt_id,
+                        "repository": self.database.parent,
+                        "expected_digest": "a" * 64,
+                    },
+                ),
+                {"operation": "result.apply", "attempt_id": attempt_id},
+            ),
+        )
+        for arguments, expected_call, expected_output in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch(
+                        "magic_glass_box.cli.ControlPlane", return_value=control
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_result_store",
+                        return_value=result_store,
+                    ),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(result_store.calls[-1], expected_call)
+                self.assertEqual(json.loads(stdout.getvalue()), expected_output)
+                self.assertEqual(
+                    control.database.calls[-1],
+                    ("result.show", {"attempt_id": attempt_id}),
+                )
 
     def test_run_coordinator_builder_wires_the_run_scoped_gateway(self) -> None:
         control = mock.Mock()
@@ -1025,6 +1158,7 @@ class CLITests(unittest.TestCase):
         workspace = object()
         executor = object()
         gateway = object()
+        result_store = object()
         coordinator = object()
         runtime_root = Path(self.temporary.name) / "runtime"
         with (
@@ -1032,7 +1166,9 @@ class CLITests(unittest.TestCase):
             mock.patch(
                 "magic_glass_box.cli.WorkspaceManager", return_value=workspace
             ) as workspace_type,
-            mock.patch("magic_glass_box.cli.DockerCLI", return_value="docker"),
+            mock.patch(
+                "magic_glass_box.cli.DockerCLI", return_value="docker"
+            ) as docker_type,
             mock.patch(
                 "magic_glass_box.cli.DockerExecutor", return_value=executor
             ) as executor_type,
@@ -1047,12 +1183,15 @@ class CLITests(unittest.TestCase):
                 "magic_glass_box.cli.RunCoordinator", return_value=coordinator
             ) as coordinator_type,
         ):
-            result = _build_run_coordinator(control)
+            result = _build_run_coordinator(
+                control, run_timeout=90, result_store=result_store
+            )
 
         self.assertIs(result, coordinator)
         workspace_type.assert_called_once_with(
             self.database.parent / "workspaces", "git"
         )
+        docker_type.assert_called_once_with(run_timeout=90)
         executor_type.assert_called_once_with("docker")
         gateway_root.assert_called_once_with(self.database)
         gateway_type.assert_called_once_with(runtime_root, control)
@@ -1062,6 +1201,7 @@ class CLITests(unittest.TestCase):
             workspace,
             credential_resolver,
             gateway,
+            result_store,
         )
 
     def test_emit_has_stable_readable_json(self) -> None:

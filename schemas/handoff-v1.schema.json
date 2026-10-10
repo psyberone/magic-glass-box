@@ -29,7 +29,8 @@
     "summary": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 4096
+      "maxLength": 4096,
+      "pattern": "\\S"
     },
     "decisions": {
       "type": "array",
@@ -38,7 +39,8 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 2048
+        "maxLength": 2048,
+        "pattern": "\\S"
       }
     },
     "artifacts": {
@@ -53,12 +55,17 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1024,
+            "allOf": [
+              {"pattern": "\\S"},
+              {"pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\).+$"}
+            ],
             "description": "A normalized relative POSIX path without dot segments or backslashes. Paths must be unique within the envelope."
           },
           "description": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 2048
+            "maxLength": 2048,
+            "pattern": "\\S"
           }
         }
       }
@@ -70,7 +77,8 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 2048
+        "maxLength": 2048,
+        "pattern": "\\S"
       }
     },
     "pending_interaction_ids": {

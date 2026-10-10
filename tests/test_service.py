@@ -220,6 +220,27 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(transitioned["state"], "preparing")
         self.assertEqual(list(self.database.iter_active_runs())[0]["id"], run["id"])
 
+        queued = self.control.create_run(
+            project_key="box-project",
+            profile_name="Worker",
+            work_item_id=work_item["id"],
+            requested_by_handle="operator",
+        )
+        cancelled = self.control.request_run_cancellation(
+            queued["id"],
+            requested_by_handle="operator",
+            expected_run_version=queued["version"],
+            reason="No longer needed",
+        )
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(
+            cancelled["events"][-1]["metadata"],
+            {
+                "reason": "No longer needed",
+                "requested_by": self.database.get_user("operator")["id"],
+            },
+        )
+
     def test_activity_and_mapping_helpers(self) -> None:
         self.control.add_krab_identity(
             instance_name="Local Krab", credential_path=self.token_path

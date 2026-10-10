@@ -34,6 +34,11 @@ This repository currently contains the first executable vertical slice:
 - tracked-files-only Git snapshots that resolve each run to an immutable commit;
 - a run coordinator that records preparation, container identity, resolved
   source revision, exit status, and terminal state;
+- owner-leased attempts with heartbeats, audited cancellation requests, real
+  container stops, and reconciliation that touches only expired ownership;
+- immutable host-captured workspace results that retain bounded file changes
+  before disposable snapshots are removed, with explicit conflict-checked
+  application and no Git hosting credentials;
 - a durable attempt ledger and bounded structured handoff that let a clean
   replacement worker resume the same run from its pinned commit without a
   transcript or inherited mutable sandbox;
@@ -42,13 +47,14 @@ This repository currently contains the first executable vertical slice:
   coordinator to recover parallel Claude/Codex-style work;
 - operator-controlled work completion that seals audit history and an explicit
   reopen into a blank next-generation memory thread; and
-- an administrative CLI that can execute queued runs and reconcile interrupted
-  ones.
+- an administrative CLI that can execute or cancel runs, reconcile interrupted
+  ones, and inspect or apply retained results.
 
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
-the source checkout remains untouched and the container and snapshot are
-removed afterward. The interaction transport has also been exercised over HTTP
+the source checkout remains untouched, bounded edits are retained in a trusted
+result bundle, and the container and snapshot are removed afterward. The
+interaction transport has also been exercised over HTTP
 against a real local `imitation-krab`: idempotent question delivery,
 reverse-route response verification, and metadata-only local persistence all
 pass. The gateway carrier has been exercised through the real Docker executor:
@@ -90,9 +96,26 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run create --project box-project --profile Worker \
   --work-item wki_<id> --requested-by operator
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run execute run_<id>
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  run execute run_<id> --run-timeout 21600
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  run cancel run_<id> --expected-version <version> \
+  --requested-by operator --reason "Stop requested"
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run reconcile
 ```
+
+After an attempt exits, verify or explicitly apply its retained changes:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  result show att_<id>
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  result apply att_<id> --repository /absolute/path/to/checkout
+```
+
+Application performs a complete conflict preflight. Magic Glass Box does not
+commit, push, open a pull request, or hold GitHub/GitLab credentials. See
+[docs/results.md](docs/results.md) for the retention and application contract.
 
 After all runs and assignments are terminal and the final work-log entry is an
 `outcome`, seal or later reopen the local work cycle with:
@@ -118,9 +141,10 @@ resolves `HEAD`; either way, the full commit ID is persisted before the
 container starts. A `gateway_only` worker receives no credential files: names
 in its profile authorize specific host-side gateway operations. Agent output,
 question and answer bodies, and transcripts are not durable control-plane
-state. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability and
-carrier contracts and [docs/provider-broker.md](docs/provider-broker.md) for
-provider policy and secret-handling details. The replacement contract and
+state; bounded workspace file changes are retained separately as inert result
+artifacts. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability
+and carrier contracts and [docs/provider-broker.md](docs/provider-broker.md)
+for provider policy and secret-handling details. The replacement contract and
 handoff schema are documented in
 [docs/worker-handoffs.md](docs/worker-handoffs.md). Multi-agent coordination and
 replacement-coordinator recovery are documented in

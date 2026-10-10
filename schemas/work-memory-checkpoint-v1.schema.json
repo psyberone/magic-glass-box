@@ -15,7 +15,12 @@
   ],
   "properties": {
     "schema_version": {"const": 1},
-    "summary": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S"
+    },
     "decisions": {"$ref": "#/$defs/notes"},
     "artifacts": {
       "type": "array",
@@ -27,7 +32,12 @@
     "candidate_revision": {
       "oneOf": [
         {"type": "null"},
-        {"type": "string", "minLength": 1, "maxLength": 512}
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        }
       ]
     }
   },
@@ -36,7 +46,12 @@
       "type": "array",
       "maxItems": 32,
       "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1, "maxLength": 2048}
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "pattern": "\\S"
+      }
     },
     "artifact": {
       "type": "object",
@@ -47,12 +62,16 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1024,
-          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\).+$"
+          "allOf": [
+            {"pattern": "\\S"},
+            {"pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\).+$"}
+          ]
         },
         "description": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2048
+          "maxLength": 2048,
+          "pattern": "\\S"
         }
       }
     }

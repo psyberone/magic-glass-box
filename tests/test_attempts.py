@@ -17,6 +17,9 @@ from magic_glass_box.domain import (
     WorkItemEnvelope,
 )
 from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.results import FileState, ResultChange, ResultManifest
+
+OWNER_ID = "orchestrator-test-owner"
 
 
 class RunAttemptTests(unittest.TestCase):
@@ -98,7 +101,10 @@ class RunAttemptTests(unittest.TestCase):
     def running_attempt(self):
         run = self.create_run()
         attempt = self.database.begin_run_attempt(
-            run["id"], runtime_adapter="docker", expected_run_version=1
+            run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
         )
         running = self.database.start_run_attempt(
             attempt["id"],
@@ -110,6 +116,30 @@ class RunAttemptTests(unittest.TestCase):
             image_id="sha256:" + "c" * 64,
         )
         return run, running
+
+    @staticmethod
+    def manifest(attempt_id: str, *, changed: bool = False) -> ResultManifest:
+        changes = ()
+        if changed:
+            changes = (
+                ResultChange(
+                    "new.txt",
+                    "added",
+                    None,
+                    FileState(
+                        kind="file",
+                        mode=0o644,
+                        size=4,
+                        sha256="d" * 64,
+                    ),
+                ),
+            )
+        return ResultManifest(1, attempt_id, "a" * 40, changes)
+
+    def record_result(self, attempt_id: str) -> dict[str, object]:
+        return self.database.record_attempt_result(
+            attempt_id, self.manifest(attempt_id)
+        )
 
     def test_attempts_and_handoffs_are_auditable_and_idempotent(self) -> None:
         run, running = self.running_attempt()
@@ -128,6 +158,7 @@ class RunAttemptTests(unittest.TestCase):
             self.database.create_attempt_handoff(
                 run["id"], self.envelope(interaction["id"], summary="Changed")
             )
+        self.record_result(running["id"])
         finished_attempt = self.database.complete_run_attempt(
             running["id"],
             expected_attempt_version=running["version"],
@@ -161,6 +192,7 @@ class RunAttemptTests(unittest.TestCase):
         self.assertEqual(visible["attempts"], [finished_attempt])
         self.assertEqual(self.database.status()["counts"]["run_attempts"], 1)
         self.assertEqual(self.database.status()["counts"]["attempt_handoffs"], 1)
+        self.assertEqual(self.database.status()["counts"]["attempt_results"], 1)
         self.assertEqual(
             self.database.get_run_execution(run["id"])["handoff"]["id"],
             first["id"],
@@ -192,6 +224,7 @@ class RunAttemptTests(unittest.TestCase):
                 run["id"], HandoffEnvelope.from_mapping(invalid_state)
             )
 
+        self.record_result(running["id"])
         finished = self.database.complete_run_attempt(
             running["id"],
             expected_attempt_version=running["version"],
@@ -211,15 +244,17 @@ class RunAttemptTests(unittest.TestCase):
             request_item_id="itm_" + "8" * 32,
             expected_run_version=running["run_version"],
         )
-        self.database.answer_interaction(
+        answered = self.database.answer_interaction(
             interaction["id"],
             response_item_id="itm_" + "9" * 32,
             expected_version=1,
         )
+        self.assertEqual(answered["run_state"], "waiting_for_input")
 
         handoff = self.database.create_attempt_handoff(
             run["id"], self.envelope(interaction["id"])
         )
+        self.record_result(running["id"])
         completed = self.database.complete_run_attempt(
             running["id"],
             expected_attempt_version=running["version"],
@@ -234,7 +269,10 @@ class RunAttemptTests(unittest.TestCase):
     def test_direct_attempt_failure_is_atomic_and_audited(self) -> None:
         run = self.create_run()
         attempt = self.database.begin_run_attempt(
-            run["id"], runtime_adapter="docker", expected_run_version=1
+            run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
         )
 
         failed = self.database.fail_run_attempt(
@@ -258,6 +296,7 @@ class RunAttemptTests(unittest.TestCase):
 
     def test_successful_attempt_terminally_completes_its_run(self) -> None:
         run, running = self.running_attempt()
+        result = self.record_result(running["id"])
 
         completed = self.database.complete_run_attempt(
             running["id"],
@@ -268,10 +307,126 @@ class RunAttemptTests(unittest.TestCase):
 
         self.assertEqual(completed["state"], "succeeded")
         self.assertEqual(completed["run_state"], "succeeded")
+        self.assertEqual(completed["result"], result)
         event = self.database.get_run(run["id"])["events"][-1]
         self.assertEqual(event["kind"], "run.transitioned")
         self.assertEqual(event["from_state"], "running")
         self.assertEqual(event["to_state"], "succeeded")
+
+    def test_running_attempt_requires_a_captured_result_before_completion(self) -> None:
+        _, running = self.running_attempt()
+
+        with self.assertRaisesRegex(ConflictError, "result has not been captured"):
+            self.database.complete_run_attempt(
+                running["id"],
+                expected_attempt_version=running["version"],
+                exit_code=0,
+                image_id="sha256:" + "c" * 64,
+            )
+
+    def test_result_metadata_is_immutable_content_addressed_and_idempotent(
+        self,
+    ) -> None:
+        _, running = self.running_attempt()
+        manifest = self.manifest(running["id"], changed=True)
+
+        first = self.database.record_attempt_result(running["id"], manifest)
+        repeated = self.database.record_attempt_result(running["id"], manifest)
+
+        self.assertEqual(repeated, first)
+        self.assertEqual(first["attempt_id"], running["id"])
+        self.assertEqual(first["content_sha256"], manifest.digest)
+        self.assertEqual(first["changed_paths"], 1)
+        self.assertEqual(first["changed_bytes"], 4)
+        self.assertEqual(first["manifest"], manifest.to_dict())
+        with self.assertRaisesRegex(ConflictError, "different result"):
+            self.database.record_attempt_result(
+                running["id"], self.manifest(running["id"])
+            )
+
+        connection = self.database.connect()
+        self.addCleanup(connection.close)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE attempt_results SET changed_paths = 0 WHERE id = ?",
+                (first["id"],),
+            )
+
+    def test_attempt_lease_renewal_and_expired_takeover_are_owner_checked(
+        self,
+    ) -> None:
+        run = self.create_run()
+        attempt = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
+            lease_seconds=30,
+        )
+        self.assertEqual(attempt["owner_id"], OWNER_ID)
+        self.assertIsNotNone(attempt["heartbeat_at"])
+        self.assertIsNotNone(attempt["lease_expires_at"])
+
+        renewed = self.database.renew_run_attempt_lease(
+            attempt["id"], owner_id=OWNER_ID, lease_seconds=60
+        )
+        self.assertEqual(renewed["owner_id"], OWNER_ID)
+        with self.assertRaisesRegex(ConflictError, "owned by another orchestrator"):
+            self.database.renew_run_attempt_lease(
+                attempt["id"], owner_id="orchestrator-other", lease_seconds=60
+            )
+        with self.assertRaisesRegex(ConflictError, "lease has not expired"):
+            self.database.claim_expired_run_attempt(
+                attempt["id"], owner_id="orchestrator-other", lease_seconds=60
+            )
+
+        connection = self.database.connect()
+        connection.execute(
+            "UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00.000000+00:00", attempt["id"]),
+        )
+        connection.commit()
+        connection.close()
+        claimed = self.database.claim_expired_run_attempt(
+            attempt["id"], owner_id="orchestrator-other", lease_seconds=60
+        )
+        self.assertEqual(claimed["owner_id"], "orchestrator-other")
+
+    def test_cancel_request_is_audited_then_terminal_only_after_worker_exit(
+        self,
+    ) -> None:
+        run, running = self.running_attempt()
+
+        requested = self.database.request_run_cancellation(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=running["run_version"],
+            reason="operator requested stop",
+        )
+
+        self.assertEqual(requested["state"], "running")
+        self.assertEqual(requested["events"][-1]["kind"], "run.cancel_requested")
+        active = requested["attempts"][-1]
+        self.assertEqual(active["cancel_requested_by"], self.user["id"])
+        self.assertEqual(active["cancel_reason"], "operator requested stop")
+        control = self.database.renew_run_attempt_lease(
+            running["id"], owner_id=OWNER_ID, lease_seconds=60
+        )
+        self.assertTrue(control["cancel_requested"])
+
+        self.record_result(running["id"])
+        completed = self.database.complete_run_attempt(
+            running["id"],
+            expected_attempt_version=running["version"],
+            exit_code=143,
+            image_id="sha256:" + "c" * 64,
+        )
+        self.assertEqual(completed["state"], "cancelled")
+        self.assertEqual(completed["run_state"], "cancelled")
+        self.assertEqual(
+            self.database.get_run(run["id"])["events"][-1]["to_state"],
+            "cancelled",
+        )
 
     def test_attempt_event_and_handoff_records_are_immutable(self) -> None:
         run, running = self.running_attempt()
@@ -328,7 +483,7 @@ class AttemptMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 7)
+            self.assertEqual(first["schema_version"], 8)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["run_attempts"], 0)
@@ -342,6 +497,7 @@ class AttemptMigrationTests(unittest.TestCase):
             self.assertIn("run_attempts", tables)
             self.assertIn("run_attempt_events", tables)
             self.assertIn("attempt_handoffs", tables)
+            self.assertIn("attempt_results", tables)
 
 
 if __name__ == "__main__":

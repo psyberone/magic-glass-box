@@ -1381,7 +1381,6 @@ RUN_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.WAITING_FOR_INPUT: frozenset(
         {
             RunState.QUEUED,
-            RunState.RUNNING,
             RunState.FAILED,
             RunState.CANCELLED,
         }

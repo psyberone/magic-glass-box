@@ -320,7 +320,12 @@ def main() -> int:
                     capabilities=pinned_profile.gateway_capabilities,
                     credential_names=pinned_profile.credential_names,
                 )
-                result = DockerExecutor(DockerCLI(timeout=args.docker_timeout)).execute(
+                result = DockerExecutor(
+                    DockerCLI(
+                        command_timeout=args.docker_timeout,
+                        run_timeout=args.docker_timeout,
+                    )
+                ).execute(
                     SandboxRequest(
                         run_id=run_id,
                         profile=pinned_profile,

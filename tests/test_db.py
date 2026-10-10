@@ -113,7 +113,7 @@ class DatabaseTests(unittest.TestCase):
     def test_database_is_private_and_reports_counts(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 7)
+        self.assertEqual(status["schema_version"], 8)
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
 
@@ -365,7 +365,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(waiting["state"], "waiting_for_input")
 
-    def test_resuming_a_waiting_run_preserves_original_start_time(self) -> None:
+    def test_requeueing_a_waiting_run_preserves_original_start_time(self) -> None:
         run = self.create_run()
         self.database.transition_run(
             run["id"], target=RunState.PREPARING, expected_version=1
@@ -376,13 +376,14 @@ class DatabaseTests(unittest.TestCase):
         self.database.transition_run(
             run["id"], target=RunState.WAITING_FOR_INPUT, expected_version=3
         )
-        resumed = self.database.transition_run(
-            run["id"], target=RunState.RUNNING, expected_version=4
+        requeued = self.database.transition_run(
+            run["id"], target=RunState.QUEUED, expected_version=4
         )
-        self.assertEqual(resumed["started_at"], running["started_at"])
-        self.assertIsNone(resumed["finished_at"])
+        self.assertEqual(requeued["started_at"], running["started_at"])
+        self.assertIsNone(requeued["finished_at"])
+        self.assertEqual(requeued["state"], "queued")
         self.assertEqual(
-            [event["sequence"] for event in resumed["events"]],
+            [event["sequence"] for event in requeued["events"]],
             [1, 2, 3, 4, 5],
         )
 

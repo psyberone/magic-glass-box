@@ -459,14 +459,14 @@ class InteractionDatabaseTests(unittest.TestCase):
     def test_open_interaction_blocks_manual_resume_and_event_mutation(self) -> None:
         run = self.running_run()
         interaction = self.open_interaction(run)
-        for target in (RunState.RUNNING, RunState.QUEUED):
-            with (
-                self.subTest(target=target),
-                self.assertRaisesRegex(ConflictError, "open interaction"),
-            ):
-                self.database.transition_run(
-                    run["id"], target=target, expected_version=4
-                )
+        with self.assertRaisesRegex(ValidationError, "invalid run transition"):
+            self.database.transition_run(
+                run["id"], target=RunState.RUNNING, expected_version=4
+            )
+        with self.assertRaisesRegex(ConflictError, "open interaction"):
+            self.database.transition_run(
+                run["id"], target=RunState.QUEUED, expected_version=4
+            )
 
         connection = self.database.connect()
         self.addCleanup(connection.close)
@@ -510,7 +510,7 @@ class InteractionMigrationTests(unittest.TestCase):
         database = Database(path)
         first = database.initialize()
         second = database.initialize()
-        self.assertEqual(first["schema_version"], 7)
+        self.assertEqual(first["schema_version"], 8)
         self.assertEqual(second, first)
         self.assertEqual(first["counts"]["users"], 1)
         self.assertEqual(first["counts"]["interactions"], 0)

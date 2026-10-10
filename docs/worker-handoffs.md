@@ -13,9 +13,11 @@ profile revision and records:
 
 - the runtime adapter identity;
 - the resolved source revision and container/image identity;
+- its orchestrator owner, heartbeat, expiring lease, and cancellation request;
 - creation, start, handoff, and outcome events;
 - exit status or a bounded failure reason; and
-- one immutable handoff, when supplied.
+- one immutable handoff, when supplied; and
+- one immutable host-captured workspace result after the worker stops.
 
 Attempt states are `preparing`, `running`, `handed_off`, `succeeded`, `failed`,
 `cancelled`, and `interrupted`. The durable run keeps its own lifecycle. For
@@ -51,7 +53,9 @@ Each attempt may submit one immutable handoff. Retrying the identical document
 is idempotent; trying to replace it with different content is a conflict. Its
 pending interaction IDs must be the interaction records opened by that active
 attempt. This check still succeeds if a very fast human response has already
-changed the run from `waiting_for_input` back to `queued`.
+answered the interaction. While the attempt remains active, the run
+deliberately stays `waiting_for_input`; finalizing that attempt performs the
+re-queue.
 
 ## Gateway flow
 
@@ -63,21 +67,27 @@ this sequence:
 2. The worker submits a v1 handoff naming that interaction ID.
 3. The gateway persists only the structured envelope and returns
    `agent_action: "exit"`.
-4. The coordinator removes the container, mailbox, and mutable workspace and
-   closes the attempt as `handed_off`.
-5. A verified response marks the interaction answered and atomically re-queues
-   the same run.
+4. The coordinator captures the attempt's bounded file result, then removes the
+   container, mailbox, and mutable workspace and closes the attempt as
+   `handed_off`.
+5. A verified response marks the interaction answered. If the attempt has
+   already closed, the run queues immediately; otherwise attempt finalization
+   performs the transition.
 6. A replacement attempt reconstructs a clean workspace from the run's pinned
    commit. `run.describe` includes the latest handoff and answered interaction
    metadata; `interaction.read` transiently retrieves only the correlated
    response from Krab.
 
 The clean-workspace rule is deliberate: mutable state from a compromised or
-failed worker is not silently promoted into the next worker's authority.
-Workers should ask before making changes they cannot safely reconstruct.
+failed worker is not silently promoted into the next worker's authority. The
+captured result remains inert and separately inspectable; a replacement still
+starts from the pinned commit unless an operator explicitly applies that
+result. Workers should ask before making changes they cannot safely
+reconstruct.
 
 If a worker exits while paused without a handoff, the durable interaction is
 preserved but the attempt is recorded as `interrupted`. If the orchestrator
 restarts after a handoff but before normal attempt finalization, reconciliation
-also records the attempt as interrupted while retaining both the wait and its
-handoff. No live resource is inferred from the durable record.
+waits for the ownership lease to expire, stops labeled resources, captures any
+remaining result, and records the attempt as interrupted while retaining the
+wait and handoff. No live resource is inferred from the durable record.

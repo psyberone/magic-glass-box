@@ -33,6 +33,7 @@ from magic_glass_box.domain import (
     WorkMemoryCheckpoint,
 )
 from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import ControlPlane
 
 
@@ -255,7 +256,10 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
     ) -> tuple[dict[str, object], dict[str, object]]:
         run = self.create_run(profile, work_item_id=work_item_id, session_id=session_id)
         attempt = self.database.begin_run_attempt(
-            run["id"], runtime_adapter=adapter, expected_run_version=1
+            run["id"],
+            runtime_adapter=adapter,
+            owner_id="orchestrator-work-memory-test",
+            expected_run_version=1,
         )
         running = self.database.start_run_attempt(
             attempt["id"],
@@ -265,6 +269,10 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
             container_id="b" * 64,
             container_name="memory-test",
             image_id="sha256:" + "c" * 64,
+        )
+        self.database.record_attempt_result(
+            running["id"],
+            ResultManifest(1, running["id"], "a" * 40, ()),
         )
         return run, running
 
@@ -1192,6 +1200,131 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
             f"work assignment not found: {missing_assignment_id}",
         )
 
+    def test_assignment_linked_logs_require_the_exact_live_lease(self) -> None:
+        coordinator, _ = self.running_run("Coordinator")
+        task = self.create_assignment(
+            coordinator["id"],
+            "Claude Worker",
+            key="assign:linked-log",
+            title="Write linked findings",
+        )
+        first_worker, first_attempt = self.running_run("Claude Worker")
+        second_worker, second_attempt = self.running_run("Claude Worker")
+        self.database.claim_work_assignment(
+            first_worker["id"],
+            task["id"],
+            expected_assignment_version=task["version"],
+            lease_seconds=600,
+        )
+
+        with self.assertRaisesRegex(ConflictError, "claimed by another run"):
+            self.database.append_work_log(
+                second_worker["id"],
+                log_entry("Wrong run cannot append."),
+                assignment_id=task["id"],
+                idempotency_key="entry:wrong-run",
+            )
+
+        with closing(self.database.connect()) as connection:
+            connection.execute(
+                "UPDATE work_assignments SET claimed_by_run_id = ? WHERE id = ?",
+                (second_worker["id"], task["id"]),
+            )
+        with self.assertRaisesRegex(ConflictError, "claimed by another run"):
+            self.database.append_work_log(
+                second_worker["id"],
+                log_entry("Wrong attempt cannot append."),
+                assignment_id=task["id"],
+                idempotency_key="entry:wrong-attempt",
+            )
+
+        with closing(self.database.connect()) as connection:
+            connection.execute(
+                "UPDATE work_assignments SET claimed_by_attempt_id = ?, "
+                "lease_expires_at = ? WHERE id = ?",
+                (
+                    second_attempt["id"],
+                    "2000-01-01T00:00:00.000000+00:00",
+                    task["id"],
+                ),
+            )
+        with self.assertRaisesRegex(ConflictError, "lease has expired"):
+            self.database.append_work_log(
+                second_worker["id"],
+                log_entry("Expired worker cannot append."),
+                assignment_id=task["id"],
+                idempotency_key="entry:expired",
+            )
+
+        other_item = self.database.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "foreign-assignment-thread",
+                    "source_updated_at": "2026-10-10T12:00:00Z",
+                    "title": "Foreign thread",
+                    "brief": "Keep assignment provenance thread-scoped.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        foreign_coordinator, _ = self.running_run(
+            "Coordinator", work_item_id=other_item["id"]
+        )
+        foreign_task = self.create_assignment(
+            foreign_coordinator["id"],
+            "Claude Worker",
+            key="assign:foreign-thread",
+            title="Foreign task",
+        )
+        with self.assertRaisesRegex(ConflictError, "another thread"):
+            self.database.append_work_log(
+                first_worker["id"],
+                log_entry("Foreign assignment cannot be linked."),
+                assignment_id=foreign_task["id"],
+                idempotency_key="entry:foreign-thread",
+            )
+
+        self.assertNotEqual(first_attempt["id"], second_attempt["id"])
+
+    def test_assignment_completion_retry_is_exactly_idempotent(self) -> None:
+        coordinator, _ = self.running_run("Coordinator")
+        task = self.create_assignment(
+            coordinator["id"],
+            "Claude Worker",
+            key="assign:completion-retry",
+            title="Return one result",
+        )
+        worker, _ = self.running_run("Claude Worker")
+        claimed = self.database.claim_work_assignment(
+            worker["id"],
+            task["id"],
+            expected_assignment_version=task["version"],
+            lease_seconds=600,
+        )
+        result = log_entry("The review is complete.", kind="assignment_result")
+        first = self.database.complete_work_assignment(
+            worker["id"],
+            task["id"],
+            expected_assignment_version=claimed["version"],
+            result=result,
+            idempotency_key="result:exact-retry",
+        )
+        repeated = self.database.complete_work_assignment(
+            worker["id"],
+            task["id"],
+            expected_assignment_version=claimed["version"],
+            result=result,
+            idempotency_key="result:exact-retry",
+        )
+
+        self.assertEqual(repeated, first)
+        memory = self.database.get_work_memory_for_run(coordinator["id"])
+        self.assertEqual(memory["log_sequence"], 1)
+        self.assertEqual(memory["assignments"][0]["state"], "completed")
+
     def test_assignment_result_must_come_from_the_current_lease_holder(self) -> None:
         coordinator, _ = self.running_run("Coordinator")
         task = self.create_assignment(
@@ -1366,7 +1499,7 @@ class WorkMemoryMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 7)
+            self.assertEqual(first["schema_version"], 8)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["work_threads"], 1)
             self.assertEqual(first["counts"]["work_thread_events"], 1)

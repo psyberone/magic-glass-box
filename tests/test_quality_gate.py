@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts" / "check_mutation_score.py"
+MAKEFILE = ROOT / "Makefile"
 
 
 class MutationScoreGateTests(unittest.TestCase):
@@ -49,6 +50,14 @@ class MutationScoreGateTests(unittest.TestCase):
                 result = self.run_checker(payload)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("invalid mutation stats", result.stderr)
+
+    def test_makefile_quotes_configurable_python_executable(self) -> None:
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+
+        self.assertNotIn("PYTHONPATH=src $(PYTHON)", makefile)
+        self.assertNotIn("\n\t$(PYTHON) scripts/check_mutation_score.py", makefile)
+        self.assertIn('PYTHONPATH=src "$(PYTHON)"', makefile)
+        self.assertIn('\n\t"$(PYTHON)" scripts/check_mutation_score.py', makefile)
 
 
 if __name__ == "__main__":

@@ -147,9 +147,36 @@ runs retain read-only access, and no new run or write can target it. A later
 import does not reactivate the item; explicit reopen creates generation two
 with no log, checkpoint, or assignments.
 
+## Milestone 3.7: execution integrity and retained results
+
+**Status: complete**
+
+- Separate short Docker command timeouts from an optional deliberate agent
+  runtime limit; ordinary runs no longer inherit a hidden 30-second ceiling.
+- Give every active attempt an owner, heartbeat, and expiring lease so recovery
+  cannot destroy another live orchestrator's container.
+- Replace the generic operator transition command with an audited cancellation
+  request that makes the owner stop the actual container before terminal state.
+- Keep answered runs waiting while their original attempt is live, then queue
+  the replacement only as part of attempt finalization.
+- Capture a bounded, content-addressed file result on the trusted host before
+  workspace cleanup, including nonzero and recoverable failure outcomes.
+- Verify retained artifacts against their database-bound digest and apply them
+  only after a complete affected-path conflict preflight.
+- Execute every published JSON Schema against its examples and representative
+  runtime rejection cases; cover assignment lease enforcement and exact
+  completion replay directly.
+
+**Exit proof:** a worker may run beyond 30 seconds, be durably cancelled and
+stopped, or lose its orchestrator without a concurrent recovery process
+touching a live lease. Its bounded edits survive snapshot deletion, tampering
+and local checkout conflicts fail closed, and applying the result requires no
+Git forge credential or outbound operation.
+
 ## Milestone 4: local control room
 
-- Show projects, users, roles, profiles, work claims, runs, and attempts.
+- Show projects, users, roles, profiles, work claims, runs, attempts, and
+  retained results.
 - Make pending questions, approvals, owners, and blockers prominent.
 - Expose policy and lifecycle metadata without private bodies or transcripts.
 - Provide explicit cancel, retry, reassign, revoke, and reconcile actions.

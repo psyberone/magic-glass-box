@@ -38,14 +38,17 @@ from .domain import (
     validate_transition,
 )
 from .krab import IDEMPOTENCY_KEY_RE, KrabIdentity, validate_base_url
+from .results import ResultError, ResultManifest
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
 LEGACY_DATABASE_FILENAME = "hex.db"
 MAX_WORK_ASSIGNMENTS_PER_THREAD = 16
 MAX_VISIBLE_ASSIGNMENT_EVENTS = 16
+MIN_ATTEMPT_LEASE_SECONDS = 10
+MAX_ATTEMPT_LEASE_SECONDS = 3600
 
 
 SCHEMA_V1 = """
@@ -877,6 +880,101 @@ BEGIN
 END;
 """
 
+EXECUTION_INTEGRITY_SCHEMA = """
+ALTER TABLE run_attempts ADD COLUMN owner_id TEXT;
+ALTER TABLE run_attempts ADD COLUMN heartbeat_at TEXT;
+ALTER TABLE run_attempts ADD COLUMN lease_expires_at TEXT;
+ALTER TABLE run_attempts ADD COLUMN cancel_requested_at TEXT;
+ALTER TABLE run_attempts ADD COLUMN cancel_requested_by TEXT
+    REFERENCES users(id) ON DELETE RESTRICT;
+ALTER TABLE run_attempts ADD COLUMN cancel_reason TEXT;
+
+UPDATE run_attempts
+SET owner_id = 'orchestrator-legacy-recovery',
+    heartbeat_at = COALESCE(started_at, created_at),
+    lease_expires_at = COALESCE(started_at, created_at)
+WHERE state IN ('preparing', 'running');
+
+CREATE TABLE attempt_results (
+    id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    manifest_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    changed_paths INTEGER NOT NULL CHECK (changed_paths >= 0),
+    changed_bytes INTEGER NOT NULL CHECK (changed_bytes >= 0),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX run_attempt_expired_lease
+    ON run_attempts(state, lease_expires_at)
+    WHERE state IN ('preparing', 'running');
+
+CREATE TRIGGER run_attempt_active_control_insert
+BEFORE INSERT ON run_attempts
+WHEN NEW.state IN ('preparing', 'running') AND (
+    NEW.owner_id IS NULL OR NEW.heartbeat_at IS NULL
+    OR NEW.lease_expires_at IS NULL
+)
+BEGIN
+    SELECT RAISE(ABORT, 'active run attempts require an owner lease');
+END;
+CREATE TRIGGER run_attempt_active_control_update
+BEFORE UPDATE ON run_attempts
+WHEN NEW.state IN ('preparing', 'running') AND (
+    NEW.owner_id IS NULL OR NEW.heartbeat_at IS NULL
+    OR NEW.lease_expires_at IS NULL
+)
+BEGIN
+    SELECT RAISE(ABORT, 'active run attempts require an owner lease');
+END;
+CREATE TRIGGER run_attempt_cancel_consistent_insert
+BEFORE INSERT ON run_attempts
+WHEN NOT (
+    (
+        NEW.cancel_requested_at IS NULL
+        AND NEW.cancel_requested_by IS NULL
+        AND NEW.cancel_reason IS NULL
+    )
+    OR (
+        NEW.cancel_requested_at IS NOT NULL
+        AND NEW.cancel_requested_by IS NOT NULL
+        AND NEW.cancel_reason IS NOT NULL
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'run attempt cancellation request is incomplete');
+END;
+CREATE TRIGGER run_attempt_cancel_consistent_update
+BEFORE UPDATE ON run_attempts
+WHEN NOT (
+    (
+        NEW.cancel_requested_at IS NULL
+        AND NEW.cancel_requested_by IS NULL
+        AND NEW.cancel_reason IS NULL
+    )
+    OR (
+        NEW.cancel_requested_at IS NOT NULL
+        AND NEW.cancel_requested_by IS NOT NULL
+        AND NEW.cancel_reason IS NOT NULL
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'run attempt cancellation request is incomplete');
+END;
+CREATE TRIGGER attempt_result_immutable_update
+BEFORE UPDATE ON attempt_results
+BEGIN
+    SELECT RAISE(ABORT, 'attempt results are immutable');
+END;
+CREATE TRIGGER attempt_result_immutable_delete
+BEFORE DELETE ON attempt_results
+BEGIN
+    SELECT RAISE(ABORT, 'attempt results are immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -885,6 +983,7 @@ SCHEMA = (
     + ATTEMPT_SCHEMA
     + WORK_MEMORY_SCHEMA
     + WORK_THREAD_LIFECYCLE_SCHEMA
+    + EXECUTION_INTEGRITY_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -893,6 +992,7 @@ MIGRATIONS = {
     4: ATTEMPT_SCHEMA,
     5: WORK_MEMORY_SCHEMA,
     6: WORK_THREAD_LIFECYCLE_SCHEMA,
+    7: EXECUTION_INTEGRITY_SCHEMA,
 }
 
 
@@ -1076,6 +1176,7 @@ class Database:
                 ("runs", "SELECT COUNT(*) FROM runs"),
                 ("run_attempts", "SELECT COUNT(*) FROM run_attempts"),
                 ("attempt_handoffs", "SELECT COUNT(*) FROM attempt_handoffs"),
+                ("attempt_results", "SELECT COUNT(*) FROM attempt_results"),
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
                 ("work_items", "SELECT COUNT(*) FROM work_items"),
                 ("work_threads", "SELECT COUNT(*) FROM work_threads"),
@@ -2235,13 +2336,17 @@ class Database:
         run_id: str,
         *,
         runtime_adapter: str,
+        owner_id: str,
         expected_run_version: int,
+        lease_seconds: int = 60,
     ) -> dict[str, Any]:
         """Atomically claim a queued durable run for one disposable worker."""
 
         runtime_adapter = validate_provider_name(
             runtime_adapter, field="runtime_adapter"
         )
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
+        self._attempt_lease_seconds(lease_seconds)
         if (
             isinstance(expected_run_version, bool)
             or not isinstance(expected_run_version, int)
@@ -2250,6 +2355,7 @@ class Database:
             raise ValidationError("expected_run_version must be a positive integer")
         attempt_id = self.new_id("att")
         now = self.now()
+        lease_expires_at = self._lease_expiry(now, lease_seconds)
         with closing(self.connect()) as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -2274,14 +2380,17 @@ class Database:
                 connection.execute(
                     "INSERT INTO run_attempts "
                     "(id, run_id, sequence, profile_version_id, runtime_adapter, "
-                    "state, version, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'preparing', 1, ?)",
+                    "state, version, owner_id, heartbeat_at, lease_expires_at, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, 'preparing', 1, ?, ?, ?, ?)",
                     (
                         attempt_id,
                         run_id,
                         sequence,
                         run["profile_version_id"],
                         runtime_adapter,
+                        owner_id,
+                        now,
+                        lease_expires_at,
                         now,
                     ),
                 )
@@ -2303,6 +2412,7 @@ class Database:
                     {
                         "attempt_id": attempt_id,
                         "attempt_sequence": sequence,
+                        "owner_id": owner_id,
                         "runtime_adapter": runtime_adapter,
                     }
                 )
@@ -2321,6 +2431,152 @@ class Database:
                 connection.rollback()
                 raise ConflictError("run attempt could not be created") from exc
         return self.get_run_attempt(attempt_id)
+
+    @staticmethod
+    def _attempt_lease_seconds(value: object) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not MIN_ATTEMPT_LEASE_SECONDS <= value <= MAX_ATTEMPT_LEASE_SECONDS
+        ):
+            raise ValidationError(
+                "lease_seconds must be between "
+                f"{MIN_ATTEMPT_LEASE_SECONDS} and {MAX_ATTEMPT_LEASE_SECONDS}"
+            )
+        return value
+
+    @staticmethod
+    def _lease_expiry(now: str, lease_seconds: int) -> str:
+        try:
+            current = datetime.fromisoformat(now)
+        except ValueError as exc:
+            raise StorageError("database clock returned an invalid timestamp") from exc
+        return (current + timedelta(seconds=lease_seconds)).isoformat(
+            timespec="microseconds"
+        )
+
+    def renew_run_attempt_lease(
+        self,
+        attempt_id: str,
+        *,
+        owner_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Renew one live ownership lease and return its control signals."""
+
+        attempt_id = require_string(attempt_id, field="attempt_id", max_bytes=64)
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
+        self._attempt_lease_seconds(lease_seconds)
+        now = self.now()
+        expires_at = self._lease_expiry(now, lease_seconds)
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                attempt = connection.execute(
+                    "SELECT state, owner_id, cancel_requested_at, cancel_reason "
+                    "FROM run_attempts WHERE id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise NotFoundError(f"run attempt not found: {attempt_id}")
+                if attempt["state"] not in {
+                    AttemptState.PREPARING.value,
+                    AttemptState.RUNNING.value,
+                }:
+                    raise ConflictError(
+                        f"run attempt is not active: {attempt['state']}"
+                    )
+                if attempt["owner_id"] != owner_id:
+                    raise ConflictError("run attempt is owned by another orchestrator")
+                changed = connection.execute(
+                    "UPDATE run_attempts SET heartbeat_at = ?, lease_expires_at = ? "
+                    "WHERE id = ? AND owner_id = ? "
+                    "AND state IN ('preparing', 'running')",
+                    (now, expires_at, attempt_id, owner_id),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError("run attempt ownership changed")
+                connection.commit()
+            except (NotFoundError, ConflictError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("run attempt lease could not be renewed") from exc
+        return {
+            "attempt_id": attempt_id,
+            "cancel_reason": attempt["cancel_reason"],
+            "cancel_requested": attempt["cancel_requested_at"] is not None,
+            "heartbeat_at": now,
+            "lease_expires_at": expires_at,
+            "owner_id": owner_id,
+        }
+
+    def claim_expired_run_attempt(
+        self,
+        attempt_id: str,
+        *,
+        owner_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Take ownership only after the previous orchestrator lease expires."""
+
+        attempt_id = require_string(attempt_id, field="attempt_id", max_bytes=64)
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
+        self._attempt_lease_seconds(lease_seconds)
+        now = self.now()
+        expires_at = self._lease_expiry(now, lease_seconds)
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                attempt = connection.execute(
+                    "SELECT state, lease_expires_at FROM run_attempts WHERE id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise NotFoundError(f"run attempt not found: {attempt_id}")
+                if attempt["state"] not in {
+                    AttemptState.PREPARING.value,
+                    AttemptState.RUNNING.value,
+                }:
+                    raise ConflictError(
+                        f"run attempt is not active: {attempt['state']}"
+                    )
+                if (
+                    attempt["lease_expires_at"] is not None
+                    and attempt["lease_expires_at"] > now
+                ):
+                    raise ConflictError("run attempt lease has not expired")
+                changed = connection.execute(
+                    "UPDATE run_attempts SET owner_id = ?, heartbeat_at = ?, "
+                    "lease_expires_at = ? WHERE id = ? "
+                    "AND state IN ('preparing', 'running') "
+                    "AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+                    (owner_id, now, expires_at, attempt_id, now),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "run attempt lease changed concurrently"
+                    )
+                connection.commit()
+            except (NotFoundError, ConflictError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("run attempt lease could not be claimed") from exc
+        return self.get_run_attempt(attempt_id)
+
+    def list_expired_run_attempts(self) -> list[dict[str, Any]]:
+        now = self.now()
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                "SELECT id FROM run_attempts WHERE state IN ('preparing', 'running') "
+                "AND (lease_expires_at IS NULL OR lease_expires_at <= ?) "
+                "ORDER BY created_at, id",
+                (now,),
+            ).fetchall()
+        return [self.get_run_attempt(row["id"]) for row in rows]
 
     def start_run_attempt(
         self,
@@ -2475,6 +2731,8 @@ class Database:
                 connection.execute("BEGIN IMMEDIATE")
                 attempt = connection.execute(
                     "SELECT ra.run_id, ra.state, ra.version, ra.image_id, "
+                    "ra.cancel_requested_at, ra.cancel_requested_by, "
+                    "ra.cancel_reason, "
                     "r.state AS run_state, r.version AS run_version "
                     "FROM run_attempts ra JOIN runs r ON r.id = ra.run_id "
                     "WHERE ra.id = ?",
@@ -2499,8 +2757,48 @@ class Database:
                     "SELECT id FROM attempt_handoffs WHERE attempt_id = ?",
                     (attempt_id,),
                 ).fetchone()
+                result = connection.execute(
+                    "SELECT id, content_sha256 FROM attempt_results "
+                    "WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if result is None:
+                    raise ConflictError("run attempt result has not been captured")
                 reason: str | None = None
-                if run_state is RunState.RUNNING:
+                if attempt["cancel_requested_at"] is not None:
+                    outcome = AttemptState.CANCELLED
+                    reason = attempt["cancel_reason"]
+                    self._cancel_open_interactions(connection, attempt["run_id"], now)
+                    run_metadata = {
+                        "exit_code": exit_code,
+                        "image_id": image_id,
+                        "reason": reason,
+                        "requested_by": attempt["cancel_requested_by"],
+                        "result_id": result["id"],
+                        "result_sha256": result["content_sha256"],
+                    }
+                    run_changed = connection.execute(
+                        "UPDATE runs SET state = 'cancelled', "
+                        "version = version + 1, updated_at = ?, finished_at = ? "
+                        "WHERE id = ? AND version = ?",
+                        (now, now, attempt["run_id"], attempt["run_version"]),
+                    ).rowcount
+                    if run_changed != 1:
+                        raise ConcurrentUpdateError("run changed concurrently")
+                    connection.execute(
+                        "INSERT INTO run_events "
+                        "(run_id, sequence, kind, from_state, to_state, "
+                        "metadata_json, created_at) VALUES (?, ?, "
+                        "'run.transitioned', ?, 'cancelled', ?, ?)",
+                        (
+                            attempt["run_id"],
+                            attempt["run_version"] + 1,
+                            run_state.value,
+                            canonical_json(run_metadata),
+                            now,
+                        ),
+                    )
+                elif run_state is RunState.RUNNING:
                     outcome = (
                         AttemptState.SUCCEEDED
                         if exit_code == 0
@@ -2512,6 +2810,8 @@ class Database:
                     run_metadata: dict[str, Any] = {
                         "exit_code": exit_code,
                         "image_id": image_id,
+                        "result_id": result["id"],
+                        "result_sha256": result["content_sha256"],
                     }
                     if reason is not None:
                         run_metadata["reason"] = reason
@@ -2554,6 +2854,40 @@ class Database:
                         reason = "worker exited while paused without a handoff"
                     else:
                         outcome = AttemptState.HANDED_OFF
+                    open_interaction = connection.execute(
+                        "SELECT 1 FROM interactions WHERE run_id = ? "
+                        "AND state = 'open' LIMIT 1",
+                        (attempt["run_id"],),
+                    ).fetchone()
+                    if (
+                        run_state is RunState.WAITING_FOR_INPUT
+                        and open_interaction is None
+                    ):
+                        run_metadata = {
+                            "attempt_id": attempt_id,
+                            "result_id": result["id"],
+                            "result_sha256": result["content_sha256"],
+                        }
+                        run_changed = connection.execute(
+                            "UPDATE runs SET state = 'queued', "
+                            "version = version + 1, updated_at = ?, "
+                            "finished_at = NULL WHERE id = ? AND version = ?",
+                            (now, attempt["run_id"], attempt["run_version"]),
+                        ).rowcount
+                        if run_changed != 1:
+                            raise ConcurrentUpdateError("run changed concurrently")
+                        connection.execute(
+                            "INSERT INTO run_events "
+                            "(run_id, sequence, kind, from_state, to_state, "
+                            "metadata_json, created_at) VALUES (?, ?, "
+                            "'run.transitioned', 'waiting_for_input', 'queued', ?, ?)",
+                            (
+                                attempt["run_id"],
+                                attempt["run_version"] + 1,
+                                canonical_json(run_metadata),
+                                now,
+                            ),
+                        )
                 elif run_state is RunState.CANCELLED:
                     outcome = AttemptState.CANCELLED
                     reason = "run was cancelled"
@@ -2580,6 +2914,8 @@ class Database:
                 event_metadata: dict[str, Any] = {
                     "exit_code": exit_code,
                     "image_id": image_id,
+                    "result_id": result["id"],
+                    "result_sha256": result["content_sha256"],
                 }
                 if handoff is not None:
                     event_metadata["handoff_id"] = handoff["id"]
@@ -2640,6 +2976,8 @@ class Database:
                 connection.execute("BEGIN IMMEDIATE")
                 attempt = connection.execute(
                     "SELECT ra.run_id, ra.state, ra.version, r.state AS run_state, "
+                    "ra.cancel_requested_at, ra.cancel_requested_by, "
+                    "ra.cancel_reason, "
                     "r.version AS run_version FROM run_attempts ra "
                     "JOIN runs r ON r.id = ra.run_id WHERE ra.id = ?",
                     (attempt_id,),
@@ -2660,14 +2998,44 @@ class Database:
                     )
                 source_state = attempt["state"]
                 run_state = RunState(attempt["run_state"])
-                if run_state is RunState.CANCELLED:
+                cancellation_requested = attempt["cancel_requested_at"] is not None
+                if run_state is RunState.CANCELLED or cancellation_requested:
                     outcome = AttemptState.CANCELLED
                 else:
                     outcome = (
                         AttemptState.INTERRUPTED if interrupted else AttemptState.FAILED
                     )
-                if run_state in {RunState.PREPARING, RunState.RUNNING}:
-                    run_metadata: dict[str, Any] = {"reason": reason}
+                if cancellation_requested:
+                    cancellation_reason = attempt["cancel_reason"]
+                    run_metadata = {
+                        "reason": cancellation_reason,
+                        "requested_by": attempt["cancel_requested_by"],
+                    }
+                    self._cancel_open_interactions(connection, attempt["run_id"], now)
+                    changed = connection.execute(
+                        "UPDATE runs SET state = 'cancelled', "
+                        "version = version + 1, updated_at = ?, finished_at = ? "
+                        "WHERE id = ? AND version = ?",
+                        (now, now, attempt["run_id"], attempt["run_version"]),
+                    ).rowcount
+                    if changed != 1:
+                        raise ConcurrentUpdateError("run changed concurrently")
+                    connection.execute(
+                        "INSERT INTO run_events "
+                        "(run_id, sequence, kind, from_state, to_state, "
+                        "metadata_json, created_at) VALUES (?, ?, "
+                        "'run.transitioned', ?, 'cancelled', ?, ?)",
+                        (
+                            attempt["run_id"],
+                            attempt["run_version"] + 1,
+                            run_state.value,
+                            canonical_json(run_metadata),
+                            now,
+                        ),
+                    )
+                    reason = cancellation_reason
+                elif run_state in {RunState.PREPARING, RunState.RUNNING}:
+                    run_metadata = {"reason": reason}
                     if interrupted:
                         run_metadata["reconciled"] = True
                     changed = connection.execute(
@@ -2747,6 +3115,137 @@ class Database:
                     "run attempt failure could not be recorded"
                 ) from exc
         return self.get_run_attempt(attempt_id)
+
+    @staticmethod
+    def _cancel_open_interactions(
+        connection: sqlite3.Connection, run_id: str, now: str
+    ) -> None:
+        interactions = connection.execute(
+            "SELECT id, version FROM interactions WHERE run_id = ? AND state = 'open'",
+            (run_id,),
+        ).fetchall()
+        for interaction in interactions:
+            version = interaction["version"]
+            connection.execute(
+                "UPDATE interactions SET state = 'cancelled', "
+                "version = version + 1, updated_at = ?, resolved_at = ? "
+                "WHERE id = ? AND version = ?",
+                (now, now, interaction["id"], version),
+            )
+            connection.execute(
+                "INSERT INTO interaction_events "
+                "(interaction_id, sequence, kind, from_state, to_state, "
+                "krab_item_id, created_at) VALUES (?, ?, "
+                "'interaction.cancelled', 'open', 'cancelled', NULL, ?)",
+                (interaction["id"], version + 1, now),
+            )
+
+    def request_run_cancellation(
+        self,
+        run_id: str,
+        *,
+        requested_by: str,
+        expected_run_version: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Request stop for an active attempt without claiming it has stopped."""
+
+        requested_by = require_string(requested_by, field="requested_by", max_bytes=64)
+        reason = require_string(reason, field="reason", max_bytes=4096)
+        if (
+            isinstance(expected_run_version, bool)
+            or not isinstance(expected_run_version, int)
+            or expected_run_version < 1
+        ):
+            raise ValidationError("expected_run_version must be a positive integer")
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                actor = connection.execute(
+                    "SELECT active FROM users WHERE id = ?", (requested_by,)
+                ).fetchone()
+                if actor is None or not actor["active"]:
+                    raise NotFoundError("cancellation operator is not an active user")
+                run = connection.execute(
+                    "SELECT state, version FROM runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                if run is None:
+                    raise NotFoundError(f"run not found: {run_id}")
+                if run["version"] != expected_run_version:
+                    raise ConcurrentUpdateError(
+                        f"run version is {run['version']}, "
+                        f"expected {expected_run_version}"
+                    )
+                state = RunState(run["state"])
+                if state in {
+                    RunState.SUCCEEDED,
+                    RunState.FAILED,
+                    RunState.CANCELLED,
+                }:
+                    raise ConflictError(f"run is already terminal: {state.value}")
+                attempt = connection.execute(
+                    "SELECT id, cancel_requested_at FROM run_attempts "
+                    "WHERE run_id = ? AND state IN ('preparing', 'running')",
+                    (run_id,),
+                ).fetchone()
+                metadata = canonical_json(
+                    {"reason": reason, "requested_by": requested_by}
+                )
+                if attempt is None:
+                    if state not in {
+                        RunState.QUEUED,
+                        RunState.WAITING_FOR_INPUT,
+                    }:
+                        raise ConflictError("active run has no active attempt")
+                    self._cancel_open_interactions(connection, run_id, now)
+                    changed = connection.execute(
+                        "UPDATE runs SET state = 'cancelled', "
+                        "version = version + 1, updated_at = ?, finished_at = ? "
+                        "WHERE id = ? AND version = ?",
+                        (now, now, run_id, expected_run_version),
+                    ).rowcount
+                    kind = "run.transitioned"
+                    target = RunState.CANCELLED.value
+                else:
+                    if attempt["cancel_requested_at"] is not None:
+                        raise ConflictError("run cancellation is already requested")
+                    connection.execute(
+                        "UPDATE run_attempts SET cancel_requested_at = ?, "
+                        "cancel_requested_by = ?, cancel_reason = ? WHERE id = ?",
+                        (now, requested_by, reason, attempt["id"]),
+                    )
+                    changed = connection.execute(
+                        "UPDATE runs SET version = version + 1, updated_at = ? "
+                        "WHERE id = ? AND version = ?",
+                        (now, run_id, expected_run_version),
+                    ).rowcount
+                    kind = "run.cancel_requested"
+                    target = state.value
+                if changed != 1:
+                    raise ConcurrentUpdateError("run changed concurrently")
+                connection.execute(
+                    "INSERT INTO run_events "
+                    "(run_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        expected_run_version + 1,
+                        kind,
+                        state.value,
+                        target,
+                        metadata,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (NotFoundError, ConflictError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("run cancellation could not be requested") from exc
+        return self.get_run(run_id)
 
     def transition_run(
         self,
@@ -3050,7 +3549,10 @@ class Database:
                 connection.execute("BEGIN IMMEDIATE")
                 interaction = connection.execute(
                     "SELECT i.state, i.version, i.request_item_id, i.run_id, "
-                    "r.state AS run_state, r.version AS run_version "
+                    "r.state AS run_state, r.version AS run_version, "
+                    "EXISTS (SELECT 1 FROM run_attempts ra "
+                    "WHERE ra.run_id = r.id "
+                    "AND ra.state IN ('preparing', 'running')) AS active_attempt "
                     "FROM interactions i JOIN runs r ON r.id = i.run_id "
                     "WHERE i.id = ?",
                     (interaction_id,),
@@ -3090,17 +3592,6 @@ class Database:
                 ).rowcount
                 if changed != 1:
                     raise ConcurrentUpdateError("interaction changed concurrently")
-                run_changed = connection.execute(
-                    "UPDATE runs SET state = 'queued', version = version + 1, "
-                    "updated_at = ? WHERE id = ? AND version = ?",
-                    (
-                        now,
-                        interaction["run_id"],
-                        interaction["run_version"],
-                    ),
-                ).rowcount
-                if run_changed != 1:
-                    raise ConcurrentUpdateError("run changed concurrently")
                 connection.execute(
                     "INSERT INTO interaction_events "
                     "(interaction_id, sequence, kind, from_state, to_state, "
@@ -3113,25 +3604,37 @@ class Database:
                         now,
                     ),
                 )
-                metadata = canonical_json(
-                    {
-                        "interaction_id": interaction_id,
-                        "response_item_id": response_item_id,
-                    }
-                )
-                connection.execute(
-                    "INSERT INTO run_events "
-                    "(run_id, sequence, kind, from_state, to_state, "
-                    "metadata_json, created_at) "
-                    "VALUES (?, ?, 'run.transitioned', 'waiting_for_input', "
-                    "'queued', ?, ?)",
-                    (
-                        interaction["run_id"],
-                        interaction["run_version"] + 1,
-                        metadata,
-                        now,
-                    ),
-                )
+                if not interaction["active_attempt"]:
+                    run_changed = connection.execute(
+                        "UPDATE runs SET state = 'queued', version = version + 1, "
+                        "updated_at = ? WHERE id = ? AND version = ?",
+                        (
+                            now,
+                            interaction["run_id"],
+                            interaction["run_version"],
+                        ),
+                    ).rowcount
+                    if run_changed != 1:
+                        raise ConcurrentUpdateError("run changed concurrently")
+                    metadata = canonical_json(
+                        {
+                            "interaction_id": interaction_id,
+                            "response_item_id": response_item_id,
+                        }
+                    )
+                    connection.execute(
+                        "INSERT INTO run_events "
+                        "(run_id, sequence, kind, from_state, to_state, "
+                        "metadata_json, created_at) "
+                        "VALUES (?, ?, 'run.transitioned', 'waiting_for_input', "
+                        "'queued', ?, ?)",
+                        (
+                            interaction["run_id"],
+                            interaction["run_version"] + 1,
+                            metadata,
+                            now,
+                        ),
+                    )
                 connection.commit()
             except (NotFoundError, ConflictError, ValidationError):
                 connection.rollback()
@@ -4329,12 +4832,125 @@ class Database:
             **envelope.to_dict(),
         }
 
+    @staticmethod
+    def _attempt_result_record(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            manifest = ResultManifest.from_mapping(json.loads(row["manifest_json"]))
+        except (json.JSONDecodeError, TypeError, ResultError) as exc:
+            raise StorageError("stored attempt result is invalid") from exc
+        if manifest.attempt_id != row["attempt_id"]:
+            raise StorageError("stored attempt result belongs to another attempt")
+        if manifest.digest != row["content_sha256"]:
+            raise StorageError("stored attempt result digest does not match")
+        if (
+            manifest.changed_paths != row["changed_paths"]
+            or manifest.changed_bytes != row["changed_bytes"]
+        ):
+            raise StorageError("stored attempt result summary does not match")
+        return {
+            "id": row["id"],
+            "attempt_id": row["attempt_id"],
+            "schema_version": row["schema_version"],
+            "manifest": manifest.to_dict(),
+            "content_sha256": row["content_sha256"],
+            "changed_paths": row["changed_paths"],
+            "changed_bytes": row["changed_bytes"],
+            "created_at": row["created_at"],
+        }
+
+    def record_attempt_result(
+        self, attempt_id: str, manifest: ResultManifest
+    ) -> dict[str, Any]:
+        """Bind one immutable host-captured result to its running attempt."""
+
+        attempt_id = require_string(attempt_id, field="attempt_id", max_bytes=64)
+        if not isinstance(manifest, ResultManifest):
+            raise ValidationError("result must be a validated manifest")
+        if manifest.attempt_id != attempt_id:
+            raise ValidationError("result belongs to another attempt")
+        result_id = self.new_id("rsl")
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                attempt = connection.execute(
+                    "SELECT state, source_revision FROM run_attempts WHERE id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise NotFoundError(f"run attempt not found: {attempt_id}")
+                if attempt["state"] != AttemptState.RUNNING.value:
+                    raise ConflictError(
+                        f"run attempt is not running: {attempt['state']}"
+                    )
+                if attempt["source_revision"] != manifest.source_revision:
+                    raise ConflictError("result source revision does not match")
+                existing = connection.execute(
+                    "SELECT id, attempt_id, schema_version, manifest_json, "
+                    "content_sha256, changed_paths, changed_bytes, created_at "
+                    "FROM attempt_results WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if existing is not None:
+                    if existing["content_sha256"] != manifest.digest:
+                        raise ConflictError(
+                            "run attempt already has a different result"
+                        )
+                    connection.commit()
+                    return self._attempt_result_record(existing)
+                connection.execute(
+                    "INSERT INTO attempt_results "
+                    "(id, attempt_id, schema_version, manifest_json, "
+                    "content_sha256, changed_paths, changed_bytes, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        result_id,
+                        attempt_id,
+                        manifest.schema_version,
+                        manifest.canonical,
+                        manifest.digest,
+                        manifest.changed_paths,
+                        manifest.changed_bytes,
+                        now,
+                    ),
+                )
+                stored = connection.execute(
+                    "SELECT id, attempt_id, schema_version, manifest_json, "
+                    "content_sha256, changed_paths, changed_bytes, created_at "
+                    "FROM attempt_results WHERE id = ?",
+                    (result_id,),
+                ).fetchone()
+                connection.commit()
+            except (NotFoundError, ConflictError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("attempt result could not be recorded") from exc
+        if stored is None:
+            raise StorageError("attempt result was not recorded")
+        return self._attempt_result_record(stored)
+
+    def get_attempt_result(self, attempt_id: str) -> dict[str, Any]:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT id, attempt_id, schema_version, manifest_json, "
+                "content_sha256, changed_paths, changed_bytes, created_at "
+                "FROM attempt_results WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"attempt result not found: {attempt_id}")
+        return self._attempt_result_record(row)
+
     def get_run_attempt(self, attempt_id: str) -> dict[str, Any]:
         with closing(self.connect()) as connection:
             row = connection.execute(
                 "SELECT ra.id, ra.run_id, ra.sequence, ra.runtime_adapter, "
                 "ra.state, ra.version, ra.source_revision, ra.container_id, "
                 "ra.container_name, ra.image_id, ra.exit_code, ra.reason, "
+                "ra.owner_id, ra.heartbeat_at, ra.lease_expires_at, "
+                "ra.cancel_requested_at, ra.cancel_requested_by, ra.cancel_reason, "
                 "ra.created_at, ra.started_at, ra.finished_at, "
                 "r.state AS run_state, r.version AS run_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
@@ -4357,6 +4973,12 @@ class Database:
                 "FROM attempt_handoffs WHERE attempt_id = ?",
                 (attempt_id,),
             ).fetchone()
+            result_row = connection.execute(
+                "SELECT id, attempt_id, schema_version, manifest_json, "
+                "content_sha256, changed_paths, changed_bytes, created_at "
+                "FROM attempt_results WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
         result = dict(row)
         try:
             result["events"] = [
@@ -4371,6 +4993,9 @@ class Database:
         for event in result["events"]:
             event.pop("metadata_json")
         result["handoff"] = None if handoff is None else self._handoff_record(handoff)
+        result["result"] = (
+            None if result_row is None else self._attempt_result_record(result_row)
+        )
         return result
 
     def list_run_attempts(self, run_id: str) -> list[dict[str, Any]]:

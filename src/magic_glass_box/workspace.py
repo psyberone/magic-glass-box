@@ -267,19 +267,26 @@ class WorkspaceManager:
             raise
         return PreparedWorkspace(path=destination, revision=resolved)
 
-    def cleanup(self, run_id: str) -> bool:
+    def locate(self, run_id: str) -> Path | None:
         run_id = self._validate_run_id(run_id)
         destination = self.ensure_root() / run_id
         try:
             info = destination.lstat()
         except FileNotFoundError:
-            return False
+            return None
         except OSError as exc:
             raise WorkspaceError("cannot inspect run workspace") from exc
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise WorkspaceError("run workspace must be a directory, not a symlink")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise WorkspaceError("run workspace is not owned by the current user")
+        return destination
+
+    def cleanup(self, run_id: str) -> bool:
+        run_id = self._validate_run_id(run_id)
+        destination = self.locate(run_id)
+        if destination is None:
+            return False
         try:
             shutil.rmtree(destination)
         except OSError as exc:

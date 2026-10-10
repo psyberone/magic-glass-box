@@ -492,10 +492,11 @@ class HandoffEnvelopeTests(unittest.TestCase):
 
 
 class RunStateTests(unittest.TestCase):
-    def test_waiting_round_trip_is_valid(self) -> None:
+    def test_waiting_requires_a_replacement_attempt(self) -> None:
         validate_transition(RunState.RUNNING, RunState.WAITING_FOR_INPUT)
-        validate_transition(RunState.WAITING_FOR_INPUT, RunState.RUNNING)
         validate_transition(RunState.WAITING_FOR_INPUT, RunState.QUEUED)
+        with self.assertRaisesRegex(ValidationError, "invalid run transition"):
+            validate_transition(RunState.WAITING_FOR_INPUT, RunState.RUNNING)
 
     def test_interaction_values_are_stable(self) -> None:
         self.assertEqual(

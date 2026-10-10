@@ -156,7 +156,8 @@ rather than messages or a transcript, and has a 24 KiB canonical limit.
 The handoff must match the active attempt and its interaction. An identical
 retry is idempotent; different content cannot replace an accepted handoff. The
 gateway returns `agent_action: "exit"`. The worker should then exit
-successfully; its container, mailbox, and mutable workspace are removed.
+successfully; its bounded file result is captured before its container,
+mailbox, and mutable workspace are removed.
 
 ### `interaction.read`
 
@@ -188,18 +189,21 @@ grant/run IDs are durable. See [provider-broker.md](provider-broker.md).
 
 ## Resume and recovery
 
-When the human response is accepted, the interaction becomes `answered` and
-the durable run returns to `queued`. A replacement worker receives a fresh
-mailbox and a clean workspace reconstructed from the already pinned commit. It
-calls `run.describe` to discover the prior handoff and answered interaction,
-then calls `interaction.read`. The original worker is not kept alive while a
-person is thinking, and its mutable filesystem is not inherited.
+When the human response is accepted, the interaction becomes `answered`. If
+the original attempt is still live, the run remains `waiting_for_input` until
+that worker exits; attempt finalization then returns it to `queued`. A
+replacement worker receives a fresh mailbox and a clean workspace reconstructed
+from the already pinned commit. It calls `run.describe` to discover the prior
+handoff and answered interaction, then calls `interaction.read`. The original
+worker is not kept alive while a person is thinking, and its mutable filesystem
+is not inherited automatically.
 
-If the orchestrator restarts, reconciliation removes containers, snapshots,
-and mailbox files. It leaves `waiting_for_input` interactions intact. Preparing
-or running work without a durable wait is failed explicitly because its live
-worker can no longer be proven. An active attempt attached to a durable wait is
-closed as interrupted while its handoff remains available.
+If the orchestrator restarts, reconciliation waits for the attempt owner lease
+to expire before removing containers, snapshots, and mailbox files. It captures
+recoverable file results and leaves `waiting_for_input` interactions intact.
+Preparing or running work without a durable wait is failed explicitly because
+its live worker can no longer be proven. An active attempt attached to a
+durable wait is closed as interrupted while its handoff remains available.
 
 ## Current boundary
 

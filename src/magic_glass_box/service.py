@@ -431,6 +431,22 @@ class ControlPlane:
             reason=reason,
         )
 
+    def request_run_cancellation(
+        self,
+        run_id: str,
+        *,
+        requested_by_handle: str,
+        expected_run_version: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(requested_by_handle)
+        return self.database.request_run_cancellation(
+            run_id,
+            requested_by=operator["id"],
+            expected_run_version=expected_run_version,
+            reason=reason,
+        )
+
     def submit_handoff(self, run_id: str, handoff: HandoffEnvelope) -> dict[str, Any]:
         """Persist bounded replacement state for the run's active attempt."""
 

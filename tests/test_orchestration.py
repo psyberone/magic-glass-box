@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,6 +24,7 @@ from magic_glass_box.executor import SandboxPlan, SandboxRequest, SandboxResult
 from magic_glass_box.gateway import GatewayEndpoint
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import RunCoordinator, RunOrchestrationError
+from magic_glass_box.results import CapturedResult, ResultManifest
 from magic_glass_box.workspace import PreparedWorkspace
 
 USER_ID = "usr_" + "1" * 32
@@ -61,6 +63,10 @@ class FakeWorkspaceManager:
         workspace.rmdir()
         return True
 
+    def locate(self, run_id: str) -> Path | None:
+        workspace = self.root / run_id
+        return workspace if workspace.exists() else None
+
 
 class FakeExecutor:
     def __init__(self, runtime_adapter: str = "docker"):
@@ -74,6 +80,9 @@ class FakeExecutor:
         self.during_execute = None
         self.requests: list[SandboxRequest] = []
         self.cleanup_calls: list[str] = []
+        self.stop_calls: list[str] = []
+        self.stop_results: list[int] = []
+        self.stopped = threading.Event()
 
     def execute(self, request: SandboxRequest, *, before_start=None) -> SandboxResult:
         self.requests.append(request)
@@ -103,6 +112,40 @@ class FakeExecutor:
         if self.cleanup_error is not None:
             raise self.cleanup_error
         return 0
+
+    def stop_run(self, run_id: str) -> int:
+        self.stop_calls.append(run_id)
+        result = self.stop_results.pop(0) if self.stop_results else 1
+        if result:
+            self.stopped.set()
+        return result
+
+
+class FakeResultStore:
+    def __init__(self, root: Path):
+        self.root = root
+        self.stage_error: Exception | None = None
+        self.capture_error: Exception | None = None
+        self.stage_calls: list[tuple[str, Path, str]] = []
+        self.capture_calls: list[tuple[str, Path]] = []
+        self.discard_calls: list[str] = []
+
+    def stage(self, attempt_id: str, workspace: Path, revision: str) -> None:
+        self.stage_calls.append((attempt_id, workspace, revision))
+        if self.stage_error is not None:
+            raise self.stage_error
+
+    def capture(self, attempt_id: str, workspace: Path) -> CapturedResult:
+        self.capture_calls.append((attempt_id, workspace))
+        if self.capture_error is not None:
+            raise self.capture_error
+        directory = self.root / attempt_id
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return CapturedResult(ResultManifest(1, attempt_id, COMMIT, ()), directory)
+
+    def discard_stage(self, attempt_id: str) -> bool:
+        self.discard_calls.append(attempt_id)
+        return True
 
 
 class FakeGatewayManager:
@@ -204,12 +247,16 @@ class RunCoordinatorTests(unittest.TestCase):
         self.workspaces.root.mkdir(mode=0o700)
         self.executor = FakeExecutor()
         self.gateways = FakeGatewayManager(self.root / "gateways")
+        self.results = FakeResultStore(self.root / "results")
         self.coordinator = RunCoordinator(
             self.database,
             self.executor,
             self.workspaces,
             PrivateFileCredentialResolver(),
             self.gateways,
+            self.results,
+            orchestrator_id="orchestrator-test",
+            heartbeat_interval=30,
         )
 
     def create_run(
@@ -248,9 +295,15 @@ class RunCoordinatorTests(unittest.TestCase):
                 "source_revision": COMMIT,
             },
         )
+        attempt = finished["attempts"][0]
         self.assertEqual(
             finished["events"][3]["metadata"],
-            {"exit_code": 0, "image_id": IMAGE_ID},
+            {
+                "exit_code": 0,
+                "image_id": IMAGE_ID,
+                "result_id": attempt["result"]["id"],
+                "result_sha256": attempt["result"]["content_sha256"],
+            },
         )
         self.assertEqual(finished["events"][3]["kind"], "run.transitioned")
         self.assertEqual(finished["events"][3]["from_state"], "running")
@@ -284,6 +337,17 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.workspaces.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
+        self.assertEqual(attempt["owner_id"], "orchestrator-test")
+        self.assertEqual(attempt["result"]["manifest"]["changes"], [])
+        self.assertEqual(
+            self.results.stage_calls,
+            [(attempt["id"], self.workspaces.root / run["id"], COMMIT)],
+        )
+        self.assertEqual(
+            self.results.capture_calls,
+            [(attempt["id"], self.workspaces.root / run["id"])],
+        )
+        self.assertEqual(self.results.discard_calls, [attempt["id"]])
 
     def test_gateway_interaction_suspends_instead_of_completing_the_run(self) -> None:
         run = self.create_run(session_id="ses_" + "4" * 32)
@@ -372,6 +436,9 @@ class RunCoordinatorTests(unittest.TestCase):
             replacement_workspaces,
             PrivateFileCredentialResolver(),
             self.gateways,
+            self.results,
+            orchestrator_id="orchestrator-replacement",
+            heartbeat_interval=30,
         )
         finished = replacement.execute(run["id"])
 
@@ -401,12 +468,15 @@ class RunCoordinatorTests(unittest.TestCase):
 
         self.assertEqual(finished["state"], "failed")
         self.assertEqual(finished["source_revision"], COMMIT)
+        result = finished["attempts"][0]["result"]
         self.assertEqual(
             finished["events"][-1]["metadata"],
             {
                 "exit_code": 17,
                 "image_id": IMAGE_ID,
                 "reason": "agent exited with code 17",
+                "result_id": result["id"],
+                "result_sha256": result["content_sha256"],
             },
         )
         self.assertEqual(self.workspaces.prepare_calls[0][2], None)
@@ -420,6 +490,8 @@ class RunCoordinatorTests(unittest.TestCase):
                 run = self.create_run()
                 self.executor.execute_error = RuntimeError("docker broke")
                 self.executor.error_after_callback = after_callback
+                capture_count = len(self.results.capture_calls)
+                discard_count = len(self.results.discard_calls)
 
                 with self.assertRaisesRegex(RunOrchestrationError, "execution failed"):
                     self.coordinator.execute(run["id"])
@@ -432,6 +504,14 @@ class RunCoordinatorTests(unittest.TestCase):
                     failed["events"][-1]["metadata"],
                     {"reason": "execution failed: RuntimeError"},
                 )
+                attempt = failed["attempts"][0]
+                if after_callback:
+                    self.assertIsNotNone(attempt["result"])
+                    self.assertEqual(len(self.results.capture_calls), capture_count + 1)
+                else:
+                    self.assertIsNone(attempt["result"])
+                    self.assertEqual(len(self.results.capture_calls), capture_count)
+                self.assertEqual(len(self.results.discard_calls), discard_count + 1)
                 self.executor.execute_error = None
                 self.executor.error_after_callback = False
 
@@ -490,6 +570,104 @@ class RunCoordinatorTests(unittest.TestCase):
 
         self.assertEqual(self.database.get_run(run["id"])["state"], "preparing")
         self.assertEqual(self.workspaces.cleanup_calls, [run["id"]])
+
+    def test_result_capture_failure_retains_workspace_for_expired_lease_recovery(
+        self,
+    ) -> None:
+        run = self.create_run()
+        self.results.capture_error = RuntimeError("disk full")
+
+        with self.assertRaisesRegex(RunOrchestrationError, "result capture incomplete"):
+            self.coordinator.execute(run["id"])
+
+        active = self.database.get_run(run["id"])
+        self.assertEqual(active["state"], "running")
+        self.assertTrue((self.workspaces.root / run["id"]).exists())
+        self.assertEqual(self.executor.cleanup_calls, [run["id"]])
+        self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
+        self.assertEqual(self.workspaces.cleanup_calls, [])
+
+    def test_executor_failure_and_capture_failure_retain_recoverable_workspace(
+        self,
+    ) -> None:
+        run = self.create_run()
+        self.executor.execute_error = RuntimeError("docker wait failed")
+        self.executor.error_after_callback = True
+        self.results.capture_error = RuntimeError("disk full")
+
+        with self.assertRaisesRegex(RunOrchestrationError, "capture incomplete"):
+            self.coordinator.execute(run["id"])
+
+        active = self.database.get_run(run["id"])
+        self.assertEqual(active["state"], "running")
+        self.assertIsNone(active["attempts"][0]["result"])
+        self.assertTrue((self.workspaces.root / run["id"]).exists())
+        self.assertEqual(self.executor.cleanup_calls, [run["id"]])
+        self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
+        self.assertEqual(self.workspaces.cleanup_calls, [])
+
+    def test_cancel_request_stops_the_owned_container_before_terminal_state(
+        self,
+    ) -> None:
+        run = self.create_run()
+        coordinator = RunCoordinator(
+            self.database,
+            self.executor,
+            self.workspaces,
+            PrivateFileCredentialResolver(),
+            self.gateways,
+            self.results,
+            orchestrator_id="orchestrator-cancel-test",
+            heartbeat_interval=0.01,
+        )
+
+        def request_cancel(_request: SandboxRequest) -> None:
+            current = self.database.get_run(run["id"])
+            requested = self.database.request_run_cancellation(
+                run["id"],
+                requested_by=self.user["id"],
+                expected_run_version=current["version"],
+                reason="stop now",
+            )
+            self.assertEqual(requested["state"], "running")
+            self.assertTrue(self.executor.stopped.wait(timeout=1))
+
+        self.executor.during_execute = request_cancel
+        cancelled = coordinator.execute(run["id"])
+
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(self.executor.stop_calls, [run["id"]])
+        self.assertEqual(cancelled["attempts"][0]["state"], "cancelled")
+
+    def test_cancel_monitor_retries_until_the_container_can_be_stopped(self) -> None:
+        run = self.create_run()
+        self.executor.stop_results = [0, 1]
+        coordinator = RunCoordinator(
+            self.database,
+            self.executor,
+            self.workspaces,
+            PrivateFileCredentialResolver(),
+            self.gateways,
+            self.results,
+            orchestrator_id="orchestrator-cancel-race-test",
+            heartbeat_interval=0.01,
+        )
+
+        def request_cancel(_request: SandboxRequest) -> None:
+            current = self.database.get_run(run["id"])
+            self.database.request_run_cancellation(
+                run["id"],
+                requested_by=self.user["id"],
+                expected_run_version=current["version"],
+                reason="stop during container discovery",
+            )
+            self.assertTrue(self.executor.stopped.wait(timeout=1))
+
+        self.executor.during_execute = request_cancel
+        cancelled = coordinator.execute(run["id"])
+
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(self.executor.stop_calls, [run["id"], run["id"]])
 
     def test_all_cleanup_boundaries_are_attempted_and_reported(self) -> None:
         run = self.create_run()
@@ -599,12 +777,12 @@ class RunCoordinatorTests(unittest.TestCase):
             self.assertEqual(
                 failed["events"][-1]["metadata"],
                 {
-                    "reason": "orchestrator restart reconciliation",
+                    "reason": "orphaned run has no active attempt",
                     "reconciled": True,
                 },
             )
 
-    def test_reconcile_preserves_a_pending_interaction_without_live_resources(
+    def test_reconcile_does_not_infer_ownership_of_a_waiting_run_without_attempt(
         self,
     ) -> None:
         run = self.create_run(session_id="ses_" + "4" * 32)
@@ -629,14 +807,44 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(preserved["state"], "waiting_for_input")
         self.assertEqual(preserved["interactions"][0]["id"], interaction["id"])
         self.assertEqual(preserved["interactions"][0]["state"], "open")
-        self.assertEqual(self.executor.cleanup_calls, [run["id"]])
-        self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
-        self.assertFalse((self.workspaces.root / run["id"]).exists())
+        self.assertEqual(self.executor.cleanup_calls, [])
+        self.assertEqual(self.gateways.cleanup_calls, [])
+        self.assertTrue((self.workspaces.root / run["id"]).exists())
+
+    def test_reconcile_skips_a_live_owned_attempt(self) -> None:
+        run = self.create_run()
+        attempt = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="agent-live",
+            owner_id="orchestrator-live",
+            expected_run_version=1,
+            lease_seconds=60,
+        )
+        self.database.start_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            expected_run_version=attempt["run_version"],
+            source_revision=COMMIT,
+            container_id=CONTAINER_ID,
+            container_name="magic-glass-box-live",
+            image_id=IMAGE_ID,
+        )
+        (self.workspaces.root / run["id"]).mkdir(mode=0o700)
+
+        self.assertEqual(self.coordinator.reconcile(), [])
+
+        current = self.database.get_run(run["id"])
+        self.assertEqual(current["state"], "running")
+        self.assertEqual(current["attempts"][0]["state"], "running")
+        self.assertEqual(self.executor.cleanup_calls, [])
 
     def test_reconcile_closes_crashed_attempt_without_losing_its_handoff(self) -> None:
         run = self.create_run(session_id="ses_" + "4" * 32)
         attempt = self.database.begin_run_attempt(
-            run["id"], runtime_adapter="agent-a", expected_run_version=1
+            run["id"],
+            runtime_adapter="agent-a",
+            owner_id="orchestrator-crashed",
+            expected_run_version=1,
         )
         running = self.database.start_run_attempt(
             attempt["id"],
@@ -669,6 +877,14 @@ class RunCoordinatorTests(unittest.TestCase):
             ),
         )
         (self.workspaces.root / run["id"]).mkdir(mode=0o700)
+        self.results.stage(running["id"], self.workspaces.root / run["id"], COMMIT)
+        connection = self.database.connect()
+        connection.execute(
+            "UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00.000000+00:00", running["id"]),
+        )
+        connection.commit()
+        connection.close()
 
         self.assertEqual(self.coordinator.reconcile(), [])
 

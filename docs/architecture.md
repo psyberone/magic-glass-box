@@ -68,6 +68,16 @@ project-activity projection.
   Revocation and expiry remain live kill switches for already-pinned runs.
 - The requested source revision is resolved to a full Git commit and persisted
   in the transition to `running`.
+- Each active attempt has one orchestrator owner, heartbeat, and expiring
+  lease. Reconciliation may take over only after that lease expires; invoking
+  recovery cannot tear down a live attempt owned by another process.
+- A cancellation request is durable and audited. The owning coordinator polls
+  it through the lease heartbeat, stops the labeled container, captures any
+  bounded result, cleans resources, and only then records terminal
+  cancellation.
+- Every started attempt binds one immutable result manifest and its
+  content-addressed blobs before its workspace is removed. Results are inert
+  evidence until an operator explicitly applies them to a checkout.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - A human interaction records only its type, lifecycle, recipient, run, and
@@ -78,9 +88,10 @@ project-activity projection.
   version, event sequence, and optional work-claim link are verified before
   the local transition is accepted.
 - Opening an interaction atomically moves its run to `waiting_for_input`.
-  Answering records the response item ID and re-queues the durable run so a
-  replacement worker can resume it; terminal run transitions cancel any open
-  interaction.
+  Answering records the response item ID. If its attempt is still live, the run
+  remains waiting until that attempt exits; attempt finalization then queues a
+  replacement. If no attempt is active, the answer queues the run immediately.
+  Terminal run transitions cancel any open interaction.
 - A response is accepted only when its project and session match the run and
   its route reverses the request route from the authorized human to the pinned
   agent identity. Its title, body, and risk flags exist in memory only for the
@@ -100,15 +111,29 @@ For an execution request, Magic Glass Box:
 3. validates the named authorities and opens the run-scoped gateway;
 4. resolves the image reference to an immutable digest and creates the sandbox;
 5. records the commit, image, and container identity before starting it;
-6. waits for the agent, removes all labeled containers, gateway files, and the
-   snapshot, then
-   records the exit status and terminal state.
+6. waits for the agent while renewing its ownership lease and polling durable
+   cancellation; Docker command timeouts remain bounded, while agent runtime is
+   unlimited unless the operator supplies `--run-timeout`;
+7. captures a bounded file-level result and binds its digest to the attempt;
+8. removes all labeled containers, gateway files, and the disposable snapshot;
+   and
+9. records the exit status and terminal state.
 
 Operational failures become audited `failed` runs only after cleanup succeeds.
-If cleanup cannot be proven, the run remains active so `run reconcile` can retry
-after a restart. Reconciliation finds containers by product and run-ID labels
+If a started worker fails, its recoverable changes are captured before cleanup.
+If capture or cleanup cannot be proven, the run remains active and its
+workspace is retained when needed so `run reconcile` can retry after the owner
+lease expires. Reconciliation finds containers by product and run-ID labels
 rather than trusting an in-memory container handle. It also recognizes the
 retired label namespace so an upgrade can clean interrupted legacy containers.
+
+The result store is trusted host state beside the control-plane database. It
+contains a canonical manifest plus deduplicated changed-file blobs, never a Git
+repository or an executable action. Applying a result verifies the database
+digest, checks every affected path against its captured baseline before making
+any change, and then reconstructs files, safe relative symlinks, deletions, and
+executable modes. It never commits, pushes, opens a pull request, or needs forge
+credentials. See [results.md](results.md).
 
 The Docker boundary rejects images with Dockerfile-declared volumes, validates
 host paths before mounting them, runs as the host's non-root numeric identity,
@@ -129,9 +154,10 @@ method, model, headers, byte limits, timeout, and concurrency in
 administrator-owned policy. Opening an interaction tells a handoff-capable
 worker to submit bounded replacement state and exit. Cleanup removes its
 resources, and the durable run remains `waiting_for_input`. A verified response
-re-queues the run, and a replacement worker may retrieve only the response
-correlated to that run. See [agent-gateway.md](agent-gateway.md),
-[provider-broker.md](provider-broker.md), and [work-memory.md](work-memory.md).
+becomes available to the current attempt, but a replacement is queued only
+after that attempt has exited. See [agent-gateway.md](agent-gateway.md),
+[provider-broker.md](provider-broker.md), [results.md](results.md), and
+[work-memory.md](work-memory.md).
 
 ## Work-item boundary
 
@@ -147,9 +173,9 @@ therefore never an authority channel.
 Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
-broker, structured worker replacement, multi-agent work memory, and work-item
-completion lifecycle are complete. The next slice is the local control room: an
-operator view over projects, authority, work threads, assignments, runs,
-attempts, interactions, and recovery actions without private message bodies or
-transcripts. See
+broker, structured worker replacement, multi-agent work memory, work-item
+completion, and execution integrity are complete. The next slice is the local
+control room: an operator view over projects, authority, work threads,
+assignments, runs, attempts, interactions, retained results, and recovery
+actions without private message bodies or transcripts. See
 [worker-handoffs.md](worker-handoffs.md) and [work-memory.md](work-memory.md).

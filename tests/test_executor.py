@@ -675,6 +675,9 @@ class FakeDockerEngine:
         self._call("wait", container_id)
         return self.exit_code
 
+    def stop(self, container_id: str) -> None:
+        self._call("stop", container_id)
+
     def remove(self, container_id: str) -> None:
         self._call("remove", container_id)
 
@@ -836,6 +839,21 @@ class DockerExecutorTests(unittest.TestCase):
             ["additional container cleanup failed: cannot remove c"],
         )
 
+    def test_stop_run_stops_every_managed_container(self) -> None:
+        second = "c" * 64
+        self.engine.managed = (CONTAINER_ID, second)
+
+        self.assertEqual(self.executor.stop_run(RUN_ID), 2)
+
+        self.assertEqual(
+            self.engine.calls,
+            [
+                ("managed", RUN_ID),
+                ("stop", CONTAINER_ID),
+                ("stop", second),
+            ],
+        )
+
 
 class DockerCLITests(unittest.TestCase):
     def setUp(self) -> None:
@@ -843,7 +861,7 @@ class DockerCLITests(unittest.TestCase):
         self.client = DockerCLI(
             binary=Path("/usr/local/bin/docker"),
             runner=self.runner,
-            timeout=12.5,
+            command_timeout=12.5,
         )
 
     def completed(
@@ -904,8 +922,34 @@ class DockerCLITests(unittest.TestCase):
                 DockerCLI(
                     binary=Path("/bin/docker"),
                     runner=self.runner,
-                    timeout=timeout,  # type: ignore[arg-type]
+                    command_timeout=timeout,  # type: ignore[arg-type]
                 )
+            with (
+                self.subTest(run_timeout=timeout),
+                self.assertRaisesRegex(ExecutionError, "timeout must be positive"),
+            ):
+                DockerCLI(
+                    binary=Path("/bin/docker"),
+                    runner=self.runner,
+                    run_timeout=timeout,  # type: ignore[arg-type]
+                )
+
+    def test_wait_has_no_accidental_command_timeout_and_allows_a_run_deadline(
+        self,
+    ) -> None:
+        self.runner.return_value = self.completed("0\n")
+
+        self.assertEqual(self.client.wait(CONTAINER_ID), 0)
+        self.assertIsNone(self.runner.call_args.kwargs["timeout"])
+
+        bounded = DockerCLI(
+            binary=Path("/usr/local/bin/docker"),
+            runner=self.runner,
+            command_timeout=12.5,
+            run_timeout=3600,
+        )
+        self.assertEqual(bounded.wait(CONTAINER_ID), 0)
+        self.assertEqual(self.runner.call_args.kwargs["timeout"], 3600.0)
 
     def test_lifecycle_commands_parse_exact_outputs(self) -> None:
         plan = SandboxPlan(
@@ -919,10 +963,12 @@ class DockerCLITests(unittest.TestCase):
             self.completed(CONTAINER_ID + "\n"),
             self.completed("17\n"),
             self.completed(CONTAINER_ID + "\n"),
+            self.completed(CONTAINER_ID + "\n"),
         )
         self.assertEqual(self.client.create(plan), CONTAINER_ID)
         self.client.start(CONTAINER_ID)
         self.assertEqual(self.client.wait(CONTAINER_ID), 17)
+        self.client.stop(CONTAINER_ID)
         self.client.remove(CONTAINER_ID)
         commands = [call.args[0][1:] for call in self.runner.call_args_list]
         self.assertEqual(
@@ -931,6 +977,7 @@ class DockerCLITests(unittest.TestCase):
                 ["container", "create"],
                 ["container", "start", CONTAINER_ID],
                 ["container", "wait", CONTAINER_ID],
+                ["container", "stop", CONTAINER_ID],
                 ["container", "rm", "--force", "--volumes", CONTAINER_ID],
             ],
         )

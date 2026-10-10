@@ -375,6 +375,8 @@ class DockerEngine(Protocol):
 
     def wait(self, container_id: str) -> int: ...
 
+    def stop(self, container_id: str) -> None: ...
+
     def remove(self, container_id: str) -> None: ...
 
     def managed_containers(self, run_id: str) -> tuple[str, ...]: ...
@@ -436,13 +438,19 @@ class DockerExecutor:
         )
 
     def cleanup_run(self, run_id: str) -> int:
+        return self._operate_managed(run_id, self.engine.remove)
+
+    def stop_run(self, run_id: str) -> int:
+        return self._operate_managed(run_id, self.engine.stop)
+
+    def _operate_managed(self, run_id: str, operation: Callable[[str], None]) -> int:
         if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:
             raise ExecutionError("invalid run identifier")
         container_ids = self.engine.managed_containers(run_id)
         failures: list[BaseException] = []
         for container_id in container_ids:
             try:
-                self.engine.remove(container_id)
+                operation(container_id)
             except BaseException as exc:
                 failures.append(exc)
         if failures:
@@ -462,7 +470,8 @@ class DockerCLI:
         *,
         binary: Path | None = None,
         runner: Runner | None = None,
-        timeout: float = 30.0,
+        command_timeout: float = 30.0,
+        run_timeout: float | None = None,
     ):
         if binary is None:
             discovered = shutil.which("docker")
@@ -471,24 +480,36 @@ class DockerCLI:
             binary = Path(discovered)
         if not Path(binary).is_absolute():
             raise ExecutionError("Docker CLI path must be absolute")
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or timeout <= 0
+        for value, label in (
+            (command_timeout, "Docker command timeout"),
+            (run_timeout, "agent run timeout"),
         ):
-            raise ExecutionError("Docker command timeout must be positive")
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value <= 0
+            ):
+                raise ExecutionError(f"{label} must be positive")
         self.binary = Path(binary)
         self.runner = runner or subprocess.run
-        self.timeout = float(timeout)
+        self.command_timeout = float(command_timeout)
+        self.run_timeout = None if run_timeout is None else float(run_timeout)
 
-    def _run(self, args: tuple[str, ...]) -> str:
+    def _run(
+        self,
+        args: tuple[str, ...],
+        *,
+        timeout: float | None = None,
+        use_command_timeout: bool = True,
+    ) -> str:
+        effective_timeout = self.command_timeout if use_command_timeout else timeout
         try:
             completed = self.runner(
                 [str(self.binary), *args],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout,
+                timeout=effective_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -544,7 +565,11 @@ class DockerCLI:
         self._run(("container", "start", container_id))
 
     def wait(self, container_id: str) -> int:
-        raw = self._run(("container", "wait", container_id)).strip()
+        raw = self._run(
+            ("container", "wait", container_id),
+            timeout=self.run_timeout,
+            use_command_timeout=False,
+        ).strip()
         try:
             exit_code = int(raw)
         except ValueError as exc:
@@ -554,6 +579,9 @@ class DockerCLI:
         if not 0 <= exit_code <= 255:
             raise ExecutionError("Docker returned an invalid container exit code")
         return exit_code
+
+    def stop(self, container_id: str) -> None:
+        self._run(("container", "stop", container_id))
 
     def remove(self, container_id: str) -> None:
         self._run(("container", "rm", "--force", "--volumes", container_id))

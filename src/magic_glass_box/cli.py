@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,7 +14,6 @@ from .domain import (
     AgentProfileSpec,
     ProjectContext,
     ProviderGrantSpec,
-    RunState,
     ValidationError,
     WorkItemEnvelope,
 )
@@ -22,12 +22,23 @@ from .gateway import FileGatewayManager, default_gateway_root
 from .krab import KrabError
 from .orchestration import RunCoordinator, RunOrchestrationError
 from .provider import ProviderError
+from .results import ResultError, WorkspaceResultStore, default_result_root
 from .service import ControlPlane, activity_to_dict
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
 
 class InputError(ValueError):
     pass
+
+
+def _positive_seconds(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return parsed
 
 
 def _json_file(path: Path) -> dict[str, Any]:
@@ -216,39 +227,66 @@ def build_parser() -> argparse.ArgumentParser:
     run_create.add_argument("--source-revision")
     run_create.add_argument("--krab-session")
     run_create.add_argument("--krab-claim")
-    run_transition = run_commands.add_parser(
-        "transition", help="apply an optimistic run-state transition"
+    run_cancel = run_commands.add_parser(
+        "cancel", help="request stop for a queued or active run"
     )
-    run_transition.add_argument("run_id")
-    run_transition.add_argument("state", choices=[state.value for state in RunState])
-    run_transition.add_argument("--expected-version", required=True, type=int)
-    run_transition.add_argument("--reason")
+    run_cancel.add_argument("run_id")
+    run_cancel.add_argument("--expected-version", required=True, type=int)
+    run_cancel.add_argument("--requested-by", required=True)
+    run_cancel.add_argument("--reason", required=True)
     run_show = run_commands.add_parser("show", help="show a run and its event stream")
     run_show.add_argument("run_id")
     run_execute = run_commands.add_parser(
         "execute", help="execute one queued run in its pinned sandbox"
     )
     run_execute.add_argument("run_id")
+    run_execute.add_argument(
+        "--run-timeout",
+        type=_positive_seconds,
+        help="optional maximum agent runtime in seconds",
+    )
     run_commands.add_parser(
         "reconcile", help="clean and fail runs interrupted by an orchestrator restart"
     )
+
+    result = commands.add_parser("result", help="inspect and apply retained work")
+    result_commands = result.add_subparsers(dest="result_command", required=True)
+    result_show = result_commands.add_parser(
+        "show", help="verify and show one retained attempt result"
+    )
+    result_show.add_argument("attempt_id")
+    result_apply = result_commands.add_parser(
+        "apply", help="apply one retained result after conflict preflight"
+    )
+    result_apply.add_argument("attempt_id")
+    result_apply.add_argument("--repository", required=True, type=Path)
     return parser
 
 
-def _build_run_coordinator(control: ControlPlane) -> RunCoordinator:
+def _build_result_store(control: ControlPlane) -> WorkspaceResultStore:
+    return WorkspaceResultStore(default_result_root(control.database.path))
+
+
+def _build_run_coordinator(
+    control: ControlPlane,
+    *,
+    run_timeout: float | None = None,
+    result_store: WorkspaceResultStore | None = None,
+) -> RunCoordinator:
     workspaces = WorkspaceManager(
         control.database.path.parent / "workspaces",
         GitSnapshotter(),
     )
     return RunCoordinator(
         control.database,
-        DockerExecutor(DockerCLI()),
+        DockerExecutor(DockerCLI(run_timeout=run_timeout)),
         workspaces,
         control.credential_resolver,
         FileGatewayManager(
             default_gateway_root(control.database.path),
             control,
         ),
+        result_store or _build_result_store(control),
     )
 
 
@@ -256,6 +294,7 @@ def _dispatch(
     args: argparse.Namespace,
     control: ControlPlane,
     coordinator: RunCoordinator | None = None,
+    result_store: WorkspaceResultStore | None = None,
 ) -> object:
     if args.command == "init":
         return control.initialize()
@@ -363,19 +402,36 @@ def _dispatch(
                 krab_session_id=args.krab_session,
                 krab_claim_id=args.krab_claim,
             )
-        if args.run_command == "transition":
-            return control.transition_run(
+        if args.run_command == "cancel":
+            requested = control.request_run_cancellation(
                 args.run_id,
-                target=RunState(args.state),
-                expected_version=args.expected_version,
+                requested_by_handle=args.requested_by,
+                expected_run_version=args.expected_version,
                 reason=args.reason,
             )
+            if coordinator is not None:
+                coordinator.reconcile(args.run_id)
+                return control.database.get_run(args.run_id)
+            return requested
         if args.run_command == "show":
             return control.database.get_run(args.run_id)
         if args.run_command == "execute" and coordinator is not None:
             return coordinator.execute(args.run_id)
         if args.run_command == "reconcile" and coordinator is not None:
             return coordinator.reconcile()
+    if args.command == "result" and result_store is not None:
+        stored = control.database.get_attempt_result(args.attempt_id)
+        if args.result_command == "show":
+            result_store.inspect(
+                args.attempt_id, expected_digest=stored["content_sha256"]
+            )
+            return stored
+        if args.result_command == "apply":
+            return result_store.apply(
+                args.attempt_id,
+                args.repository,
+                expected_digest=stored["content_sha256"],
+            )
     raise RuntimeError("unreachable command")
 
 
@@ -385,15 +441,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     control = ControlPlane(Database(args.db))
     try:
         coordinator = None
-        if args.command == "run" and args.run_command in {"execute", "reconcile"}:
-            coordinator = _build_run_coordinator(control)
-        result = _dispatch(args, control, coordinator)
+        result_store = None
+        if args.command == "run" and args.run_command in {
+            "cancel",
+            "execute",
+            "reconcile",
+        }:
+            result_store = _build_result_store(control)
+            coordinator = _build_run_coordinator(
+                control,
+                run_timeout=(
+                    args.run_timeout if args.run_command == "execute" else None
+                ),
+                result_store=result_store,
+            )
+        elif args.command == "result":
+            result_store = _build_result_store(control)
+        result = _dispatch(args, control, coordinator, result_store)
     except (
         CredentialError,
         ExecutionError,
         InputError,
         KrabError,
         ProviderError,
+        ResultError,
         RunOrchestrationError,
         StorageError,
         ValidationError,
