@@ -11,6 +11,7 @@ mutants/
 .venv/
 build/
 dist/
+docs/internal/
 *.db
 *.db-shm
 *.db-wal
