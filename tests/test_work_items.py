@@ -311,7 +311,16 @@ class WorkItemDatabaseTests(unittest.TestCase):
         self.assertEqual(imported["content"], envelope().content)
         self.assertEqual(imported["content_sha256"], envelope().digest)
         self.assertEqual(imported["imported_by"], "operator")
+        self.assertEqual(imported["state"], "active")
+        self.assertEqual(imported["work_thread"]["generation"], 1)
+        self.assertEqual(imported["work_thread"]["version"], 1)
+        self.assertEqual(
+            imported["work_thread"]["events"][0]["kind"],
+            "work_thread.created",
+        )
+        self.assertEqual(imported["work_thread"]["events"][0]["actor"], "operator")
         self.assertEqual(self.database.status()["counts"]["work_items"], 1)
+        self.assertEqual(self.database.status()["counts"]["work_thread_events"], 1)
         stored = self.database.get_work_item(imported["id"])
         self.assertNotIn("import_status", stored)
         self.assertEqual(stored, {key: imported[key] for key in stored})
@@ -375,20 +384,25 @@ class WorkItemDatabaseTests(unittest.TestCase):
         first = self.import_item()
         self.import_item(envelope(updated_at="2026-10-10T12:00:00Z"))
 
-        with self.assertRaisesRegex(ConflictError, "stale"):
+        with self.assertRaises(ConflictError) as stale:
             self.import_item(
                 envelope(
                     updated_at="2026-10-09T18:00:00Z",
                     brief="This stale change must not win.",
                 )
             )
-        with self.assertRaisesRegex(ConflictError, "same source revision"):
+        self.assertEqual(str(stale.exception), "work item import is stale")
+        with self.assertRaises(ConflictError) as conflicting_revision:
             self.import_item(
                 envelope(
                     updated_at="2026-10-10T12:00:00Z",
                     brief="This ambiguous change must not win.",
                 )
             )
+        self.assertEqual(
+            str(conflicting_revision.exception),
+            "work item import changed at the same source revision",
+        )
         stored = self.database.get_work_item(first["id"])
         self.assertEqual(stored["version"], 1)
         self.assertEqual(stored["content"], envelope().content)
@@ -429,12 +443,15 @@ class WorkItemDatabaseTests(unittest.TestCase):
         connection.execute(
             "UPDATE projects SET active = 1 WHERE id = ?", (self.project["id"],)
         )
-        with self.assertRaisesRegex(ConflictError, "could not be imported"):
+        with self.assertRaises(ConflictError) as unauthorized_import:
             self.database.import_work_item(
                 project_key="box-project",
                 envelope=envelope(external_id="new-item"),
                 imported_by="boxu_" + "f" * 32,
             )
+        self.assertEqual(
+            str(unauthorized_import.exception), "work item could not be imported"
+        )
         with self.assertRaisesRegex(ValidationError, "WorkItemEnvelope"):
             self.database.import_work_item(
                 project_key="box-project",
@@ -477,8 +494,11 @@ class WorkItemDatabaseTests(unittest.TestCase):
                 "DELETE FROM work_item_versions WHERE work_item_id = ?",
                 (imported["id"],),
             )
-        with self.assertRaisesRegex(StorageError, "no content version"):
+        with self.assertRaises(StorageError) as missing_version:
             self.import_item(envelope(updated_at="2026-10-10T12:00:00Z"))
+        self.assertEqual(
+            str(missing_version.exception), "work item has no content version"
+        )
 
     def test_runs_pin_the_current_work_item_version(self) -> None:
         first_import = self.import_item()
@@ -566,7 +586,7 @@ class WorkItemMigrationTests(unittest.TestCase):
             database = Database(path)
             first = database.initialize()
             second = database.initialize()
-            self.assertEqual(first["schema_version"], 6)
+            self.assertEqual(first["schema_version"], 7)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["work_items"], 0)

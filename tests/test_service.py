@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import Database
@@ -254,6 +255,47 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(
             profile_from_mapping({"image": "agent", "command": ["run"]}).image,
             "agent",
+        )
+
+    def test_work_item_lifecycle_resolves_operator_handles(self) -> None:
+        database = mock.Mock()
+        database.get_user.return_value = {"id": "boxu_operator"}
+        database.get_work_item.return_value = {"id": "wki_one"}
+        database.complete_work_item.return_value = {"state": "completed"}
+        database.reopen_work_item.return_value = {"state": "active"}
+        control = ControlPlane(database)
+
+        self.assertEqual(control.get_work_item("wki_one"), {"id": "wki_one"})
+        self.assertEqual(
+            control.complete_work_item(
+                "wki_one",
+                completed_by_handle="operator",
+                expected_thread_version=4,
+                reason="Verified.",
+            ),
+            {"state": "completed"},
+        )
+        self.assertEqual(
+            control.reopen_work_item(
+                "wki_one",
+                reopened_by_handle="operator",
+                expected_thread_version=5,
+            ),
+            {"state": "active"},
+        )
+
+        database.get_work_item.assert_called_once_with("wki_one")
+        self.assertEqual(database.get_user.call_args_list, [mock.call("operator")] * 2)
+        database.complete_work_item.assert_called_once_with(
+            "wki_one",
+            completed_by="boxu_operator",
+            expected_thread_version=4,
+            reason="Verified.",
+        )
+        database.reopen_work_item.assert_called_once_with(
+            "wki_one",
+            reopened_by="boxu_operator",
+            expected_thread_version=5,
         )
 
     def test_authentication_rejects_credential_reassigned_to_another_user(self) -> None:

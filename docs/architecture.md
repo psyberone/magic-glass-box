@@ -60,6 +60,10 @@ project-activity projection.
 - Coordinator checkpoints compact the log only through an exact observed head
   under optimistic concurrency. Assignments pin an exact profile revision and
   use reclaimable leases, so a dead worker does not own work forever.
+- Work-item completion is an operator-only, optimistic transition that requires
+  terminal runs, resolved assignments, and a final outcome. It seals rather
+  than deletes the thread. Explicit reopen creates an empty next generation;
+  imports alone never reactivate work.
 - A provider-capable run also pins each exact grant ID named by its profile.
   Revocation and expiry remain live kill switches for already-pinned runs.
 - The requested source revision is resolved to a full Git commit and persisted
@@ -143,8 +147,9 @@ therefore never an authority channel.
 Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
-broker, structured worker replacement, and multi-agent work memory are
-complete. The next slice is the local control room: an operator view over
-projects, authority, work threads, assignments, runs, attempts, interactions,
-and recovery actions without private message bodies or transcripts. See
+broker, structured worker replacement, multi-agent work memory, and work-item
+completion lifecycle are complete. The next slice is the local control room: an
+operator view over projects, authority, work threads, assignments, runs,
+attempts, interactions, and recovery actions without private message bodies or
+transcripts. See
 [worker-handoffs.md](worker-handoffs.md) and [work-memory.md](work-memory.md).

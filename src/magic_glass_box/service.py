@@ -361,6 +361,39 @@ class ControlPlane:
             imported_by=importer["id"],
         )
 
+    def get_work_item(self, work_item_id: str) -> dict[str, Any]:
+        return self.database.get_work_item(work_item_id)
+
+    def complete_work_item(
+        self,
+        work_item_id: str,
+        *,
+        completed_by_handle: str,
+        expected_thread_version: int,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(completed_by_handle)
+        return self.database.complete_work_item(
+            work_item_id,
+            completed_by=operator["id"],
+            expected_thread_version=expected_thread_version,
+            reason=reason,
+        )
+
+    def reopen_work_item(
+        self,
+        work_item_id: str,
+        *,
+        reopened_by_handle: str,
+        expected_thread_version: int,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(reopened_by_handle)
+        return self.database.reopen_work_item(
+            work_item_id,
+            reopened_by=operator["id"],
+            expected_thread_version=expected_thread_version,
+        )
+
     def create_run(
         self,
         *,

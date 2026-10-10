@@ -91,6 +91,19 @@ class FakeControlPlane:
     def import_work_item(self, **kwargs: object) -> dict[str, object]:
         return self._called("work-item.import", **kwargs)
 
+    def get_work_item(self, work_item_id: str) -> dict[str, object]:
+        return self._called("work-item.show", work_item_id=work_item_id)
+
+    def complete_work_item(
+        self, work_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("work-item.complete", work_item_id=work_item_id, **kwargs)
+
+    def reopen_work_item(
+        self, work_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("work-item.reopen", work_item_id=work_item_id, **kwargs)
+
     def create_run(self, **kwargs: object) -> dict[str, object]:
         return self._called("run.create", **kwargs)
 
@@ -154,7 +167,7 @@ class CLITests(unittest.TestCase):
                     ("project", "manage project context"),
                     ("profile", "manage agent profiles"),
                     ("provider", "manage scoped provider grants"),
-                    ("work-item", "import durable work items"),
+                    ("work-item", "manage durable work items"),
                     ("run", "manage agent runs"),
                 ),
             ),
@@ -206,7 +219,12 @@ class CLITests(unittest.TestCase):
             ("work-item",): (
                 "work_item_command",
                 True,
-                (("import", "create or update a normalized work item"),),
+                (
+                    ("import", "create or update a normalized work item"),
+                    ("show", "show work-item lifecycle metadata"),
+                    ("complete", "seal completed work memory"),
+                    ("reopen", "start a fresh work-memory generation"),
+                ),
             ),
             ("run",): (
                 "run_command",
@@ -310,6 +328,14 @@ class CLITests(unittest.TestCase):
                     "--revoked-by",
                 ),
                 ("work-item", "import"): ("--project", "--imported-by"),
+                ("work-item", "complete"): (
+                    "--expected-thread-version",
+                    "--completed-by",
+                ),
+                ("work-item", "reopen"): (
+                    "--expected-thread-version",
+                    "--reopened-by",
+                ),
                 ("run", "create"): (
                     "--project",
                     "--profile",
@@ -331,7 +357,7 @@ class CLITests(unittest.TestCase):
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 6)
+        self.assertEqual(initialized["schema_version"], 7)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -659,6 +685,60 @@ class CLITests(unittest.TestCase):
                 {"operation": "work-item.import"},
             ),
             (
+                "work-item.show",
+                ["work-item", "show", "wki_" + "6" * 32],
+                (
+                    "work-item.show",
+                    {"work_item_id": "wki_" + "6" * 32},
+                ),
+                {"operation": "work-item.show"},
+            ),
+            (
+                "work-item.complete",
+                [
+                    "work-item",
+                    "complete",
+                    "wki_" + "6" * 32,
+                    "--expected-thread-version",
+                    "4",
+                    "--completed-by",
+                    "operator",
+                    "--reason",
+                    "Acceptance checks passed.",
+                ],
+                (
+                    "work-item.complete",
+                    {
+                        "work_item_id": "wki_" + "6" * 32,
+                        "expected_thread_version": 4,
+                        "completed_by_handle": "operator",
+                        "reason": "Acceptance checks passed.",
+                    },
+                ),
+                {"operation": "work-item.complete"},
+            ),
+            (
+                "work-item.reopen",
+                [
+                    "work-item",
+                    "reopen",
+                    "wki_" + "6" * 32,
+                    "--expected-thread-version",
+                    "5",
+                    "--reopened-by",
+                    "operator",
+                ],
+                (
+                    "work-item.reopen",
+                    {
+                        "work_item_id": "wki_" + "6" * 32,
+                        "expected_thread_version": 5,
+                        "reopened_by_handle": "operator",
+                    },
+                ),
+                {"operation": "work-item.reopen"},
+            ),
+            (
                 "run.create",
                 [
                     "run",
@@ -853,7 +933,7 @@ class CLITests(unittest.TestCase):
                 "project": "manage project context",
                 "profile": "manage agent profiles",
                 "provider": "manage scoped provider grants",
-                "work-item": "import durable work items",
+                "work-item": "manage durable work items",
                 "run": "manage agent runs",
             },
         )
@@ -879,6 +959,9 @@ class CLITests(unittest.TestCase):
             },
             "work-item": {
                 "import": "create or update a normalized work item",
+                "show": "show work-item lifecycle metadata",
+                "complete": "seal completed work memory",
+                "reopen": "start a fresh work-memory generation",
             },
             "run": {
                 "create": "create a pinned run record",

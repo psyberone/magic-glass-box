@@ -176,7 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     provider_revoke.add_argument("--expected-version", required=True, type=int)
     provider_revoke.add_argument("--revoked-by", required=True)
 
-    work_item = commands.add_parser("work-item", help="import durable work items")
+    work_item = commands.add_parser("work-item", help="manage durable work items")
     work_item_commands = work_item.add_subparsers(
         dest="work_item_command", required=True
     )
@@ -186,6 +186,25 @@ def build_parser() -> argparse.ArgumentParser:
     work_item_import.add_argument("document", type=Path)
     work_item_import.add_argument("--project", required=True)
     work_item_import.add_argument("--imported-by", required=True)
+    work_item_show = work_item_commands.add_parser(
+        "show", help="show work-item lifecycle metadata"
+    )
+    work_item_show.add_argument("work_item_id")
+    work_item_complete = work_item_commands.add_parser(
+        "complete", help="seal completed work memory"
+    )
+    work_item_complete.add_argument("work_item_id")
+    work_item_complete.add_argument(
+        "--expected-thread-version", required=True, type=int
+    )
+    work_item_complete.add_argument("--completed-by", required=True)
+    work_item_complete.add_argument("--reason")
+    work_item_reopen = work_item_commands.add_parser(
+        "reopen", help="start a fresh work-memory generation"
+    )
+    work_item_reopen.add_argument("work_item_id")
+    work_item_reopen.add_argument("--expected-thread-version", required=True, type=int)
+    work_item_reopen.add_argument("--reopened-by", required=True)
 
     run = commands.add_parser("run", help="manage agent runs")
     run_commands = run.add_subparsers(dest="run_command", required=True)
@@ -311,12 +330,28 @@ def _dispatch(
                 expected_version=args.expected_version,
                 revoked_by_handle=args.revoked_by,
             )
-    if args.command == "work-item" and args.work_item_command == "import":
-        return control.import_work_item(
-            project_key=args.project,
-            envelope=WorkItemEnvelope.from_mapping(_json_file(args.document)),
-            imported_by_handle=args.imported_by,
-        )
+    if args.command == "work-item":
+        if args.work_item_command == "import":
+            return control.import_work_item(
+                project_key=args.project,
+                envelope=WorkItemEnvelope.from_mapping(_json_file(args.document)),
+                imported_by_handle=args.imported_by,
+            )
+        if args.work_item_command == "show":
+            return control.get_work_item(args.work_item_id)
+        if args.work_item_command == "complete":
+            return control.complete_work_item(
+                args.work_item_id,
+                completed_by_handle=args.completed_by,
+                expected_thread_version=args.expected_thread_version,
+                reason=args.reason,
+            )
+        if args.work_item_command == "reopen":
+            return control.reopen_work_item(
+                args.work_item_id,
+                reopened_by_handle=args.reopened_by,
+                expected_thread_version=args.expected_thread_version,
+            )
     if args.command == "run":
         if args.run_command == "create":
             return control.create_run(

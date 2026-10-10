@@ -27,6 +27,13 @@ version. A later import cannot change the title or instructions visible to that
 run. Run listings expose the untrusted title and version as metadata; the full
 brief is loaded only through the trusted execution projection.
 
+Each work item also owns one active work-memory generation. An operator may
+complete it only after its runs and assignments are terminal and a final
+`outcome` has been recorded. Completion seals that generation without deleting
+it. A later import may append content versions but does not implicitly reopen
+the work. Explicit reopen creates a blank next generation, and only subsequent
+runs pin it.
+
 ## Trust boundary
 
 Every imported string is untrusted content. An envelope cannot choose its local
@@ -36,9 +43,9 @@ operator. Unknown fields fail validation so an adapter cannot smuggle authority
 through a provider-specific extension.
 
 The contract intentionally contains no provider URL, raw issue payload, comment
-history, transcript, credential, or outbound action. `workspace_path` context
-entries must be canonical relative POSIX paths; Magic Glass Box never fetches a
-URL found in imported text.
+history, transcript, credential, lifecycle command, or outbound action.
+`workspace_path` context entries must be canonical relative POSIX paths; Magic
+Glass Box never fetches a URL found in imported text.
 
 ## Adapter boundary
 

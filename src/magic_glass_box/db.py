@@ -39,7 +39,7 @@ from .domain import (
 )
 from .krab import IDEMPOTENCY_KEY_RE, KrabIdentity, validate_base_url
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -804,6 +804,79 @@ BEGIN
 END;
 """
 
+WORK_THREAD_LIFECYCLE_SCHEMA = """
+CREATE TABLE work_thread_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_thread_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('work_thread.created', 'work_thread.completed')
+    ),
+    from_state TEXT CHECK (from_state IS NULL OR from_state = 'active'),
+    to_state TEXT NOT NULL CHECK (to_state IN ('active', 'completed')),
+    actor_id TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (work_thread_id, sequence),
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (kind = 'work_thread.created' AND from_state IS NULL AND to_state = 'active')
+        OR (
+            kind = 'work_thread.completed'
+            AND from_state = 'active'
+            AND to_state = 'completed'
+        )
+    )
+) STRICT;
+
+INSERT INTO work_thread_events (
+    work_thread_id, sequence, kind, from_state, to_state, actor_id,
+    metadata_json, created_at
+)
+SELECT
+    wt.id, 1, 'work_thread.created', NULL, 'active', wi.last_imported_by,
+    '{}', wt.created_at
+FROM work_threads wt
+JOIN work_items wi ON wi.id = wt.work_item_id;
+
+INSERT INTO work_thread_events (
+    work_thread_id, sequence, kind, from_state, to_state, actor_id,
+    metadata_json, created_at
+)
+SELECT
+    wt.id, 2, 'work_thread.completed', 'active', 'completed',
+    wi.last_imported_by, '{"migration_backfill":true}', wt.completed_at
+FROM work_threads wt
+JOIN work_items wi ON wi.id = wt.work_item_id
+WHERE wt.state = 'completed';
+
+CREATE INDEX work_thread_event_stream
+    ON work_thread_events(work_thread_id, sequence);
+
+CREATE TRIGGER work_thread_event_immutable_update
+BEFORE UPDATE ON work_thread_events
+BEGIN
+    SELECT RAISE(ABORT, 'work-thread events are immutable');
+END;
+CREATE TRIGGER work_thread_event_immutable_delete
+BEFORE DELETE ON work_thread_events
+BEGIN
+    SELECT RAISE(ABORT, 'work-thread events are immutable');
+END;
+CREATE TRIGGER work_thread_completed_immutable
+BEFORE UPDATE ON work_threads
+WHEN OLD.state = 'completed'
+BEGIN
+    SELECT RAISE(ABORT, 'completed work threads are immutable');
+END;
+CREATE TRIGGER work_thread_immutable_delete
+BEFORE DELETE ON work_threads
+BEGIN
+    SELECT RAISE(ABORT, 'work threads cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -811,6 +884,7 @@ SCHEMA = (
     + PROVIDER_SCHEMA
     + ATTEMPT_SCHEMA
     + WORK_MEMORY_SCHEMA
+    + WORK_THREAD_LIFECYCLE_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -818,6 +892,7 @@ MIGRATIONS = {
     3: PROVIDER_SCHEMA,
     4: ATTEMPT_SCHEMA,
     5: WORK_MEMORY_SCHEMA,
+    6: WORK_THREAD_LIFECYCLE_SCHEMA,
 }
 
 
@@ -1004,6 +1079,10 @@ class Database:
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
                 ("work_items", "SELECT COUNT(*) FROM work_items"),
                 ("work_threads", "SELECT COUNT(*) FROM work_threads"),
+                (
+                    "work_thread_events",
+                    "SELECT COUNT(*) FROM work_thread_events",
+                ),
                 ("work_log_entries", "SELECT COUNT(*) FROM work_log_entries"),
                 (
                     "work_memory_checkpoints",
@@ -1422,6 +1501,38 @@ class Database:
         return result
 
     @staticmethod
+    def _work_thread_record(
+        connection: sqlite3.Connection, thread_id: str
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT id, work_item_id, generation, state, version, log_sequence, "
+            "created_at, updated_at, completed_at FROM work_threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"work thread not found: {thread_id}")
+        events = connection.execute(
+            "SELECT e.sequence, e.kind, e.from_state, e.to_state, "
+            "u.handle AS actor, e.metadata_json, e.created_at "
+            "FROM work_thread_events e JOIN users u ON u.id = e.actor_id "
+            "WHERE e.work_thread_id = ? ORDER BY e.sequence",
+            (thread_id,),
+        ).fetchall()
+        try:
+            parsed_events = [
+                {**dict(event), "metadata": json.loads(event["metadata_json"])}
+                for event in events
+            ]
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise StorageError("stored work-thread event is invalid") from exc
+        for event in parsed_events:
+            event.pop("metadata_json")
+        result = dict(row)
+        result["thread_id"] = result.pop("id")
+        result["events"] = parsed_events
+        return result
+
+    @staticmethod
     def _work_item_record(
         connection: sqlite3.Connection, work_item_id: str
     ) -> dict[str, Any]:
@@ -1456,12 +1567,207 @@ class Database:
         if envelope.digest != result["content_sha256"]:
             raise StorageError("stored work item content digest does not match")
         result["content"] = envelope.content
+        thread = connection.execute(
+            "SELECT id FROM work_threads WHERE work_item_id = ? "
+            "ORDER BY generation DESC LIMIT 1",
+            (work_item_id,),
+        ).fetchone()
+        if thread is None:
+            raise StorageError("work item has no durable work thread")
+        result["work_thread"] = Database._work_thread_record(connection, thread["id"])
+        result["state"] = result["work_thread"]["state"]
         return result
 
     def get_work_item(self, work_item_id: str) -> dict[str, Any]:
         work_item_id = require_string(work_item_id, field="work_item_id", max_bytes=64)
         with closing(self.connect()) as connection:
             return self._work_item_record(connection, work_item_id)
+
+    def complete_work_item(
+        self,
+        work_item_id: str,
+        *,
+        completed_by: str,
+        expected_thread_version: int,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Seal a quiescent work thread while preserving its audit history."""
+
+        work_item_id = require_string(work_item_id, field="work_item_id", max_bytes=64)
+        completed_by = require_string(completed_by, field="completed_by", max_bytes=64)
+        self._positive_integer(expected_thread_version, field="expected_thread_version")
+        if reason is not None:
+            reason = require_string(reason, field="reason", max_bytes=4096)
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                actor = connection.execute(
+                    "SELECT id FROM users WHERE id = ? AND active = 1",
+                    (completed_by,),
+                ).fetchone()
+                if actor is None:
+                    raise NotFoundError(f"active local user not found: {completed_by}")
+                exists = connection.execute(
+                    "SELECT 1 FROM work_items WHERE id = ?", (work_item_id,)
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError(f"work item not found: {work_item_id}")
+                thread = connection.execute(
+                    "SELECT id, state, version FROM work_threads "
+                    "WHERE work_item_id = ? ORDER BY generation DESC LIMIT 1",
+                    (work_item_id,),
+                ).fetchone()
+                if thread is None:
+                    raise StorageError("work item has no durable work thread")
+                if thread["version"] != expected_thread_version:
+                    raise ConcurrentUpdateError(
+                        f"work thread version is {thread['version']}, "
+                        f"expected {expected_thread_version}"
+                    )
+                if thread["state"] != "active":
+                    raise ConflictError("work item is already completed")
+                active_run = connection.execute(
+                    "SELECT id FROM runs WHERE work_thread_id = ? AND state IN "
+                    "('queued', 'preparing', 'running', 'waiting_for_input') "
+                    "LIMIT 1",
+                    (thread["id"],),
+                ).fetchone()
+                if active_run is not None:
+                    raise ConflictError("work item has active runs")
+                unfinished = connection.execute(
+                    "SELECT id FROM work_assignments WHERE work_thread_id = ? "
+                    "AND state IN ('open', 'claimed') LIMIT 1",
+                    (thread["id"],),
+                ).fetchone()
+                if unfinished is not None:
+                    raise ConflictError("work item has unfinished assignments")
+                outcome = connection.execute(
+                    "SELECT id, kind FROM work_log_entries "
+                    "WHERE work_thread_id = ? ORDER BY sequence DESC LIMIT 1",
+                    (thread["id"],),
+                ).fetchone()
+                if outcome is None or outcome["kind"] != WorkLogKind.OUTCOME.value:
+                    raise ConflictError("work item requires a final outcome entry")
+                metadata: dict[str, Any] = {"outcome_entry_id": outcome["id"]}
+                if reason is not None:
+                    metadata["reason"] = reason
+                changed = connection.execute(
+                    "UPDATE work_threads SET state = 'completed', "
+                    "version = version + 1, updated_at = ?, completed_at = ? "
+                    "WHERE id = ? AND version = ? AND state = 'active'",
+                    (
+                        now,
+                        now,
+                        thread["id"],
+                        expected_thread_version,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError("work thread changed concurrently")
+                event_sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 "
+                    "FROM work_thread_events WHERE work_thread_id = ?",
+                    (thread["id"],),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO work_thread_events "
+                    "(work_thread_id, sequence, kind, from_state, to_state, "
+                    "actor_id, metadata_json, created_at) VALUES (?, ?, "
+                    "'work_thread.completed', 'active', 'completed', ?, ?, ?)",
+                    (
+                        thread["id"],
+                        event_sequence,
+                        completed_by,
+                        canonical_json(metadata),
+                        now,
+                    ),
+                )
+                result = self._work_thread_record(connection, thread["id"])
+                connection.commit()
+            except (NotFoundError, ConflictError, StorageError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("work item could not be completed") from exc
+        return result
+
+    def reopen_work_item(
+        self,
+        work_item_id: str,
+        *,
+        reopened_by: str,
+        expected_thread_version: int,
+    ) -> dict[str, Any]:
+        """Begin a blank work-memory generation after a completed thread."""
+
+        work_item_id = require_string(work_item_id, field="work_item_id", max_bytes=64)
+        reopened_by = require_string(reopened_by, field="reopened_by", max_bytes=64)
+        self._positive_integer(expected_thread_version, field="expected_thread_version")
+        thread_id = self.new_id("wth")
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                actor = connection.execute(
+                    "SELECT id FROM users WHERE id = ? AND active = 1",
+                    (reopened_by,),
+                ).fetchone()
+                if actor is None:
+                    raise NotFoundError(f"active local user not found: {reopened_by}")
+                exists = connection.execute(
+                    "SELECT 1 FROM work_items WHERE id = ?", (work_item_id,)
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError(f"work item not found: {work_item_id}")
+                previous = connection.execute(
+                    "SELECT id, generation, state, version FROM work_threads "
+                    "WHERE work_item_id = ? ORDER BY generation DESC LIMIT 1",
+                    (work_item_id,),
+                ).fetchone()
+                if previous is None:
+                    raise StorageError("work item has no durable work thread")
+                if previous["version"] != expected_thread_version:
+                    raise ConcurrentUpdateError(
+                        f"work thread version is {previous['version']}, "
+                        f"expected {expected_thread_version}"
+                    )
+                if previous["state"] == "active":
+                    raise ConflictError("work item is already active")
+                connection.execute(
+                    "INSERT INTO work_threads "
+                    "(id, work_item_id, generation, state, version, log_sequence, "
+                    "created_at, updated_at) VALUES (?, ?, ?, 'active', 1, 0, ?, ?)",
+                    (
+                        thread_id,
+                        work_item_id,
+                        previous["generation"] + 1,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO work_thread_events "
+                    "(work_thread_id, sequence, kind, from_state, to_state, "
+                    "actor_id, metadata_json, created_at) VALUES (?, 1, "
+                    "'work_thread.created', NULL, 'active', ?, ?, ?)",
+                    (
+                        thread_id,
+                        reopened_by,
+                        canonical_json({"previous_thread_id": previous["id"]}),
+                        now,
+                    ),
+                )
+                result = self._work_thread_record(connection, thread_id)
+                connection.commit()
+            except (NotFoundError, ConflictError, StorageError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("work item could not be reopened") from exc
+        return result
 
     def import_work_item(
         self,
@@ -1530,6 +1836,13 @@ class Database:
                         "log_sequence, created_at, updated_at) "
                         "VALUES (?, ?, 1, 'active', 1, 0, ?, ?)",
                         (thread_id, work_item_id, now, now),
+                    )
+                    connection.execute(
+                        "INSERT INTO work_thread_events "
+                        "(work_thread_id, sequence, kind, from_state, to_state, "
+                        "actor_id, metadata_json, created_at) VALUES (?, 1, "
+                        "'work_thread.created', NULL, 'active', ?, '{}', ?)",
+                        (thread_id, imported_by, now),
                     )
                     import_status = "created"
                 else:
@@ -1831,6 +2144,14 @@ class Database:
                     (work_item_id, project["id"]),
                 ).fetchone()
                 if work_item_version is None:
+                    known_work_item = connection.execute(
+                        "SELECT 1 FROM work_items WHERE id = ? AND project_id = ?",
+                        (work_item_id, project["id"]),
+                    ).fetchone()
+                    if known_work_item is not None:
+                        raise ConflictError(
+                            "work item is completed; reopen it before creating a run"
+                        )
                     raise NotFoundError(
                         "work item not found for project: " + work_item_id
                     )

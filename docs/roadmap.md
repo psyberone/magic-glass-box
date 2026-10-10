@@ -129,6 +129,24 @@ work from the earlier checkpoint plus both independently authored result
 entries. Stale checkpoints, wrong-profile claims, live-lease theft, changed
 idempotent retries, and cross-thread references fail closed.
 
+## Milestone 3.6: work completion and memory generations
+
+**Status: complete**
+
+- Require an explicit operator action rather than inferring work completion
+  from one successful run.
+- Refuse completion while runs or assignments remain active or the thread lacks
+  a final typed outcome.
+- Seal completed memory without deleting its append-only evidence.
+- Keep imports lifecycle-neutral and require an optimistic explicit reopen.
+- Start reopened work in a blank next-generation thread while historical runs
+  retain their original thread.
+
+**Exit proof:** an operator seals a quiescent thread at its exact version, old
+runs retain read-only access, and no new run or write can target it. A later
+import does not reactivate the item; explicit reopen creates generation two
+with no log, checkpoint, or assignments.
+
 ## Milestone 4: local control room
 
 - Show projects, users, roles, profiles, work claims, runs, and attempts.

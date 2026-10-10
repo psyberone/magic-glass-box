@@ -15,9 +15,11 @@ from magic_glass_box.db import (
     PROVIDER_SCHEMA,
     SCHEMA_V1,
     WORK_ITEM_SCHEMA,
+    ConcurrentUpdateError,
     ConflictError,
     Database,
     NotFoundError,
+    StorageError,
 )
 from magic_glass_box.domain import (
     AgentProfileSpec,
@@ -300,6 +302,401 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
         self.assertEqual(first["assignments"], [])
         counts = self.database.status()["counts"]
         self.assertEqual(counts["work_threads"], 1)
+
+    def test_completion_seals_memory_and_reopen_starts_a_fresh_generation(
+        self,
+    ) -> None:
+        coordinator, attempt = self.running_run("Coordinator")
+        outcome = self.database.append_work_log(
+            coordinator["id"],
+            log_entry("The work is complete.", kind="outcome"),
+            idempotency_key="outcome:complete",
+        )
+        before = self.database.get_work_memory_for_run(coordinator["id"])
+        self.database.complete_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id=attempt["image_id"],
+        )
+
+        completed = self.database.complete_work_item(
+            self.work_item["id"],
+            completed_by=self.user["id"],
+            expected_thread_version=before["version"],
+            reason="Acceptance checks passed.",
+        )
+
+        self.assertEqual(completed["thread_id"], before["thread_id"])
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["version"], before["version"] + 1)
+        self.assertEqual(completed["completed_at"], completed["updated_at"])
+        self.assertEqual(
+            completed["events"],
+            [
+                {
+                    "sequence": 1,
+                    "kind": "work_thread.created",
+                    "from_state": None,
+                    "to_state": "active",
+                    "actor": "operator",
+                    "metadata": {},
+                    "created_at": completed["created_at"],
+                },
+                {
+                    "sequence": 2,
+                    "kind": "work_thread.completed",
+                    "from_state": "active",
+                    "to_state": "completed",
+                    "actor": "operator",
+                    "metadata": {
+                        "outcome_entry_id": outcome["id"],
+                        "reason": "Acceptance checks passed.",
+                    },
+                    "created_at": completed["completed_at"],
+                },
+            ],
+        )
+        self.assertEqual(
+            self.database.get_work_memory_for_run(coordinator["id"])["state"],
+            "completed",
+        )
+        with self.assertRaisesRegex(ConflictError, "work thread is not active"):
+            self.database.append_work_log(
+                coordinator["id"],
+                log_entry(kind="progress"),
+                idempotency_key="after:completion",
+            )
+        with self.assertRaisesRegex(ConflictError, "reopen it"):
+            self.create_run("Coordinator")
+
+        refreshed = self.database.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "memory-test",
+                    "source_updated_at": "2026-10-11T12:00:00Z",
+                    "title": "Keep agent work memory",
+                    "brief": "Coordinate a fresh cycle of disposable workers.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        self.assertEqual(refreshed["import_status"], "updated")
+        self.assertEqual(refreshed["state"], "completed")
+        self.assertEqual(refreshed["work_thread"]["thread_id"], completed["thread_id"])
+
+        reopened = self.database.reopen_work_item(
+            self.work_item["id"],
+            reopened_by=self.user["id"],
+            expected_thread_version=completed["version"],
+        )
+        self.assertNotEqual(reopened["thread_id"], completed["thread_id"])
+        self.assertEqual(reopened["generation"], 2)
+        self.assertEqual(reopened["state"], "active")
+        self.assertEqual(reopened["version"], 1)
+        self.assertEqual(reopened["log_sequence"], 0)
+        self.assertEqual(
+            reopened["events"][0]["metadata"],
+            {"previous_thread_id": completed["thread_id"]},
+        )
+        replacement = self.create_run("Coordinator")
+        self.assertEqual(replacement["work_item_version"], 2)
+        fresh = self.database.get_work_memory_for_run(replacement["id"])
+        self.assertEqual(fresh["thread_id"], reopened["thread_id"])
+        self.assertIsNone(fresh["checkpoint"])
+        self.assertEqual(fresh["entries"], [])
+        self.assertEqual(fresh["assignments"], [])
+
+    def test_completion_requires_a_quiescent_thread_and_final_outcome(self) -> None:
+        initial = self.database.get_work_item(self.work_item["id"])["work_thread"]
+        with self.assertRaises(ConflictError) as missing_outcome:
+            self.database.complete_work_item(
+                self.work_item["id"],
+                completed_by=self.user["id"],
+                expected_thread_version=initial["version"],
+            )
+        self.assertEqual(
+            str(missing_outcome.exception),
+            "work item requires a final outcome entry",
+        )
+
+        coordinator, attempt = self.running_run("Coordinator")
+        self.database.append_work_log(
+            coordinator["id"],
+            log_entry(kind="outcome"),
+            idempotency_key="outcome:active-run",
+        )
+        active = self.database.get_work_memory_for_run(coordinator["id"])
+        with self.assertRaises(ConflictError) as active_runs:
+            self.database.complete_work_item(
+                self.work_item["id"],
+                completed_by=self.user["id"],
+                expected_thread_version=active["version"],
+            )
+        self.assertEqual(str(active_runs.exception), "work item has active runs")
+
+        task = self.create_assignment(
+            coordinator["id"],
+            "Codex Worker",
+            key="assignment:unfinished",
+            title="Unfinished review",
+        )
+        self.database.append_work_log(
+            coordinator["id"],
+            log_entry("Work is otherwise complete.", kind="outcome"),
+            idempotency_key="outcome:unfinished-assignment",
+        )
+        ready = self.database.get_work_memory_for_run(coordinator["id"])
+        self.database.complete_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id=attempt["image_id"],
+        )
+        with self.assertRaises(ConflictError) as unfinished_assignments:
+            self.database.complete_work_item(
+                self.work_item["id"],
+                completed_by=self.user["id"],
+                expected_thread_version=ready["version"],
+            )
+        self.assertEqual(
+            str(unfinished_assignments.exception),
+            "work item has unfinished assignments",
+        )
+        self.assertEqual(
+            self.database.get_work_memory_for_run(coordinator["id"])["assignments"][0][
+                "id"
+            ],
+            task["id"],
+        )
+
+    def test_completion_and_reopen_are_optimistic_and_audited(self) -> None:
+        with self.assertRaises(ConcurrentUpdateError):
+            self.database.complete_work_item(
+                self.work_item["id"],
+                completed_by=self.user["id"],
+                expected_thread_version=99,
+            )
+        with self.assertRaises(ConflictError) as already_active:
+            self.database.reopen_work_item(
+                self.work_item["id"],
+                reopened_by=self.user["id"],
+                expected_thread_version=1,
+            )
+        self.assertEqual(str(already_active.exception), "work item is already active")
+
+        coordinator, attempt = self.running_run("Coordinator")
+        outcome = self.database.append_work_log(
+            coordinator["id"],
+            log_entry(kind="outcome"),
+            idempotency_key="outcome:no-reason",
+        )
+        ready = self.database.get_work_memory_for_run(coordinator["id"])
+        self.database.complete_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id=attempt["image_id"],
+        )
+        completed = self.database.complete_work_item(
+            self.work_item["id"],
+            completed_by=self.user["id"],
+            expected_thread_version=ready["version"],
+        )
+        self.assertEqual(
+            completed["events"][-1]["metadata"],
+            {"outcome_entry_id": outcome["id"]},
+        )
+        with self.assertRaises(ConflictError) as already_completed:
+            self.database.complete_work_item(
+                self.work_item["id"],
+                completed_by=self.user["id"],
+                expected_thread_version=completed["version"],
+            )
+        self.assertEqual(
+            str(already_completed.exception), "work item is already completed"
+        )
+        with self.assertRaises(ConcurrentUpdateError):
+            self.database.reopen_work_item(
+                self.work_item["id"],
+                reopened_by=self.user["id"],
+                expected_thread_version=99,
+            )
+
+        connection = self.database.connect()
+        self.addCleanup(connection.close)
+        event = connection.execute(
+            "SELECT id FROM work_thread_events LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(event)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE work_thread_events SET metadata_json = '{}' WHERE id = ?",
+                (event["id"],),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM work_threads WHERE id = ?",
+                (self.work_item["work_thread"]["thread_id"],),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE work_threads SET version = version + 1 WHERE id = ?",
+                (completed["thread_id"],),
+            )
+
+    def test_work_item_lifecycle_rejects_invalid_or_missing_authority(self) -> None:
+        for method, arguments, message in (
+            (
+                self.database.complete_work_item,
+                {
+                    "completed_by": self.user["id"],
+                    "expected_thread_version": 0,
+                },
+                "expected_thread_version must be a positive integer",
+            ),
+            (
+                self.database.complete_work_item,
+                {
+                    "completed_by": self.user["id"],
+                    "expected_thread_version": 1,
+                    "reason": "x" * 4097,
+                },
+                "reason exceeds 4096 UTF-8 bytes",
+            ),
+            (
+                self.database.reopen_work_item,
+                {
+                    "reopened_by": self.user["id"],
+                    "expected_thread_version": True,
+                },
+                "expected_thread_version must be a positive integer",
+            ),
+        ):
+            with (
+                self.subTest(method=method.__name__, message=message),
+                self.assertRaisesRegex(ValidationError, message),
+            ):
+                method(self.work_item["id"], **arguments)
+
+        missing_user = "boxu_" + "f" * 32
+        with self.assertRaises(NotFoundError) as missing_completion_actor:
+            self.database.complete_work_item(
+                self.work_item["id"],
+                completed_by=missing_user,
+                expected_thread_version=1,
+            )
+        self.assertEqual(
+            str(missing_completion_actor.exception),
+            f"active local user not found: {missing_user}",
+        )
+        missing_item = "wki_" + "f" * 32
+        with self.assertRaises(NotFoundError) as missing_completion_item:
+            self.database.complete_work_item(
+                missing_item,
+                completed_by=self.user["id"],
+                expected_thread_version=1,
+            )
+        self.assertEqual(
+            str(missing_completion_item.exception),
+            f"work item not found: {missing_item}",
+        )
+        with self.assertRaises(NotFoundError) as missing_reopen_actor:
+            self.database.reopen_work_item(
+                self.work_item["id"],
+                reopened_by=missing_user,
+                expected_thread_version=1,
+            )
+        self.assertEqual(
+            str(missing_reopen_actor.exception),
+            f"active local user not found: {missing_user}",
+        )
+        with self.assertRaises(NotFoundError) as missing_reopen_item:
+            self.database.reopen_work_item(
+                missing_item,
+                reopened_by=self.user["id"],
+                expected_thread_version=1,
+            )
+        self.assertEqual(
+            str(missing_reopen_item.exception),
+            f"work item not found: {missing_item}",
+        )
+
+    def test_concurrent_completion_and_reopen_have_single_winners(self) -> None:
+        coordinator, attempt = self.running_run("Coordinator")
+        self.database.append_work_log(
+            coordinator["id"],
+            log_entry(kind="outcome"),
+            idempotency_key="outcome:concurrent",
+        )
+        ready = self.database.get_work_memory_for_run(coordinator["id"])
+        self.database.complete_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id=attempt["image_id"],
+        )
+
+        def complete() -> str:
+            try:
+                return self.database.complete_work_item(
+                    self.work_item["id"],
+                    completed_by=self.user["id"],
+                    expected_thread_version=ready["version"],
+                )["state"]
+            except ConcurrentUpdateError:
+                return "stale"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            completion_results = list(pool.map(lambda _: complete(), range(2)))
+        self.assertCountEqual(completion_results, ["completed", "stale"])
+        completed = self.database.get_work_item(self.work_item["id"])["work_thread"]
+        self.assertEqual(
+            [event["kind"] for event in completed["events"]],
+            ["work_thread.created", "work_thread.completed"],
+        )
+
+        def reopen() -> str:
+            try:
+                return self.database.reopen_work_item(
+                    self.work_item["id"],
+                    reopened_by=self.user["id"],
+                    expected_thread_version=completed["version"],
+                )["state"]
+            except ConcurrentUpdateError:
+                return "stale"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reopen_results = list(pool.map(lambda _: reopen(), range(2)))
+        self.assertCountEqual(reopen_results, ["active", "stale"])
+        current = self.database.get_work_item(self.work_item["id"])["work_thread"]
+        self.assertEqual(current["generation"], 2)
+        self.assertEqual(current["events"][0]["actor"], "operator")
+
+    def test_work_item_lifecycle_fails_closed_on_corrupt_or_missing_state(self) -> None:
+        connection = self.database.connect()
+        self.addCleanup(connection.close)
+        thread_id = self.work_item["work_thread"]["thread_id"]
+        connection.execute("DROP TRIGGER work_thread_event_immutable_update")
+        connection.execute(
+            "UPDATE work_thread_events SET metadata_json = '{' "
+            "WHERE work_thread_id = ?",
+            (thread_id,),
+        )
+        with self.assertRaises(StorageError) as invalid_event:
+            self.database.get_work_item(self.work_item["id"])
+        self.assertEqual(
+            str(invalid_event.exception), "stored work-thread event is invalid"
+        )
+        missing_thread = "wth_" + "f" * 32
+        with self.assertRaises(NotFoundError) as not_found:
+            Database._work_thread_record(connection, missing_thread)
+        self.assertEqual(
+            str(not_found.exception), f"work thread not found: {missing_thread}"
+        )
 
     def test_work_writes_require_a_running_attempt_for_provenance(self) -> None:
         queued = self.create_run("Coordinator")
@@ -969,18 +1366,23 @@ class WorkMemoryMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 6)
+            self.assertEqual(first["schema_version"], 7)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["work_threads"], 1)
+            self.assertEqual(first["counts"]["work_thread_events"], 1)
             with closing(database.connect()) as migrated:
                 row = migrated.execute(
-                    "SELECT r.work_thread_id, wt.work_item_id "
-                    "FROM runs r JOIN work_threads wt ON wt.id = r.work_thread_id "
+                    "SELECT r.work_thread_id, wt.work_item_id, e.kind, "
+                    "e.actor_id FROM runs r JOIN work_threads wt "
+                    "ON wt.id = r.work_thread_id JOIN work_thread_events e "
+                    "ON e.work_thread_id = wt.id "
                     "WHERE r.id = ?",
                     (run_id,),
                 ).fetchone()
             self.assertEqual(row["work_item_id"], item_id)
             self.assertTrue(row["work_thread_id"].startswith("wth_"))
+            self.assertEqual(row["kind"], "work_thread.created")
+            self.assertEqual(row["actor_id"], user_id)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,9 @@ This repository currently contains the first executable vertical slice:
   transcript or inherited mutable sandbox;
 - a work-item-scoped, append-only coordination log with optimistic checkpoints,
   profile-pinned leased assignments, and enough provenance for a replacement
-  coordinator to recover parallel Claude/Codex-style work; and
+  coordinator to recover parallel Claude/Codex-style work;
+- operator-controlled work completion that seals audit history and an explicit
+  reopen into a blank next-generation memory thread; and
 - an administrative CLI that can execute queued runs and reconcile interrupted
   ones.
 
@@ -90,6 +92,18 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   --work-item wki_<id> --requested-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run execute run_<id>
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run reconcile
+```
+
+After all runs and assignments are terminal and the final work-log entry is an
+`outcome`, seal or later reopen the local work cycle with:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  work-item complete wki_<id> --expected-thread-version <version> \
+  --completed-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  work-item reopen wki_<id> --expected-thread-version <version> \
+  --reopened-by operator
 ```
 
 Work-item import is an idempotent upsert keyed by project, source, and external

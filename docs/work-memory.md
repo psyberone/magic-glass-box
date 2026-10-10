@@ -65,6 +65,36 @@ unbounded.
 No coordinator election or model session is durable. The checkpoint plus the
 append-only tail is the recovery protocol.
 
+## Completion and a fresh cycle
+
+Run success does not complete a work item. Completion is an explicit operator
+action outside the worker gateway and succeeds only when:
+
+- every run pinned to the active thread is terminal;
+- every assignment is completed or cancelled; and
+- the latest log entry is a typed `outcome`.
+
+The operator supplies the exact observed thread version. A stale completion
+fails, and a successful completion appends an immutable lifecycle event naming
+the operator and final outcome entry. The thread is then sealed: old runs can
+still read its evidence, but no worker can append, checkpoint, assign, claim,
+or complete more work against it.
+
+Nothing is deleted. If work resumes, an operator explicitly reopens the work
+item using the completed thread's exact version. Magic Glass Box creates a new
+active generation with an empty log, no checkpoint, and no assignments. New
+runs pin that generation; historical runs stay pinned to the sealed one.
+Importing newer source content while a work item is completed does not reopen
+it or create new authority.
+
+```console
+magic-glass-box work-item show wki_<id>
+magic-glass-box work-item complete wki_<id> \
+  --expected-thread-version <version> --completed-by operator
+magic-glass-box work-item reopen wki_<id> \
+  --expected-thread-version <version> --reopened-by operator
+```
+
 ## Gateway operations
 
 Profiles grant each operation separately:
@@ -91,6 +121,6 @@ content is not copied into the log.
 
 The contracts reject message histories, private Krab bodies, provider payloads,
 credentials, and transcripts. Nothing is exported to a source issue or pull
-request. Entries and checkpoints are immutable audit records. A completion
-policy may later seal a thread and compact what is presented as active memory;
-it should not silently rewrite or delete evidence while work is active.
+request. Entries, checkpoints, sealed threads, and lifecycle events are
+immutable audit records. Completion changes which generation is active; it
+never rewrites or deletes evidence.

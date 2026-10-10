@@ -328,7 +328,7 @@ class AttemptMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 6)
+            self.assertEqual(first["schema_version"], 7)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["run_attempts"], 0)
