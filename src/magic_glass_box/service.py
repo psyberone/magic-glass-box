@@ -92,6 +92,20 @@ class ControlPlane:
     def initialize(self) -> dict[str, Any]:
         return self.database.initialize()
 
+    def control_room_snapshot(
+        self,
+        *,
+        history_limit: int = 25,
+        refresh_krab: bool = False,
+    ) -> dict[str, Any]:
+        from .control_room import ControlRoom
+
+        return ControlRoom(
+            self.database,
+            credential_resolver=self.credential_resolver,
+            client_factory=self.client_factory,
+        ).snapshot(history_limit=history_limit, refresh_krab=refresh_krab)
+
     def create_user(
         self, handle: str, display_name: str | None = None
     ) -> dict[str, Any]:

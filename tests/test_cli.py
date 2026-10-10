@@ -65,6 +65,9 @@ class FakeControlPlane:
     def initialize(self) -> dict[str, object]:
         return self._called("init")
 
+    def control_room_snapshot(self, **kwargs: object) -> dict[str, object]:
+        return self._called("control-room.show", **kwargs)
+
     def create_user(self, handle: str, display_name: str | None) -> dict[str, object]:
         return self._called("user.add", handle=handle, display_name=display_name)
 
@@ -192,6 +195,7 @@ class CLITests(unittest.TestCase):
                 (
                     ("init", "initialize the private state database"),
                     ("status", "validate state and show object counts"),
+                    ("control-room", "inspect redacted operational state"),
                     ("user", "manage local users"),
                     ("krab", "manage and query Krab connections"),
                     ("project", "manage project context"),
@@ -206,6 +210,11 @@ class CLITests(unittest.TestCase):
                 "user_command",
                 True,
                 (("add", "add a local user"),),
+            ),
+            ("control-room",): (
+                "control_room_command",
+                True,
+                (("show", "show one consistent redacted snapshot"),),
             ),
             ("krab",): (
                 "krab_command",
@@ -403,6 +412,10 @@ class CLITests(unittest.TestCase):
         status, state, _ = self.invoke("status")
         self.assertEqual(status, 0)
         self.assertEqual(state["counts"]["users"], 1)
+        status, room, _ = self.invoke("control-room", "show", "--history-limit", "0")
+        self.assertEqual(status, 0)
+        self.assertEqual(room["summary"]["users"], 1)
+        self.assertEqual(room["snapshot"]["history_limit"], 0)
 
     def test_error_is_structured_and_nonzero(self) -> None:
         self.invoke("init")
@@ -467,6 +480,21 @@ class CLITests(unittest.TestCase):
             ...,
         ] = (
             ("status", ["status"], ("status", {}), {"operation": "status"}),
+            (
+                "control-room.show",
+                [
+                    "control-room",
+                    "show",
+                    "--history-limit",
+                    "17",
+                    "--refresh-krab",
+                ],
+                (
+                    "control-room.show",
+                    {"history_limit": 17, "refresh_krab": True},
+                ),
+                {"operation": "control-room.show"},
+            ),
             (
                 "krab.instance-add",
                 ["krab", "instance-add", "local", "--url", "http://localhost:8765"],
@@ -874,6 +902,19 @@ class CLITests(unittest.TestCase):
             ["run", "execute", "run_" + "1" * 32, "--run-timeout", "12.5"]
         )
         self.assertEqual(timed.run_timeout, 12.5)
+        room = parser.parse_args(["control-room", "show"])
+        self.assertEqual(room.history_limit, 25)
+        self.assertFalse(room.refresh_krab)
+        for invalid_limit in ("-1", "501", "1.5"):
+            with (
+                self.subTest(invalid_limit=invalid_limit),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as invalid,
+            ):
+                parser.parse_args(
+                    ["control-room", "show", "--history-limit", invalid_limit]
+                )
+            self.assertEqual(invalid.exception.code, 2)
         for invalid_timeout in ("0", "-1", "nan", "inf", "not-a-number"):
             with (
                 self.subTest(invalid_timeout=invalid_timeout),
@@ -963,6 +1004,7 @@ class CLITests(unittest.TestCase):
             {
                 "init": "initialize the private state database",
                 "status": "validate state and show object counts",
+                "control-room": "inspect redacted operational state",
                 "user": "manage local users",
                 "krab": "manage and query Krab connections",
                 "project": "manage project context",
@@ -974,6 +1016,9 @@ class CLITests(unittest.TestCase):
             },
         )
         expected_nested = {
+            "control-room": {
+                "show": "show one consistent redacted snapshot",
+            },
             "user": {"add": "add a local user"},
             "krab": {
                 "instance-add": "add a Krab origin",

@@ -46,7 +46,10 @@ This repository currently contains the first executable vertical slice:
   profile-pinned leased assignments, and enough provenance for a replacement
   coordinator to recover parallel Claude/Codex-style work;
 - operator-controlled work completion that seals audit history and an explicit
-  reopen into a blank next-generation memory thread; and
+  reopen into a blank next-generation memory thread;
+- a transactionally consistent, redacted control-room projection with an
+  optional live overlay of configured Krab identities' roles and claim queues;
+  and
 - an administrative CLI that can execute or cancel runs, reconcile interrupted
   ones, and inspect or apply retained results.
 
@@ -57,7 +60,9 @@ result bundle, and the container and snapshot are removed afterward. The
 interaction transport has also been exercised over HTTP
 against a real local `imitation-krab`: idempotent question delivery,
 reverse-route response verification, and metadata-only local persistence all
-pass. The gateway carrier has been exercised through the real Docker executor:
+pass. The same proof verifies the control room's live role and claim-queue
+overlay without surfacing private interaction content. The gateway carrier has
+been exercised through the real Docker executor:
 the worker has `--network none`, direct egress fails, and a typed request still
 reaches the orchestrator. A second live proof reaches one policy-pinned local
 provider while undeclared grants, destinations, models, direct networking, and
@@ -102,6 +107,8 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run cancel run_<id> --expected-version <version> \
   --requested-by operator --reason "Stop requested"
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run reconcile
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  control-room show --refresh-krab
 ```
 
 After an attempt exits, verify or explicitly apply its retained changes:
@@ -148,7 +155,9 @@ for provider policy and secret-handling details. The replacement contract and
 handoff schema are documented in
 [docs/worker-handoffs.md](docs/worker-handoffs.md). Multi-agent coordination and
 replacement-coordinator recovery are documented in
-[docs/work-memory.md](docs/work-memory.md).
+[docs/work-memory.md](docs/work-memory.md). The redacted inventory and live
+role/claim overlay are documented in
+[docs/control-room.md](docs/control-room.md).
 
 When running directly from a checkout, set `PYTHONPATH=src` or install the
 package into a virtual environment.

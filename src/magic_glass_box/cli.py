@@ -41,6 +41,18 @@ def _positive_seconds(value: str) -> float:
     return parsed
 
 
+def _history_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be an integer between 0 and 500"
+        ) from exc
+    if not 0 <= parsed <= 500:
+        raise argparse.ArgumentTypeError("must be an integer between 0 and 500")
+    return parsed
+
+
 def _json_file(path: Path) -> dict[str, Any]:
     try:
         raw = path.read_bytes()
@@ -103,6 +115,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("init", help="initialize the private state database")
     commands.add_parser("status", help="validate state and show object counts")
+
+    control_room = commands.add_parser(
+        "control-room", help="inspect redacted operational state"
+    )
+    control_room_commands = control_room.add_subparsers(
+        dest="control_room_command", required=True
+    )
+    control_room_show = control_room_commands.add_parser(
+        "show", help="show one consistent redacted snapshot"
+    )
+    control_room_show.add_argument(
+        "--history-limit",
+        type=_history_limit,
+        default=25,
+        help="terminal runs to include in addition to every active run (0-500)",
+    )
+    control_room_show.add_argument(
+        "--refresh-krab",
+        action="store_true",
+        help="resolve configured identities and read live roles and claim queues",
+    )
 
     user = commands.add_parser("user", help="manage local users")
     user_commands = user.add_subparsers(dest="user_command", required=True)
@@ -300,6 +333,11 @@ def _dispatch(
         return control.initialize()
     if args.command == "status":
         return control.database.status()
+    if args.command == "control-room" and args.control_room_command == "show":
+        return control.control_room_snapshot(
+            history_limit=args.history_limit,
+            refresh_krab=args.refresh_krab,
+        )
     if args.command == "user" and args.user_command == "add":
         return control.create_user(args.handle, args.display_name)
     if args.command == "krab":

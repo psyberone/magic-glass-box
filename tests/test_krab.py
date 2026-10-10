@@ -16,6 +16,8 @@ from magic_glass_box.krab import (
     KrabUserRef,
     SessionItem,
     SessionItemHistoryEvent,
+    WorkClaim,
+    WorkClaimPage,
     WorkClaimRef,
     validate_base_url,
 )
@@ -126,6 +128,39 @@ def activity_response(
             "next_cursor": next_cursor,
         },
         "events": events,
+    }
+
+
+def work_claim_response() -> dict[str, Any]:
+    return {
+        "trusted_metadata": {
+            "project_key": "box-project",
+            "kind": "issue",
+            "count": 1,
+        },
+        "claims": [
+            {
+                "trusted_metadata": {
+                    "claim_id": CLAIM_ID,
+                    "project_key": "box-project",
+                    "kind": "issue",
+                    "external_id": "owner/repository#42",
+                    "status": "under_review",
+                    "version": 4,
+                    "review_round": 1,
+                    "assignee": {
+                        "user_id": OTHER_USER_ID,
+                        "handle": "agent_two",
+                    },
+                    "created_by": {
+                        "user_id": USER_ID,
+                        "handle": "agent_one",
+                    },
+                    "created_at": "2026-10-08T12:00:00Z",
+                    "updated_at": "2026-10-09T12:00:00Z",
+                }
+            }
+        ],
     }
 
 
@@ -469,6 +504,103 @@ class KrabClientTests(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_work_claim_queue_is_typed_metadata_only_and_filterable(self) -> None:
+        client, connection = client_for(FakeResponse(200, work_claim_response()))
+
+        page = client.work_claims(
+            "box-project",
+            kind="issue",
+            status="under_review",
+            assignee="agent_two",
+        )
+
+        self.assertEqual(
+            page,
+            WorkClaimPage(
+                project_key="box-project",
+                kind="issue",
+                claims=(
+                    WorkClaim(
+                        claim_id=CLAIM_ID,
+                        project_key="box-project",
+                        kind="issue",
+                        external_id="owner/repository#42",
+                        status="under_review",
+                        version=4,
+                        review_round=1,
+                        assignee=KrabUserRef(OTHER_USER_ID, "agent_two"),
+                        created_by=KrabUserRef(USER_ID, "agent_one"),
+                        created_at="2026-10-08T12:00:00Z",
+                        updated_at="2026-10-09T12:00:00Z",
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(
+            connection.requests[0][1],
+            "/v1/projects/box-project/issues?status=under_review&assignee=agent_two",
+        )
+        self.assertNotIn("untrusted_text", str(page))
+
+    def test_work_claim_queue_supports_pull_requests_and_unassigned_work(self) -> None:
+        payload = work_claim_response()
+        payload["trusted_metadata"]["kind"] = "pull_request"
+        metadata = payload["claims"][0]["trusted_metadata"]
+        metadata["kind"] = "pull_request"
+        metadata["status"] = "available"
+        metadata["assignee"] = None
+        metadata["review_round"] = 0
+        client, connection = client_for(FakeResponse(200, payload))
+
+        page = client.work_claims("box-project", kind="pull_request")
+
+        self.assertIsNone(page.claims[0].assignee)
+        self.assertEqual(page.claims[0].status, "available")
+        self.assertEqual(
+            connection.requests[0][1], "/v1/projects/box-project/pull-requests"
+        )
+
+    def test_work_claim_queue_rejects_invalid_requests_and_responses(self) -> None:
+        valid = work_claim_response()
+        request_cases = (
+            ({"kind": "task"}, "kind"),
+            ({"kind": "issue", "status": "closed"}, "status"),
+            ({"kind": "issue", "assignee": "Bad Handle"}, "handle"),
+        )
+        for kwargs, message in request_cases:
+            with self.subTest(kwargs=kwargs):
+                client, _ = client_for(FakeResponse(200, valid))
+                with self.assertRaisesRegex(KrabError, message):
+                    client.work_claims("box-project", **kwargs)
+
+        response_cases: list[tuple[dict[str, Any], str]] = []
+        wrong_count = work_claim_response()
+        wrong_count["trusted_metadata"]["count"] = 2
+        response_cases.append((wrong_count, "count"))
+        wrong_project = work_claim_response()
+        wrong_project["trusted_metadata"]["project_key"] = "other-project"
+        response_cases.append((wrong_project, "project"))
+        wrong_kind = work_claim_response()
+        wrong_kind["claims"][0]["trusted_metadata"]["kind"] = "pull_request"
+        response_cases.append((wrong_kind, "kind"))
+        bad_claim = work_claim_response()
+        bad_claim["claims"][0]["trusted_metadata"]["claim_id"] = ITEM_ID
+        response_cases.append((bad_claim, "claim ID"))
+        bad_status = work_claim_response()
+        bad_status["claims"][0]["trusted_metadata"]["status"] = "blocked"
+        response_cases.append((bad_status, "status"))
+        bad_round = work_claim_response()
+        bad_round["claims"][0]["trusted_metadata"]["review_round"] = -1
+        response_cases.append((bad_round, "review round"))
+        bad_shape = work_claim_response()
+        bad_shape["claims"][0]["private_body"] = "must not be accepted"
+        response_cases.append((bad_shape, "work claim"))
+        for payload, message in response_cases:
+            with self.subTest(message=message):
+                client, _ = client_for(FakeResponse(200, payload))
+                with self.assertRaisesRegex(KrabError, message):
+                    client.work_claims("box-project", kind="issue")
 
     def test_activity_contains_title_but_no_body_shape(self) -> None:
         event = {

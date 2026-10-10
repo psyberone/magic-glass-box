@@ -56,11 +56,22 @@ def main() -> int:
         krab_project = krab_database.create_project(
             "box-project", "Magic Glass Box live transport"
         )
-        krab_database.add_project_member("box-project", "agent_one", "member")
+        krab_database.add_project_member("box-project", "agent_one", "coordinator")
         krab_database.add_project_member("box-project", "reviewer", "member")
         agent_actor = krab_database.authenticate(agent_token)
         if agent_actor is None:
             raise RuntimeError("live agent token did not authenticate")
+        claim = (
+            KrabService(krab_database)
+            .create_work_claim(
+                agent_actor,
+                "box-project",
+                "issue",
+                {"external_id": "owner/repository#42"},
+                "mgb.live.claim:0001",
+            )
+            .payload["trusted_metadata"]
+        )
         session = (
             KrabService(krab_database)
             .create_session(
@@ -126,7 +137,7 @@ def main() -> int:
                     {
                         "schema_version": 1,
                         "source": "manual",
-                        "external_id": "live-transport-proof",
+                        "external_id": "owner/repository#42",
                         "source_updated_at": "2026-10-09T12:00:00Z",
                         "title": "Exercise live interaction transport",
                         "brief": "Prove private question and response routing.",
@@ -148,6 +159,7 @@ def main() -> int:
                 work_item_id=work_item["id"],
                 requested_by=operator["id"],
                 krab_session_id=session,
+                krab_claim_id=claim["claim_id"],
             )
             database.transition_run(
                 run["id"], target=RunState.PREPARING, expected_version=1
@@ -179,6 +191,7 @@ def main() -> int:
                 title=request_title,
                 body=request_body,
                 idempotency_key=request_key,
+                claim_id=claim["claim_id"],
             )
             if replayed.item_id != interaction["request_item_id"]:
                 raise RuntimeError("Krab idempotency replay returned another item")
@@ -209,6 +222,32 @@ def main() -> int:
                 if private_text.encode("utf-8") in control_plane_bytes:
                     raise RuntimeError("private interaction content entered MGB state")
 
+            room = control.control_room_snapshot(refresh_krab=True)
+            roles = room["krab"]["roles"]
+            if not any(
+                role["krab_handle"] == "agent_one" and role["role"] == "coordinator"
+                for role in roles
+            ):
+                raise RuntimeError("control room did not project the live Krab role")
+            visible_claim = next(
+                (
+                    current
+                    for current in room["krab"]["work_claims"]
+                    if current["claim_id"] == claim["claim_id"]
+                ),
+                None,
+            )
+            if visible_claim is None:
+                raise RuntimeError("control room did not project the live claim queue")
+            if visible_claim["local_work_item"] != {
+                "id": work_item["id"],
+                "untrusted_title": "Exercise live interaction transport",
+            }:
+                raise RuntimeError("live claim was not linked to its local title")
+            room_json = json.dumps(room, sort_keys=True)
+            if request_body in room_json or response_body in room_json:
+                raise RuntimeError("private interaction content entered control room")
+
             print(
                 json.dumps(
                     {
@@ -219,6 +258,8 @@ def main() -> int:
                         "run_state": accepted.run_state,
                         "idempotency_replay": "same_item",
                         "private_content_persisted_by_mgb": False,
+                        "control_room_role": "coordinator",
+                        "control_room_claim_id": claim["claim_id"],
                     },
                     indent=2,
                     sort_keys=True,

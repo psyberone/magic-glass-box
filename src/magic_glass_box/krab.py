@@ -31,6 +31,15 @@ ITEM_STATUS = {
     "closed.rejected",
 }
 EVENT_KINDS = {"item.created", "status.changed", "item.reminded"}
+WORK_CLAIM_KINDS = {"issue", "pull_request"}
+WORK_CLAIM_STATUSES = {
+    "available",
+    "claimed",
+    "active",
+    "under_review",
+    "done",
+}
+WORK_CLAIM_PATHS = {"issue": "issues", "pull_request": "pull-requests"}
 
 
 class KrabError(RuntimeError):
@@ -72,6 +81,28 @@ class WorkClaimRef:
     claim_id: str
     kind: str
     external_id: str
+
+
+@dataclass(frozen=True)
+class WorkClaim:
+    claim_id: str
+    project_key: str
+    kind: str
+    external_id: str
+    status: str
+    version: int
+    review_round: int
+    assignee: KrabUserRef | None
+    created_by: KrabUserRef
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class WorkClaimPage:
+    project_key: str
+    kind: str
+    claims: tuple[WorkClaim, ...]
 
 
 @dataclass(frozen=True)
@@ -453,7 +484,7 @@ class KrabClient:
     def _request(
         self,
         path: str,
-        query: Mapping[str, int] | None = None,
+        query: Mapping[str, str | int] | None = None,
         *,
         method: str = "GET",
         payload: Mapping[str, Any] | None = None,
@@ -603,6 +634,130 @@ class KrabClient:
                 )
             )
         return tuple(projects)
+
+    def work_claims(
+        self,
+        project_key: str,
+        *,
+        kind: str,
+        status: str | None = None,
+        assignee: str | None = None,
+    ) -> WorkClaimPage:
+        try:
+            key = validate_project_key(project_key)
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        if not isinstance(kind, str) or kind not in WORK_CLAIM_KINDS:
+            raise KrabError("invalid work-claim kind")
+        if status is not None and (
+            not isinstance(status, str) or status not in WORK_CLAIM_STATUSES
+        ):
+            raise KrabError("invalid work-claim status")
+        if assignee is not None:
+            assignee = _handle(assignee)
+        query: dict[str, str] = {}
+        if status is not None:
+            query["status"] = status
+        if assignee is not None:
+            query["assignee"] = assignee
+        payload = _exact_object(
+            self._request(
+                "/v1/projects/" + quote(key, safe="") + "/" + WORK_CLAIM_PATHS[kind],
+                query,
+            ),
+            fields={"trusted_metadata", "claims"},
+            label="work-claim list response",
+        )
+        metadata = _exact_object(
+            payload["trusted_metadata"],
+            fields={"project_key", "kind", "count"},
+            label="work-claim list metadata",
+        )
+        if metadata["project_key"] != key:
+            raise KrabError("work-claim response project does not match the request")
+        if metadata["kind"] != kind:
+            raise KrabError("work-claim response kind does not match the request")
+        entries = payload["claims"]
+        if not isinstance(entries, list) or len(entries) > 10_000:
+            raise KrabError("invalid work-claim list")
+        count = _integer(metadata["count"], minimum=0, label="work-claim count")
+        if count != len(entries):
+            raise KrabError("work-claim count does not match the response")
+        claims = tuple(self._work_claim(entry, key, kind) for entry in entries)
+        if len({claim.claim_id for claim in claims}) != len(claims):
+            raise KrabError("work-claim response contains duplicate claims")
+        return WorkClaimPage(project_key=key, kind=kind, claims=claims)
+
+    @staticmethod
+    def _work_claim(value: object, project_key: str, kind: str) -> WorkClaim:
+        item = _exact_object(
+            value,
+            fields={"trusted_metadata"},
+            label="work claim",
+        )
+        metadata = _exact_object(
+            item["trusted_metadata"],
+            fields={
+                "claim_id",
+                "project_key",
+                "kind",
+                "external_id",
+                "status",
+                "version",
+                "review_round",
+                "assignee",
+                "created_by",
+                "created_at",
+                "updated_at",
+            },
+            label="work-claim metadata",
+        )
+        if metadata["project_key"] != project_key:
+            raise KrabError("work claim belongs to another project")
+        if metadata["kind"] != kind:
+            raise KrabError("work claim has an unexpected kind")
+        try:
+            claim_id = validate_krab_id(metadata["claim_id"], "clm")
+        except ValueError as exc:
+            raise KrabError("invalid work-claim claim ID") from exc
+        claim_status = metadata["status"]
+        if not isinstance(claim_status, str) or claim_status not in WORK_CLAIM_STATUSES:
+            raise KrabError("invalid work-claim status")
+        assignee_value = metadata["assignee"]
+        assignee = (
+            None
+            if assignee_value is None
+            else _user_ref(assignee_value, "work-claim assignee")
+        )
+        if (claim_status == "available") != (assignee is None):
+            raise KrabError("invalid work-claim assignee for status")
+        return WorkClaim(
+            claim_id=claim_id,
+            project_key=project_key,
+            kind=kind,
+            external_id=_text(
+                metadata["external_id"],
+                label="work-claim external ID",
+                max_bytes=256,
+            ),
+            status=claim_status,
+            version=_integer(
+                metadata["version"], minimum=1, label="work-claim version"
+            ),
+            review_round=_integer(
+                metadata["review_round"],
+                minimum=0,
+                label="work-claim review round",
+            ),
+            assignee=assignee,
+            created_by=_user_ref(metadata["created_by"], "work-claim creator"),
+            created_at=_timestamp(
+                metadata["created_at"], label="work-claim created timestamp"
+            ),
+            updated_at=_timestamp(
+                metadata["updated_at"], label="work-claim updated timestamp"
+            ),
+        )
 
     def create_session_item(
         self,

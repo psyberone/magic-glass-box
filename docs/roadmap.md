@@ -175,6 +175,29 @@ Git forge credential or outbound operation.
 
 ## Milestone 4: local control room
 
+### 4A. Redacted operational projection
+
+**Status: complete**
+
+- Read users, projects, profiles, work generations, assignments, runs,
+  attempts, interactions, results, and authority bindings in one SQLite read
+  transaction.
+- Keep every active run visible while bounding only terminal history.
+- Elevate pending interactions, owners, blocker evidence, cancellation
+  requests, expired leases, and unavailable authority into one attention list.
+- Optionally verify configured Krab identities and overlay their live roles and
+  issue/pull-request claim queues without storing that external state.
+- Expose visible work-item and assignment titles as untrusted text while
+  excluding briefs, objectives, message bodies, work-log text, handoffs,
+  transcripts, result paths, and secret-bearing policy values.
+
+**Exit proof:** one CLI call discovers every active local run and its linked
+metadata without knowing an object ID in advance. The local view comes from one
+read transaction; a live Krab failure degrades per identity without hiding
+local state or exposing credential references.
+
+### 4B. Operator action surface
+
 - Show projects, users, roles, profiles, work claims, runs, attempts, and
   retained results.
 - Make pending questions, approvals, owners, and blockers prominent.

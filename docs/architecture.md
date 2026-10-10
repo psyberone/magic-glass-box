@@ -174,8 +174,10 @@ Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
 broker, structured worker replacement, multi-agent work memory, work-item
-completion, and execution integrity are complete. The next slice is the local
-control room: an operator view over projects, authority, work threads,
+completion, execution integrity, and the transactionally consistent
+control-room read model are complete. The next slice is the interactive
+control-room action surface over projects, authority, work threads,
 assignments, runs, attempts, interactions, retained results, and recovery
 actions without private message bodies or transcripts. See
-[worker-handoffs.md](worker-handoffs.md) and [work-memory.md](work-memory.md).
+[control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
+and [work-memory.md](work-memory.md).
