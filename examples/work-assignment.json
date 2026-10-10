@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "title": "Review the persistence boundary",
+  "objective": "Verify that parallel workers can append without sharing a coordinator session.",
+  "scope_paths": [
+    "src/magic_glass_box/db.py",
+    "tests/test_work_memory.py"
+  ],
+  "acceptance_checks": [
+    "Run the focused work-memory tests.",
+    "Report findings through the assignment result."
+  ],
+  "base_revision": null
+}

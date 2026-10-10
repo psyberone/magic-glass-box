@@ -62,8 +62,10 @@ The product thesis is proven when one local demonstration can:
    private Krab delivery;
 4. terminate the original worker without losing the interaction;
 5. accept a human response later;
-6. resume the work with a different compatible worker; and
-7. show the exact context, authority, transitions, and outcome without showing
+6. resume the work with a different compatible worker;
+7. collect independently authored results from parallel profile-pinned
+   assignments after replacing the original coordinator; and
+8. show the exact context, authority, transitions, and outcome without showing
    either private message body.
 
 ## Non-goals

@@ -21,7 +21,13 @@ A profile opts into each operation explicitly:
     "interaction.open",
     "interaction.read",
     "handoff.submit",
-    "provider.invoke"
+    "provider.invoke",
+    "work.read",
+    "work.append",
+    "work.checkpoint",
+    "work.assign",
+    "work.assignment.claim",
+    "work.assignment.complete"
   ]
 }
 ```
@@ -96,9 +102,32 @@ Payload: `{}`.
 
 Returns the current run state and version, pinned project key and source
 revision, sanitized project context, immutable work item, authority summary,
-bounded interaction metadata, and the latest structured handoff when one
-exists. It omits the host repository path, image and command details,
+bounded interaction metadata, latest structured handoff, and the initial
+bounded work-memory page. Work memory contains the latest checkpoint, entries
+after it, and assignment state with at most the latest 16 lifecycle events per
+assignment. It omits the host repository path, image and command details,
 credential references, and secret values.
+
+### Work-memory operations
+
+`work.read` pages the bound work item's log from an optional sequence with a
+limit of 1 through 16. `work.append` accepts one v1 work-log entry, an optional
+assignment ID, and a stable idempotency key. The gateway supplies run identity
+and storage supplies attempt/profile/runtime provenance.
+
+`work.checkpoint` accepts one v1 checkpoint, the exact log sequence it covers,
+the observed thread version, and an idempotency key. Both the version and log
+head must still match. `work.assign` similarly uses the observed thread
+version, selects an active target profile by name, and stores its exact profile
+revision with the v1 assignment document.
+
+`work.assignment.claim` accepts an assignment ID, observed assignment version,
+and a lease of 30 through 86,400 seconds. Only a run pinned to the target
+profile revision can claim it; an unexpired lease cannot be stolen.
+`work.assignment.complete` accepts the observed assignment version, stable
+idempotency key, and an `assignment_result` entry. The result append and state
+transition are atomic. Full contracts and recovery semantics are in
+[work-memory.md](work-memory.md).
 
 ### `interaction.open`
 
@@ -174,10 +203,11 @@ closed as interrupted while its handoff remains available.
 
 ## Current boundary
 
-The gateway brokers run context, Krab interactions, structured handoffs, and
-named provider grants. It does not grant transparent Internet access, relay
-arbitrary URLs, expose administrator credentials, accept destinations selected
-by the worker, or store transcripts.
+The gateway brokers run context, Krab interactions, structured handoffs, named
+provider grants, and work-item-scoped coordination. It does not grant
+transparent Internet access, relay arbitrary URLs, expose administrator
+credentials, accept destinations selected by the worker, export forge
+comments, or store transcripts.
 
 Run the carrier and isolation proof with:
 

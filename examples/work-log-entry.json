@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "kind": "finding",
+  "summary": "The gateway already provides the narrow synchronization boundary.",
+  "details": [
+    "Worker updates can remain local without forge comments or transcripts."
+  ],
+  "artifacts": [
+    {
+      "path": "src/magic_glass_box/gateway.py",
+      "description": "Run-bound capability dispatch."
+    }
+  ],
+  "related_interaction_ids": [],
+  "candidate_revision": null
+}

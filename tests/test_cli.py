@@ -130,10 +130,208 @@ class CLITests(unittest.TestCase):
         _emit({"message": "café"}, stream=stream)
         self.assertEqual(stream.getvalue(), '{\n  "message": "café"\n}\n')
 
+    def test_parser_exposes_the_documented_command_help_contract(self) -> None:
+        parser = build_parser()
+        self.assertEqual(parser.prog, "magic-glass-box")
+        self.assertEqual(
+            parser.description,
+            "Magic Glass Box control-plane administration",
+        )
+        database_action = next(
+            action for action in parser._actions if action.dest == "db"
+        )
+        self.assertEqual(database_action.help, "control-plane database path")
+
+        expected = {
+            (): (
+                "command",
+                True,
+                (
+                    ("init", "initialize the private state database"),
+                    ("status", "validate state and show object counts"),
+                    ("user", "manage local users"),
+                    ("krab", "manage and query Krab connections"),
+                    ("project", "manage project context"),
+                    ("profile", "manage agent profiles"),
+                    ("provider", "manage scoped provider grants"),
+                    ("work-item", "import durable work items"),
+                    ("run", "manage agent runs"),
+                ),
+            ),
+            ("user",): (
+                "user_command",
+                True,
+                (("add", "add a local user"),),
+            ),
+            ("krab",): (
+                "krab_command",
+                True,
+                (
+                    ("instance-add", "add a Krab origin"),
+                    (
+                        "identity-add",
+                        "verify and retain a Krab credential reference",
+                    ),
+                    ("activity", "read metadata-only project activity"),
+                ),
+            ),
+            ("project",): (
+                "project_command",
+                True,
+                (
+                    ("add", "verify and register a visible Krab project"),
+                    ("revise", "append an immutable project-context revision"),
+                ),
+            ),
+            ("profile",): (
+                "profile_command",
+                True,
+                (
+                    ("add", "create a versioned agent profile"),
+                    ("revise", "append an immutable profile revision"),
+                ),
+            ),
+            ("provider",): (
+                "provider_command",
+                True,
+                (
+                    (
+                        "add",
+                        "add an immutable provider policy and credential reference",
+                    ),
+                    ("show", "show provider policy and lifecycle metadata"),
+                    ("revoke", "revoke a provider grant"),
+                ),
+            ),
+            ("work-item",): (
+                "work_item_command",
+                True,
+                (("import", "create or update a normalized work item"),),
+            ),
+            ("run",): (
+                "run_command",
+                True,
+                (
+                    ("create", "create a pinned run record"),
+                    (
+                        "transition",
+                        "apply an optimistic run-state transition",
+                    ),
+                    ("show", "show a run and its event stream"),
+                    (
+                        "execute",
+                        "execute one queued run in its pinned sandbox",
+                    ),
+                    (
+                        "reconcile",
+                        "clean and fail runs interrupted by an orchestrator restart",
+                    ),
+                ),
+            ),
+        }
+
+        actual: dict[
+            tuple[str, ...], tuple[str, bool, tuple[tuple[str, str | None], ...]]
+        ] = {}
+        required_options: dict[tuple[str, ...], tuple[str, ...]] = {}
+        choices: dict[tuple[tuple[str, ...], str], tuple[str, ...]] = {}
+
+        def collect(
+            current: argparse.ArgumentParser, path: tuple[str, ...] = ()
+        ) -> None:
+            required = tuple(
+                action.option_strings[0]
+                for action in current._actions
+                if action.required and action.option_strings
+            )
+            if required:
+                required_options[path] = required
+            for parser_action in current._actions:
+                if (
+                    not isinstance(parser_action, argparse._SubParsersAction)
+                    and parser_action.choices is not None
+                ):
+                    choices[(path, parser_action.dest)] = tuple(parser_action.choices)
+            subparsers = [
+                action
+                for action in current._actions
+                if isinstance(action, argparse._SubParsersAction)
+            ]
+            if not subparsers:
+                return
+            self.assertEqual(len(subparsers), 1)
+            action = subparsers[0]
+            help_by_name = {
+                choice.dest: choice.help for choice in action._choices_actions
+            }
+            actual[path] = (
+                action.dest,
+                action.required,
+                tuple((name, help_by_name[name]) for name in action.choices),
+            )
+            for name, child in action.choices.items():
+                collect(child, (*path, name))
+
+        collect(parser)
+        self.assertEqual(actual, expected)
+        self.assertEqual(
+            required_options,
+            {
+                ("krab", "instance-add"): ("--url",),
+                ("krab", "identity-add"): ("--token-file",),
+                ("krab", "activity"): ("--as-user",),
+                ("project", "add"): (
+                    "--instance",
+                    "--as-user",
+                    "--name",
+                    "--context",
+                    "--created-by",
+                ),
+                ("project", "revise"): ("--context", "--created-by"),
+                ("profile", "add"): (
+                    "--instance",
+                    "--krab-user",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("profile", "revise"): (
+                    "--instance",
+                    "--krab-user",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("provider", "add"): (
+                    "--policy",
+                    "--credential-file",
+                    "--created-by",
+                ),
+                ("provider", "revoke"): (
+                    "--expected-version",
+                    "--revoked-by",
+                ),
+                ("work-item", "import"): ("--project", "--imported-by"),
+                ("run", "create"): (
+                    "--project",
+                    "--profile",
+                    "--work-item",
+                    "--requested-by",
+                ),
+                ("run", "transition"): ("--expected-version",),
+            },
+        )
+        self.assertEqual(
+            choices,
+            {
+                (("run", "transition"), "state"): tuple(
+                    state.value for state in RunState
+                )
+            },
+        )
+
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 5)
+        self.assertEqual(initialized["schema_version"], 6)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )

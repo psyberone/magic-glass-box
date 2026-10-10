@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:work-log-entry:v1",
+  "title": "Magic Glass Box work-log entry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "summary",
+    "details",
+    "artifacts",
+    "related_interaction_ids",
+    "candidate_revision"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {
+      "enum": [
+        "plan",
+        "progress",
+        "finding",
+        "decision",
+        "blocker",
+        "verification",
+        "review",
+        "assignment_result",
+        "outcome"
+      ]
+    },
+    "summary": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "details": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "related_interaction_ids": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^int_[0-9a-f]{32}$"}
+    },
+    "candidate_revision": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "minLength": 1, "maxLength": 512}
+      ]
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "description"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\).+$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    }
+  }
+}

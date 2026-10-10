@@ -109,6 +109,26 @@ same run with Agent B. The automated vertical proof uses two distinct runtime
 adapter identities, reconstructs Agent B's workspace from the commit pinned by
 Agent A, and retains only the bounded handoff and interaction metadata.
 
+## Milestone 3.5: durable multi-agent work memory
+
+**Status: complete**
+
+- Attach one durable coordination thread to the stable work item rather than a
+  coordinator process or model session.
+- Accept bounded, typed, append-only entries with orchestrator-supplied run,
+  attempt, profile, and runtime provenance.
+- Let coordinators publish optimistic checkpoints through the exact log head.
+- Delegate bounded assignments to exact immutable profile revisions under
+  reclaimable leases.
+- Expose paging, append, checkpoint, assign, claim, and completion through the
+  run-scoped gateway without forge comments or transcripts.
+
+**Exit proof:** Claude- and Codex-identified workers claim separate assignments
+and complete concurrently. A newly created coordinator reconstructs the same
+work from the earlier checkpoint plus both independently authored result
+entries. Stale checkpoints, wrong-profile claims, live-lease theft, changed
+idempotent retries, and cross-thread references fail closed.
+
 ## Milestone 4: local control room
 
 - Show projects, users, roles, profiles, work claims, runs, and attempts.

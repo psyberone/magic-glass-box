@@ -54,6 +54,12 @@ project-activity projection.
   argv-form command, workspace/network policy, and a dedicated Krab identity.
 - A run pins exact context, profile, and work-item revisions. Later imports or
   edits cannot change an in-flight or historical run.
+- A work item owns a durable coordination thread shared by all of its runs.
+  Append-only work-log entries retain orchestrator-supplied run, attempt,
+  profile, and runtime provenance; they are bounded evidence, not authority.
+- Coordinator checkpoints compact the log only through an exact observed head
+  under optimistic concurrency. Assignments pin an exact profile revision and
+  use reclaimable leases, so a dead worker does not own work forever.
 - A provider-capable run also pins each exact grant ID named by its profile.
   Revocation and expiry remain live kill switches for already-pinned runs.
 - The requested source revision is resolved to a full Git commit and persisted
@@ -111,17 +117,17 @@ size, and SHA-256 commitments prevent torn reads and stale response confusion.
 The retired `krab_only` mode fails closed.
 
 The gateway binds run identity outside the agent-controlled request. Its
-allowlist comes from the immutable profile revision. The current operations are
-`run.describe`, `interaction.open`, `interaction.read`, `handoff.submit`, and
-`provider.invoke`; none accepts a run ID or credential value. Provider calls additionally pin the
-destination, method, model, headers, byte limits, timeout, and concurrency in
+allowlist comes from the immutable profile revision. The current operations
+cover run description, interactions, handoff, provider invocation, and the
+typed work-memory read/append/checkpoint/assignment lifecycle; none accepts a
+run ID or credential value. Provider calls additionally pin the destination,
+method, model, headers, byte limits, timeout, and concurrency in
 administrator-owned policy. Opening an interaction tells a handoff-capable
 worker to submit bounded replacement state and exit. Cleanup removes its
 resources, and the durable run remains `waiting_for_input`. A verified response
 re-queues the run, and a replacement worker may retrieve only the response
-correlated to that run. See
-[agent-gateway.md](agent-gateway.md) and
-[provider-broker.md](provider-broker.md).
+correlated to that run. See [agent-gateway.md](agent-gateway.md),
+[provider-broker.md](provider-broker.md), and [work-memory.md](work-memory.md).
 
 ## Work-item boundary
 
@@ -137,7 +143,8 @@ therefore never an authority channel.
 Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
-broker, and structured worker replacement are complete. The next slice is the
-local control room: an operator view over projects, authority, runs, attempts,
-interactions, and recovery actions without private message bodies or
-transcripts. See [worker-handoffs.md](worker-handoffs.md).
+broker, structured worker replacement, and multi-agent work memory are
+complete. The next slice is the local control room: an operator view over
+projects, authority, work threads, assignments, runs, attempts, interactions,
+and recovery actions without private message bodies or transcripts. See
+[worker-handoffs.md](worker-handoffs.md) and [work-memory.md](work-memory.md).

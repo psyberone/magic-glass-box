@@ -24,7 +24,10 @@ from .domain import (
     ProviderGrantSpec,
     RunState,
     ValidationError,
+    WorkAssignmentSpec,
     WorkItemEnvelope,
+    WorkLogEntry,
+    WorkMemoryCheckpoint,
     validate_krab_id,
 )
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
@@ -399,6 +402,98 @@ class ControlPlane:
         """Persist bounded replacement state for the run's active attempt."""
 
         return self.database.create_attempt_handoff(run_id, handoff)
+
+    def read_work_memory(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int | None = None,
+        limit: int = 16,
+    ) -> dict[str, Any]:
+        return self.database.get_work_memory_for_run(
+            run_id, after_sequence=after_sequence, limit=limit
+        )
+
+    def append_work_log(
+        self,
+        run_id: str,
+        entry: WorkLogEntry,
+        *,
+        idempotency_key: str,
+        assignment_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.database.append_work_log(
+            run_id,
+            entry,
+            idempotency_key=idempotency_key,
+            assignment_id=assignment_id,
+        )
+
+    def checkpoint_work_memory(
+        self,
+        run_id: str,
+        checkpoint: WorkMemoryCheckpoint,
+        *,
+        through_sequence: int,
+        expected_thread_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.create_work_memory_checkpoint(
+            run_id,
+            checkpoint,
+            through_sequence=through_sequence,
+            expected_thread_version=expected_thread_version,
+            idempotency_key=idempotency_key,
+        )
+
+    def create_work_assignment(
+        self,
+        run_id: str,
+        *,
+        target_profile_name: str,
+        spec: WorkAssignmentSpec,
+        expected_thread_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.create_work_assignment(
+            run_id,
+            target_profile_name=target_profile_name,
+            spec=spec,
+            expected_thread_version=expected_thread_version,
+            idempotency_key=idempotency_key,
+        )
+
+    def claim_work_assignment(
+        self,
+        run_id: str,
+        assignment_id: str,
+        *,
+        expected_assignment_version: int,
+        lease_seconds: int,
+    ) -> dict[str, Any]:
+        return self.database.claim_work_assignment(
+            run_id,
+            assignment_id,
+            expected_assignment_version=expected_assignment_version,
+            lease_seconds=lease_seconds,
+        )
+
+    def complete_work_assignment(
+        self,
+        run_id: str,
+        assignment_id: str,
+        *,
+        expected_assignment_version: int,
+        result: WorkLogEntry,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.complete_work_assignment(
+            run_id,
+            assignment_id,
+            expected_assignment_version=expected_assignment_version,
+            result=result,
+            idempotency_key=idempotency_key,
+        )
 
     def open_interaction(
         self,

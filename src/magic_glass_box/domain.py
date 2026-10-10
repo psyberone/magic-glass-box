@@ -26,6 +26,10 @@ WORK_ITEM_SCHEMA_VERSION = 1
 MAX_WORK_ITEM_CONTENT_BYTES = 256 * 1024
 HANDOFF_SCHEMA_VERSION = 1
 MAX_HANDOFF_CONTENT_BYTES = 24 * 1024
+WORK_MEMORY_SCHEMA_VERSION = 1
+MAX_WORK_LOG_CONTENT_BYTES = 24 * 1024
+MAX_WORK_CHECKPOINT_CONTENT_BYTES = 24 * 1024
+MAX_WORK_ASSIGNMENT_CONTENT_BYTES = 16 * 1024
 INTERACTION_ID_RE = re.compile(r"^int_[0-9a-f]{32}$")
 
 
@@ -339,6 +343,18 @@ class WorkItemEnvelope:
         return content_sha256(self.canonical)
 
 
+class WorkLogKind(StrEnum):
+    PLAN = "plan"
+    PROGRESS = "progress"
+    FINDING = "finding"
+    DECISION = "decision"
+    BLOCKER = "blocker"
+    VERIFICATION = "verification"
+    REVIEW = "review"
+    ASSIGNMENT_RESULT = "assignment_result"
+    OUTCOME = "outcome"
+
+
 class HandoffWorkState(StrEnum):
     IN_PROGRESS = "in_progress"
     WAITING_FOR_INPUT = "waiting_for_input"
@@ -505,6 +521,340 @@ class HandoffEnvelope:
 
 
 @dataclass(frozen=True)
+class WorkLogEntry:
+    """Bounded evidence appended by a run; provenance is supplied by storage."""
+
+    schema_version: int
+    kind: WorkLogKind
+    summary: str
+    details: tuple[str, ...] = ()
+    artifacts: tuple[HandoffArtifact, ...] = ()
+    related_interaction_ids: tuple[str, ...] = ()
+    candidate_revision: str | None = None
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> WorkLogEntry:
+        if not isinstance(value, dict):
+            raise ValidationError("work-log entry must be an object")
+        fields = {
+            "schema_version",
+            "kind",
+            "summary",
+            "details",
+            "artifacts",
+            "related_interaction_ids",
+            "candidate_revision",
+        }
+        unknown = set(value) - fields
+        if unknown:
+            raise ValidationError(
+                "work-log entry contains unknown fields: " + ", ".join(sorted(unknown))
+            )
+        missing = fields - set(value)
+        if missing:
+            raise ValidationError(
+                "work-log entry is missing fields: " + ", ".join(sorted(missing))
+            )
+        schema_version = value["schema_version"]
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != WORK_MEMORY_SCHEMA_VERSION
+        ):
+            raise ValidationError(
+                f"schema_version must be {WORK_MEMORY_SCHEMA_VERSION}"
+            )
+        try:
+            kind = WorkLogKind(value["kind"])
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("work-log kind is invalid") from exc
+        raw_artifacts = value["artifacts"]
+        if not isinstance(raw_artifacts, list) or len(raw_artifacts) > 32:
+            raise ValidationError("artifacts must be a list of at most 32 entries")
+        artifacts = tuple(
+            HandoffArtifact.from_mapping(item, index=index)
+            for index, item in enumerate(raw_artifacts)
+        )
+        if len({artifact.path for artifact in artifacts}) != len(artifacts):
+            raise ValidationError("artifacts must use unique paths")
+        raw_interactions = value["related_interaction_ids"]
+        if not isinstance(raw_interactions, list) or len(raw_interactions) > 32:
+            raise ValidationError(
+                "related_interaction_ids must be a list of at most 32 entries"
+            )
+        interactions = tuple(raw_interactions)
+        if any(
+            not isinstance(interaction_id, str)
+            or INTERACTION_ID_RE.fullmatch(interaction_id) is None
+            for interaction_id in interactions
+        ):
+            raise ValidationError("related interaction identifier is invalid")
+        if len(set(interactions)) != len(interactions):
+            raise ValidationError("related_interaction_ids must be unique")
+        candidate_revision = value["candidate_revision"]
+        if candidate_revision is not None:
+            candidate_revision = _nonblank_string(
+                candidate_revision,
+                field="candidate_revision",
+                max_bytes=512,
+            )
+        result = cls(
+            schema_version=schema_version,
+            kind=kind,
+            summary=_nonblank_string(value["summary"], field="summary", max_bytes=4096),
+            details=_nonblank_tuple(
+                value["details"],
+                field="details",
+                maximum=32,
+                item_bytes=4096,
+            ),
+            artifacts=artifacts,
+            related_interaction_ids=interactions,
+            candidate_revision=candidate_revision,
+        )
+        if len(result.canonical.encode("utf-8")) > MAX_WORK_LOG_CONTENT_BYTES:
+            raise ValidationError(
+                f"work-log content exceeds {MAX_WORK_LOG_CONTENT_BYTES} UTF-8 bytes"
+            )
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "kind": self.kind.value,
+            "summary": self.summary,
+            "details": list(self.details),
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "related_interaction_ids": list(self.related_interaction_ids),
+            "candidate_revision": self.candidate_revision,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
+@dataclass(frozen=True)
+class WorkMemoryCheckpoint:
+    """A compact coordinator view through one exact work-log sequence."""
+
+    schema_version: int
+    summary: str
+    decisions: tuple[str, ...] = ()
+    artifacts: tuple[HandoffArtifact, ...] = ()
+    next_steps: tuple[str, ...] = ()
+    open_blockers: tuple[str, ...] = ()
+    candidate_revision: str | None = None
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> WorkMemoryCheckpoint:
+        if not isinstance(value, dict):
+            raise ValidationError("work-memory checkpoint must be an object")
+        fields = {
+            "schema_version",
+            "summary",
+            "decisions",
+            "artifacts",
+            "next_steps",
+            "open_blockers",
+            "candidate_revision",
+        }
+        unknown = set(value) - fields
+        if unknown:
+            raise ValidationError(
+                "work-memory checkpoint contains unknown fields: "
+                + ", ".join(sorted(unknown))
+            )
+        missing = fields - set(value)
+        if missing:
+            raise ValidationError(
+                "work-memory checkpoint is missing fields: "
+                + ", ".join(sorted(missing))
+            )
+        schema_version = value["schema_version"]
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != WORK_MEMORY_SCHEMA_VERSION
+        ):
+            raise ValidationError(
+                f"schema_version must be {WORK_MEMORY_SCHEMA_VERSION}"
+            )
+        raw_artifacts = value["artifacts"]
+        if not isinstance(raw_artifacts, list) or len(raw_artifacts) > 32:
+            raise ValidationError("artifacts must be a list of at most 32 entries")
+        artifacts = tuple(
+            HandoffArtifact.from_mapping(item, index=index)
+            for index, item in enumerate(raw_artifacts)
+        )
+        if len({artifact.path for artifact in artifacts}) != len(artifacts):
+            raise ValidationError("artifacts must use unique paths")
+        candidate_revision = value["candidate_revision"]
+        if candidate_revision is not None:
+            candidate_revision = _nonblank_string(
+                candidate_revision,
+                field="candidate_revision",
+                max_bytes=512,
+            )
+        result = cls(
+            schema_version=schema_version,
+            summary=_nonblank_string(value["summary"], field="summary", max_bytes=4096),
+            decisions=_nonblank_tuple(
+                value["decisions"],
+                field="decisions",
+                maximum=32,
+                item_bytes=2048,
+            ),
+            artifacts=artifacts,
+            next_steps=_nonblank_tuple(
+                value["next_steps"],
+                field="next_steps",
+                maximum=32,
+                item_bytes=2048,
+            ),
+            open_blockers=_nonblank_tuple(
+                value["open_blockers"],
+                field="open_blockers",
+                maximum=32,
+                item_bytes=2048,
+            ),
+            candidate_revision=candidate_revision,
+        )
+        if len(result.canonical.encode("utf-8")) > MAX_WORK_CHECKPOINT_CONTENT_BYTES:
+            raise ValidationError(
+                "work-memory checkpoint content exceeds "
+                f"{MAX_WORK_CHECKPOINT_CONTENT_BYTES} UTF-8 bytes"
+            )
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "summary": self.summary,
+            "decisions": list(self.decisions),
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "next_steps": list(self.next_steps),
+            "open_blockers": list(self.open_blockers),
+            "candidate_revision": self.candidate_revision,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
+@dataclass(frozen=True)
+class WorkAssignmentSpec:
+    """A bounded task delegated to one exact agent-profile revision."""
+
+    schema_version: int
+    title: str
+    objective: str
+    scope_paths: tuple[str, ...] = ()
+    acceptance_checks: tuple[str, ...] = ()
+    base_revision: str | None = None
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> WorkAssignmentSpec:
+        if not isinstance(value, dict):
+            raise ValidationError("work assignment must be an object")
+        fields = {
+            "schema_version",
+            "title",
+            "objective",
+            "scope_paths",
+            "acceptance_checks",
+            "base_revision",
+        }
+        unknown = set(value) - fields
+        if unknown:
+            raise ValidationError(
+                "work assignment contains unknown fields: " + ", ".join(sorted(unknown))
+            )
+        missing = fields - set(value)
+        if missing:
+            raise ValidationError(
+                "work assignment is missing fields: " + ", ".join(sorted(missing))
+            )
+        schema_version = value["schema_version"]
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != WORK_MEMORY_SCHEMA_VERSION
+        ):
+            raise ValidationError(
+                f"schema_version must be {WORK_MEMORY_SCHEMA_VERSION}"
+            )
+        scope_paths = _nonblank_tuple(
+            value["scope_paths"],
+            field="scope_paths",
+            maximum=64,
+            item_bytes=1024,
+        )
+        for path_text in scope_paths:
+            path = PurePosixPath(path_text)
+            if (
+                path_text.startswith("/")
+                or "\\" in path_text
+                or path_text != path.as_posix()
+                or path.as_posix() == "."
+                or any(part in {".", ".."} for part in path.parts)
+            ):
+                raise ValidationError(
+                    "scope_paths entries must be safe relative POSIX paths"
+                )
+        base_revision = value["base_revision"]
+        if base_revision is not None:
+            base_revision = _nonblank_string(
+                base_revision, field="base_revision", max_bytes=512
+            )
+        result = cls(
+            schema_version=schema_version,
+            title=_nonblank_string(value["title"], field="title", max_bytes=512),
+            objective=_nonblank_string(
+                value["objective"], field="objective", max_bytes=8192
+            ),
+            scope_paths=scope_paths,
+            acceptance_checks=_nonblank_tuple(
+                value["acceptance_checks"],
+                field="acceptance_checks",
+                maximum=32,
+                item_bytes=2048,
+            ),
+            base_revision=base_revision,
+        )
+        if len(result.canonical.encode("utf-8")) > MAX_WORK_ASSIGNMENT_CONTENT_BYTES:
+            raise ValidationError(
+                "work assignment content exceeds "
+                f"{MAX_WORK_ASSIGNMENT_CONTENT_BYTES} UTF-8 bytes"
+            )
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "title": self.title,
+            "objective": self.objective,
+            "scope_paths": list(self.scope_paths),
+            "acceptance_checks": list(self.acceptance_checks),
+            "base_revision": self.base_revision,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
+@dataclass(frozen=True)
 class ProjectContext:
     purpose: str
     instructions: tuple[str, ...] = ()
@@ -603,6 +953,12 @@ class GatewayCapability(StrEnum):
     INTERACTION_READ = "interaction.read"
     HANDOFF_SUBMIT = "handoff.submit"
     PROVIDER_INVOKE = "provider.invoke"
+    WORK_READ = "work.read"
+    WORK_APPEND = "work.append"
+    WORK_CHECKPOINT = "work.checkpoint"
+    WORK_ASSIGN = "work.assign"
+    WORK_ASSIGNMENT_CLAIM = "work.assignment.claim"
+    WORK_ASSIGNMENT_COMPLETE = "work.assignment.complete"
 
 
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")

@@ -36,7 +36,10 @@ This repository currently contains the first executable vertical slice:
   source revision, exit status, and terminal state;
 - a durable attempt ledger and bounded structured handoff that let a clean
   replacement worker resume the same run from its pinned commit without a
-  transcript or inherited mutable sandbox; and
+  transcript or inherited mutable sandbox;
+- a work-item-scoped, append-only coordination log with optimistic checkpoints,
+  profile-pinned leased assignments, and enough provenance for a replacement
+  coordinator to recover parallel Claude/Codex-style work; and
 - an administrative CLI that can execute queued runs and reconcile interrupted
   ones.
 
@@ -105,7 +108,9 @@ state. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability and
 carrier contracts and [docs/provider-broker.md](docs/provider-broker.md) for
 provider policy and secret-handling details. The replacement contract and
 handoff schema are documented in
-[docs/worker-handoffs.md](docs/worker-handoffs.md).
+[docs/worker-handoffs.md](docs/worker-handoffs.md). Multi-agent coordination and
+replacement-coordinator recovery are documented in
+[docs/work-memory.md](docs/work-memory.md).
 
 When running directly from a checkout, set `PYTHONPATH=src` or install the
 package into a virtual environment.

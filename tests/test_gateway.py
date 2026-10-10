@@ -16,6 +16,9 @@ from magic_glass_box.domain import (
     GatewayCapability,
     HandoffEnvelope,
     ValidationError,
+    WorkAssignmentSpec,
+    WorkLogEntry,
+    WorkMemoryCheckpoint,
     canonical_json,
 )
 from magic_glass_box.gateway import (
@@ -45,6 +48,8 @@ OTHER_RUN_ID = "run_" + "2" * 32
 INTERACTION_ID = "int_" + "3" * 32
 ATTEMPT_ID = "att_" + "4" * 32
 HANDOFF_ID = "hof_" + "5" * 32
+ASSIGNMENT_ID = "was_" + "6" * 32
+WORK_ENTRY_ID = "wle_" + "7" * 32
 
 
 class FakeGatewayDatabase:
@@ -121,6 +126,37 @@ class FakeGatewayDatabase:
                 "next_steps": ["Read the response."],
                 "pending_interaction_ids": [INTERACTION_ID],
             },
+            "work_memory": {
+                "thread_id": "wth_" + "8" * 32,
+                "work_item_id": "wki_" + "4" * 32,
+                "generation": 1,
+                "state": "active",
+                "version": 3,
+                "log_sequence": 1,
+                "checkpoint": None,
+                "entries": [],
+                "entries_truncated": False,
+                "next_after_sequence": None,
+                "assignments": [],
+            },
+        }
+
+    def get_work_memory_for_run(
+        self, run_id: str, *, after_sequence: int | None = None, limit: int = 32
+    ) -> dict[str, Any]:
+        if run_id != RUN_ID:
+            raise AssertionError("gateway escaped its bound run")
+        return {
+            "thread_id": "wth_" + "8" * 32,
+            "version": 3,
+            "log_sequence": 1,
+            "requested_after_sequence": after_sequence,
+            "requested_limit": limit,
+            "entries": [],
+            "entries_truncated": False,
+            "next_after_sequence": None,
+            "assignments": [],
+            "checkpoint": None,
         }
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -146,6 +182,7 @@ class FakeGatewayControl:
         self.read_calls: list[tuple[str, str]] = []
         self.provider_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.handoff_calls: list[tuple[str, HandoffEnvelope]] = []
+        self.work_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.provider_failure: Exception | None = None
 
     def open_interaction(self, run_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -202,6 +239,127 @@ class FakeGatewayControl:
             **handoff.to_dict(),
         }
 
+    def append_work_log(
+        self,
+        run_id: str,
+        entry: WorkLogEntry,
+        *,
+        idempotency_key: str,
+        assignment_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.work_calls.append(
+            (
+                "append",
+                run_id,
+                {
+                    "entry": entry,
+                    "idempotency_key": idempotency_key,
+                    "assignment_id": assignment_id,
+                },
+            )
+        )
+        return {"id": WORK_ENTRY_ID, "sequence": 2, **entry.to_dict()}
+
+    def checkpoint_work_memory(
+        self,
+        run_id: str,
+        checkpoint: WorkMemoryCheckpoint,
+        *,
+        through_sequence: int,
+        expected_thread_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.work_calls.append(
+            (
+                "checkpoint",
+                run_id,
+                {
+                    "checkpoint": checkpoint,
+                    "through_sequence": through_sequence,
+                    "expected_thread_version": expected_thread_version,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {"id": "wmc_" + "9" * 32, "version": 1, "through_sequence": 2}
+
+    def create_work_assignment(
+        self,
+        run_id: str,
+        *,
+        target_profile_name: str,
+        spec: WorkAssignmentSpec,
+        expected_thread_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.work_calls.append(
+            (
+                "assign",
+                run_id,
+                {
+                    "target_profile_name": target_profile_name,
+                    "spec": spec,
+                    "expected_thread_version": expected_thread_version,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {"id": ASSIGNMENT_ID, "state": "open", "version": 1}
+
+    def claim_work_assignment(
+        self,
+        run_id: str,
+        assignment_id: str,
+        *,
+        expected_assignment_version: int,
+        lease_seconds: int,
+    ) -> dict[str, Any]:
+        self.work_calls.append(
+            (
+                "claim",
+                run_id,
+                {
+                    "assignment_id": assignment_id,
+                    "expected_assignment_version": expected_assignment_version,
+                    "lease_seconds": lease_seconds,
+                },
+            )
+        )
+        return {
+            "id": assignment_id,
+            "state": "claimed",
+            "version": 2,
+            "lease_expires_at": "2026-10-10T12:10:00.000000+00:00",
+        }
+
+    def complete_work_assignment(
+        self,
+        run_id: str,
+        assignment_id: str,
+        *,
+        expected_assignment_version: int,
+        result: WorkLogEntry,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.work_calls.append(
+            (
+                "complete",
+                run_id,
+                {
+                    "assignment_id": assignment_id,
+                    "expected_assignment_version": expected_assignment_version,
+                    "result": result,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+        return {
+            "id": assignment_id,
+            "state": "completed",
+            "version": 3,
+            "result_entry_id": WORK_ENTRY_ID,
+        }
+
 
 def request(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
@@ -233,6 +391,18 @@ class RunGatewayTests(unittest.TestCase):
         self.assertEqual(result["work_item"]["title"], "Build the gateway")
         self.assertEqual(result["context"]["purpose"], "Build the box")
         self.assertEqual(result["handoff"]["id"], HANDOFF_ID)
+        self.assertEqual(result["work_memory"]["version"], 3)
+        self.assertEqual(
+            result["authority"],
+            {
+                "workspace_mode": "copy_on_write",
+                "network_mode": "gateway_only",
+                "credential_names": ["krab", "openai-main"],
+                "gateway_capabilities": sorted(
+                    capability.value for capability in GatewayCapability
+                ),
+            },
+        )
         self.assertEqual(
             result["interactions"],
             [
@@ -252,6 +422,152 @@ class RunGatewayTests(unittest.TestCase):
         self.assertNotIn("credential_references", encoded)
         self.assertNotIn("agent.token", encoded)
         self.assertNotIn("secret-host-policy", encoded)
+
+    def test_work_memory_operations_are_typed_and_bound_to_the_run(self) -> None:
+        entry = {
+            "schema_version": 1,
+            "kind": "finding",
+            "summary": "The persistence boundary is sound.",
+            "details": [],
+            "artifacts": [],
+            "related_interaction_ids": [],
+            "candidate_revision": "a" * 40,
+        }
+        checkpoint = {
+            "schema_version": 1,
+            "summary": "Worker findings are ready.",
+            "decisions": [],
+            "artifacts": [],
+            "next_steps": ["Review both findings."],
+            "open_blockers": [],
+            "candidate_revision": "a" * 40,
+        }
+        spec = {
+            "schema_version": 1,
+            "title": "Review persistence",
+            "objective": "Review the durable storage boundary.",
+            "scope_paths": ["src/magic_glass_box/db.py"],
+            "acceptance_checks": ["Run focused tests."],
+            "base_revision": "a" * 40,
+        }
+        calls = (
+            (
+                "work.read",
+                {"after_sequence": 1, "limit": 16},
+                "requested_after_sequence",
+                1,
+            ),
+            (
+                "work.append",
+                {
+                    "assignment_id": None,
+                    "idempotency_key": "work.append:0001",
+                    "entry": entry,
+                },
+                "entry_id",
+                WORK_ENTRY_ID,
+            ),
+            (
+                "work.checkpoint",
+                {
+                    "expected_thread_version": 3,
+                    "through_sequence": 2,
+                    "idempotency_key": "work.checkpoint:0001",
+                    "checkpoint": checkpoint,
+                },
+                "checkpoint_id",
+                "wmc_" + "9" * 32,
+            ),
+            (
+                "work.assign",
+                {
+                    "expected_thread_version": 4,
+                    "target_profile_name": "Codex Worker",
+                    "idempotency_key": "work.assign:0001",
+                    "spec": spec,
+                },
+                "assignment_id",
+                ASSIGNMENT_ID,
+            ),
+            (
+                "work.assignment.claim",
+                {
+                    "assignment_id": ASSIGNMENT_ID,
+                    "expected_assignment_version": 1,
+                    "lease_seconds": 600,
+                },
+                "state",
+                "claimed",
+            ),
+            (
+                "work.assignment.complete",
+                {
+                    "assignment_id": ASSIGNMENT_ID,
+                    "expected_assignment_version": 2,
+                    "idempotency_key": "work.result:0001",
+                    "result": {**entry, "kind": "assignment_result"},
+                },
+                "result_entry_id",
+                WORK_ENTRY_ID,
+            ),
+        )
+        for operation, payload, result_key, expected in calls:
+            with self.subTest(operation=operation):
+                response = self.gateway.handle(request(operation, payload))
+                self.assertTrue(response["ok"], response)
+                self.assertEqual(response["result"][result_key], expected)
+                if operation == "work.assignment.claim":
+                    self.assertEqual(
+                        response["result"],
+                        {
+                            "assignment_id": ASSIGNMENT_ID,
+                            "state": "claimed",
+                            "version": 2,
+                            "lease_expires_at": ("2026-10-10T12:10:00.000000+00:00"),
+                        },
+                    )
+
+        self.assertTrue(
+            all(call[1] == RUN_ID for call in self.control.work_calls),
+            self.control.work_calls,
+        )
+
+    def test_work_memory_payloads_fail_closed_before_dispatch(self) -> None:
+        cases = (
+            request("work.read", {"after_sequence": -1, "limit": 16}),
+            request("work.read", {"after_sequence": None, "limit": 17}),
+            request(
+                "work.append",
+                {
+                    "assignment_id": None,
+                    "idempotency_key": "short",
+                    "entry": {},
+                },
+            ),
+            request(
+                "work.assign",
+                {
+                    "expected_thread_version": 1,
+                    "target_profile_name": "Bad/Profile",
+                    "idempotency_key": "work.assign:0001",
+                    "spec": {},
+                },
+            ),
+            request(
+                "work.assignment.claim",
+                {
+                    "assignment_id": "was_bad",
+                    "expected_assignment_version": 1,
+                    "lease_seconds": 600,
+                },
+            ),
+        )
+        for candidate in cases:
+            with self.subTest(operation=candidate["operation"]):
+                response = self.gateway.handle(candidate)
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertEqual(self.control.work_calls, [])
 
     def test_describe_bounds_historical_interaction_metadata(self) -> None:
         self.control.database.interactions = [
@@ -429,16 +745,33 @@ class RunGatewayTests(unittest.TestCase):
             credential_names=("krab",),
         )
         cases = (
-            ({**request("run.describe"), "extra": True}, "invalid_request"),
-            ({**request("run.describe"), "version": 2}, "invalid_request"),
-            (request("unknown.operation"), "invalid_request"),
-            (request("interaction.open"), "forbidden"),
+            (
+                {**request("run.describe"), "extra": True},
+                "invalid_request",
+                "invalid gateway request",
+            ),
+            (
+                {**request("run.describe"), "version": 2},
+                "invalid_request",
+                "unsupported gateway protocol version",
+            ),
+            (
+                request("unknown.operation"),
+                "invalid_request",
+                "unknown gateway operation",
+            ),
+            (
+                request("interaction.open"),
+                "forbidden",
+                "operation is not authorized for this run",
+            ),
         )
-        for candidate, code in cases:
+        for candidate, code, message in cases:
             with self.subTest(code=code, candidate=candidate):
                 response = limited.handle(candidate)
                 self.assertFalse(response["ok"])
                 self.assertEqual(response["error"]["code"], code)
+                self.assertEqual(response["error"]["message"], message)
 
         without_credential = RunGateway(
             self.control,
@@ -449,10 +782,14 @@ class RunGatewayTests(unittest.TestCase):
         denied = without_credential.handle(request("interaction.open"))
         self.assertFalse(denied["ok"])
         self.assertEqual(denied["error"]["code"], "forbidden")
+        self.assertEqual(
+            denied["error"]["message"], "operation has no authorized credential"
+        )
 
         invalid_id = limited.handle({**request("run.describe"), "request_id": "short"})
         self.assertIsNone(invalid_id["request_id"])
         self.assertEqual(invalid_id["error"]["code"], "invalid_request")
+        self.assertEqual(invalid_id["error"]["message"], "invalid request_id")
 
     def test_constructor_rejects_invalid_binding_policy(self) -> None:
         cases = (
@@ -499,18 +836,40 @@ class RunGatewayTests(unittest.TestCase):
             "idempotency_key": "gateway.request:0002",
         }
         cases = (
-            request("run.describe", {"extra": True}),
-            request("interaction.open", {**valid_open, "kind": "unknown"}),
-            request("interaction.open", {**valid_open, "recipient_handle": "BAD"}),
-            request("interaction.open", {**valid_open, "title": ""}),
-            request("interaction.open", {**valid_open, "idempotency_key": "bad key"}),
-            request("interaction.read", {"interaction_id": "int_bad"}),
+            (request("run.describe", {"extra": True}), "invalid operation payload"),
+            (
+                request("interaction.open", {**valid_open, "kind": "unknown"}),
+                "invalid interaction kind",
+            ),
+            (
+                request("interaction.open", {**valid_open, "recipient_handle": "BAD"}),
+                "invalid recipient_handle",
+            ),
+            (
+                request("interaction.open", {**valid_open, "title": ""}),
+                "invalid title",
+            ),
+            (
+                request("interaction.open", {**valid_open, "title": "bad\x00title"}),
+                "invalid title",
+            ),
+            (
+                request(
+                    "interaction.open", {**valid_open, "idempotency_key": "bad key"}
+                ),
+                "invalid idempotency_key",
+            ),
+            (
+                request("interaction.read", {"interaction_id": "int_bad"}),
+                "invalid interaction_id",
+            ),
         )
-        for candidate in cases:
+        for candidate, message in cases:
             with self.subTest(operation=candidate["operation"]):
                 response = self.gateway.handle(candidate)
                 self.assertFalse(response["ok"])
                 self.assertEqual(response["error"]["code"], "invalid_request")
+                self.assertEqual(response["error"]["message"], message)
         self.assertEqual(self.control.open_calls, [])
         self.assertEqual(self.control.read_calls, [])
 

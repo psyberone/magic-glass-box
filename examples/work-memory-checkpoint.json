@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "summary": "Two independent reviews are in progress.",
+  "decisions": [
+    "Keep the imported work item immutable and store coordination beside it."
+  ],
+  "artifacts": [
+    {
+      "path": "docs/work-memory.md",
+      "description": "Durable coordination contract."
+    }
+  ],
+  "next_steps": [
+    "Collect both assignment results and reconcile disagreements."
+  ],
+  "open_blockers": [],
+  "candidate_revision": null
+}

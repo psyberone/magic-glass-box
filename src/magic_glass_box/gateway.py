@@ -19,7 +19,11 @@ from .domain import (
     HandoffEnvelope,
     InteractionKind,
     ValidationError,
+    WorkAssignmentSpec,
+    WorkLogEntry,
+    WorkMemoryCheckpoint,
     canonical_json,
+    validate_name,
 )
 from .krab import (
     IDEMPOTENCY_KEY_RE,
@@ -53,6 +57,7 @@ GATEWAY_WRITABLE_NAMES = (GATEWAY_REQUEST_NAME, GATEWAY_REQUEST_READY_NAME)
 CONTAINER_GATEWAY_ROOT = "/run/magic-glass-box"
 RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 INTERACTION_ID_RE = re.compile(r"^int_[0-9a-f]{32}$")
+ASSIGNMENT_ID_RE = re.compile(r"^was_[0-9a-f]{32}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 
 
@@ -75,6 +80,54 @@ class GatewayControlPlane(Protocol):
 
     def submit_handoff(
         self, run_id: str, handoff: HandoffEnvelope
+    ) -> dict[str, Any]: ...
+
+    def append_work_log(
+        self,
+        run_id: str,
+        entry: WorkLogEntry,
+        *,
+        idempotency_key: str,
+        assignment_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def checkpoint_work_memory(
+        self,
+        run_id: str,
+        checkpoint: WorkMemoryCheckpoint,
+        *,
+        through_sequence: int,
+        expected_thread_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def create_work_assignment(
+        self,
+        run_id: str,
+        *,
+        target_profile_name: str,
+        spec: WorkAssignmentSpec,
+        expected_thread_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def claim_work_assignment(
+        self,
+        run_id: str,
+        assignment_id: str,
+        *,
+        expected_assignment_version: int,
+        lease_seconds: int,
+    ) -> dict[str, Any]: ...
+
+    def complete_work_assignment(
+        self,
+        run_id: str,
+        assignment_id: str,
+        *,
+        expected_assignment_version: int,
+        result: WorkLogEntry,
+        idempotency_key: str,
     ) -> dict[str, Any]: ...
 
 
@@ -135,6 +188,16 @@ def _text(value: object, *, field: str, max_bytes: int) -> str:
 def _exact_payload(value: object, fields: set[str]) -> Mapping[str, Any]:
     if not isinstance(value, dict) or set(value) != fields:
         raise _RequestFailure("invalid_request", "invalid operation payload")
+    return value
+
+
+def _integer(value: object, *, field: str, minimum: int, maximum: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= maximum
+    ):
+        raise _RequestFailure("invalid_request", f"invalid {field}")
     return value
 
 
@@ -246,8 +309,24 @@ class RunGateway:
                 result = self._read_interaction(value["payload"])
             elif operation is GatewayCapability.HANDOFF_SUBMIT:
                 result = self._submit_handoff(value["payload"])
-            else:
+            elif operation is GatewayCapability.PROVIDER_INVOKE:
                 result = self._invoke_provider(value["payload"])
+            elif operation is GatewayCapability.WORK_READ:
+                result = self._read_work(value["payload"])
+            elif operation is GatewayCapability.WORK_APPEND:
+                result = self._append_work(value["payload"])
+            elif operation is GatewayCapability.WORK_CHECKPOINT:
+                result = self._checkpoint_work(value["payload"])
+            elif operation is GatewayCapability.WORK_ASSIGN:
+                result = self._assign_work(value["payload"])
+            elif operation is GatewayCapability.WORK_ASSIGNMENT_CLAIM:
+                result = self._claim_assignment(value["payload"])
+            elif operation is GatewayCapability.WORK_ASSIGNMENT_COMPLETE:
+                result = self._complete_assignment(value["payload"])
+            else:
+                raise _RequestFailure(
+                    "invalid_request", "unsupported gateway operation"
+                )
             return self._success(request_id, result)
         except _RequestFailure as exc:
             return self._failure(request_id, exc.code, str(exc))
@@ -310,6 +389,7 @@ class RunGateway:
             "context": context,
             "work_item": execution["work_item"],
             "handoff": execution["handoff"],
+            "work_memory": execution["work_memory"],
             "authority": {
                 "workspace_mode": profile["workspace_mode"],
                 "network_mode": profile["network_mode"],
@@ -426,6 +506,186 @@ class RunGateway:
             request=provider_request,
         )
         return asdict(accepted)
+
+    def _read_work(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"after_sequence", "limit"})
+        after_sequence = item["after_sequence"]
+        if after_sequence is not None:
+            after_sequence = _integer(
+                after_sequence,
+                field="after_sequence",
+                minimum=0,
+                maximum=MAX_GATEWAY_SEQUENCE,
+            )
+        limit = _integer(item["limit"], field="limit", minimum=1, maximum=16)
+        return self.control.database.get_work_memory_for_run(
+            self.run_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+
+    @staticmethod
+    def _idempotency_key(value: object) -> str:
+        key = _text(value, field="idempotency_key", max_bytes=128)
+        if IDEMPOTENCY_KEY_RE.fullmatch(key) is None:
+            raise _RequestFailure("invalid_request", "invalid idempotency_key")
+        return key
+
+    @staticmethod
+    def _assignment_id(value: object) -> str:
+        assignment_id = _text(value, field="assignment_id", max_bytes=64)
+        if ASSIGNMENT_ID_RE.fullmatch(assignment_id) is None:
+            raise _RequestFailure("invalid_request", "invalid assignment_id")
+        return assignment_id
+
+    def _append_work(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(
+            payload,
+            {"assignment_id", "idempotency_key", "entry"},
+        )
+        assignment_id = item["assignment_id"]
+        if assignment_id is not None:
+            assignment_id = self._assignment_id(assignment_id)
+        entry = WorkLogEntry.from_mapping(item["entry"])
+        stored = self.control.append_work_log(
+            self.run_id,
+            entry,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+            assignment_id=assignment_id,
+        )
+        return {
+            "entry_id": stored["id"],
+            "sequence": stored["sequence"],
+            "content_sha256": stored.get("content_sha256", entry.digest),
+        }
+
+    def _checkpoint_work(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(
+            payload,
+            {
+                "expected_thread_version",
+                "through_sequence",
+                "idempotency_key",
+                "checkpoint",
+            },
+        )
+        expected_version = _integer(
+            item["expected_thread_version"],
+            field="expected_thread_version",
+            minimum=1,
+            maximum=MAX_GATEWAY_SEQUENCE,
+        )
+        through_sequence = _integer(
+            item["through_sequence"],
+            field="through_sequence",
+            minimum=0,
+            maximum=MAX_GATEWAY_SEQUENCE,
+        )
+        checkpoint = WorkMemoryCheckpoint.from_mapping(item["checkpoint"])
+        stored = self.control.checkpoint_work_memory(
+            self.run_id,
+            checkpoint,
+            through_sequence=through_sequence,
+            expected_thread_version=expected_version,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "checkpoint_id": stored["id"],
+            "version": stored["version"],
+            "through_sequence": stored["through_sequence"],
+            "content_sha256": stored.get("content_sha256", checkpoint.digest),
+        }
+
+    def _assign_work(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(
+            payload,
+            {
+                "expected_thread_version",
+                "target_profile_name",
+                "idempotency_key",
+                "spec",
+            },
+        )
+        expected_version = _integer(
+            item["expected_thread_version"],
+            field="expected_thread_version",
+            minimum=1,
+            maximum=MAX_GATEWAY_SEQUENCE,
+        )
+        target_profile_name = validate_name(
+            item["target_profile_name"], field="target profile name"
+        )
+        spec = WorkAssignmentSpec.from_mapping(item["spec"])
+        stored = self.control.create_work_assignment(
+            self.run_id,
+            target_profile_name=target_profile_name,
+            spec=spec,
+            expected_thread_version=expected_version,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "assignment_id": stored["id"],
+            "state": stored["state"],
+            "version": stored["version"],
+        }
+
+    def _claim_assignment(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(
+            payload,
+            {"assignment_id", "expected_assignment_version", "lease_seconds"},
+        )
+        stored = self.control.claim_work_assignment(
+            self.run_id,
+            self._assignment_id(item["assignment_id"]),
+            expected_assignment_version=_integer(
+                item["expected_assignment_version"],
+                field="expected_assignment_version",
+                minimum=1,
+                maximum=MAX_GATEWAY_SEQUENCE,
+            ),
+            lease_seconds=_integer(
+                item["lease_seconds"],
+                field="lease_seconds",
+                minimum=30,
+                maximum=86_400,
+            ),
+        )
+        return {
+            "assignment_id": stored["id"],
+            "state": stored["state"],
+            "version": stored["version"],
+            "lease_expires_at": stored.get("lease_expires_at"),
+        }
+
+    def _complete_assignment(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(
+            payload,
+            {
+                "assignment_id",
+                "expected_assignment_version",
+                "idempotency_key",
+                "result",
+            },
+        )
+        result = WorkLogEntry.from_mapping(item["result"])
+        stored = self.control.complete_work_assignment(
+            self.run_id,
+            self._assignment_id(item["assignment_id"]),
+            expected_assignment_version=_integer(
+                item["expected_assignment_version"],
+                field="expected_assignment_version",
+                minimum=1,
+                maximum=MAX_GATEWAY_SEQUENCE,
+            ),
+            result=result,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "assignment_id": stored["id"],
+            "state": stored["state"],
+            "version": stored["version"],
+            "result_entry_id": stored["result_entry_id"],
+        }
 
 
 def _strict_json_document(raw: bytes, *, max_bytes: int, subject: str) -> object:

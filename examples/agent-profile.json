@@ -12,7 +12,13 @@
     "interaction.open",
     "interaction.read",
     "handoff.submit",
-    "provider.invoke"
+    "provider.invoke",
+    "work.read",
+    "work.append",
+    "work.checkpoint",
+    "work.assign",
+    "work.assignment.claim",
+    "work.assignment.complete"
   ],
   "image": "magic-glass-box/codex-agent@sha256:replace-with-a-pinned-digest",
   "network_mode": "gateway_only",

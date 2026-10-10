@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:work-assignment:v1",
+  "title": "Magic Glass Box work assignment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "title",
+    "objective",
+    "scope_paths",
+    "acceptance_checks",
+    "base_revision"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "title": {"type": "string", "minLength": 1, "maxLength": 512},
+    "objective": {"type": "string", "minLength": 1, "maxLength": 8192},
+    "scope_paths": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\).+$"
+      }
+    },
+    "acceptance_checks": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 2048}
+    },
+    "base_revision": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "minLength": 1, "maxLength": 512}
+      ]
+    }
+  }
+}

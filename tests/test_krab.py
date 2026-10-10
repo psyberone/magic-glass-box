@@ -304,45 +304,75 @@ class KrabClientTests(unittest.TestCase):
         cases: list[tuple[dict[str, Any], str]] = []
         extra = session_item_response(created=False)
         extra["extra"] = True
-        cases.append((extra, "session-item response"))
+        cases.append((extra, "invalid session-item response object"))
+        bad_metadata = session_item_response(created=False)
+        bad_metadata["trusted_metadata"]["extra"] = True
+        cases.append((bad_metadata, "invalid session-item metadata object"))
+        bad_text = session_item_response(created=False)
+        bad_text["untrusted_text"]["extra"] = True
+        cases.append((bad_text, "invalid session-item text object"))
         wrong_project = session_item_response(
             created=False, project_key="other-project"
         )
-        cases.append((wrong_project, "project does not match"))
+        cases.append((wrong_project, "session-item project does not match the request"))
         wrong_session = session_item_response(
             created=False, session_id="ses_" + "9" * 32
         )
-        cases.append((wrong_session, "session does not match"))
+        cases.append((wrong_session, "session-item session does not match the request"))
         wrong_item = session_item_response(created=False, item_id="itm_" + "9" * 32)
-        cases.append((wrong_item, "item does not match"))
+        cases.append((wrong_item, "session-item item does not match the request"))
+        bad_creator = session_item_response(created=False)
+        bad_creator["trusted_metadata"]["creator"] = {"user_id": USER_ID}
+        cases.append((bad_creator, "invalid session-item creator object"))
+        bad_recipient = session_item_response(created=False)
+        bad_recipient["trusted_metadata"]["recipient"] = {"user_id": USER_ID}
+        cases.append((bad_recipient, "invalid session-item recipient object"))
+        bad_version = session_item_response(created=False)
+        bad_version["trusted_metadata"]["version"] = 0
+        cases.append((bad_version, "invalid session-item version"))
+        bad_created_at = session_item_response(created=False)
+        bad_created_at["trusted_metadata"]["created_at"] = "yesterday"
+        cases.append((bad_created_at, "invalid item creation timestamp"))
+        bad_updated_at = session_item_response(created=False)
+        bad_updated_at["trusted_metadata"]["updated_at"] = "yesterday"
+        cases.append((bad_updated_at, "invalid item update timestamp"))
+        bad_title = session_item_response(created=False)
+        bad_title["untrusted_text"]["title"] = []
+        cases.append((bad_title, "invalid session-item title"))
+        bad_body = session_item_response(created=False)
+        bad_body["untrusted_text"]["body"] = []
+        cases.append((bad_body, "invalid session-item body"))
         bad_flags = session_item_response(created=False)
         bad_flags["content_risk_flags"] = ["same", "same"]
-        cases.append((bad_flags, "risk flags"))
+        cases.append((bad_flags, "invalid session-item risk flags"))
         bad_history = session_item_response(created=False)
         bad_history["history"][0]["trusted_metadata"]["kind"] = "item.deleted"
-        cases.append((bad_history, "history event kind"))
+        cases.append((bad_history, "invalid session-item history event kind"))
         empty_history = session_item_response(created=False)
         empty_history["history"] = []
-        cases.append((empty_history, "history"))
+        cases.append((empty_history, "invalid session-item history"))
         unhashable_status = session_item_response(created=False)
         unhashable_status["trusted_metadata"]["status"] = []
-        cases.append((unhashable_status, "session-item status"))
+        cases.append((unhashable_status, "invalid session-item status"))
         unhashable_claim_kind = session_item_response(created=False)
         unhashable_claim_kind["trusted_metadata"]["work_claim"] = {
             "claim_id": CLAIM_ID,
             "kind": [],
             "external_id": "owner/repository#42",
         }
-        cases.append((unhashable_claim_kind, "work-claim kind"))
+        cases.append((unhashable_claim_kind, "invalid work-claim kind"))
         unhashable_history_kind = session_item_response(created=False)
         unhashable_history_kind["history"][0]["trusted_metadata"]["kind"] = []
-        cases.append((unhashable_history_kind, "history event kind"))
+        cases.append(
+            (unhashable_history_kind, "invalid session-item history event kind")
+        )
 
         for payload, message in cases:
             with self.subTest(message=message):
                 client, _ = client_for(FakeResponse(200, payload))
-                with self.assertRaisesRegex(KrabError, message):
+                with self.assertRaises(KrabError) as raised:
                     client.get_session_item("box-project", SESSION_ID, ITEM_ID)
+                self.assertEqual(str(raised.exception), message)
 
     def test_session_item_rejects_invalid_write_arguments_and_status(self) -> None:
         cases = (
