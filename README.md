@@ -26,7 +26,9 @@ This repository currently contains the first executable vertical slice:
   validates workspaces and credential files, applies resource and privilege
   ceilings, and always attempts container cleanup;
 - a runtime-adapter boundary with a compatibility command dialect plus Codex
-  JSONL and Claude Code JSON launch/completion contracts, audited per attempt;
+  JSONL and Claude Code JSON launch/completion contracts, explicit
+  runtime-to-grant routing, and a loopback-to-mailbox worker transport, audited
+  per attempt;
 - a run-scoped capability gateway that gives networkless workers typed access
   to pinned run context and asynchronous Krab interactions without mounting a
   reusable token;
@@ -178,7 +180,9 @@ package into a virtual environment.
 PYTHONPATH=src python3.11 -m unittest discover -s tests -v
 ```
 
-An installed package exposes the `magic-glass-box` command. New default state
+An installed package exposes the `magic-glass-box` control-plane command and
+the `magic-glass-box-worker` entry point used inside compatible vendor images.
+New default state
 is stored under `magic-glass-box/control-plane.db` in the platform state
 directory. If that database does not exist but a database from the retired
 working codename is present at `hexadecapus/hex.db`, it is reused in place.

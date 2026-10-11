@@ -209,6 +209,19 @@ class RunCoordinator:
         adapter_name = self.runtime_adapters.require(
             runtime_adapter or configured_adapter
         )
+        raw_command = (
+            raw_profile.get("command", ()) if isinstance(raw_profile, Mapping) else ()
+        )
+        raw_provider_grant = (
+            raw_profile.get("runtime_provider_grant")
+            if isinstance(raw_profile, Mapping)
+            else None
+        )
+        launch = self.runtime_adapters.launch(
+            adapter_name,
+            raw_command,
+            provider_grant=raw_provider_grant,
+        )
         try:
             attempt = self.database.begin_run_attempt(
                 run_id,
@@ -239,7 +252,6 @@ class RunCoordinator:
             try:
                 context = ProjectContext.from_mapping(inputs["context"])
                 profile = AgentProfileSpec.from_mapping(inputs["profile"])
-                launch = self.runtime_adapters.launch(adapter_name, profile.command)
                 if context.repository_path is None:
                     raise RunOrchestrationError(
                         "pinned project context has no repository path"

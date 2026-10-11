@@ -413,6 +413,7 @@ class ControlRoomTests(unittest.TestCase):
                 "image",
                 "command_argv_count",
                 "runtime_adapter",
+                "runtime_provider_grant",
                 "workspace_mode",
                 "network_mode",
                 "credential_names",
@@ -427,6 +428,7 @@ class ControlRoomTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["profiles"][0]["image"], "agent@sha256:abc")
         self.assertEqual(snapshot["profiles"][0]["runtime_adapter"], "command")
+        self.assertIsNone(snapshot["profiles"][0]["runtime_provider_grant"])
         self.assertEqual(
             snapshot["profiles"][0]["credential_names"], ["krab", "openai-main"]
         )

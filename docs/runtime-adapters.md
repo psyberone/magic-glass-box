@@ -15,6 +15,7 @@ An agent profile may name a default adapter:
   "image": "magic-glass-box/codex-agent@sha256:<digest>",
   "command": ["codex"],
   "runtime_adapter": "codex",
+  "runtime_provider_grant": "openai-main",
   "workspace_mode": "copy_on_write",
   "network_mode": "gateway_only",
   "credential_names": ["krab", "openai-main"],
@@ -28,6 +29,14 @@ flags and prompts do not live in the profile. The compatibility `command`
 adapter executes the complete argv unchanged. Profiles created before this
 contract omit `runtime_adapter`, retain their original content digest, and use
 `command`.
+
+The bundled vendor adapters also require `runtime_provider_grant`. It must name
+one entry in `credential_names`, and the profile must authorize both
+`run.describe` and `provider.invoke`. This is a route selection, not a secret:
+the named grant pins the actual endpoint, protocol adapter, model, credential,
+and limits on the trusted host. Profiles without the field retain their old
+digest. A `command` profile may set it so an explicit per-attempt vendor
+adapter override has the same deterministic route.
 
 `run execute --runtime-adapter NAME` may select a different compatible adapter
 for one attempt. The immutable profile, context, work item, source revision,
@@ -43,7 +52,12 @@ The public protocol is `magic_glass_box.runtime.RuntimeAdapter`:
 class RuntimeAdapter(Protocol):
     name: str
 
-    def launch(self, command: tuple[str, ...]) -> RuntimeLaunch: ...
+    def launch(
+        self,
+        command: tuple[str, ...],
+        *,
+        provider_grant: str | None,
+    ) -> RuntimeLaunch: ...
 
     def complete(self, *, exit_code: int, stdout: str) -> RuntimeCompletion: ...
 ```
@@ -72,8 +86,8 @@ happy and sad paths.
 | Name | Launch contract | Successful completion |
 | --- | --- | --- |
 | `command` | Execute the profile argv unchanged | Process exit code `0` |
-| `codex` | Non-interactive, ephemeral `codex exec --json` under the outer sandbox | Final JSONL event is `turn.completed` |
-| `claude-code` | Non-interactive `claude --print --output-format json` with no session persistence or permission prompt | JSON result reports `type: result`, `subtype: success`, and `is_error: false` |
+| `codex` | `magic-glass-box-worker` wraps an ephemeral `codex exec --json` configured for a local Responses endpoint | Final JSONL event is `turn.completed` |
+| `claude-code` | `magic-glass-box-worker` wraps bare, non-interactive `claude --print --output-format json` against a local Anthropic endpoint | JSON result reports `type: result`, `subtype: success`, and `is_error: false` |
 
 The Codex JSONL shape follows the official
 [Codex automation guidance](https://developers.openai.com/blog/eval-skills),
@@ -88,14 +102,42 @@ declared gateway operations, leave changes in `/workspace`, and avoid Git
 publication. The prompt contains no work-item body, response body, credential,
 or provider configuration.
 
-## Network and credential boundary
+## Worker-side provider transport
 
 A runtime adapter is not a network escape hatch. It does not mount a vendor
-token, select a model, or enable container egress. A compatible
-`gateway_only` image must include a worker-side transport that routes its model
-traffic through the declared provider grant and committed-file gateway. A
-stock vendor CLI image that expects direct Internet access or a reusable token
-is therefore not compatible by itself.
+token, select the upstream model, or enable container egress. A compatible
+`gateway_only` image installs this package and its `magic-glass-box-worker`
+entry point alongside the vendor CLI. The adapter launches that entry point,
+which binds only `127.0.0.1:8766` inside the container and starts the vendor
+process as its child.
+
+Codex receives a custom Responses provider URL and a fixed, explicitly
+non-secret sentinel token. Claude Code receives an Anthropic-compatible base
+URL and the same kind of sentinel. The loopback bridge accepts only
+`POST /v1/responses` for Codex or `POST /v1/messages` for Claude, requires a
+streaming JSON request, removes the worker-supplied model, and submits the body
+through the profile's exact `runtime_provider_grant`. It discards every inbound
+HTTP header except the small protocol-feature allowlist documented in
+[provider-broker.md](provider-broker.md).
+
+The trusted broker injects the pinned model and reusable credential, performs
+the sole outbound request, buffers the bounded SSE response, and returns it
+through the ephemeral committed-file mailbox. The bridge replays those bytes
+to the vendor CLI. Buffering adds first-token latency, but it preserves Docker
+`--network none`, keeps the carrier finite, and avoids putting a socket or
+credential in the worker. Neither request nor response bodies are durable.
+
+The same entry point exposes bounded gateway calls to the agent:
+
+```console
+magic-glass-box-worker call run.describe '{}'
+magic-glass-box-worker call work.read '{"after_sequence":null,"limit":16}'
+```
+
+Independent bridge and tool processes serialize access with an advisory lock
+on the fixed request file. Sequence, size, digest, response correlation, and
+timeouts are verified on every exchange. The image remains incompatible if it
+contains only a stock vendor CLI and not this worker entry point.
 
 The remaining Milestone 5 exit proof is a live, single golden-path
 demonstration using that worker-side provider transport with both bundled

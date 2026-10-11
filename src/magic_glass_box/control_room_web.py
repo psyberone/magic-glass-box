@@ -447,6 +447,7 @@ def _render_control_room(
             row.get("active"),
             row.get("profile_version"),
             row.get("runtime_adapter"),
+            row.get("runtime_provider_grant"),
             row.get("krab_handle"),
             row.get("network_mode"),
         )
@@ -706,7 +707,15 @@ def _render_control_room(
         _section(
             "Profiles",
             _table(
-                ("Name", "Active", "Version", "Runtime", "Krab user", "Network"),
+                (
+                    "Name",
+                    "Active",
+                    "Version",
+                    "Runtime",
+                    "Provider route",
+                    "Krab user",
+                    "Network",
+                ),
                 profile_rows,
             ),
         ),

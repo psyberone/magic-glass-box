@@ -16,6 +16,7 @@ from magic_glass_box.domain import (
     InteractionKind,
     NetworkMode,
     ProjectContext,
+    ProviderGrantSpec,
     RunState,
     WorkItemEnvelope,
     WorkspaceMode,
@@ -26,6 +27,7 @@ from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import RunCoordinator, RunOrchestrationError
 from magic_glass_box.results import CapturedResult, ResultManifest
 from magic_glass_box.runtime import RuntimeAdapterError, RuntimeLaunch
+from magic_glass_box.service import ControlPlane
 from magic_glass_box.workspace import PreparedWorkspace
 
 USER_ID = "usr_" + "1" * 32
@@ -191,6 +193,34 @@ class RunCoordinatorTests(unittest.TestCase):
         self.database = Database(self.root / "control-plane.db")
         self.database.initialize()
         self.user = self.database.create_user("operator", "Local Operator")
+        provider_secret = self.root / "provider.secret"
+        provider_secret.write_text("provider-test-secret\n", encoding="ascii")
+        os.chmod(provider_secret, 0o600)
+        ControlPlane(
+            self.database,
+            credential_resolver=PrivateFileCredentialResolver(),
+        ).add_provider_grant(
+            name="provider-main",
+            spec=ProviderGrantSpec.from_mapping(
+                {
+                    "provider": "test-provider",
+                    "adapter": "openai_responses",
+                    "destination": "http://127.0.0.1:9999/v1/responses",
+                    "method": "POST",
+                    "model": "pinned-test-model",
+                    "credential_header": "Authorization",
+                    "credential_prefix": "Bearer ",
+                    "static_headers": {},
+                    "request_bytes": 2 * 1024 * 1024,
+                    "response_bytes": 4 * 1024 * 1024,
+                    "timeout_ms": 1000,
+                    "max_concurrency": 1,
+                }
+            ),
+            credential_path=provider_secret,
+            expires_at=None,
+            created_by_handle="operator",
+        )
         instance = self.database.create_krab_instance(
             "Local Krab", "http://127.0.0.1:8765"
         )
@@ -232,14 +262,16 @@ class RunCoordinatorTests(unittest.TestCase):
             spec=AgentProfileSpec.create(
                 image="agent:local",
                 command=["agent"],
+                runtime_provider_grant="provider-main",
                 workspace_mode=WorkspaceMode.COPY_ON_WRITE,
                 network_mode=NetworkMode.GATEWAY_ONLY,
-                credential_names=["krab"],
+                credential_names=["krab", "provider-main"],
                 gateway_capabilities=[
                     GatewayCapability.RUN_DESCRIBE,
                     GatewayCapability.INTERACTION_OPEN,
                     GatewayCapability.INTERACTION_READ,
                     GatewayCapability.HANDOFF_SUBMIT,
+                    GatewayCapability.PROVIDER_INVOKE,
                 ],
             ),
             krab_identity_id=self.identity["id"],
@@ -328,8 +360,9 @@ class RunCoordinatorTests(unittest.TestCase):
                         GatewayCapability.INTERACTION_OPEN,
                         GatewayCapability.INTERACTION_READ,
                         GatewayCapability.HANDOFF_SUBMIT,
+                        GatewayCapability.PROVIDER_INVOKE,
                     ),
-                    ("krab",),
+                    ("krab", "provider-main"),
                 )
             ],
         )

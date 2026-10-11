@@ -29,7 +29,8 @@ contains:
 - local users and their configured Krab identity IDs;
 - Krab instances and redacted identity metadata;
 - projects and current context-version metadata;
-- profiles and current execution-policy metadata;
+- profiles, runtime adapters, explicit provider routes, and current
+  execution-policy metadata;
 - provider grants with lifecycle state and redacted policy metadata;
 - current work-item generations and visible, explicitly untrusted titles;
 - local profile-pinned assignments and their visible, untrusted titles;

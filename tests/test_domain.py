@@ -275,12 +275,16 @@ class AgentProfileTests(unittest.TestCase):
                 "image": "agent@sha256:abc",
                 "command": ["codex"],
                 "runtime_adapter": "codex",
+                "runtime_provider_grant": "openai-main",
+                "credential_names": ["openai-main"],
+                "gateway_capabilities": ["run.describe", "provider.invoke"],
             }
         )
 
         self.assertNotIn("runtime_adapter", legacy.to_dict())
         self.assertEqual(codex.runtime_adapter, "codex")
         self.assertEqual(codex.to_dict()["runtime_adapter"], "codex")
+        self.assertEqual(codex.runtime_provider_grant, "openai-main")
         with self.assertRaisesRegex(ValidationError, "runtime_adapter must match"):
             AgentProfileSpec.from_mapping(
                 {
@@ -312,6 +316,41 @@ class AgentProfileTests(unittest.TestCase):
                     "gateway_capabilities": ["provider.invoke"],
                 }
             )
+
+    def test_vendor_runtime_requires_one_explicit_provider_transport(self) -> None:
+        valid = {
+            "image": "agent@sha256:abc",
+            "command": ["codex"],
+            "runtime_adapter": "codex",
+            "runtime_provider_grant": "openai-main",
+            "credential_names": ["krab", "openai-main"],
+            "gateway_capabilities": ["run.describe", "provider.invoke"],
+        }
+        profile = AgentProfileSpec.from_mapping(valid)
+        self.assertEqual(profile.runtime_provider_grant, "openai-main")
+        self.assertEqual(profile.to_dict()["runtime_provider_grant"], "openai-main")
+
+        cases = (
+            ({"runtime_provider_grant": "other"}, "credential_names"),
+            ({"gateway_capabilities": ["provider.invoke"]}, "run.describe"),
+            ({"gateway_capabilities": ["run.describe"]}, "provider.invoke"),
+        )
+        for override, message in cases:
+            with (
+                self.subTest(override=override),
+                self.assertRaisesRegex(ValidationError, message),
+            ):
+                AgentProfileSpec.from_mapping({**valid, **override})
+
+        legacy_vendor = AgentProfileSpec.from_mapping(
+            {
+                "image": "agent@sha256:abc",
+                "command": ["codex"],
+                "runtime_adapter": "codex",
+            }
+        )
+        self.assertIsNone(legacy_vendor.runtime_provider_grant)
+        self.assertNotIn("runtime_provider_grant", legacy_vendor.to_dict())
 
     def test_gateway_capabilities_are_explicit_and_require_gateway_authority(
         self,

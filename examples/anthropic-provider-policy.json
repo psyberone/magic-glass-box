@@ -1,0 +1,16 @@
+{
+  "adapter": "anthropic_messages",
+  "credential_header": "x-api-key",
+  "credential_prefix": "",
+  "destination": "https://api.anthropic.com/v1/messages?beta=true",
+  "max_concurrency": 2,
+  "method": "POST",
+  "model": "replace-with-an-allowed-model",
+  "provider": "anthropic",
+  "request_bytes": 2097152,
+  "response_bytes": 4194304,
+  "static_headers": {
+    "anthropic-version": "2023-06-01"
+  },
+  "timeout_ms": 120000
+}

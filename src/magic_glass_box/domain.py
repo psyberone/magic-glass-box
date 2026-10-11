@@ -1044,8 +1044,15 @@ class ProviderGrantSpec:
 
         provider = validate_provider_name(value["provider"], field="provider")
         adapter = require_string(value["adapter"], field="adapter", max_bytes=32)
-        if adapter != "json_http":
-            raise ValidationError("provider adapter must be json_http")
+        if adapter not in {
+            "json_http",
+            "openai_responses",
+            "anthropic_messages",
+        }:
+            raise ValidationError(
+                "provider adapter must be json_http, openai_responses, "
+                "or anthropic_messages"
+            )
 
         destination = require_string(
             value["destination"], field="destination", max_bytes=2048
@@ -1144,13 +1151,13 @@ class ProviderGrantSpec:
                 value["request_bytes"],
                 field="request_bytes",
                 minimum=1,
-                maximum=32 * 1024,
+                maximum=2 * 1024 * 1024,
             ),
             response_bytes=_bounded_integer(
                 value["response_bytes"],
                 field="response_bytes",
                 minimum=1,
-                maximum=1024 * 1024,
+                maximum=4 * 1024 * 1024,
             ),
             timeout_ms=_bounded_integer(
                 value["timeout_ms"],
@@ -1196,6 +1203,7 @@ class AgentProfileSpec:
     image: str
     command: tuple[str, ...]
     runtime_adapter: str = "command"
+    runtime_provider_grant: str | None = None
     workspace_mode: WorkspaceMode = WorkspaceMode.COPY_ON_WRITE
     network_mode: NetworkMode = NetworkMode.GATEWAY_ONLY
     credential_names: tuple[str, ...] = ()
@@ -1209,6 +1217,7 @@ class AgentProfileSpec:
             "image",
             "command",
             "runtime_adapter",
+            "runtime_provider_grant",
             "workspace_mode",
             "network_mode",
             "credential_names",
@@ -1226,6 +1235,7 @@ class AgentProfileSpec:
             image=value["image"],
             command=value["command"],
             runtime_adapter=value.get("runtime_adapter", "command"),
+            runtime_provider_grant=value.get("runtime_provider_grant"),
             workspace_mode=value.get(
                 "workspace_mode", WorkspaceMode.COPY_ON_WRITE.value
             ),
@@ -1241,6 +1251,7 @@ class AgentProfileSpec:
         image: object,
         command: Sequence[object],
         runtime_adapter: object = "command",
+        runtime_provider_grant: object = None,
         workspace_mode: str = WorkspaceMode.COPY_ON_WRITE,
         network_mode: str = NetworkMode.GATEWAY_ONLY,
         credential_names: Sequence[object] = (),
@@ -1254,6 +1265,13 @@ class AgentProfileSpec:
             for value in command
         )
         adapter = validate_provider_name(runtime_adapter, field="runtime_adapter")
+        provider_grant = None
+        if runtime_provider_grant is not None:
+            provider_grant = validate_provider_name(
+                runtime_provider_grant, field="runtime provider grant"
+            )
+            if provider_grant == "krab":
+                raise ValidationError("runtime provider grant cannot be krab")
         credential_tuple = tuple(
             require_string(value, field="credential name", max_bytes=128)
             for value in credential_names
@@ -1306,10 +1324,26 @@ class AgentProfileSpec:
             raise ValidationError(
                 "provider.invoke requires at least one named provider grant"
             )
+        if provider_grant is not None:
+            if provider_grant not in credential_tuple:
+                raise ValidationError(
+                    "runtime provider grant must appear in credential_names"
+                )
+            required = {
+                GatewayCapability.RUN_DESCRIBE,
+                GatewayCapability.PROVIDER_INVOKE,
+            }
+            missing = required.difference(capability_tuple)
+            if missing:
+                raise ValidationError(
+                    "runtime provider grant requires gateway capability: "
+                    + ", ".join(sorted(capability.value for capability in missing))
+                )
         return cls(
             image=image_text,
             command=command_tuple,
             runtime_adapter=adapter,
+            runtime_provider_grant=provider_grant,
             workspace_mode=workspace,
             network_mode=network,
             credential_names=credential_tuple,
@@ -1326,6 +1360,8 @@ class AgentProfileSpec:
         }
         if self.runtime_adapter != "command":
             result["runtime_adapter"] = self.runtime_adapter
+        if self.runtime_provider_grant is not None:
+            result["runtime_provider_grant"] = self.runtime_provider_grant
         if self.gateway_capabilities:
             result["gateway_capabilities"] = [
                 capability.value for capability in self.gateway_capabilities

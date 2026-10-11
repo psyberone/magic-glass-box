@@ -243,11 +243,12 @@ immutability suite passes without a schema migration.
 
 The bounded Python protocol, registry, legacy `command` adapter, Codex JSONL
 adapter, Claude Code JSON-result adapter, profile default, per-attempt override,
-transient output capture, and control-room visibility are implemented. Legacy
-profiles retain their content digests. The remaining work is the worker-side
-provider transport and one live golden-path demonstration through both vendor
-dialects; direct network access and reusable provider credentials remain out
-of scope for an adapter.
+transient output capture, control-room visibility, explicit runtime-to-grant
+binding, committed-file client, loopback vendor bridge, and buffered SSE
+provider adapters are implemented. Legacy profiles retain their content
+digests. The remaining work is one live golden-path demonstration through both
+vendor dialects; direct network access and reusable provider credentials remain
+out of scope for an adapter.
 
 **Exit proof:** the golden-path demonstration in the product thesis succeeds
 with two interchangeable worker implementations.

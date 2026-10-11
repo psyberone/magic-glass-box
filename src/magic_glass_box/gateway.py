@@ -36,8 +36,8 @@ from .provider import ProviderBusyError, ProviderError, ProviderUpstreamError
 from .service import AcceptedInteractionResponse, AcceptedProviderResponse
 
 GATEWAY_PROTOCOL_VERSION = 1
-MAX_GATEWAY_REQUEST_BYTES = 32 * 1024
-MAX_GATEWAY_RESPONSE_BYTES = 1024 * 1024
+MAX_GATEWAY_REQUEST_BYTES = 3 * 1024 * 1024
+MAX_GATEWAY_RESPONSE_BYTES = 9 * 1024 * 1024
 MAX_GATEWAY_MARKER_BYTES = 512
 MAX_GATEWAY_SEQUENCE = (1 << 53) - 1
 MAX_GATEWAY_INTERACTIONS = 128

@@ -133,7 +133,8 @@ For an execution request, Magic Glass Box:
 
 1. validates the profile default or explicit attempt-level runtime adapter;
 2. atomically claims a queued run by transitioning it to `preparing`;
-3. asks the selected adapter for bounded argv and non-secret environment;
+3. asks the selected adapter for bounded argv, its explicit provider-grant
+   route, and non-secret loopback environment;
 4. resolves the requested revision and exports only tracked Git files;
 5. validates the named authorities and opens the run-scoped gateway;
 6. resolves the image reference to an immutable digest and creates the sandbox;
@@ -169,6 +170,10 @@ host paths before mounting them, runs as the host's non-root numeric identity,
 uses a read-only root filesystem, drops all capabilities, applies resource
 ceilings, and bounds local logs. Both `none` and `gateway_only` use Docker
 network policy `none`; `gateway_only` adds a private committed-file mailbox.
+Bundled vendor adapters put a loopback-only HTTP bridge inside that same
+network namespace. It translates the vendor protocol to serialized mailbox
+operations; only the trusted host broker owns an outbound socket or reusable
+provider credential.
 The mailbox directory and response files are read-only in the container. Only
 the fixed request payload and request commit files are writable. Sequence,
 size, and SHA-256 commitments prevent torn reads and stale response confusion.

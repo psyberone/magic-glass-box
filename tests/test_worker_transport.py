@@ -1,0 +1,537 @@
+from __future__ import annotations
+
+import contextlib
+import http.client
+import io
+import json
+import os
+import socket
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+from magic_glass_box.gateway import FileGatewayManager
+from magic_glass_box.service import AcceptedProviderResponse
+from magic_glass_box.worker_transport import (
+    FileGatewayClient,
+    ProviderHTTPTransport,
+    WorkerTransportError,
+    main,
+)
+
+RUN_ID = "run_" + "1" * 32
+
+
+class ProviderControl:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def invoke_provider(
+        self, run_id: str, *, grant_name: str, request: dict[str, Any]
+    ) -> AcceptedProviderResponse:
+        self.calls.append((run_id, grant_name, request))
+        protocol = request.get("protocol", "openai-responses")
+        return AcceptedProviderResponse(
+            invocation_id="pvi_" + "2" * 32,
+            grant_name=grant_name,
+            provider="openai",
+            model="pinned-model",
+            status_code=200,
+            request_bytes=100,
+            response_bytes=120,
+            untrusted_response={
+                "body": 'data: {"type":"response.completed"}\n\n',
+                "content_type": "text/event-stream",
+                "protocol": protocol,
+            },
+        )
+
+
+class FileGatewayClientTests(unittest.TestCase):
+    def test_exchange_commits_and_verifies_multiple_mailbox_requests(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            root = Path(temporary) / "gateway"
+            control = ProviderControl()
+            manager = FileGatewayManager(root, control, poll_interval=0.005)
+            try:
+                endpoint = manager.open(
+                    RUN_ID,
+                    capabilities=("provider.invoke",),
+                    credential_names=("openai-main",),
+                )
+                client = FileGatewayClient(endpoint.directory, timeout=1)
+
+                first = client.exchange(
+                    "provider.invoke",
+                    {
+                        "grant": "openai-main",
+                        "request": {
+                            "body": {"input": "hello"},
+                            "protocol": "openai-responses",
+                        },
+                    },
+                )
+                denied = client.exchange(
+                    "provider.invoke",
+                    {
+                        "grant": "other",
+                        "request": {
+                            "body": {"input": "no"},
+                            "protocol": "openai-responses",
+                        },
+                    },
+                )
+
+                self.assertTrue(first["ok"])
+                self.assertFalse(denied["ok"])
+                self.assertEqual(denied["error"]["code"], "forbidden")
+                self.assertEqual(len(control.calls), 1)
+            finally:
+                manager.close()
+
+    def test_missing_or_unsafe_mailbox_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            missing = Path(temporary) / "missing"
+            with self.assertRaisesRegex(WorkerTransportError, "mailbox"):
+                FileGatewayClient(missing)
+
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            os.unlink(mailbox / "response.json")
+            os.symlink(mailbox / "request.json", mailbox / "response.json")
+            with self.assertRaisesRegex(WorkerTransportError, "unsafe"):
+                FileGatewayClient(mailbox)
+
+    def test_invalid_client_inputs_and_an_unserved_request_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            with self.assertRaisesRegex(WorkerTransportError, "timeout"):
+                FileGatewayClient(mailbox, timeout=0)
+
+            client = FileGatewayClient(mailbox, timeout=0.1)
+            with self.assertRaisesRegex(WorkerTransportError, "operation"):
+                client.exchange("Bad Operation", {})
+            with self.assertRaisesRegex(WorkerTransportError, "payload"):
+                client.exchange("run.describe", [])  # type: ignore[arg-type]
+            with self.assertRaisesRegex(WorkerTransportError, "timed out"):
+                client.exchange("run.describe", {})
+
+
+class RecordingGateway:
+    def __init__(self, protocol: str):
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.response: dict[str, Any] = {
+            "version": 1,
+            "request_id": "worker-response",
+            "ok": True,
+            "result": {
+                "invocation_id": "pvi_" + "3" * 32,
+                "grant_name": "provider-main",
+                "provider": "test",
+                "model": "pinned-model",
+                "status_code": 200,
+                "request_bytes": 10,
+                "response_bytes": 20,
+                "untrusted_response": {
+                    "body": "data: done\n\n",
+                    "content_type": "text/event-stream; charset=utf-8",
+                    "protocol": protocol,
+                },
+            },
+        }
+
+    def exchange(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((operation, payload))
+        return self.response
+
+
+class ProviderHTTPTransportTests(unittest.TestCase):
+    def test_vendor_dialects_strip_model_and_forward_buffered_sse(self) -> None:
+        cases = (
+            ("openai-responses", "/v1/responses"),
+            ("anthropic-messages", "/v1/messages"),
+            ("anthropic-messages", "/v1/messages?beta=true"),
+        )
+        for dialect, path in cases:
+            with self.subTest(dialect=dialect):
+                gateway = RecordingGateway(dialect)
+                transport = ProviderHTTPTransport(
+                    gateway, dialect=dialect, grant="provider-main"
+                )
+                response = transport.invoke(
+                    path,
+                    json.dumps(
+                        {
+                            "model": "worker-selected",
+                            "stream": True,
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    ).encode(),
+                    headers={
+                        (
+                            "x-codex-beta-features"
+                            if dialect == "openai-responses"
+                            else "anthropic-beta"
+                        ): "feature-one",
+                        "authorization": "SECRET discarded",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.content_type, "text/event-stream; charset=utf-8"
+                )
+                self.assertEqual(response.body, b"data: done\n\n")
+                operation, payload = gateway.calls[0]
+                self.assertEqual(operation, "provider.invoke")
+                self.assertEqual(payload["grant"], "provider-main")
+                self.assertEqual(payload["request"]["protocol"], dialect)
+                self.assertNotIn("model", payload["request"]["body"])
+                self.assertEqual(
+                    payload["request"]["headers"],
+                    {
+                        (
+                            "x-codex-beta-features"
+                            if dialect == "openai-responses"
+                            else "anthropic-beta"
+                        ): "feature-one"
+                    },
+                )
+
+    def test_malformed_or_unapproved_requests_fail_before_the_gateway(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        cases = (
+            ("/v1/messages", b"{}", "route"),
+            (
+                "/v1/responses?beta=true",
+                b'{"stream":true,"model":"x"}',
+                "route",
+            ),
+            (
+                "https://untrusted.example/v1/responses",
+                b'{"stream":true,"model":"x"}',
+                "route",
+            ),
+            ("/v1/responses", b"[]", "object"),
+            ("/v1/responses", b'{"stream":false,"model":"x"}', "stream"),
+            ("/v1/responses", b'{"stream":true}', "model"),
+            ("/v1/responses", b'{"stream":true,"model":""}', "model"),
+            (
+                "/v1/responses",
+                json.dumps({"stream": True, "model": "x" * 257}).encode(),
+                "model",
+            ),
+            (
+                "/v1/responses",
+                b'{"stream":true,"model":"x","model":"y"}',
+                "JSON",
+            ),
+        )
+        for path, body, message in cases:
+            with (
+                self.subTest(path=path, body=body),
+                self.assertRaisesRegex(WorkerTransportError, message),
+            ):
+                transport.invoke(path, body)
+        self.assertEqual(gateway.calls, [])
+
+    def test_protocol_headers_are_bounded_printable_text(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        request = b'{"model":"x","stream":true}'
+        cases: tuple[object, ...] = ("", "feature\nvalue", "x" * 8193, 7)
+        for value in cases:
+            with (
+                self.subTest(value=repr(value)[:80]),
+                self.assertRaisesRegex(WorkerTransportError, "header"),
+            ):
+                transport.invoke(
+                    "/v1/responses",
+                    request,
+                    headers={"x-codex-beta-features": value},  # type: ignore[dict-item]
+                )
+        self.assertEqual(gateway.calls, [])
+
+    def test_gateway_errors_and_malformed_responses_are_redacted(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        request = b'{"model":"x","stream":true}'
+        gateway.response = {
+            "version": 1,
+            "request_id": "worker-response",
+            "ok": False,
+            "error": {"code": "forbidden", "message": "SECRET detail"},
+        }
+        with self.assertRaisesRegex(WorkerTransportError, "denied") as denied:
+            transport.invoke("/v1/responses", request)
+        self.assertNotIn("SECRET", str(denied.exception))
+
+        gateway.response = {"ok": True, "result": {"status_code": 200}}
+        with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
+            transport.invoke("/v1/responses", request)
+
+    def test_transport_configuration_and_response_envelope_are_strict(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        for dialect, grant in (
+            ("other", "provider-main"),
+            ("openai-responses", "Bad Grant"),
+            ("openai-responses", "krab"),
+        ):
+            with (
+                self.subTest(dialect=dialect, grant=grant),
+                self.assertRaises(WorkerTransportError),
+            ):
+                ProviderHTTPTransport(gateway, dialect=dialect, grant=grant)
+
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        request = b'{"model":"x","stream":true}'
+        upstream = gateway.response["result"]["untrusted_response"]
+        for replacement in (
+            {**upstream, "protocol": "anthropic-messages"},
+            {**upstream, "content_type": "application/json"},
+            {**upstream, "body": ""},
+            {**upstream, "extra": True},
+        ):
+            with self.subTest(replacement=replacement):
+                gateway.response["result"]["untrusted_response"] = replacement
+                with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
+                    transport.invoke("/v1/responses", request)
+
+        gateway.response["result"]["untrusted_response"] = upstream
+        result = gateway.response["result"]
+        for replacement in (
+            {**result, "grant_name": "other-provider"},
+            {**result, "status_code": True},
+            {**result, "status_code": 300},
+            {**result, "untrusted_response": None},
+            {**result, "extra": True},
+        ):
+            with self.subTest(replacement=replacement):
+                gateway.response["result"] = replacement
+                with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
+                    transport.invoke("/v1/responses", request)
+
+
+class WorkerTransportCLITests(unittest.TestCase):
+    def _manager(
+        self, temporary: str
+    ) -> tuple[FileGatewayManager, Path, ProviderControl]:
+        control = ProviderControl()
+        manager = FileGatewayManager(
+            Path(temporary) / "gateways", control, poll_interval=0.005
+        )
+        endpoint = manager.open(
+            RUN_ID,
+            capabilities=("provider.invoke",),
+            credential_names=("provider-main",),
+        )
+        return manager, endpoint.directory, control
+
+    def test_call_subcommand_prints_success_and_failure_envelopes(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            manager, directory, _control = self._manager(temporary)
+            try:
+                environment = {"MAGIC_GLASS_BOX_GATEWAY_DIR": str(directory)}
+                payload = json.dumps(
+                    {
+                        "grant": "provider-main",
+                        "request": {
+                            "protocol": "openai-responses",
+                            "body": {"stream": True},
+                        },
+                    }
+                )
+                output = io.StringIO()
+                with (
+                    mock.patch.dict(os.environ, environment, clear=False),
+                    contextlib.redirect_stdout(output),
+                ):
+                    self.assertEqual(main(["call", "provider.invoke", payload]), 0)
+                self.assertTrue(json.loads(output.getvalue())["ok"])
+
+                output = io.StringIO()
+                denied = payload.replace("provider-main", "other-provider")
+                with (
+                    mock.patch.dict(os.environ, environment, clear=False),
+                    contextlib.redirect_stdout(output),
+                ):
+                    self.assertEqual(main(["call", "provider.invoke", denied]), 2)
+                self.assertFalse(json.loads(output.getvalue())["ok"])
+            finally:
+                manager.close()
+
+    def test_serve_subcommand_bridges_both_dialects_then_returns_child_exit(
+        self,
+    ) -> None:
+        cases = (
+            ("openai-responses", "/v1/responses"),
+            ("anthropic-messages", "/v1/messages?beta=true"),
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            manager, directory, control = self._manager(temporary)
+            try:
+                for dialect, target in cases:
+                    with self.subTest(dialect=dialect):
+                        probe = socket.socket()
+                        probe.bind(("127.0.0.1", 0))
+                        port = probe.getsockname()[1]
+                        probe.close()
+
+                        def run_child(
+                            command: list[str],
+                            *,
+                            check: bool,
+                            bridge_port: int = port,
+                            bridge_target: str = target,
+                        ) -> subprocess.CompletedProcess[str]:
+                            self.assertEqual(command, ["vendor", "--headless"])
+                            self.assertFalse(check)
+                            rejected = http.client.HTTPConnection(
+                                "127.0.0.1", bridge_port, timeout=2
+                            )
+                            rejected.request(
+                                "POST",
+                                bridge_target,
+                                body=json.dumps(
+                                    {
+                                        "model": "worker-choice",
+                                        "stream": True,
+                                        "messages": [],
+                                    }
+                                ),
+                                headers={"Content-Type": "application/json-patch"},
+                            )
+                            rejected_response = rejected.getresponse()
+                            rejected_response.read()
+                            rejected.close()
+                            self.assertEqual(rejected_response.status, 400)
+
+                            connection = http.client.HTTPConnection(
+                                "127.0.0.1", bridge_port, timeout=2
+                            )
+                            body = json.dumps(
+                                {
+                                    "model": "worker-choice",
+                                    "stream": True,
+                                    "messages": [],
+                                }
+                            )
+                            connection.request(
+                                "POST",
+                                bridge_target,
+                                body=body,
+                                headers={"Content-Type": "application/json"},
+                            )
+                            response = connection.getresponse()
+                            raw = response.read()
+                            connection.close()
+                            self.assertEqual(response.status, 200)
+                            self.assertEqual(
+                                response.getheader("Cache-Control"), "no-store"
+                            )
+                            self.assertIn(b"response.completed", raw)
+                            return subprocess.CompletedProcess(command, 17)
+
+                        with (
+                            mock.patch.dict(
+                                os.environ,
+                                {"MAGIC_GLASS_BOX_GATEWAY_DIR": str(directory)},
+                                clear=False,
+                            ),
+                            mock.patch(
+                                "magic_glass_box.worker_transport.TRANSPORT_PORT",
+                                port,
+                            ),
+                            mock.patch(
+                                "magic_glass_box.worker_transport.subprocess.run",
+                                side_effect=run_child,
+                            ),
+                        ):
+                            self.assertEqual(
+                                main(
+                                    [
+                                        "serve",
+                                        "--dialect",
+                                        dialect,
+                                        "--grant",
+                                        "provider-main",
+                                        "--",
+                                        "vendor",
+                                        "--headless",
+                                    ]
+                                ),
+                                17,
+                            )
+                self.assertEqual(
+                    [call[2]["protocol"] for call in control.calls],
+                    ["openai-responses", "anthropic-messages"],
+                )
+            finally:
+                manager.close()
+
+    def test_cli_errors_are_redacted_and_nonzero(self) -> None:
+        error = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            contextlib.redirect_stderr(error),
+        ):
+            self.assertEqual(main(["call", "run.describe", "{}"]), 2)
+        self.assertIn("environment", error.getvalue())
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "empty"
+            mailbox.mkdir()
+            error = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"MAGIC_GLASS_BOX_GATEWAY_DIR": str(mailbox)},
+                    clear=True,
+                ),
+                contextlib.redirect_stderr(error),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "serve",
+                            "--dialect",
+                            "openai-responses",
+                            "--grant",
+                            "provider-main",
+                            "--",
+                        ]
+                    ),
+                    2,
+                )
+            self.assertNotIn("Traceback", error.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

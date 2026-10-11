@@ -23,6 +23,7 @@ development = [
 
 [project.scripts]
 magic-glass-box = "magic_glass_box.cli:main"
+magic-glass-box-worker = "magic_glass_box.worker_transport:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

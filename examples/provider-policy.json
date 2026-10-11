@@ -1,5 +1,5 @@
 {
-  "adapter": "json_http",
+  "adapter": "openai_responses",
   "credential_header": "Authorization",
   "credential_prefix": "Bearer ",
   "destination": "https://api.openai.com/v1/responses",
@@ -7,8 +7,8 @@
   "method": "POST",
   "model": "replace-with-an-allowed-model",
   "provider": "openai",
-  "request_bytes": 32768,
-  "response_bytes": 1048576,
+  "request_bytes": 2097152,
+  "response_bytes": 4194304,
   "static_headers": {},
-  "timeout_ms": 30000
+  "timeout_ms": 120000
 }

@@ -67,8 +67,10 @@ The worker writes and flushes `request.json`, then writes and flushes
 `request.ready`. Sequences are positive, strictly increasing safe integers.
 The orchestrator reads a request only when its exact byte length and SHA-256
 match the commit. It writes and flushes `response.json` before publishing the
-matching sequence in `response.ready`. Requests are limited to 32 KiB and
-responses to 1 MiB. Malformed frames, duplicate JSON keys, non-finite numbers,
+matching sequence in `response.ready`. Requests are limited to 3 MiB and
+responses to 9 MiB so a 2 MiB vendor request or escaped 4 MiB buffered SSE
+response still fits its committed envelope. Malformed frames, duplicate JSON
+keys, non-finite numbers,
 torn commits, oversized files, and replayed sequences fail closed.
 
 Mailbox content is ephemeral transport state, never SQLite state. Normal run

@@ -25,27 +25,52 @@ class RuntimeAdapterContractTests(unittest.TestCase):
 
     def test_built_in_adapters_have_stable_distinct_launch_contracts(self) -> None:
         command = self.registry.launch("command", ("worker", "--once"))
-        codex = self.registry.launch("codex", ("codex",))
-        claude = self.registry.launch("claude-code", ("claude",))
+        codex = self.registry.launch("codex", ("codex",), provider_grant="openai-main")
+        claude = self.registry.launch(
+            "claude-code", ("claude",), provider_grant="anthropic-main"
+        )
 
         self.assertEqual(command, RuntimeLaunch(("worker", "--once")))
         self.assertEqual(
-            codex.command[:-1],
+            codex.command[:5],
             (
-                "codex",
-                "exec",
-                "--json",
-                "--color",
-                "never",
-                "--ephemeral",
-                "--skip-git-repo-check",
-                "--dangerously-bypass-approvals-and-sandbox",
+                "magic-glass-box-worker",
+                "serve",
+                "--dialect",
+                "openai-responses",
+                "--grant",
+            ),
+        )
+        self.assertEqual(codex.command[5:8], ("openai-main", "--", "codex"))
+        self.assertIn(
+            'model_providers.magic_glass_box.base_url="http://127.0.0.1:8766/v1"',
+            codex.command,
+        )
+        for argument in (
+            "exec",
+            "--json",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ):
+            self.assertIn(argument, codex.command)
+        self.assertEqual(
+            claude.command[:8],
+            (
+                "magic-glass-box-worker",
+                "serve",
+                "--dialect",
+                "anthropic-messages",
+                "--grant",
+                "anthropic-main",
+                "--",
+                "claude",
             ),
         )
         self.assertEqual(
-            claude.command[:-1],
+            claude.command[8:-1],
             (
-                "claude",
                 "--print",
                 "--output-format",
                 "json",
@@ -53,14 +78,26 @@ class RuntimeAdapterContractTests(unittest.TestCase):
                 "--permission-prompts",
                 "none",
                 "--dangerously-skip-permissions",
+                "--bare",
             ),
         )
         self.assertEqual(codex.command[-1], claude.command[-1])
         self.assertIn("run.describe", codex.command[-1])
         self.assertIn("MAGIC_GLASS_BOX_GATEWAY_DIR", codex.command[-1])
-        self.assertNotIn("model", codex.command)
-        self.assertEqual(codex.environment, ())
-        self.assertEqual(claude.environment, ())
+        self.assertIn("magic-glass-box-worker call", codex.command[-1])
+        self.assertNotIn("openai-main", codex.environment)
+        self.assertIn(
+            ("MAGIC_GLASS_BOX_PROVIDER_TOKEN", "local-gateway-not-a-secret"),
+            codex.environment,
+        )
+        self.assertIn(
+            ("ANTHROPIC_BASE_URL", "http://127.0.0.1:8766"),
+            claude.environment,
+        )
+        self.assertIn(
+            ("ANTHROPIC_API_KEY", "local-gateway-not-a-secret"),
+            claude.environment,
+        )
 
     def test_built_in_adapters_normalize_their_different_success_outputs(self) -> None:
         command = self.registry.complete("command", exit_code=0, stdout="anything")
@@ -208,7 +245,12 @@ class RuntimeAdapterContractTests(unittest.TestCase):
         class InvalidLaunchAdapter:
             name = "invalid"
 
-            def launch(self, _command: tuple[str, ...]) -> object:
+            def launch(
+                self,
+                _command: tuple[str, ...],
+                *,
+                provider_grant: str | None,
+            ) -> object:
                 return ("not", "a", "launch")
 
             def complete(self, *, exit_code: int, stdout: str) -> object:
@@ -261,7 +303,21 @@ class RuntimeAdapterContractTests(unittest.TestCase):
                 self.subTest(name=adapter.name),
                 self.assertRaisesRegex(RuntimeAdapterError, "executable only"),
             ):
-                adapter.launch((adapter.name, "--profile-owned-flag"))
+                adapter.launch(
+                    (adapter.name, "--profile-owned-flag"),
+                    provider_grant="provider-main",
+                )
+
+    def test_vendor_adapters_require_an_explicit_provider_grant(self) -> None:
+        for name in ("codex", "claude-code"):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(RuntimeAdapterError, "provider grant"),
+            ):
+                self.registry.launch(name, (name,))
+
+        with self.assertRaisesRegex(RuntimeAdapterError, "provider grant"):
+            self.registry.launch("codex", ("codex",), provider_grant="Bad Grant")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ grant ID alongside its other immutable inputs.
 
 ## Configure a grant
 
-The policy document fixes the adapter, destination, HTTP method, model,
+The policy document fixes the protocol adapter, destination, HTTP method, model,
 credential placement, static headers, request and response ceilings, timeout,
 and concurrency limit. It contains no secret:
 
@@ -21,6 +21,10 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   --credential-file ./private-credentials/openai.key \
   --created-by operator
 ```
+
+`examples/provider-policy.json` is the Responses form;
+`examples/anthropic-provider-policy.json` shows the Messages form and pins the
+required Anthropic API version as a static header.
 
 The credential file must be owned by the current user, live in a mode-0700
 directory, be a mode-0600 regular file with one link, and contain one non-empty
@@ -60,13 +64,29 @@ The worker may submit only:
 The named grant must appear in the pinned profile. The worker cannot include a
 destination, method, credential, or top-level model override. The trusted
 broker injects the pinned model and credential, enforces byte and concurrency
-limits, accepts only finite JSON object responses, and does not follow
-redirects. HTTPS is mandatory except for explicit loopback destinations used
-by local adapters and integration tests.
+limits, and does not follow redirects. HTTPS is mandatory except for explicit
+loopback destinations used by local adapters and integration tests.
+
+Three adapters are available:
+
+- `json_http` sends one finite JSON object and accepts one finite JSON object;
+- `openai_responses` accepts a model-free Responses request, requires
+  streaming, and buffers one bounded SSE response; and
+- `anthropic_messages` does the same for the Anthropic Messages dialect.
+
+Vendor requests may carry only protocol feature negotiation that the CLI needs:
+`openai-beta` and `x-codex-beta-features` for Responses, or `anthropic-beta`
+and `anthropic-version` for Messages. All authorization, destination, session,
+client-metadata, telemetry, and arbitrary headers from the worker are dropped.
+Policy `static_headers` are applied afterward and therefore pin or override an
+allowed value when required. The request and response ceilings are at most 2
+MiB and 4 MiB respectively; a policy may choose smaller values.
 
 The transient response includes the grant name, provider, pinned model, HTTP
-status, byte counts, invocation ID, and an `untrusted_response` object. Provider
-output remains untrusted agent input.
+status, byte counts, invocation ID, and an `untrusted_response` object. A vendor
+adapter's object contains only its protocol, content type, and buffered SSE
+text so the worker bridge can replay it. Provider output remains untrusted
+agent input.
 
 ## Durable audit boundary
 

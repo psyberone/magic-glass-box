@@ -7,6 +7,7 @@ from typing import Any
 
 from magic_glass_box.domain import ProviderGrantSpec, ValidationError
 from magic_glass_box.provider import (
+    BufferedHTTPProviderAdapter,
     JSONHTTPProviderAdapter,
     ProviderBroker,
     ProviderBusyError,
@@ -56,8 +57,8 @@ class ProviderGrantSpecTests(unittest.TestCase):
             ({"credential_prefix": "bad\n"}, "credential prefix"),
             ({"static_headers": {"Authorization": "fixed"}}, "header"),
             ({"request_bytes": 0}, "request_bytes"),
-            ({"request_bytes": 32769}, "request_bytes"),
-            ({"response_bytes": 1048577}, "response_bytes"),
+            ({"request_bytes": 2 * 1024 * 1024 + 1}, "request_bytes"),
+            ({"response_bytes": 4 * 1024 * 1024 + 1}, "response_bytes"),
             ({"timeout_ms": 99}, "timeout_ms"),
             ({"max_concurrency": 0}, "max_concurrency"),
             ({"extra": True}, "unknown fields"),
@@ -68,6 +69,16 @@ class ProviderGrantSpecTests(unittest.TestCase):
                 self.assertRaisesRegex(ValidationError, message),
             ):
                 policy(**override)
+
+    def test_vendor_stream_adapters_have_bounded_larger_envelopes(self) -> None:
+        for adapter in ("openai_responses", "anthropic_messages"):
+            with self.subTest(adapter=adapter):
+                spec = policy(
+                    adapter=adapter,
+                    request_bytes=2 * 1024 * 1024,
+                    response_bytes=4 * 1024 * 1024,
+                )
+                self.assertEqual(spec.adapter, adapter)
 
     def test_loopback_http_is_available_for_local_provider_adapters(self) -> None:
         spec = policy(destination="http://127.0.0.1:8080/v1/invoke")
@@ -192,15 +203,19 @@ class FakeResponse:
         status: int = 200,
         body: bytes = b'{"output_text":"done"}',
         content_length: str | None = None,
+        content_type: str | None = "application/json",
     ):
         self.status = status
         self.body = body
         self.content_length = content_length
+        self.content_type = content_type
 
     def getheader(self, name: str) -> str | None:
-        if name != "Content-Length":
-            raise AssertionError(f"unexpected header lookup: {name}")
-        return self.content_length
+        if name == "Content-Length":
+            return self.content_length
+        if name == "Content-Type":
+            return self.content_type
+        raise AssertionError(f"unexpected header lookup: {name}")
 
     def read(self, amount: int) -> bytes:
         return self.body[:amount]
@@ -311,6 +326,123 @@ class JSONHTTPProviderAdapterTests(unittest.TestCase):
             adapter.invoke(policy(), "secret", {"input": "x"})
         self.assertNotIn("SECRET", str(raised.exception))
         self.assertTrue(connection.closed)
+
+
+class BufferedHTTPProviderAdapterTests(unittest.TestCase):
+    def adapter(
+        self, protocol: str, response: FakeResponse
+    ) -> tuple[BufferedHTTPProviderAdapter, FakeConnection]:
+        connection = FakeConnection(response)
+
+        def factory(
+            _scheme: str, _host: str, _port: int | None, _timeout: float
+        ) -> FakeConnection:
+            return connection
+
+        return BufferedHTTPProviderAdapter(protocol, factory), connection
+
+    def test_streaming_request_is_model_pinned_and_response_is_buffered(self) -> None:
+        raw = b'data: {"type":"response.completed"}\n\n'
+        adapter, connection = self.adapter(
+            "openai-responses",
+            FakeResponse(
+                body=raw,
+                content_length=str(len(raw)),
+                content_type="text/event-stream; charset=utf-8",
+            ),
+        )
+
+        result = adapter.invoke(
+            policy(adapter="openai_responses", request_bytes=2 * 1024 * 1024),
+            "private-key",
+            {
+                "protocol": "openai-responses",
+                "body": {"stream": True, "input": "hello"},
+                "headers": {"x-codex-beta-features": "feature-one"},
+            },
+        )
+
+        body = json.loads(connection.requests[0][2])
+        self.assertEqual(body["model"], "gpt-test")
+        self.assertTrue(body["stream"])
+        self.assertEqual(connection.requests[0][3]["accept"], "text/event-stream")
+        self.assertEqual(
+            connection.requests[0][3]["x-codex-beta-features"], "feature-one"
+        )
+        self.assertEqual(
+            result.untrusted_response,
+            {
+                "body": raw.decode(),
+                "content_type": "text/event-stream; charset=utf-8",
+                "protocol": "openai-responses",
+            },
+        )
+
+    def test_protocol_shape_and_response_encoding_fail_closed(self) -> None:
+        adapter, _ = self.adapter(
+            "anthropic-messages",
+            FakeResponse(body=b"\xff", content_type="text/event-stream"),
+        )
+        spec = policy(adapter="anthropic_messages")
+        invalid = (
+            (
+                {
+                    "protocol": "openai-responses",
+                    "body": {"stream": True},
+                    "headers": {},
+                },
+                "protocol",
+            ),
+            (
+                {
+                    "protocol": "anthropic-messages",
+                    "body": [],
+                    "headers": {},
+                },
+                "body",
+            ),
+            (
+                {
+                    "protocol": "anthropic-messages",
+                    "body": {"stream": True, "model": "worker-model"},
+                    "headers": {},
+                },
+                "model",
+            ),
+            (
+                {
+                    "protocol": "anthropic-messages",
+                    "body": {"stream": False},
+                    "headers": {},
+                },
+                "stream",
+            ),
+            (
+                {
+                    "protocol": "anthropic-messages",
+                    "body": {"stream": True},
+                    "headers": {"authorization": "SECRET"},
+                },
+                "header",
+            ),
+        )
+        for request, message in invalid:
+            with (
+                self.subTest(request=request),
+                self.assertRaisesRegex(ProviderError, message),
+            ):
+                adapter.invoke(spec, "secret", request)  # type: ignore[arg-type]
+
+        with self.assertRaisesRegex(ProviderUpstreamError, "invalid response"):
+            adapter.invoke(
+                spec,
+                "secret",
+                {
+                    "protocol": "anthropic-messages",
+                    "body": {"stream": True},
+                    "headers": {},
+                },
+            )
 
 
 if __name__ == "__main__":
