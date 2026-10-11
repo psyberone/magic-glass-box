@@ -252,6 +252,7 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(profile.workspace_mode, WorkspaceMode.COPY_ON_WRITE)
         self.assertEqual(profile.network_mode, NetworkMode.GATEWAY_ONLY)
         self.assertEqual(profile.gateway_capabilities, ())
+        self.assertEqual(profile.runtime_adapter, "command")
         self.assertEqual(
             profile.to_dict(),
             {
@@ -262,6 +263,32 @@ class AgentProfileTests(unittest.TestCase):
                 "workspace_mode": "copy_on_write",
             },
         )
+
+    def test_profile_pins_a_runtime_adapter_without_changing_legacy_digests(
+        self,
+    ) -> None:
+        legacy = AgentProfileSpec.from_mapping(
+            {"image": "agent@sha256:abc", "command": ["agent", "run"]}
+        )
+        codex = AgentProfileSpec.from_mapping(
+            {
+                "image": "agent@sha256:abc",
+                "command": ["codex"],
+                "runtime_adapter": "codex",
+            }
+        )
+
+        self.assertNotIn("runtime_adapter", legacy.to_dict())
+        self.assertEqual(codex.runtime_adapter, "codex")
+        self.assertEqual(codex.to_dict()["runtime_adapter"], "codex")
+        with self.assertRaisesRegex(ValidationError, "runtime_adapter must match"):
+            AgentProfileSpec.from_mapping(
+                {
+                    "image": "agent@sha256:abc",
+                    "command": ["agent"],
+                    "runtime_adapter": "Bad Adapter",
+                }
+            )
 
     def test_provider_gateway_capability_requires_a_named_provider_grant(self) -> None:
         profile = AgentProfileSpec.from_mapping(

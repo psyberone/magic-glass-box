@@ -51,7 +51,9 @@ project-activity projection.
   ID. Changed content appends an immutable version; identical imports are
   idempotent and stale source revisions fail closed.
 - Agent profile revisions are append-only and contain an image reference,
-  argv-form command, workspace/network policy, and a dedicated Krab identity.
+  argv-form executable prefix, default runtime adapter, workspace/network
+  policy, and a dedicated Krab identity. Legacy profiles default to the
+  compatibility `command` adapter without changing their content digest.
 - A run pins exact context, profile, and work-item revisions. Later imports or
   edits cannot change an in-flight or historical run.
 - A work item owns a durable coordination thread shared by all of its runs.
@@ -129,18 +131,22 @@ work memory.
 
 For an execution request, Magic Glass Box:
 
-1. atomically claims a queued run by transitioning it to `preparing`;
-2. resolves its requested revision and exports only tracked Git files;
-3. validates the named authorities and opens the run-scoped gateway;
-4. resolves the image reference to an immutable digest and creates the sandbox;
-5. records the commit, image, and container identity before starting it;
-6. waits for the agent while renewing its ownership lease and polling durable
+1. validates the profile default or explicit attempt-level runtime adapter;
+2. atomically claims a queued run by transitioning it to `preparing`;
+3. asks the selected adapter for bounded argv and non-secret environment;
+4. resolves the requested revision and exports only tracked Git files;
+5. validates the named authorities and opens the run-scoped gateway;
+6. resolves the image reference to an immutable digest and creates the sandbox;
+7. records the commit, image, and container identity before starting it;
+8. waits for the agent while renewing its ownership lease and polling durable
    cancellation; Docker command timeouts remain bounded, while agent runtime is
    unlimited unless the operator supplies `--run-timeout`;
-7. captures a bounded file-level result and binds its digest to the attempt;
-8. removes all labeled containers, gateway files, and the disposable snapshot;
+9. captures bounded stdout transiently, lets the adapter validate only its
+   completion envelope, and retains none of that output;
+10. captures a bounded file-level result and binds its digest to the attempt;
+11. removes all labeled containers, gateway files, and the disposable snapshot;
    and
-9. records the exit status and terminal state.
+12. records the normalized exit status and terminal state.
 
 Operational failures become audited `failed` runs only after cleanup succeeds.
 If a started worker fails, its recoverable changes are captured before cleanup.
@@ -198,7 +204,7 @@ independent subsystems. See [roadmap.md](roadmap.md) for the current sequence an
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
 broker, structured worker replacement, multi-agent work memory, work-item
 completion, execution integrity, the redacted interactive control room, and the
-storage-boundary refactor are complete. The next slice is the runtime adapter
-contract and its conformance suite. See
+storage-boundary refactor are complete. The runtime adapter contract and its
+conformance suite are in progress. See
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
-and [work-memory.md](work-memory.md).
+[runtime-adapters.md](runtime-adapters.md), and [work-memory.md](work-memory.md).

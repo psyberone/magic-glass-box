@@ -31,6 +31,7 @@ from magic_glass_box.gateway import (
     GATEWAY_RESPONSE_NAME,
     GATEWAY_RESPONSE_READY_NAME,
 )
+from magic_glass_box.runtime import RuntimeLaunch
 
 RUN_ID = "run_" + "1" * 32
 IMAGE_ID = "sha256:" + "a" * 64
@@ -71,6 +72,10 @@ class SandboxPlanTests(unittest.TestCase):
             run_id=RUN_ID,
             profile=profile,
             workspace=self.workspace,
+            launch=RuntimeLaunch(
+                ("runtime-agent", "--headless"),
+                (("RUNTIME_MODE", "strict"),),
+            ),
             credential_files=(
                 {"krab": self.token} if credential_files is None else credential_files
             ),
@@ -156,6 +161,8 @@ class SandboxPlanTests(unittest.TestCase):
                 "--env",
                 f"MAGIC_GLASS_BOX_RUN_ID={RUN_ID}",
                 "--env",
+                "RUNTIME_MODE=strict",
+                "--env",
                 "MAGIC_GLASS_BOX_CREDENTIAL_DIR=/run/secrets/magic-glass-box",
                 "--env",
                 "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab",
@@ -167,9 +174,9 @@ class SandboxPlanTests(unittest.TestCase):
                     "dst=/run/secrets/magic-glass-box/krab,readonly"
                 ),
                 "--entrypoint",
-                "agent",
+                "runtime-agent",
                 IMAGE_ID,
-                "--run",
+                "--headless",
             ),
         )
         self.assertNotIn("secret-material", "\n".join(plan.create_args))
@@ -295,6 +302,24 @@ class SandboxPlanTests(unittest.TestCase):
                     uid=os.getuid(),
                     gid=os.getgid(),
                 )
+
+    def test_runtime_environment_cannot_override_sandbox_policy(self) -> None:
+        request = self.request(credential_names=(), credential_files={})
+        request = SandboxRequest(
+            run_id=request.run_id,
+            profile=request.profile,
+            workspace=request.workspace,
+            launch=RuntimeLaunch(("worker",), (("HOME", "/workspace"),)),
+            credential_files={},
+        )
+
+        with self.assertRaisesRegex(ExecutionError, "reserved environment"):
+            build_sandbox_plan(
+                request,
+                DockerImage(IMAGE_ID, ()),
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
 
     def test_gateway_mailbox_rejects_unsafe_filesystem_shapes(self) -> None:
         def request_for(path: Path) -> SandboxRequest:
@@ -423,6 +448,7 @@ class SandboxPlanTests(unittest.TestCase):
                     "run_bad",
                     self.request().profile,
                     self.workspace,
+                    self.request().launch,
                     {"krab": self.token},
                 ),
                 "invalid run identifier",
@@ -432,6 +458,7 @@ class SandboxPlanTests(unittest.TestCase):
                     RUN_ID,
                     self.request().profile,
                     missing_workspace,
+                    self.request().launch,
                     {"krab": self.token},
                 ),
                 f"workspace is unavailable: {missing_workspace.absolute()}",
@@ -441,6 +468,7 @@ class SandboxPlanTests(unittest.TestCase):
                     RUN_ID,
                     self.request().profile,
                     workspace_link,
+                    self.request().launch,
                     {"krab": self.token},
                 ),
                 "workspace must not be a symlink",
@@ -450,6 +478,7 @@ class SandboxPlanTests(unittest.TestCase):
                     RUN_ID,
                     self.request().profile,
                     workspace_file,
+                    self.request().launch,
                     {"krab": self.token},
                 ),
                 "workspace must be a directory",
@@ -459,6 +488,7 @@ class SandboxPlanTests(unittest.TestCase):
                     RUN_ID,
                     self.request(credential_names=(), credential_files={}).profile,
                     Path("/"),
+                    self.request().launch,
                     {},
                 ),
                 "workspace must not be a filesystem root",
@@ -468,6 +498,7 @@ class SandboxPlanTests(unittest.TestCase):
                     RUN_ID,
                     self.request(credential_names=(), credential_files={}).profile,
                     comma_workspace,
+                    self.request().launch,
                     {},
                 ),
                 "workspace path must not contain a comma",
@@ -651,6 +682,7 @@ class FakeDockerEngine:
     def __init__(self) -> None:
         self.image = DockerImage(IMAGE_ID, ())
         self.exit_code = 0
+        self.stdout = "runtime output\n"
         self.failure: tuple[str, Exception] | None = None
         self.managed: tuple[str, ...] = ()
         self.calls: list[tuple[str, object]] = []
@@ -675,6 +707,10 @@ class FakeDockerEngine:
         self._call("wait", container_id)
         return self.exit_code
 
+    def logs(self, container_id: str) -> str:
+        self._call("logs", container_id)
+        return self.stdout
+
     def stop(self, container_id: str) -> None:
         self._call("stop", container_id)
 
@@ -698,7 +734,13 @@ class DockerExecutorTests(unittest.TestCase):
             workspace_mode=WorkspaceMode.READ_ONLY,
             network_mode=NetworkMode.NONE,
         )
-        self.request = SandboxRequest(RUN_ID, self.profile, self.workspace, {})
+        self.request = SandboxRequest(
+            RUN_ID,
+            self.profile,
+            self.workspace,
+            RuntimeLaunch(self.profile.command),
+            {},
+        )
         self.engine = FakeDockerEngine()
         self.executor = DockerExecutor(
             self.engine,
@@ -719,11 +761,12 @@ class DockerExecutorTests(unittest.TestCase):
                         container_name="magic-glass-box-" + "1" * 32,
                         image_id=IMAGE_ID,
                         exit_code=exit_code,
+                        stdout="runtime output\n",
                     ),
                 )
                 self.assertEqual(
                     [operation for operation, _ in self.engine.calls],
-                    ["inspect", "create", "start", "wait", "remove"],
+                    ["inspect", "create", "start", "wait", "logs", "remove"],
                 )
 
     def test_declared_image_volumes_are_rejected_before_create(self) -> None:
@@ -785,7 +828,7 @@ class DockerExecutorTests(unittest.TestCase):
         self.assertEqual(observed[0][1], CONTAINER_ID)
         self.assertEqual(
             [operation for operation, _ in self.engine.calls],
-            ["inspect", "create", "callback", "start", "wait", "remove"],
+            ["inspect", "create", "callback", "start", "wait", "logs", "remove"],
         )
 
         self.engine.calls.clear()
@@ -798,6 +841,17 @@ class DockerExecutorTests(unittest.TestCase):
         self.assertEqual(
             [operation for operation, _ in self.engine.calls],
             ["inspect", "create", "remove"],
+        )
+
+    def test_log_capture_failure_still_removes_the_container(self) -> None:
+        self.engine.failure = ("logs", ExecutionError("logs failed"))
+
+        with self.assertRaisesRegex(ExecutionError, "logs failed"):
+            self.executor.execute(self.request)
+
+        self.assertEqual(
+            [operation for operation, _ in self.engine.calls],
+            ["inspect", "create", "start", "wait", "logs", "remove"],
         )
 
     def test_cleanup_run_removes_every_managed_container(self) -> None:
@@ -962,12 +1016,14 @@ class DockerCLITests(unittest.TestCase):
             self.completed(CONTAINER_ID + "\n"),
             self.completed(CONTAINER_ID + "\n"),
             self.completed("17\n"),
+            self.completed("structured output\n"),
             self.completed(CONTAINER_ID + "\n"),
             self.completed(CONTAINER_ID + "\n"),
         )
         self.assertEqual(self.client.create(plan), CONTAINER_ID)
         self.client.start(CONTAINER_ID)
         self.assertEqual(self.client.wait(CONTAINER_ID), 17)
+        self.assertEqual(self.client.logs(CONTAINER_ID), "structured output\n")
         self.client.stop(CONTAINER_ID)
         self.client.remove(CONTAINER_ID)
         commands = [call.args[0][1:] for call in self.runner.call_args_list]
@@ -977,6 +1033,7 @@ class DockerCLITests(unittest.TestCase):
                 ["container", "create"],
                 ["container", "start", CONTAINER_ID],
                 ["container", "wait", CONTAINER_ID],
+                ["container", "logs", CONTAINER_ID],
                 ["container", "stop", CONTAINER_ID],
                 ["container", "rm", "--force", "--volumes", CONTAINER_ID],
             ],

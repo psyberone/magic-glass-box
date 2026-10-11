@@ -135,8 +135,17 @@ class FakeRunCoordinator:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
-    def execute(self, run_id: str) -> dict[str, object]:
-        self.calls.append(("execute", run_id))
+    def execute(
+        self, run_id: str, *, runtime_adapter: str | None = None
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "execute",
+                run_id
+                if runtime_adapter is None
+                else {"run_id": run_id, "runtime_adapter": runtime_adapter},
+            )
+        )
         return {"operation": "run.execute", "run_id": run_id}
 
     def reconcile(self, run_id: str | None = None) -> list[dict[str, object]]:
@@ -1161,8 +1170,20 @@ class CLITests(unittest.TestCase):
         result_store = FakeResultStore()
         cases = (
             (
-                ["run", "execute", "run_" + "1" * 32],
-                ("execute", "run_" + "1" * 32),
+                [
+                    "run",
+                    "execute",
+                    "run_" + "1" * 32,
+                    "--runtime-adapter",
+                    "codex",
+                ],
+                (
+                    "execute",
+                    {
+                        "run_id": "run_" + "1" * 32,
+                        "runtime_adapter": "codex",
+                    },
+                ),
                 {"operation": "run.execute", "run_id": "run_" + "1" * 32},
             ),
             (

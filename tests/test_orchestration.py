@@ -25,6 +25,7 @@ from magic_glass_box.gateway import GatewayEndpoint
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import RunCoordinator, RunOrchestrationError
 from magic_glass_box.results import CapturedResult, ResultManifest
+from magic_glass_box.runtime import RuntimeAdapterError, RuntimeLaunch
 from magic_glass_box.workspace import PreparedWorkspace
 
 USER_ID = "usr_" + "1" * 32
@@ -69,9 +70,9 @@ class FakeWorkspaceManager:
 
 
 class FakeExecutor:
-    def __init__(self, runtime_adapter: str = "docker"):
-        self.runtime_adapter = runtime_adapter
+    def __init__(self):
         self.exit_code = 0
+        self.stdout = ""
         self.execute_error: Exception | None = None
         self.error_after_callback = False
         self.skip_callback = False
@@ -105,6 +106,7 @@ class FakeExecutor:
             plan.container_name,
             IMAGE_ID,
             self.exit_code,
+            self.stdout,
         )
 
     def cleanup_run(self, run_id: str) -> int:
@@ -229,7 +231,7 @@ class RunCoordinatorTests(unittest.TestCase):
             name="Worker",
             spec=AgentProfileSpec.create(
                 image="agent:local",
-                command=["agent", "run"],
+                command=["agent"],
                 workspace_mode=WorkspaceMode.COPY_ON_WRITE,
                 network_mode=NetworkMode.GATEWAY_ONLY,
                 credential_names=["krab"],
@@ -310,6 +312,7 @@ class RunCoordinatorTests(unittest.TestCase):
         request = self.executor.requests[0]
         self.assertEqual(request.run_id, run["id"])
         self.assertEqual(request.workspace, self.workspaces.root / run["id"])
+        self.assertEqual(request.launch, RuntimeLaunch(("agent",)))
         self.assertEqual(request.credential_files, {})
         self.assertEqual(
             request.gateway_directory,
@@ -338,6 +341,7 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.workspaces.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
         self.assertEqual(attempt["owner_id"], "orchestrator-test")
+        self.assertEqual(attempt["runtime_adapter"], "command")
         self.assertEqual(attempt["result"]["manifest"]["changes"], [])
         self.assertEqual(
             self.results.stage_calls,
@@ -407,15 +411,18 @@ class RunCoordinatorTests(unittest.TestCase):
                 ),
             )
 
-        self.executor.runtime_adapter = "agent-a"
+        self.executor.stdout = (
+            '{"type":"thread.started","thread_id":"abc"}\n'
+            '{"type":"turn.completed","usage":{}}\n'
+        )
         self.executor.during_execute = hand_off
-        waiting = self.coordinator.execute(run["id"])
+        waiting = self.coordinator.execute(run["id"], runtime_adapter="codex")
 
         self.assertEqual(waiting["state"], "waiting_for_input")
         self.assertEqual(len(waiting["attempts"]), 1)
         first_attempt = waiting["attempts"][0]
         self.assertEqual(first_attempt["state"], "handed_off")
-        self.assertEqual(first_attempt["runtime_adapter"], "agent-a")
+        self.assertEqual(first_attempt["runtime_adapter"], "codex")
         self.assertEqual(
             first_attempt["handoff"]["pending_interaction_ids"],
             [waiting["interactions"][0]["id"]],
@@ -428,7 +435,10 @@ class RunCoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(answered["run_state"], "queued")
 
-        replacement_executor = FakeExecutor("agent-b")
+        replacement_executor = FakeExecutor()
+        replacement_executor.stdout = (
+            '{"type":"result","subtype":"success","is_error":false,"result":"done"}\n'
+        )
         replacement_workspaces = FakeWorkspaceManager(self.workspaces.root)
         replacement = RunCoordinator(
             self.database,
@@ -440,7 +450,7 @@ class RunCoordinatorTests(unittest.TestCase):
             orchestrator_id="orchestrator-replacement",
             heartbeat_interval=30,
         )
-        finished = replacement.execute(run["id"])
+        finished = replacement.execute(run["id"], runtime_adapter="claude-code")
 
         self.assertEqual(finished["id"], run["id"])
         self.assertEqual(finished["state"], "succeeded")
@@ -453,11 +463,15 @@ class RunCoordinatorTests(unittest.TestCase):
                 (attempt["sequence"], attempt["runtime_adapter"], attempt["state"])
                 for attempt in finished["attempts"]
             ],
-            [(1, "agent-a", "handed_off"), (2, "agent-b", "succeeded")],
+            [(1, "codex", "handed_off"), (2, "claude-code", "succeeded")],
         )
         self.assertEqual(
             replacement_executor.requests[0].profile,
             self.executor.requests[0].profile,
+        )
+        self.assertNotEqual(
+            replacement_executor.requests[0].launch,
+            self.executor.requests[0].launch,
         )
 
     def test_nonzero_agent_exit_is_a_durable_failed_run(self) -> None:
@@ -480,6 +494,29 @@ class RunCoordinatorTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.workspaces.prepare_calls[0][2], None)
+
+    def test_unknown_adapter_does_not_claim_the_queued_run(self) -> None:
+        run = self.create_run()
+
+        with self.assertRaisesRegex(RuntimeAdapterError, "unknown runtime adapter"):
+            self.coordinator.execute(run["id"], runtime_adapter="missing")
+
+        current = self.database.get_run(run["id"])
+        self.assertEqual(current["state"], "queued")
+        self.assertEqual(current["attempts"], [])
+        self.assertEqual(self.executor.requests, [])
+
+    def test_malformed_success_output_fails_without_retaining_the_output(self) -> None:
+        run = self.create_run()
+        self.executor.stdout = "malformed SECRET transcript"
+
+        with self.assertRaisesRegex(RunOrchestrationError, "run execution failed"):
+            self.coordinator.execute(run["id"], runtime_adapter="codex")
+
+        failed = self.database.get_run(run["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["attempts"][0]["runtime_adapter"], "codex")
+        self.assertNotIn("SECRET", repr(failed))
 
     def test_failures_before_and_after_container_creation_are_audited(self) -> None:
         for after_callback, expected_from, expected_version in (

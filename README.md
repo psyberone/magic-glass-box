@@ -25,6 +25,8 @@ This repository currently contains the first executable vertical slice:
 - a Docker execution adapter that resolves images to immutable digests,
   validates workspaces and credential files, applies resource and privilege
   ceilings, and always attempts container cleanup;
+- a runtime-adapter boundary with a compatibility command dialect plus Codex
+  JSONL and Claude Code JSON launch/completion contracts, audited per attempt;
 - a run-scoped capability gateway that gives networkless workers typed access
   to pinned run context and asynchronous Krab interactions without mounting a
   reusable token;
@@ -103,7 +105,7 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run create --project box-project --profile Worker \
   --work-item wki_<id> --requested-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
-  run execute run_<id> --run-timeout 21600
+  run execute run_<id> --run-timeout 21600 --runtime-adapter codex
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run cancel run_<id> --expected-version <version> \
   --requested-by operator --reason "Stop requested"
@@ -163,8 +165,10 @@ for provider policy and secret-handling details. The replacement contract and
 handoff schema are documented in
 [docs/worker-handoffs.md](docs/worker-handoffs.md). Multi-agent coordination and
 replacement-coordinator recovery are documented in
-[docs/work-memory.md](docs/work-memory.md). The redacted inventory and live
-role/claim overlay are documented in
+[docs/work-memory.md](docs/work-memory.md). Runtime launch and completion
+contracts are documented in
+[docs/runtime-adapters.md](docs/runtime-adapters.md). The redacted inventory
+and live role/claim overlay are documented in
 [docs/control-room.md](docs/control-room.md).
 
 When running directly from a checkout, set `PYTHONPATH=src` or install the

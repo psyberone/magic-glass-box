@@ -234,10 +234,20 @@ immutability suite passes without a schema migration.
 
 ## Milestone 5: runtime adapter contract
 
+**Status: in progress**
+
 - Publish the minimal adapter protocol and conformance tests.
 - Support at least two meaningfully different headless agent runtimes.
 - Keep runtime-specific prompts, flags, and output parsing outside the control
   plane.
+
+The bounded Python protocol, registry, legacy `command` adapter, Codex JSONL
+adapter, Claude Code JSON-result adapter, profile default, per-attempt override,
+transient output capture, and control-room visibility are implemented. Legacy
+profiles retain their content digests. The remaining work is the worker-side
+provider transport and one live golden-path demonstration through both vendor
+dialects; direct network access and reusable provider credentials remain out
+of scope for an adapter.
 
 **Exit proof:** the golden-path demonstration in the product thesis succeeds
 with two interchangeable worker implementations.

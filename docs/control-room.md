@@ -64,7 +64,8 @@ The projection intentionally excludes:
 - interaction titles, questions, answers, and message history;
 - handoff summaries and agent transcripts;
 - retained result manifests, file paths, and file content;
-- agent command arguments; and
+- agent command arguments;
+- transient runtime stdout and vendor result envelopes; and
 - provider credential prefixes and static-header values.
 
 Provider destinations are displayed without query strings. Static-header names

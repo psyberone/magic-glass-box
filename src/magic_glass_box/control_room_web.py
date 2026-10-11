@@ -446,6 +446,7 @@ def _render_control_room(
             row.get("name"),
             row.get("active"),
             row.get("profile_version"),
+            row.get("runtime_adapter"),
             row.get("krab_handle"),
             row.get("network_mode"),
         )
@@ -483,6 +484,7 @@ def _render_control_room(
             row.get("id"),
             row.get("run_id"),
             row.get("state"),
+            row.get("runtime_adapter"),
             row.get("owner_id"),
             row.get("lease_expired"),
             bool(row.get("cancel_requested_at")),
@@ -622,7 +624,15 @@ def _render_control_room(
         _section(
             "Attempts",
             _table(
-                ("ID", "Run", "State", "Owner", "Lease expired", "Cancel requested"),
+                (
+                    "ID",
+                    "Run",
+                    "State",
+                    "Runtime",
+                    "Owner",
+                    "Lease expired",
+                    "Cancel requested",
+                ),
                 attempt_rows,
             ),
         ),
@@ -696,7 +706,7 @@ def _render_control_room(
         _section(
             "Profiles",
             _table(
-                ("Name", "Active", "Version", "Krab user", "Network"),
+                ("Name", "Active", "Version", "Runtime", "Krab user", "Network"),
                 profile_rows,
             ),
         ),

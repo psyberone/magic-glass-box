@@ -1195,6 +1195,7 @@ class ProviderGrantSpec:
 class AgentProfileSpec:
     image: str
     command: tuple[str, ...]
+    runtime_adapter: str = "command"
     workspace_mode: WorkspaceMode = WorkspaceMode.COPY_ON_WRITE
     network_mode: NetworkMode = NetworkMode.GATEWAY_ONLY
     credential_names: tuple[str, ...] = ()
@@ -1207,6 +1208,7 @@ class AgentProfileSpec:
         allowed = {
             "image",
             "command",
+            "runtime_adapter",
             "workspace_mode",
             "network_mode",
             "credential_names",
@@ -1223,6 +1225,7 @@ class AgentProfileSpec:
         return cls.create(
             image=value["image"],
             command=value["command"],
+            runtime_adapter=value.get("runtime_adapter", "command"),
             workspace_mode=value.get(
                 "workspace_mode", WorkspaceMode.COPY_ON_WRITE.value
             ),
@@ -1237,6 +1240,7 @@ class AgentProfileSpec:
         *,
         image: object,
         command: Sequence[object],
+        runtime_adapter: object = "command",
         workspace_mode: str = WorkspaceMode.COPY_ON_WRITE,
         network_mode: str = NetworkMode.GATEWAY_ONLY,
         credential_names: Sequence[object] = (),
@@ -1249,6 +1253,7 @@ class AgentProfileSpec:
             require_string(value, field="command argument", max_bytes=1024)
             for value in command
         )
+        adapter = validate_provider_name(runtime_adapter, field="runtime_adapter")
         credential_tuple = tuple(
             require_string(value, field="credential name", max_bytes=128)
             for value in credential_names
@@ -1304,6 +1309,7 @@ class AgentProfileSpec:
         return cls(
             image=image_text,
             command=command_tuple,
+            runtime_adapter=adapter,
             workspace_mode=workspace,
             network_mode=network,
             credential_names=credential_tuple,
@@ -1318,6 +1324,8 @@ class AgentProfileSpec:
             "network_mode": self.network_mode.value,
             "workspace_mode": self.workspace_mode.value,
         }
+        if self.runtime_adapter != "command":
+            result["runtime_adapter"] = self.runtime_adapter
         if self.gateway_capabilities:
             result["gateway_capabilities"] = [
                 capability.value for capability in self.gateway_capabilities

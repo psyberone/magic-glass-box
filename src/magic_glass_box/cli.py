@@ -24,6 +24,7 @@ from .krab import KrabError
 from .orchestration import RunCoordinator, RunOrchestrationError
 from .provider import ProviderError
 from .results import ResultError, WorkspaceResultStore, default_result_root
+from .runtime import RuntimeAdapterError
 from .service import ControlPlane, activity_to_dict
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
@@ -324,6 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_seconds,
         help="optional maximum agent runtime in seconds",
     )
+    run_execute.add_argument(
+        "--runtime-adapter",
+        help="override the pinned profile's runtime adapter for this attempt",
+    )
     run_commands.add_parser(
         "reconcile", help="clean and fail runs interrupted by an orchestrator restart"
     )
@@ -545,7 +550,10 @@ def _dispatch(
         if args.run_command == "show":
             return control.database.get_run(args.run_id)
         if args.run_command == "execute" and coordinator is not None:
-            return coordinator.execute(args.run_id)
+            return coordinator.execute(
+                args.run_id,
+                runtime_adapter=args.runtime_adapter,
+            )
         if args.run_command == "reconcile" and coordinator is not None:
             return coordinator.reconcile()
     if args.command == "result" and result_store is not None:
@@ -606,6 +614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         KrabError,
         ProviderError,
         ResultError,
+        RuntimeAdapterError,
         RunOrchestrationError,
         StorageError,
         ValidationError,

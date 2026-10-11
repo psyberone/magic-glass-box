@@ -25,12 +25,13 @@ example, a stopped attempt can be `handed_off` while its run remains
 `waiting_for_input`, then a new attempt can start after the response re-queues
 that same run.
 
-The coordinator records an adapter's stable `runtime_adapter` name. The
-currently shipped CLI uses `docker`; another executor implementing the same
-request and cleanup boundary can resume the pinned run under a different name.
-The profile, context, work item, credential grants, and source commit do not
-change with the adapter. Runtime conformance and a second shipped adapter are a
-later milestone.
+The coordinator records an adapter's stable `runtime_adapter` name. Docker is
+the sandbox executor, not that runtime identity. A profile selects a default
+adapter and an operator may select another compatible adapter for a replacement
+attempt. The profile, context, work item, credential grants, and source commit
+do not change with the adapter. The bundled Codex and Claude Code dialects and
+their conformance boundary are documented in
+[runtime-adapters.md](runtime-adapters.md).
 
 ## Handoff v1
 

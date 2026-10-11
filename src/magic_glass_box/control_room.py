@@ -299,6 +299,7 @@ class ControlRoom:
                     "content_sha256": row["content_sha256"],
                     "image": spec.image,
                     "command_argv_count": len(spec.command),
+                    "runtime_adapter": spec.runtime_adapter,
                     "workspace_mode": spec.workspace_mode.value,
                     "network_mode": spec.network_mode.value,
                     "credential_names": list(spec.credential_names),

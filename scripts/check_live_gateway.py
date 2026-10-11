@@ -13,6 +13,7 @@ from typing import Any
 from magic_glass_box.domain import AgentProfileSpec, GatewayCapability, NetworkMode
 from magic_glass_box.executor import DockerCLI, DockerExecutor, SandboxRequest
 from magic_glass_box.gateway import FileGatewayManager
+from magic_glass_box.runtime import RuntimeLaunch
 
 RUN_ID = "run_" + "7" * 32
 
@@ -188,6 +189,7 @@ def main() -> int:
                     run_id=RUN_ID,
                     profile=profile,
                     workspace=workspace,
+                    launch=RuntimeLaunch(profile.command),
                     credential_files={},
                     gateway_directory=endpoint.directory,
                 )

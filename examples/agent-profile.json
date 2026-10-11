@@ -1,7 +1,6 @@
 {
   "command": [
-    "codex",
-    "exec"
+    "codex"
   ],
   "credential_names": [
     "krab",
@@ -22,5 +21,6 @@
   ],
   "image": "magic-glass-box/codex-agent@sha256:replace-with-a-pinned-digest",
   "network_mode": "gateway_only",
+  "runtime_adapter": "codex",
   "workspace_mode": "copy_on_write"
 }

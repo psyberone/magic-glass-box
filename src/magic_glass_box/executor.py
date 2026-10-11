@@ -17,6 +17,7 @@ from .gateway import (
     GATEWAY_FILE_NAMES,
     GATEWAY_WRITABLE_NAMES,
 )
+from .runtime import RuntimeLaunch
 
 RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -30,6 +31,14 @@ MANAGED_LABEL = "io.magicglassbox.managed"
 RUN_ID_LABEL = "io.magicglassbox.run-id"
 LEGACY_MANAGED_LABEL = "io.hexadecapus.managed"
 LEGACY_RUN_ID_LABEL = "io.hexadecapus.run-id"
+RESERVED_RUNTIME_ENVIRONMENT = {
+    "CI",
+    "HOME",
+    "KRAB_TOKEN_FILE",
+    "MAGIC_GLASS_BOX_CREDENTIAL_DIR",
+    "MAGIC_GLASS_BOX_GATEWAY_DIR",
+    "MAGIC_GLASS_BOX_RUN_ID",
+}
 
 
 class ExecutionError(RuntimeError):
@@ -92,6 +101,7 @@ class SandboxRequest:
     run_id: str
     profile: AgentProfileSpec
     workspace: Path
+    launch: RuntimeLaunch
     credential_files: Mapping[str, Path] = field(default_factory=dict)
     gateway_directory: Path | None = None
 
@@ -116,6 +126,7 @@ class SandboxResult:
     container_name: str
     image_id: str
     exit_code: int
+    stdout: str = ""
 
 
 def _workspace_path(path: Path, *, writable: bool, uid: int) -> Path:
@@ -242,6 +253,15 @@ def build_sandbox_plan(
             raise ExecutionError(
                 "credential set does not match the pinned agent profile"
             )
+    runtime_environment = dict(request.launch.environment)
+    reserved_environment = set(runtime_environment).intersection(
+        RESERVED_RUNTIME_ENVIRONMENT
+    )
+    if reserved_environment:
+        raise ExecutionError(
+            "runtime adapter cannot override reserved environment: "
+            + ", ".join(sorted(reserved_environment))
+        )
 
     policy = limits or DockerLimits()
     workspace = _workspace_path(
@@ -320,6 +340,8 @@ def build_sandbox_plan(
         "--env",
         f"MAGIC_GLASS_BOX_RUN_ID={request.run_id}",
     ]
+    for name in sorted(runtime_environment):
+        args.extend(("--env", f"{name}={runtime_environment[name]}"))
     if gateway is not None:
         args.extend(("--env", f"MAGIC_GLASS_BOX_GATEWAY_DIR={CONTAINER_GATEWAY_ROOT}"))
     elif credentials:
@@ -356,8 +378,8 @@ def build_sandbox_plan(
                 ),
             )
         )
-    args.extend(("--entrypoint", request.profile.command[0], image.image_id))
-    args.extend(request.profile.command[1:])
+    args.extend(("--entrypoint", request.launch.command[0], image.image_id))
+    args.extend(request.launch.command[1:])
     return SandboxPlan(
         run_id=request.run_id,
         container_name=container_name,
@@ -375,6 +397,8 @@ class DockerEngine(Protocol):
 
     def wait(self, container_id: str) -> int: ...
 
+    def logs(self, container_id: str) -> str: ...
+
     def stop(self, container_id: str) -> None: ...
 
     def remove(self, container_id: str) -> None: ...
@@ -383,8 +407,6 @@ class DockerEngine(Protocol):
 
 
 class DockerExecutor:
-    runtime_adapter = "docker"
-
     def __init__(
         self,
         engine: DockerEngine,
@@ -423,6 +445,7 @@ class DockerExecutor:
                 before_start(plan, container_id)
             self.engine.start(container_id)
             exit_code = self.engine.wait(container_id)
+            stdout = self.engine.logs(container_id)
         except BaseException as exc:
             try:
                 self.engine.remove(container_id)
@@ -435,6 +458,7 @@ class DockerExecutor:
             container_name=plan.container_name,
             image_id=image.image_id,
             exit_code=exit_code,
+            stdout=stdout,
         )
 
     def cleanup_run(self, run_id: str) -> int:
@@ -579,6 +603,9 @@ class DockerCLI:
         if not 0 <= exit_code <= 255:
             raise ExecutionError("Docker returned an invalid container exit code")
         return exit_code
+
+    def logs(self, container_id: str) -> str:
+        return self._run(("container", "logs", container_id))
 
     def stop(self, container_id: str) -> None:
         self._run(("container", "stop", container_id))

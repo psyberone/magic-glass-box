@@ -17,6 +17,7 @@ from .domain import (
 from .executor import SandboxPlan, SandboxRequest, SandboxResult
 from .gateway import GatewayEndpoint
 from .results import CapturedResult
+from .runtime import RuntimeAdapterRegistry, default_runtime_adapters
 from .workspace import PreparedWorkspace
 
 
@@ -25,8 +26,6 @@ class RunOrchestrationError(RuntimeError):
 
 
 class SandboxExecutor(Protocol):
-    runtime_adapter: str
-
     def execute(
         self,
         request: SandboxRequest,
@@ -160,6 +159,7 @@ class RunCoordinator:
         orchestrator_id: str | None = None,
         lease_seconds: int = 60,
         heartbeat_interval: float = 15.0,
+        runtime_adapters: RuntimeAdapterRegistry | None = None,
     ):
         if (
             isinstance(lease_seconds, bool)
@@ -187,20 +187,32 @@ class RunCoordinator:
         )
         self.lease_seconds = lease_seconds
         self.heartbeat_interval = float(heartbeat_interval)
+        self.runtime_adapters = runtime_adapters or RuntimeAdapterRegistry(
+            default_runtime_adapters()
+        )
 
-    def execute(self, run_id: str) -> dict[str, Any]:
+    def execute(
+        self,
+        run_id: str,
+        *,
+        runtime_adapter: str | None = None,
+    ) -> dict[str, Any]:
         inputs = self.database.get_run_execution(run_id)
         if inputs["state"] != RunState.QUEUED.value:
             raise RunOrchestrationError(f"run is not queued: {inputs['state']}")
-        runtime_adapter = getattr(self.executor, "runtime_adapter", None)
-        if not isinstance(runtime_adapter, str):
-            raise RunOrchestrationError(
-                "sandbox executor has no runtime adapter identity"
-            )
+        raw_profile = inputs["profile"]
+        configured_adapter = (
+            raw_profile.get("runtime_adapter", "command")
+            if isinstance(raw_profile, Mapping)
+            else "command"
+        )
+        adapter_name = self.runtime_adapters.require(
+            runtime_adapter or configured_adapter
+        )
         try:
             attempt = self.database.begin_run_attempt(
                 run_id,
-                runtime_adapter=runtime_adapter,
+                runtime_adapter=adapter_name,
                 owner_id=self.orchestrator_id,
                 expected_run_version=inputs["version"],
                 lease_seconds=self.lease_seconds,
@@ -227,6 +239,7 @@ class RunCoordinator:
             try:
                 context = ProjectContext.from_mapping(inputs["context"])
                 profile = AgentProfileSpec.from_mapping(inputs["profile"])
+                launch = self.runtime_adapters.launch(adapter_name, profile.command)
                 if context.repository_path is None:
                     raise RunOrchestrationError(
                         "pinned project context has no repository path"
@@ -261,6 +274,7 @@ class RunCoordinator:
                     run_id=run_id,
                     profile=profile,
                     workspace=prepared.path,
+                    launch=launch,
                     credential_files=credentials,
                     gateway_directory=gateway_directory,
                 )
@@ -292,6 +306,11 @@ class RunCoordinator:
                     raise RunOrchestrationError(
                         "sandbox executor returned inconsistent container identity"
                     )
+                completion = self.runtime_adapters.complete(
+                    adapter_name,
+                    exit_code=result.exit_code,
+                    stdout=result.stdout,
+                )
             except Exception as exc:
                 self._abort(
                     run_id,
@@ -329,7 +348,7 @@ class RunCoordinator:
                 self.database.complete_run_attempt(
                     running_attempt["id"],
                     expected_attempt_version=current_attempt["version"],
-                    exit_code=result.exit_code,
+                    exit_code=completion.exit_code,
                     image_id=result.image_id,
                 )
             except Exception as exc:

@@ -27,6 +27,7 @@ from magic_glass_box.domain import (
 from magic_glass_box.executor import DockerCLI, DockerExecutor, SandboxRequest
 from magic_glass_box.gateway import FileGatewayManager
 from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.runtime import RuntimeLaunch
 from magic_glass_box.service import ControlPlane
 
 AGENT_PROGRAM = r"""
@@ -330,6 +331,7 @@ def main() -> int:
                         run_id=run_id,
                         profile=pinned_profile,
                         workspace=workspace,
+                        launch=RuntimeLaunch(pinned_profile.command),
                         credential_files={},
                         gateway_directory=endpoint.directory,
                     )
