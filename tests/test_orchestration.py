@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from magic_glass_box.credentials import PrivateFileCredentialResolver
-from magic_glass_box.db import Database
+from magic_glass_box.db import Database, StorageError
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -24,7 +25,11 @@ from magic_glass_box.domain import (
 from magic_glass_box.executor import SandboxPlan, SandboxRequest, SandboxResult
 from magic_glass_box.gateway import GatewayEndpoint
 from magic_glass_box.krab import KrabIdentity
-from magic_glass_box.orchestration import RunCoordinator, RunOrchestrationError
+from magic_glass_box.orchestration import (
+    RunCoordinator,
+    RunOrchestrationError,
+    _AttemptLeaseMonitor,
+)
 from magic_glass_box.results import CapturedResult, ResultManifest
 from magic_glass_box.runtime import RuntimeAdapterError, RuntimeLaunch
 from magic_glass_box.service import ControlPlane
@@ -641,7 +646,7 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.database.get_run(run["id"])["state"], "preparing")
         self.assertEqual(self.workspaces.cleanup_calls, [run["id"]])
 
-    def test_result_capture_failure_retains_workspace_for_expired_lease_recovery(
+    def test_result_capture_failure_terminalizes_without_discarding_workspace(
         self,
     ) -> None:
         run = self.create_run()
@@ -651,13 +656,16 @@ class RunCoordinatorTests(unittest.TestCase):
             self.coordinator.execute(run["id"])
 
         active = self.database.get_run(run["id"])
-        self.assertEqual(active["state"], "running")
+        self.assertEqual(active["state"], "failed")
+        self.assertEqual(active["attempts"][0]["state"], "failed")
+        self.assertIn("result capture failed", active["attempts"][0]["reason"])
+        self.assertIsNone(active["attempts"][0]["result"])
         self.assertTrue((self.workspaces.root / run["id"]).exists())
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
         self.assertEqual(self.workspaces.cleanup_calls, [])
 
-    def test_executor_failure_and_capture_failure_retain_recoverable_workspace(
+    def test_executor_and_capture_failure_terminalize_with_recoverable_workspace(
         self,
     ) -> None:
         run = self.create_run()
@@ -669,12 +677,53 @@ class RunCoordinatorTests(unittest.TestCase):
             self.coordinator.execute(run["id"])
 
         active = self.database.get_run(run["id"])
-        self.assertEqual(active["state"], "running")
+        self.assertEqual(active["state"], "failed")
+        self.assertEqual(active["attempts"][0]["state"], "failed")
         self.assertIsNone(active["attempts"][0]["result"])
         self.assertTrue((self.workspaces.root / run["id"]).exists())
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
         self.assertEqual(self.workspaces.cleanup_calls, [])
+
+    def test_reconcile_terminalizes_an_expired_attempt_when_capture_is_impossible(
+        self,
+    ) -> None:
+        run = self.create_run()
+        attempt = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="command",
+            owner_id="orchestrator-crashed",
+            expected_run_version=run["version"],
+        )
+        running = self.database.start_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            expected_run_version=attempt["run_version"],
+            source_revision=COMMIT,
+            container_id=CONTAINER_ID,
+            container_name="magic-glass-box-crashed",
+            image_id=IMAGE_ID,
+        )
+        workspace = self.workspaces.root / run["id"]
+        workspace.mkdir(mode=0o700)
+        self.results.stage(running["id"], workspace, COMMIT)
+        self.results.capture_error = RuntimeError("too many paths")
+        connection = self.database.connect()
+        connection.execute(
+            "UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?",
+            ("2000-01-01T00:00:00.000000+00:00", running["id"]),
+        )
+        connection.commit()
+        connection.close()
+
+        reconciled = self.coordinator.reconcile()
+
+        self.assertEqual([item["id"] for item in reconciled], [run["id"]])
+        failed = self.database.get_run(run["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["attempts"][0]["state"], "interrupted")
+        self.assertIsNone(failed["attempts"][0]["result"])
+        self.assertTrue(workspace.exists())
 
     def test_cancel_request_stops_the_owned_container_before_terminal_state(
         self,
@@ -738,6 +787,164 @@ class RunCoordinatorTests(unittest.TestCase):
 
         self.assertEqual(cancelled["state"], "cancelled")
         self.assertEqual(self.executor.stop_calls, [run["id"], run["id"]])
+
+    def test_lease_monitor_recovers_from_one_transient_storage_failure(self) -> None:
+        renewed = threading.Event()
+
+        class FlakyLeaseDatabase:
+            calls = 0
+
+            def renew_run_attempt_lease(
+                self,
+                attempt_id: str,
+                *,
+                owner_id: str,
+                lease_seconds: int,
+            ) -> dict[str, object]:
+                self.calls += 1
+                if self.calls == 1:
+                    raise StorageError("database operation failed")
+                renewed.set()
+                return {"cancel_requested": False}
+
+        monitor = _AttemptLeaseMonitor(
+            FlakyLeaseDatabase(),  # type: ignore[arg-type]
+            self.executor,
+            attempt_id="att_" + "a" * 32,
+            run_id="run_" + "b" * 32,
+            owner_id="orchestrator-monitor-test",
+            lease_seconds=60,
+            interval=0.01,
+        )
+
+        monitor.start()
+        self.assertTrue(renewed.wait(timeout=1))
+        monitor.close()
+        monitor.check()
+        self.assertEqual(self.executor.stop_calls, [])
+
+    def test_successful_lease_pulse_uses_a_conservative_local_deadline(self) -> None:
+        class LeaseDatabase:
+            def renew_run_attempt_lease(
+                self,
+                attempt_id: str,
+                *,
+                owner_id: str,
+                lease_seconds: int,
+            ) -> dict[str, object]:
+                return {"cancel_requested": False}
+
+        with mock.patch(
+            "magic_glass_box.orchestration.time.monotonic",
+            side_effect=(100.0, 105.0),
+        ):
+            monitor = _AttemptLeaseMonitor(
+                LeaseDatabase(),  # type: ignore[arg-type]
+                self.executor,
+                attempt_id="att_" + "a" * 32,
+                run_id="run_" + "b" * 32,
+                owner_id="orchestrator-monitor-test",
+                lease_seconds=60,
+                interval=15,
+            )
+            monitor.pulse()
+
+        self.assertEqual(monitor._lease_deadline, 165.0)
+
+    def test_lease_monitor_stops_before_a_storage_outage_can_expire_ownership(
+        self,
+    ) -> None:
+        class LockedLeaseDatabase:
+            def renew_run_attempt_lease(
+                self,
+                attempt_id: str,
+                *,
+                owner_id: str,
+                lease_seconds: int,
+            ) -> dict[str, object]:
+                raise StorageError("database operation failed")
+
+        monitor = _AttemptLeaseMonitor(
+            LockedLeaseDatabase(),  # type: ignore[arg-type]
+            self.executor,
+            attempt_id="att_" + "a" * 32,
+            run_id="run_" + "b" * 32,
+            owner_id="orchestrator-monitor-test",
+            lease_seconds=60,
+            interval=0.01,
+        )
+        monitor._lease_deadline = time.monotonic() + 4.0
+
+        monitor.start()
+        self.assertTrue(self.executor.stopped.wait(timeout=1))
+        monitor.close()
+
+        with self.assertRaisesRegex(RunOrchestrationError, "ownership monitor failed"):
+            monitor.check()
+
+    def test_pre_capture_lease_failure_still_retains_a_result(self) -> None:
+        run = self.create_run()
+
+        class FailedPulseMonitor:
+            def start(self) -> None:
+                return None
+
+            def pulse(self) -> None:
+                raise StorageError("database operation failed")
+
+            def check(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        with (
+            mock.patch(
+                "magic_glass_box.orchestration._AttemptLeaseMonitor",
+                return_value=FailedPulseMonitor(),
+            ),
+            self.assertRaisesRegex(RunOrchestrationError, "execution failed"),
+        ):
+            self.coordinator.execute(run["id"])
+
+        failed = self.database.get_run(run["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIsNotNone(failed["attempts"][0]["result"])
+        self.assertFalse((self.workspaces.root / run["id"]).exists())
+
+    def test_post_capture_lease_failure_preserves_the_recorded_result(self) -> None:
+        run = self.create_run()
+
+        class FailedCheckMonitor:
+            checks = 0
+
+            def start(self) -> None:
+                return None
+
+            def pulse(self) -> None:
+                return None
+
+            def check(self) -> None:
+                self.checks += 1
+                if self.checks == 2:
+                    raise RunOrchestrationError("ownership monitor failed")
+
+            def close(self) -> None:
+                return None
+
+        with (
+            mock.patch(
+                "magic_glass_box.orchestration._AttemptLeaseMonitor",
+                return_value=FailedCheckMonitor(),
+            ),
+            self.assertRaisesRegex(RunOrchestrationError, "execution failed"),
+        ):
+            self.coordinator.execute(run["id"])
+
+        failed = self.database.get_run(run["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIsNotNone(failed["attempts"][0]["result"])
+        self.assertFalse((self.workspaces.root / run["id"]).exists())
 
     def test_all_cleanup_boundaries_are_attempted_and_reported(self) -> None:
         run = self.create_run()

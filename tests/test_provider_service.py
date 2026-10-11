@@ -11,6 +11,7 @@ from magic_glass_box.db import ConflictError, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
+    InteractionKind,
     ProjectContext,
     ProviderGrantSpec,
     RunState,
@@ -86,6 +87,7 @@ class ProviderServiceTests(unittest.TestCase):
             instance["id"],
             KrabIdentity("usr_" + "1" * 32, "agent_one", 1),
             "file:/private/krab-agent-one",
+            user_id=self.user["id"],
         )
         self.database.create_project(
             instance_id=instance["id"],
@@ -134,23 +136,33 @@ class ProviderServiceTests(unittest.TestCase):
             created_by=self.user["id"],
         )
 
-    def create_run(self, *, running: bool = True) -> dict[str, object]:
+    def create_run(
+        self, *, running: bool = True, session_id: str | None = None
+    ) -> dict[str, object]:
         run = self.database.create_run(
             project_key="box-project",
             profile_name="Provider Worker",
             work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
+            krab_session_id=session_id,
         )
         if running:
-            preparing = self.database.transition_run(
-                str(run["id"]), target=RunState.PREPARING, expected_version=1
-            )
-            run = self.database.transition_run(
+            attempt = self.database.begin_run_attempt(
                 str(run["id"]),
-                target=RunState.RUNNING,
-                expected_version=int(preparing["version"]),
-                source_revision="abc123",
+                runtime_adapter="codex",
+                owner_id="orchestrator-provider-test",
+                expected_run_version=int(run["version"]),
             )
+            self.database.start_run_attempt(
+                str(attempt["id"]),
+                expected_attempt_version=int(attempt["version"]),
+                expected_run_version=int(attempt["run_version"]),
+                source_revision="abc123",
+                container_id="b" * 64,
+                container_name="magic-glass-box-provider-test",
+                image_id="sha256:" + "a" * 64,
+            )
+            run = self.database.get_run(str(run["id"]))
         return run
 
     def test_add_and_invoke_keep_secret_transient_and_audit_only_metadata(self) -> None:
@@ -202,6 +214,83 @@ class ProviderServiceTests(unittest.TestCase):
                 str(running["id"]),
                 grant_name="example-main",
                 request={"input": "hello"},
+            )
+        self.assertEqual(self.adapter.calls, [])
+
+    def test_waiting_run_keeps_provider_authority_only_for_its_live_attempt(
+        self,
+    ) -> None:
+        run = self.create_run(running=False, session_id="ses_" + "8" * 32)
+        attempt = self.database.begin_run_attempt(
+            str(run["id"]),
+            runtime_adapter="codex",
+            owner_id="orchestrator-provider-test",
+            expected_run_version=int(run["version"]),
+        )
+        running = self.database.start_run_attempt(
+            str(attempt["id"]),
+            expected_attempt_version=int(attempt["version"]),
+            expected_run_version=int(attempt["run_version"]),
+            source_revision="abc123",
+            container_id="b" * 64,
+            container_name="magic-glass-box-provider-test",
+            image_id="sha256:" + "a" * 64,
+        )
+        self.database.open_interaction(
+            str(run["id"]),
+            kind=InteractionKind.QUESTION,
+            recipient_krab_identity_id=str(self.identity["id"]),
+            request_item_id="itm_" + "9" * 32,
+            expected_run_version=int(running["run_version"]),
+        )
+
+        accepted = self.control.invoke_provider(
+            str(run["id"]),
+            grant_name="example-main",
+            request={"input": "submit the durable handoff"},
+        )
+
+        self.assertEqual(accepted.model, "bounded-model")
+        self.assertEqual(len(self.adapter.calls), 1)
+
+    def test_running_state_without_a_live_attempt_has_no_provider_authority(
+        self,
+    ) -> None:
+        run = self.database.create_run(
+            project_key="box-project",
+            profile_name="Provider Worker",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+        )
+        preparing = self.database.transition_run(
+            str(run["id"]), target=RunState.PREPARING, expected_version=1
+        )
+        running = self.database.transition_run(
+            str(run["id"]),
+            target=RunState.RUNNING,
+            expected_version=int(preparing["version"]),
+            source_revision="abc123",
+        )
+
+        with self.assertRaisesRegex(ConflictError, "run is not running"):
+            self.control.invoke_provider(
+                str(running["id"]),
+                grant_name="example-main",
+                request={"input": "must remain denied"},
+            )
+
+        self.assertEqual(self.adapter.calls, [])
+
+        waiting = self.database.transition_run(
+            str(running["id"]),
+            target=RunState.WAITING_FOR_INPUT,
+            expected_version=int(running["version"]),
+        )
+        with self.assertRaisesRegex(ConflictError, "run is not running"):
+            self.control.invoke_provider(
+                str(waiting["id"]),
+                grant_name="example-main",
+                request={"input": "must remain denied"},
             )
         self.assertEqual(self.adapter.calls, [])
 

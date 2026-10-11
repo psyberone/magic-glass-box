@@ -15,3 +15,7 @@ docs/internal/
 *.db
 *.db-shm
 *.db-wal
+# panopticon run artifacts (--setup #485)
+.panopticon/*
+.claude/settings.local.json
+panopticon.yml.draft

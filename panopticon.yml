@@ -1,0 +1,106 @@
+# panopticon.yml -- reviewed and committed like any other linter config.
+# groups: match/tests/panels/exclude, gitignore-flavored globs; first
+# matching group wins. A group whose keys are names (no match:) is a
+# parent; its subgroups are its layers and roll up to it in the report.
+# settings: max_per_group (8-48) / max_groups (4-64) / include_fixtures;
+# gate keys only tighten the review, operator flags are refused.
+version: 1
+groups:
+  AI:
+    match:
+    - src/magic_glass_box/runtime.py
+    - src/magic_glass_box/provider.py
+    - src/magic_glass_box/gateway.py
+    - src/magic_glass_box/worker_transport.py
+    - examples/provider-policy.json
+    - examples/anthropic-provider-policy.json
+    - scripts/check_live_gateway.py
+    - scripts/check_live_provider_gateway.py
+    - scripts/check_live_runtime_adapters.py
+    tests:
+    - tests/test_runtime.py
+    - tests/test_provider.py
+    - tests/test_provider_service.py
+    - tests/test_provider_grants.py
+    - tests/test_gateway.py
+    - tests/test_worker_transport.py
+    - tests/test_live_runtime_adapters.py
+    panels:
+    - ARC
+    - SEC
+  SandboxExecution:
+    match:
+    - src/magic_glass_box/orchestration.py
+    - src/magic_glass_box/executor.py
+    - src/magic_glass_box/workspace.py
+    - src/magic_glass_box/results.py
+    - src/magic_glass_box/storage/runs.py
+    - src/magic_glass_box/storage/attempts.py
+    - src/magic_glass_box/storage/artifacts.py
+    tests:
+    - tests/test_orchestration.py
+    - tests/test_executor.py
+    - tests/test_workspace.py
+    - tests/test_results.py
+    - tests/test_attempts.py
+    panels:
+    - ARC
+    - DAT
+    - SEC
+  Admin:
+    match:
+    - src/magic_glass_box/cli.py
+    - src/magic_glass_box/__main__.py
+    - src/magic_glass_box/control_room.py
+    - src/magic_glass_box/control_room_web.py
+    tests:
+    - tests/test_cli.py
+    - tests/test_control_room.py
+    - tests/test_control_room_web.py
+    - tests/test_operator_actions.py
+    panels:
+    - SEC
+    - ACC
+    - OPS
+  Platform:
+    match:
+    - src/magic_glass_box/__init__.py
+    - src/magic_glass_box/domain.py
+    - src/magic_glass_box/service.py
+    - src/magic_glass_box/credentials.py
+    - src/magic_glass_box/krab.py
+    - src/magic_glass_box/db.py
+    - src/magic_glass_box/storage/__init__.py
+    - src/magic_glass_box/storage/core.py
+    - src/magic_glass_box/storage/schema.py
+    - src/magic_glass_box/storage/errors.py
+    - src/magic_glass_box/storage/queries.py
+    - src/magic_glass_box/storage/catalog.py
+    - src/magic_glass_box/storage/interactions.py
+    - src/magic_glass_box/storage/work_items.py
+    - src/magic_glass_box/storage/work.py
+    - schemas/**
+    - examples/project-context.json
+    - examples/agent-profile.json
+    - examples/work-item.json
+    - examples/work-log-entry.json
+    - examples/work-memory-checkpoint.json
+    - examples/work-assignment.json
+    - examples/handoff.json
+    - scripts/check_live_krab_transport.py
+    - scripts/check_mutation_score.py
+    tests:
+    - tests/test_domain.py
+    - tests/test_db.py
+    - tests/test_service.py
+    - tests/test_credentials.py
+    - tests/test_krab.py
+    - tests/test_interactions.py
+    - tests/test_interaction_transport.py
+    - tests/test_work_items.py
+    - tests/test_work_memory.py
+    - tests/test_schema_contracts.py
+    - tests/test_quality_gate.py
+    panels:
+    - OPS
+    - SEC

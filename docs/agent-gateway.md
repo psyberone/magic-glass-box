@@ -183,11 +183,21 @@ Payload:
 
 The grant must be named by the pinned profile. The payload has no run ID,
 destination, method, credential, or worker-selected model. The orchestrator
-checks run state and grant revocation/expiry, resolves the external credential
-reference, injects the pinned model, and applies the grant's byte, timeout, and
-concurrency limits. The JSON object response is transient and explicitly
-untrusted. Only status, byte counts, outcome, error category, timestamps, and
-grant/run IDs are durable. See [provider-broker.md](provider-broker.md).
+requires a live `running` attempt and permits the enclosing run to be either
+`running` or `waiting_for_input`. The latter keeps a worker alive just long
+enough to submit its handoff after opening a question; a parked run with no
+live attempt has no provider authority. The orchestrator then checks grant
+revocation/expiry, resolves the external credential reference, injects the
+pinned model, and applies the grant's byte, timeout, and concurrency limits.
+The JSON object response is transient and explicitly untrusted. Only status,
+byte counts, outcome, error category, timestamps, and grant/run IDs are
+durable. See [provider-broker.md](provider-broker.md).
+
+Normal mailbox operations retain a worker-side deadline. A provider exchange
+waits for the trusted host result because the grant's outbound timeout and run
+cancellation are the authoritative bounds. Closing a gateway detaches from an
+in-flight provider handler immediately; cleanup does not wait for a blocked
+upstream operation, and the handler cannot publish into the removed mailbox.
 
 ## Resume and recovery
 

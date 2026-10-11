@@ -827,6 +827,20 @@ class _FileGatewayChannel:
         _write_all(self.directory / GATEWAY_RESPONSE_NAME, encoded)
         _write_all(self.directory / GATEWAY_RESPONSE_READY_NAME, marker.encode())
 
+    def _handle_request(
+        self,
+        request: dict[str, Any],
+        responses: list[dict[str, Any]],
+        failures: list[BaseException],
+        finished: threading.Event,
+    ) -> None:
+        try:
+            responses.append(self.gateway.handle(request))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
     def serve(self) -> None:
         last_marker = b""
         last_sequence = 0
@@ -894,9 +908,30 @@ class _FileGatewayChannel:
                 pending_marker = b""
                 try:
                     request = _strict_request(request_raw)
-                    response = self.gateway.handle(request)
                 except _RequestFailure as exc:
                     response = self.gateway._failure(None, exc.code, str(exc))
+                else:
+                    responses: list[dict[str, Any]] = []
+                    failures: list[BaseException] = []
+                    finished = threading.Event()
+
+                    operation = threading.Thread(
+                        target=self._handle_request,
+                        args=(request, responses, failures, finished),
+                        name="magic-glass-box-gateway-operation",
+                        daemon=True,
+                    )
+                    operation.start()
+                    while not finished.wait(self.poll_interval):
+                        if self.stop_event.is_set():
+                            return
+                    if self.stop_event.is_set():
+                        return
+                    if failures:
+                        raise failures[0]
+                    if len(responses) != 1:
+                        raise GatewayError("gateway operation returned no response")
+                    response = responses[0]
                 self._publish(marker.sequence, response)
                 last_sequence = marker.sequence
                 last_marker = marker_raw

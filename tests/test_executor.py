@@ -1152,6 +1152,16 @@ class DockerCLITests(unittest.TestCase):
                 with self.assertRaisesRegex(ExecutionError, expected):
                     self.client.start(CONTAINER_ID)
 
+    def test_verbose_container_logs_use_the_separate_rotated_log_limit(self) -> None:
+        verbose = "x" * (2 * 1024 * 1024)
+        self.runner.return_value = self.completed(verbose)
+
+        self.assertEqual(self.client.logs(CONTAINER_ID), verbose)
+
+        self.runner.return_value = self.completed("x" * (24 * 1024 * 1024 + 1))
+        with self.assertRaisesRegex(ExecutionError, "size limit"):
+            self.client.logs(CONTAINER_ID)
+
     def test_cli_wraps_missing_binary_and_timeout_without_leaking_arguments(
         self,
     ) -> None:

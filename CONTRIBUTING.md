@@ -37,3 +37,22 @@ have a literal kill rate of at least **80%**: `killed / total`. Untested,
 skipped, suspicious, timed-out, and surviving mutants therefore lower the
 score. Equivalent mutants should be documented and excluded narrowly in code;
 do not weaken the project-wide threshold.
+
+## End-of-phase review gate
+
+A milestone is not complete when its implementation first goes green. At the
+end of each phase:
+
+1. Run the quality, mutation, and applicable live-proof gates.
+2. Freeze the candidate at one exact Git commit.
+3. Have an independent reviewer inspect the whole milestone scope at that
+   commit, including its architecture, security boundaries, failure behavior,
+   and tests.
+4. Treat unresolved severity 0 or severity 1 findings as release blockers.
+   Record any deliberately accepted lower-severity findings and their rationale.
+5. Start fixes with a RED regression test, rerun the affected gates, and review
+   the resulting commit again before marking the milestone complete.
+
+Review working notes belong in the ignored `docs/internal/` directory. The
+tracked product and contributor documentation must still contain every durable
+decision needed to understand or verify the shipped behavior.

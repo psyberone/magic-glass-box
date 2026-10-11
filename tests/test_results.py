@@ -3,9 +3,15 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
-from magic_glass_box.results import ResultError, WorkspaceResultStore
+from magic_glass_box.results import (
+    ResultError,
+    WorkspaceResultStore,
+    _PinnedIgnoreRules,
+)
 
 ATTEMPT_ID = "att_" + "1" * 32
 COMMIT = "a" * 40
@@ -131,6 +137,123 @@ class WorkspaceResultStoreTests(unittest.TestCase):
                     message = "too many paths"
                 with self.assertRaisesRegex(ResultError, message):
                     store.capture(attempt_id, workspace)
+
+    def test_capture_uses_pinned_gitignore_without_hiding_tracked_work(self) -> None:
+        workspace = self.root / "ignored-workspace"
+        workspace.mkdir(mode=0o700)
+        (workspace / ".gitignore").write_text(
+            "node_modules/\ngenerated/\n", encoding="utf-8"
+        )
+        generated = workspace / "generated"
+        generated.mkdir()
+        (generated / "tracked.txt").write_text("before\n", encoding="utf-8")
+        store = WorkspaceResultStore(self.root / "ignored-results", max_paths=6)
+        attempt_id = "att_" + "8" * 32
+        store.stage(attempt_id, workspace, COMMIT)
+
+        # A worker cannot change the ignore policy after its baseline is pinned.
+        (workspace / ".gitignore").write_text("*\n", encoding="utf-8")
+        (workspace / "kept.txt").write_text("work product\n", encoding="utf-8")
+        (generated / "tracked.txt").write_text("after\n", encoding="utf-8")
+        (generated / "cache.bin").write_bytes(b"ignored")
+        dependencies = workspace / "node_modules"
+        dependencies.mkdir()
+        for index in range(20):
+            (dependencies / f"dependency-{index}").write_text("ignored")
+
+        captured = store.capture(attempt_id, workspace)
+
+        self.assertEqual(
+            [change.path for change in captured.manifest.changes],
+            [".gitignore", "generated/tracked.txt", "kept.txt"],
+        )
+
+    def test_ignore_matching_batches_exact_tokens_at_the_byte_ceiling(self) -> None:
+        matcher = object.__new__(_PinnedIgnoreRules)
+        with (
+            mock.patch(
+                "magic_glass_box.results.MAX_IGNORE_BATCH_BYTES",
+                8,
+            ),
+            mock.patch.object(
+                matcher,
+                "_check_batch",
+                side_effect=({"abc"}, {"ghi"}),
+            ) as check_batch,
+        ):
+            ignored = matcher.ignored(
+                (("abc", False), ("def", False), ("ghi", True), ("jk", False))
+            )
+
+        self.assertEqual(ignored, {"abc", "ghi"})
+        self.assertEqual(
+            check_batch.call_args_list,
+            [
+                mock.call([("abc", "abc"), ("def", "def")]),
+                mock.call([("ghi", "ghi/"), ("jk", "jk")]),
+            ],
+        )
+
+    def test_pinned_ignore_files_enforce_the_combined_exact_byte_limit(self) -> None:
+        workspace = self.root / "ignore-limit-workspace"
+        workspace.mkdir(mode=0o700)
+        (workspace / ".gitignore").write_text("a\n", encoding="utf-8")
+        (workspace / "README.md").write_text("proof\n", encoding="utf-8")
+        nested = workspace / "nested"
+        nested.mkdir()
+        nested_ignore = nested / ".gitignore"
+        nested_ignore.write_text("b\n", encoding="utf-8")
+        store = WorkspaceResultStore(self.root / "ignore-limit-results")
+
+        with mock.patch("magic_glass_box.results.MAX_PINNED_IGNORE_BYTES", 4):
+            store.stage("att_" + "9" * 32, workspace, COMMIT)
+            nested_ignore.write_text("bc\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ResultError,
+                "^result ignore rules exceed the size limit$",
+            ):
+                store.stage("att_" + "a" * 32, workspace, COMMIT)
+
+    def test_pinned_ignore_read_requires_the_scanned_size_and_digest(self) -> None:
+        ignore_file = self.workspace / ".gitignore"
+        ignore_file.write_text("dependencies/\n", encoding="utf-8")
+        state = self.results._file_state(ignore_file, ".gitignore")
+
+        for expected in (
+            replace(state, size=state.size + 1 if state.size is not None else 1),
+            replace(state, sha256="0" * 64),
+        ):
+            with (
+                self.subTest(expected=expected),
+                self.assertRaisesRegex(
+                    ResultError,
+                    "^cannot pin result ignore rules: \\.gitignore$",
+                ),
+            ):
+                self.results._read_pinned_ignore(
+                    ignore_file,
+                    ".gitignore",
+                    expected,
+                )
+
+    def test_stage_rejects_an_ignore_file_swapped_after_scanning(self) -> None:
+        ignore_file = self.workspace / ".gitignore"
+        ignore_file.write_text("dependencies/\n", encoding="utf-8")
+        replacement = self.root / "replacement-ignore"
+        replacement.write_text("*\n", encoding="utf-8")
+        original_scan = self.results._scan
+
+        def scan_then_swap(*args: object, **kwargs: object) -> object:
+            states = original_scan(*args, **kwargs)  # type: ignore[arg-type]
+            ignore_file.unlink()
+            ignore_file.symlink_to(replacement)
+            return states
+
+        with (
+            mock.patch.object(self.results, "_scan", side_effect=scan_then_swap),
+            self.assertRaisesRegex(ResultError, "pin result ignore rules"),
+        ):
+            self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
 
     def test_inspect_detects_blob_and_manifest_tampering(self) -> None:
         self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)

@@ -167,22 +167,31 @@ class DatabaseCore:
         self, connection: sqlite3.Connection | None = None
     ) -> Iterator[sqlite3.Connection]:
         if connection is not None:
-            yield connection
+            try:
+                yield connection
+            except sqlite3.OperationalError as exc:
+                raise StorageError("database operation failed") from exc
             return
         with closing(self.connect()) as connection:
-            yield connection
+            try:
+                yield connection
+            except sqlite3.OperationalError as exc:
+                raise StorageError("database operation failed") from exc
 
     @contextmanager
     def _read_snapshot(self) -> Iterator[sqlite3.Connection]:
         with closing(self.connect()) as connection:
-            connection.execute("BEGIN")
             try:
-                yield connection
-            except Exception:
-                connection.rollback()
-                raise
-            else:
-                connection.commit()
+                connection.execute("BEGIN")
+                try:
+                    yield connection
+                except Exception:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+            except sqlite3.OperationalError as exc:
+                raise StorageError("database operation failed") from exc
 
     @staticmethod
     def _check_schema(connection: sqlite3.Connection) -> None:

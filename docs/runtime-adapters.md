@@ -68,12 +68,15 @@ override `HOME`, `CI`, run identity, credential paths, or the gateway path.
 Adapters cannot alter mounts, networking, resource limits, image identity, or
 workspace policy.
 
-`RuntimeCompletion` contains only an exit code. Docker stdout is capped at 1
-MiB, parsed in memory after the container exits, and discarded. It is never
-written to SQLite, a result manifest, a work log, or the control room. A
-non-zero process exit remains the outcome even if its output is malformed, so
-private error output is not parsed into a durable failure reason. A zero exit
-with a malformed or incomplete success envelope fails closed.
+`RuntimeCompletion` contains only an exit code. Runtime logs are capped at 24
+MiB at both the Docker read boundary and the adapter parser, parsed in memory
+after the container exits, and discarded. Docker itself retains no more than
+two rotating 10 MiB local log files. Ordinary Docker control commands keep a
+tighter 1 MiB output limit. Runtime output is never written to SQLite, a result
+manifest, a work log, or the control room. A non-zero process exit remains the
+outcome even if its output is malformed, so private error output is not parsed
+into a durable failure reason. A zero exit with a malformed or incomplete
+success envelope fails closed.
 
 `RuntimeAdapterRegistry` validates names, rejects duplicates and unknown
 selections, and validates every launch and completion value returned across
@@ -136,8 +139,12 @@ magic-glass-box-worker call work.read '{"after_sequence":null,"limit":16}'
 
 Independent bridge and tool processes serialize access with an advisory lock
 on the fixed request file. Sequence, size, digest, response correlation, and
-timeouts are verified on every exchange. The image remains incompatible if it
-contains only a stock vendor CLI and not this worker entry point.
+timeouts are verified on every exchange. Ordinary tool calls have a bounded
+worker-side mailbox deadline. Provider exchanges deliberately do not add a
+second worker deadline: the trusted grant's outbound timeout and run
+cancellation own that operation, so a valid long provider stream cannot lose a
+race to the mailbox client. The image remains incompatible if it contains only
+a stock vendor CLI and not this worker entry point.
 
 ## Live two-runtime proof
 
@@ -158,11 +165,19 @@ PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build
 ```
 
 The image pins Codex CLI and Claude Code versions and contains this package's
-worker entry point. The proof runs both CLIs through the real coordinator and
-Docker executor. A host-only provider fixture returns valid deterministic SSE;
-it is reached only by the trusted broker. The proof verifies both attempts and
-provider audits, Docker network policy `none`, absence of credential mounts,
-host-side credential injection, container cleanup, and that neither the
-credential nor transient model output entered SQLite. It therefore tests the
-runtime and protocol seam rather than a provider account, entitlement, quota,
-or model quality.
+worker entry point. The proof launches three real containers through the
+coordinator and Docker executor. The first Codex attempt creates one retained
+file plus a 64-file ignored dependency tree, opens a durable question through
+the gateway, submits a structured handoff, and exits. After the fixture accepts
+an answer, a clean replacement Codex attempt discovers the handoff with
+`run.describe`, reads the answer with `interaction.read`, and succeeds. A
+Claude Code attempt exercises the second adapter and vendor protocol.
+
+A host-only provider fixture returns valid deterministic SSE and is reached
+only by the trusted broker. The proof verifies the attempt and provider audit
+records, pinned-ignore result behavior under a deliberately tiny path ceiling,
+Docker network policy `none`, absence of credential mounts, host-side
+credential injection, container cleanup, and that credentials, private
+interaction content, and transient model output never entered SQLite. It
+therefore tests runtime replacement and protocol continuity rather than a
+provider account, entitlement, quota, or model quality.

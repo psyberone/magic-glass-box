@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -131,13 +132,70 @@ class FileGatewayClientTests(unittest.TestCase):
                 client.exchange("Bad Operation", {})
             with self.assertRaisesRegex(WorkerTransportError, "payload"):
                 client.exchange("run.describe", [])  # type: ignore[arg-type]
+            with self.assertRaisesRegex(WorkerTransportError, "timeout"):
+                client.exchange("run.describe", {}, timeout=0)
+            self.assertEqual((mailbox / "request.ready").read_bytes(), b"")
+
+            with mock.patch.object(
+                client,
+                "_wait_response",
+                return_value={"ok": True},
+            ) as wait_response:
+                self.assertEqual(
+                    client.exchange("run.describe", {}, timeout=300),
+                    {"ok": True},
+                )
+                wait_response.assert_called_once()
+                self.assertEqual(wait_response.call_args.args[2], 300.0)
+                committed = (mailbox / "request.ready").read_bytes()
+                with self.assertRaisesRegex(WorkerTransportError, "timeout"):
+                    client.exchange("run.describe", {}, timeout=300.1)
+            self.assertEqual((mailbox / "request.ready").read_bytes(), committed)
+
             with self.assertRaisesRegex(WorkerTransportError, "timed out"):
                 client.exchange("run.describe", {})
+
+    def test_provider_exchange_can_wait_for_the_host_owned_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            root = Path(temporary) / "gateway"
+            control = ProviderControl()
+            invoke = control.invoke_provider
+
+            def delayed_invoke(*args: Any, **kwargs: Any) -> AcceptedProviderResponse:
+                time.sleep(0.15)
+                return invoke(*args, **kwargs)
+
+            control.invoke_provider = delayed_invoke  # type: ignore[method-assign]
+            manager = FileGatewayManager(root, control, poll_interval=0.005)
+            try:
+                endpoint = manager.open(
+                    RUN_ID,
+                    capabilities=("provider.invoke",),
+                    credential_names=("openai-main",),
+                )
+                client = FileGatewayClient(endpoint.directory, timeout=0.1)
+
+                response = client.exchange(
+                    "provider.invoke",
+                    {
+                        "grant": "openai-main",
+                        "request": {
+                            "body": {"input": "slow"},
+                            "protocol": "openai-responses",
+                        },
+                    },
+                    timeout=None,
+                )
+
+                self.assertTrue(response["ok"])
+            finally:
+                manager.close()
 
 
 class RecordingGateway:
     def __init__(self, protocol: str):
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.timeouts: list[float | None] = []
         self.response: dict[str, Any] = {
             "version": 1,
             "request_id": "worker-response",
@@ -158,8 +216,15 @@ class RecordingGateway:
             },
         }
 
-    def exchange(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def exchange(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None = 30.0,
+    ) -> dict[str, Any]:
         self.calls.append((operation, payload))
+        self.timeouts.append(timeout)
         return self.response
 
 
@@ -205,6 +270,7 @@ class ProviderHTTPTransportTests(unittest.TestCase):
                 self.assertEqual(payload["grant"], "provider-main")
                 self.assertEqual(payload["request"]["protocol"], dialect)
                 self.assertNotIn("model", payload["request"]["body"])
+                self.assertIsNone(gateway.timeouts[0])
                 self.assertEqual(
                     payload["request"]["headers"],
                     {

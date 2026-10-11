@@ -93,6 +93,45 @@ class DatabaseTests(unittest.TestCase):
             timedelta(0),
         )
 
+    def test_sqlite_operational_failures_do_not_escape_the_storage_boundary(
+        self,
+    ) -> None:
+        lock = self.database.connect()
+        lock.execute("BEGIN IMMEDIATE")
+        original_connect = self.database.connect
+
+        def short_timeout_connect() -> sqlite3.Connection:
+            connection = original_connect()
+            connection.execute("PRAGMA busy_timeout = 1")
+            return connection
+
+        try:
+            with (
+                mock.patch.object(
+                    self.database,
+                    "connect",
+                    side_effect=short_timeout_connect,
+                ),
+                self.assertRaisesRegex(StorageError, "database operation failed"),
+            ):
+                self.database.create_user("contended", "Contended Writer")
+        finally:
+            lock.rollback()
+            lock.close()
+
+    def test_snapshot_transaction_failures_use_the_storage_error_boundary(self) -> None:
+        connection = mock.Mock()
+        connection.execute.side_effect = sqlite3.OperationalError("database is locked")
+
+        with (
+            mock.patch.object(self.database, "connect", return_value=connection),
+            self.assertRaisesRegex(StorageError, "database operation failed"),
+            self.database._read_snapshot(),
+        ):
+            self.fail("snapshot should not begin")
+
+        connection.close.assert_called_once_with()
+
     def test_get_krab_instance_validates_with_the_public_field_name(self) -> None:
         with self.assertRaises(ValidationError) as invalid:
             self.database.get_krab_instance("not/valid")

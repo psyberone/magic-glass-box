@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -979,6 +980,35 @@ class FileGatewayManagerTests(unittest.TestCase):
         self.assertTrue(self.manager.cleanup(RUN_ID))
         self.assertFalse(endpoint.directory.exists())
         self.assertFalse(self.manager.cleanup(RUN_ID))
+
+    def test_cleanup_detaches_from_an_in_flight_gateway_operation(self) -> None:
+        endpoint = self.manager.open(
+            RUN_ID,
+            capabilities=(GatewayCapability.RUN_DESCRIBE,),
+            credential_names=("krab",),
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        describe = self.control.database.get_run_execution
+
+        def blocked_describe(run_id: str) -> dict[str, Any]:
+            entered.set()
+            release.wait(timeout=10)
+            return describe(run_id)
+
+        self.control.database.get_run_execution = blocked_describe  # type: ignore[method-assign]
+        raw = (json.dumps(request("run.describe")) + "\n").encode()
+        self.commit(endpoint.directory, raw, sequence=1)
+        self.assertTrue(entered.wait(timeout=1))
+
+        started = time.monotonic()
+        try:
+            self.assertTrue(self.manager.cleanup(RUN_ID))
+        finally:
+            release.set()
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertFalse(endpoint.directory.exists())
 
     def test_malformed_oversized_and_duplicate_requests_are_bounded(self) -> None:
         endpoint = self.manager.open(

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import secrets
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from .db import ConflictError, Database
+from .db import ConflictError, Database, NotFoundError, StorageError
 from .domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -92,6 +93,7 @@ class _AttemptLeaseMonitor:
         self.lease_seconds = lease_seconds
         self.interval = interval
         self.failure: BaseException | None = None
+        self._lease_deadline = time.monotonic() + lease_seconds
         self._cancel_stopped = False
         self._closed = threading.Event()
         self._pulse_lock = threading.Lock()
@@ -108,26 +110,42 @@ class _AttemptLeaseMonitor:
         while not self._closed.is_set():
             try:
                 self.pulse()
+            except (ConflictError, NotFoundError) as exc:
+                self._stop_after_failure(exc)
+                return
+            except StorageError as exc:
+                remaining = self._lease_deadline - time.monotonic()
+                if remaining <= 5.0:
+                    self._stop_after_failure(exc)
+                    return
+                if self._closed.wait(min(1.0, self.interval, remaining - 5.0)):
+                    return
+                continue
             except BaseException as exc:
-                self.failure = exc
-                try:
-                    self.executor.stop_run(self.run_id)
-                except BaseException as stop_error:
-                    exc.add_note(
-                        "container stop after lease failure also failed: "
-                        f"{type(stop_error).__name__}: {stop_error}"
-                    )
+                self._stop_after_failure(exc)
                 return
             if self._closed.wait(self.interval):
                 return
 
+    def _stop_after_failure(self, exc: BaseException) -> None:
+        self.failure = exc
+        try:
+            self.executor.stop_run(self.run_id)
+        except BaseException as stop_error:
+            exc.add_note(
+                "container stop after lease failure also failed: "
+                f"{type(stop_error).__name__}: {stop_error}"
+            )
+
     def pulse(self) -> None:
         with self._pulse_lock:
+            renewal_started = time.monotonic()
             control = self.database.renew_run_attempt_lease(
                 self.attempt_id,
                 owner_id=self.owner_id,
                 lease_seconds=self.lease_seconds,
             )
+            self._lease_deadline = renewal_started + self.lease_seconds
             if control["cancel_requested"] and not self._cancel_stopped:
                 self._cancel_stopped = self.executor.stop_run(self.run_id) > 0
 
@@ -330,30 +348,77 @@ class RunCoordinator:
                     exc,
                     workspace=None if prepared is None else prepared.path,
                     capture_result=running_attempt is not None,
+                    monitor=monitor,
                 )
 
             try:
                 monitor.pulse()
                 monitor.check()
+            except Exception as exc:
+                self._abort(
+                    run_id,
+                    attempt["id"],
+                    exc,
+                    workspace=prepared.path,
+                    capture_result=True,
+                    monitor=monitor,
+                )
+
+            try:
                 self._capture_result(attempt["id"], prepared.path)
+            except Exception as exc:
+                monitor.close()
+                self._fail_uncaptured_attempt(
+                    run_id,
+                    attempt["id"],
+                    interrupted=False,
+                    include_executor=True,
+                )
+                error = RunOrchestrationError(
+                    "result capture incomplete; attempt failed without a result and "
+                    "workspace retained for manual recovery"
+                )
+                error.add_note(f"capture failed: {type(exc).__name__}")
+                raise error from exc
+
+            try:
                 monitor.check()
             except Exception as exc:
-                cleanup_failures = self._cleanup(run_id, include_workspace=False)
-                error = RunOrchestrationError(
-                    "result capture incomplete; workspace retained for recovery"
+                self._abort(
+                    run_id,
+                    attempt["id"],
+                    exc,
+                    workspace=prepared.path,
+                    capture_result=False,
+                    monitor=monitor,
                 )
-                for failure in cleanup_failures:
-                    error.add_note(
-                        f"cleanup failed: {type(failure).__name__}: {failure}"
-                    )
-                raise error from exc
 
             cleanup_failures = self._cleanup(run_id)
             if cleanup_failures:
                 self._raise_cleanup_incomplete(cleanup_failures)
-            monitor.check()
+            try:
+                monitor.check()
+            except Exception as exc:
+                self._abort(
+                    run_id,
+                    attempt["id"],
+                    exc,
+                    workspace=None,
+                    capture_result=False,
+                    monitor=monitor,
+                )
             monitor.close()
-            monitor.check()
+            try:
+                monitor.check()
+            except Exception as exc:
+                self._abort(
+                    run_id,
+                    attempt["id"],
+                    exc,
+                    workspace=None,
+                    capture_result=False,
+                    monitor=monitor,
+                )
 
             try:
                 current_attempt = self.database.get_run_attempt(running_attempt["id"])
@@ -442,6 +507,37 @@ class RunCoordinator:
         self.database.record_attempt_result(attempt_id, captured.manifest)
         self.result_store.discard_stage(attempt_id)
 
+    def _fail_uncaptured_attempt(
+        self,
+        run_id: str,
+        attempt_id: str,
+        *,
+        interrupted: bool,
+        include_executor: bool,
+    ) -> dict[str, Any]:
+        cleanup_failures = self._cleanup(
+            run_id,
+            include_executor=include_executor,
+            include_workspace=False,
+        )
+        if cleanup_failures:
+            error = RunOrchestrationError(
+                "result capture incomplete; cleanup is required before the attempt "
+                "can fail without a result"
+            )
+            for failure in cleanup_failures:
+                error.add_note(f"cleanup failed: {type(failure).__name__}: {failure}")
+            raise error
+        attempt = self.database.get_run_attempt(attempt_id)
+        if attempt["state"] not in {"preparing", "running"}:
+            return attempt
+        return self.database.fail_run_attempt(
+            attempt_id,
+            expected_attempt_version=attempt["version"],
+            reason="result capture failed; workspace retained for manual recovery",
+            interrupted=interrupted,
+        )
+
     def _abort(
         self,
         run_id: str,
@@ -450,6 +546,7 @@ class RunCoordinator:
         *,
         workspace: Path | None,
         capture_result: bool,
+        monitor: _AttemptLeaseMonitor,
     ) -> None:
         if workspace is not None:
             try:
@@ -458,20 +555,23 @@ class RunCoordinator:
                 else:
                     self.result_store.discard_stage(attempt_id)
             except Exception as exc:
-                cleanup_failures = self._cleanup(run_id, include_workspace=False)
+                monitor.close()
+                self._fail_uncaptured_attempt(
+                    run_id,
+                    attempt_id,
+                    interrupted=False,
+                    include_executor=True,
+                )
                 error = RunOrchestrationError(
-                    "result capture incomplete; workspace retained for recovery"
+                    "result capture incomplete; attempt failed without a result and "
+                    "workspace retained for manual recovery"
                     if capture_result
                     else "run cleanup incomplete; restart reconciliation is required"
                 )
                 error.add_note(
                     f"execution failed before cleanup: {type(cause).__name__}"
                 )
-                error.add_note(f"result staging failed: {type(exc).__name__}: {exc}")
-                for failure in cleanup_failures:
-                    error.add_note(
-                        f"cleanup failed: {type(failure).__name__}: {failure}"
-                    )
+                error.add_note(f"result staging failed: {type(exc).__name__}")
                 raise error from exc
         cleanup_failures = self._cleanup(run_id)
         if cleanup_failures:
@@ -479,6 +579,7 @@ class RunCoordinator:
                 self._raise_cleanup_incomplete(cleanup_failures)
             except RunOrchestrationError as error:
                 raise error from cause
+        monitor.close()
         attempt = self.database.get_run_attempt(attempt_id)
         if attempt["state"] in {
             "preparing",
@@ -527,7 +628,22 @@ class RunCoordinator:
                     and active_attempt["result"] is None
                     and workspace is not None
                 ):
-                    self._capture_result(active_attempt["id"], workspace)
+                    try:
+                        self._capture_result(active_attempt["id"], workspace)
+                    except Exception:
+                        self._fail_uncaptured_attempt(
+                            run_id,
+                            active_attempt["id"],
+                            interrupted=True,
+                            include_executor=False,
+                        )
+                        current = self.database.get_run(run_id)
+                        if current["state"] in {
+                            RunState.FAILED.value,
+                            RunState.CANCELLED.value,
+                        }:
+                            reconciled.append(current)
+                        continue
                 else:
                     self.result_store.discard_stage(active_attempt["id"])
                 cleanup_failures = self._cleanup(run_id, include_executor=False)

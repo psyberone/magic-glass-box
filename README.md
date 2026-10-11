@@ -218,8 +218,13 @@ PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
 Use `--image` to select another local, volume-free image with Python installed.
 
 The live runtime proof builds an intentionally narrow image with pinned Codex
-and Claude Code CLIs, then runs both through the real networkless Docker and
-provider-gateway path against a host-only deterministic protocol fixture:
+and Claude Code CLIs, then runs three real networkless containers through the
+Docker and provider-gateway path against a host-only deterministic protocol
+fixture. Codex opens a durable question, submits a structured handoff, exits,
+and is replaced after an answer; the replacement reads the durable context and
+finishes. The same proof verifies that a generated ignored dependency tree is
+excluded while the worker's retained file is captured, and Claude Code proves
+the second runtime seam:
 
 ```console
 PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build

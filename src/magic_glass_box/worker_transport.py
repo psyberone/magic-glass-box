@@ -38,6 +38,7 @@ TRANSPORT_PORT = 8766
 MAX_VENDOR_REQUEST_BYTES = 2 * 1024 * 1024
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+_DEFAULT_GATEWAY_TIMEOUT = object()
 
 
 class WorkerTransportError(RuntimeError):
@@ -45,7 +46,13 @@ class WorkerTransportError(RuntimeError):
 
 
 class GatewayClient(Protocol):
-    def exchange(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]: ...
+    def exchange(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]: ...
 
 
 def _strict_json(raw: bytes, *, subject: str, limit: int) -> Any:
@@ -215,11 +222,26 @@ class FileGatewayClient:
             raise WorkerTransportError("gateway mailbox sequence is exhausted")
         return sequence
 
-    def exchange(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def exchange(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None | object = _DEFAULT_GATEWAY_TIMEOUT,
+    ) -> dict[str, Any]:
         if not isinstance(operation, str) or OPERATION_RE.fullmatch(operation) is None:
             raise WorkerTransportError("gateway operation is invalid")
         if not isinstance(payload, dict):
             raise WorkerTransportError("gateway payload must be an object")
+        effective_timeout = (
+            self.timeout if timeout is _DEFAULT_GATEWAY_TIMEOUT else timeout
+        )
+        if effective_timeout is not None and (
+            isinstance(effective_timeout, bool)
+            or not isinstance(effective_timeout, (int, float))
+            or not 0.1 <= effective_timeout <= 300
+        ):
+            raise WorkerTransportError("gateway timeout is invalid")
         request_path = self.directory / GATEWAY_REQUEST_NAME
         descriptor = _safe_file(request_path, os.O_RDWR)
         try:
@@ -249,7 +271,11 @@ class FileGatewayClient:
                 self.directory / GATEWAY_REQUEST_READY_NAME,
                 marker.encode(),
             )
-            response = self._wait_response(sequence, request_id)
+            response = self._wait_response(
+                sequence,
+                request_id,
+                None if effective_timeout is None else float(effective_timeout),
+            )
         finally:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -257,9 +283,11 @@ class FileGatewayClient:
                 os.close(descriptor)
         return response
 
-    def _wait_response(self, sequence: int, request_id: str) -> dict[str, Any]:
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
+    def _wait_response(
+        self, sequence: int, request_id: str, timeout: float | None
+    ) -> dict[str, Any]:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while deadline is None or time.monotonic() < deadline:
             ready_raw = _read_file(
                 self.directory / GATEWAY_RESPONSE_READY_NAME,
                 MAX_GATEWAY_MARKER_BYTES,
@@ -378,6 +406,7 @@ class ProviderHTTPTransport:
                     "headers": forwarded_headers,
                 },
             },
+            timeout=None,
         )
         if response.get("ok") is not True:
             raise WorkerTransportError("provider gateway denied the request")

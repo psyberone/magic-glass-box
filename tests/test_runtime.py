@@ -177,6 +177,17 @@ class RuntimeAdapterContractTests(unittest.TestCase):
                 stdout="x" * (MAX_RUNTIME_OUTPUT_BYTES + 1),
             )
 
+    def test_vendor_completion_accepts_output_beyond_the_old_one_mib_cap(self) -> None:
+        verbose_event = (
+            '{"type":"item.completed","text":"' + ("x" * (2 * 1024 * 1024)) + '"}\n'
+        )
+        stdout = verbose_event + '{"type":"turn.completed"}\n'
+
+        self.assertEqual(
+            self.registry.complete("codex", exit_code=0, stdout=stdout),
+            RuntimeCompletion(0),
+        )
+
     def test_runtime_value_boundaries_reject_malformed_values(self) -> None:
         invalid_commands = (
             ("",),

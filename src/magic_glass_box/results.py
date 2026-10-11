@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -7,7 +9,10 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import tempfile
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -15,6 +20,7 @@ from typing import Any
 from .domain import canonical_json
 
 RESULT_SCHEMA_VERSION = 1
+BASELINE_SCHEMA_VERSION = 2
 ATTEMPT_ID_RE = re.compile(r"^att_[0-9a-f]{32}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
@@ -23,10 +29,108 @@ MAX_CHANGED_BYTES = 64 * 1024 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_PATH_BYTES = 1024
 READ_CHUNK_BYTES = 1024 * 1024
+MAX_PINNED_IGNORE_BYTES = 1024 * 1024
+MAX_IGNORE_BATCH_BYTES = 256 * 1024
+IGNORE_COMMAND_TIMEOUT = 10.0
 
 
 class ResultError(RuntimeError):
     """A worker result could not be retained or applied safely."""
+
+
+class _PinnedIgnoreRules:
+    """Ask Git to apply only the baseline's committed ignore files."""
+
+    def __init__(self, git_binary: Path, root: Path, rules: dict[str, bytes]):
+        self.git_binary = git_binary
+        self._temporary = tempfile.TemporaryDirectory(prefix="ignore-", dir=root)
+        temporary = Path(self._temporary.name)
+        self.worktree = temporary / "rules"
+        self.git_directory = temporary / "repository.git"
+        self.worktree.mkdir(mode=0o700)
+        for relative, raw in rules.items():
+            destination = self.worktree.joinpath(*PurePosixPath(relative).parts)
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(raw)
+        try:
+            completed = subprocess.run(  # noqa: S603
+                [str(git_binary), "init", "--quiet", "--bare", str(self.git_directory)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=IGNORE_COMMAND_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.close()
+            raise ResultError("cannot initialize pinned result ignore rules") from exc
+        if completed.returncode != 0:
+            self.close()
+            raise ResultError("cannot initialize pinned result ignore rules")
+
+    def close(self) -> None:
+        self._temporary.cleanup()
+
+    def ignored(self, paths: Sequence[tuple[str, bool]]) -> set[str]:
+        ignored: set[str] = set()
+        batch: list[tuple[str, str]] = []
+        batch_bytes = 0
+        for path, is_directory in paths:
+            token = path + ("/" if is_directory else "")
+            size = len(token.encode("utf-8")) + 1
+            if batch and batch_bytes + size > MAX_IGNORE_BATCH_BYTES:
+                ignored.update(self._check_batch(batch))
+                batch = []
+                batch_bytes = 0
+            batch.append((path, token))
+            batch_bytes += size
+        if batch:
+            ignored.update(self._check_batch(batch))
+        return ignored
+
+    def _check_batch(self, batch: Sequence[tuple[str, str]]) -> set[str]:
+        submitted = {token: path for path, token in batch}
+        raw = b"\0".join(token.encode("utf-8") for token in submitted) + b"\0"
+        try:
+            completed = subprocess.run(  # noqa: S603
+                [
+                    str(self.git_binary),
+                    "-c",
+                    "core.excludesFile=/dev/null",
+                    f"--git-dir={self.git_directory}",
+                    f"--work-tree={self.worktree}",
+                    "check-ignore",
+                    "--no-index",
+                    "-z",
+                    "--stdin",
+                ],
+                input=raw,
+                capture_output=True,
+                timeout=IGNORE_COMMAND_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ResultError("cannot evaluate pinned result ignore rules") from exc
+        if completed.returncode not in {0, 1} or completed.stderr:
+            raise ResultError("cannot evaluate pinned result ignore rules")
+        try:
+            tokens = [
+                value.decode("utf-8", "strict")
+                for value in completed.stdout.split(b"\0")
+                if value
+            ]
+        except UnicodeDecodeError as exc:
+            raise ResultError(
+                "pinned result ignore rules returned invalid output"
+            ) from exc
+        if any(token not in submitted for token in tokens):
+            raise ResultError("pinned result ignore rules returned invalid output")
+        return {submitted[token] for token in tokens}
 
 
 def _digest_bytes(value: bytes) -> str:
@@ -296,6 +400,7 @@ class WorkspaceResultStore:
         *,
         max_changed_bytes: int = MAX_CHANGED_BYTES,
         max_paths: int = MAX_RESULT_PATHS,
+        git_binary: Path | None = None,
     ):
         if (
             isinstance(max_changed_bytes, bool)
@@ -312,6 +417,13 @@ class WorkspaceResultStore:
         self.root = Path(root).expanduser().absolute()
         self.max_changed_bytes = max_changed_bytes
         self.max_paths = max_paths
+        if git_binary is None:
+            discovered = shutil.which("git")
+            self.git_binary = None if discovered is None else Path(discovered)
+        elif not Path(git_binary).is_absolute():
+            raise ResultError("Git binary path must be absolute")
+        else:
+            self.git_binary = Path(git_binary)
 
     def ensure_root(self) -> Path:
         try:
@@ -395,41 +507,142 @@ class WorkspaceResultStore:
         mode = 0o755 if opened.st_mode & 0o111 else 0o644
         return FileState(kind="file", mode=mode, size=size, sha256=digest.hexdigest())
 
-    def _scan(self, workspace: Path) -> dict[str, FileState]:
+    @staticmethod
+    def _protected_paths(baseline_paths: Sequence[str]) -> frozenset[str]:
+        protected: set[str] = set(baseline_paths)
+        for value in baseline_paths:
+            path = PurePosixPath(value)
+            protected.update(
+                parent.as_posix() for parent in path.parents if parent.as_posix() != "."
+            )
+        return frozenset(protected)
+
+    @contextmanager
+    def _ignore_rules(
+        self, rules: dict[str, bytes]
+    ) -> Iterator[_PinnedIgnoreRules | None]:
+        if not rules:
+            yield None
+            return
+        if self.git_binary is None:
+            raise ResultError("Git is required to evaluate pinned result ignore rules")
+        matcher = _PinnedIgnoreRules(
+            self.git_binary, self.ensure_root() / ".staging", rules
+        )
+        try:
+            yield matcher
+        finally:
+            matcher.close()
+
+    def _scan(
+        self,
+        workspace: Path,
+        *,
+        baseline_paths: Sequence[str] = (),
+        ignore_files: dict[str, bytes] | None = None,
+    ) -> dict[str, FileState]:
         workspace = self._workspace(workspace)
         states: dict[str, FileState] = {}
         path_count = 0
         pending = [PurePosixPath(".")]
+        protected = self._protected_paths(baseline_paths)
         try:
-            while pending:
-                relative_directory = pending.pop()
-                directory = (
-                    workspace
-                    if relative_directory.as_posix() == "."
-                    else workspace.joinpath(*relative_directory.parts)
-                )
-                with os.scandir(directory) as iterator:
-                    entries = sorted(iterator, key=lambda item: item.name)
-                for entry in entries:
-                    path_count += 1
-                    if path_count > self.max_paths:
-                        raise ResultError("result contains too many paths")
-                    relative_path = (
-                        PurePosixPath(entry.name)
+            with self._ignore_rules(ignore_files or {}) as matcher:
+                while pending:
+                    relative_directory = pending.pop()
+                    directory = (
+                        workspace
                         if relative_directory.as_posix() == "."
-                        else relative_directory / entry.name
+                        else workspace.joinpath(*relative_directory.parts)
                     )
-                    relative = _safe_path(relative_path.as_posix())
-                    info = entry.stat(follow_symlinks=False)
-                    if stat.S_ISDIR(info.st_mode):
-                        pending.append(relative_path)
-                        continue
-                    states[relative] = self._file_state(Path(entry.path), relative)
+                    with os.scandir(directory) as iterator:
+                        entries = sorted(iterator, key=lambda item: item.name)
+                    inspected: list[
+                        tuple[os.DirEntry[str], PurePosixPath, str, bool]
+                    ] = []
+                    candidates: list[tuple[str, bool]] = []
+                    for entry in entries:
+                        relative_path = (
+                            PurePosixPath(entry.name)
+                            if relative_directory.as_posix() == "."
+                            else relative_directory / entry.name
+                        )
+                        relative = _safe_path(relative_path.as_posix())
+                        info = entry.stat(follow_symlinks=False)
+                        is_directory = stat.S_ISDIR(info.st_mode)
+                        inspected.append((entry, relative_path, relative, is_directory))
+                        if (
+                            matcher is not None
+                            and relative not in protected
+                            and entry.name != ".gitignore"
+                        ):
+                            candidates.append((relative, is_directory))
+                    ignored = set() if matcher is None else matcher.ignored(candidates)
+                    for entry, relative_path, relative, is_directory in inspected:
+                        if relative in ignored:
+                            continue
+                        path_count += 1
+                        if path_count > self.max_paths:
+                            raise ResultError("result contains too many paths")
+                        if is_directory:
+                            pending.append(relative_path)
+                            continue
+                        states[relative] = self._file_state(Path(entry.path), relative)
         except ResultError:
             raise
         except OSError as exc:
             raise ResultError("cannot enumerate result workspace") from exc
         return dict(sorted(states.items()))
+
+    @staticmethod
+    def _read_pinned_ignore(path: Path, relative: str, expected: FileState) -> bytes:
+        assert (
+            expected.kind == "file"
+            and expected.size is not None
+            and expected.sha256 is not None
+        )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                raise ResultError("cannot pin result ignore rules")
+            descriptor = os.open(path, flags)
+            with os.fdopen(descriptor, "rb") as input_file:
+                opened = os.fstat(input_file.fileno())
+                raw = input_file.read(MAX_PINNED_IGNORE_BYTES + 1)
+                finished = os.fstat(input_file.fileno())
+            current = path.lstat()
+        except OSError as exc:
+            raise ResultError("cannot pin result ignore rules") from exc
+        identities = {
+            (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            for info in (before, opened, finished, current)
+        }
+        if (
+            len(identities) != 1
+            or not stat.S_ISREG(opened.st_mode)
+            or len(raw) != expected.size
+            or _digest_bytes(raw) != expected.sha256
+        ):
+            raise ResultError(f"cannot pin result ignore rules: {relative}")
+        return raw
+
+    @staticmethod
+    def _pinned_ignore_files(
+        workspace: Path, states: dict[str, FileState]
+    ) -> dict[str, str]:
+        pinned: dict[str, str] = {}
+        total = 0
+        for relative, state in states.items():
+            if PurePosixPath(relative).name != ".gitignore" or state.kind != "file":
+                continue
+            path = workspace.joinpath(*PurePosixPath(relative).parts)
+            raw = WorkspaceResultStore._read_pinned_ignore(path, relative, state)
+            total += len(raw)
+            if total > MAX_PINNED_IGNORE_BYTES:
+                raise ResultError("result ignore rules exceed the size limit")
+            pinned[relative] = base64.b64encode(raw).decode("ascii")
+        return pinned
 
     def _stage_path(self, attempt_id: str) -> Path:
         return self.ensure_root() / ".staging" / f"{attempt_id}.json"
@@ -482,11 +695,13 @@ class WorkspaceResultStore:
             or REVISION_RE.fullmatch(source_revision) is None
         ):
             raise ResultError("result source revision is invalid")
+        workspace = self._workspace(workspace)
         states = self._scan(workspace)
         value = {
             "attempt_id": attempt_id,
             "files": {path: state.to_dict() for path, state in states.items()},
-            "schema_version": RESULT_SCHEMA_VERSION,
+            "ignore_files": self._pinned_ignore_files(workspace, states),
+            "schema_version": BASELINE_SCHEMA_VERSION,
             "source_revision": source_revision,
         }
         raw = canonical_json(value).encode("utf-8")
@@ -504,11 +719,17 @@ class WorkspaceResultStore:
                     "result attempt already has a different baseline"
                 ) from None
 
-    def _load_baseline(self, attempt_id: str) -> tuple[str, dict[str, FileState]]:
+    def _load_baseline(
+        self, attempt_id: str
+    ) -> tuple[str, dict[str, FileState], dict[str, bytes]]:
         value = self._read_json(self._stage_path(attempt_id), label="result baseline")
-        if set(value) != {"attempt_id", "files", "schema_version", "source_revision"}:
+        version = value.get("schema_version")
+        expected_fields = {"attempt_id", "files", "schema_version", "source_revision"}
+        if version == BASELINE_SCHEMA_VERSION:
+            expected_fields.add("ignore_files")
+        if set(value) != expected_fields:
             raise ResultError("result baseline is invalid")
-        if value["schema_version"] != RESULT_SCHEMA_VERSION:
+        if version not in {1, BASELINE_SCHEMA_VERSION} or isinstance(version, bool):
             raise ResultError("result baseline is invalid")
         if value["attempt_id"] != attempt_id:
             raise ResultError("result baseline belongs to another attempt")
@@ -524,7 +745,26 @@ class WorkspaceResultStore:
             states[path] = FileState.from_mapping(raw_state, path=path)
         if list(states) != sorted(states):
             raise ResultError("result baseline paths are not sorted")
-        return revision, states
+        ignore_files: dict[str, bytes] = {}
+        encoded_rules = value.get("ignore_files", {})
+        if not isinstance(encoded_rules, dict):
+            raise ResultError("result baseline is invalid")
+        total = 0
+        for raw_path, encoded in encoded_rules.items():
+            path = _safe_path(raw_path)
+            if PurePosixPath(path).name != ".gitignore" or not isinstance(encoded, str):
+                raise ResultError("result baseline is invalid")
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise ResultError("result baseline is invalid") from exc
+            total += len(raw)
+            if total > MAX_PINNED_IGNORE_BYTES:
+                raise ResultError("result baseline is invalid")
+            ignore_files[path] = raw
+        if list(ignore_files) != sorted(ignore_files):
+            raise ResultError("result baseline is invalid")
+        return revision, states, ignore_files
 
     @staticmethod
     def _changes(
@@ -577,8 +817,12 @@ class WorkspaceResultStore:
         if final.exists():
             return CapturedResult(self.inspect(attempt_id), final)
         workspace = self._workspace(workspace)
-        revision, before = self._load_baseline(attempt_id)
-        after = self._scan(workspace)
+        revision, before, ignore_files = self._load_baseline(attempt_id)
+        after = self._scan(
+            workspace,
+            baseline_paths=tuple(before),
+            ignore_files=ignore_files,
+        )
         manifest = ResultManifest(
             RESULT_SCHEMA_VERSION,
             attempt_id,

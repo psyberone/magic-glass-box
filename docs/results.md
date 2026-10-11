@@ -8,8 +8,9 @@ This is a local handoff boundary, not a forge integration.
 ## Result shape
 
 Before the worker starts, the orchestrator records a baseline of the pristine
-tracked-files snapshot. After the container has stopped, it compares that
-baseline with the final workspace and retains:
+tracked-files snapshot. That baseline also pins every tracked `.gitignore`
+file. After the container has stopped, it compares the baseline with the final
+workspace and retains:
 
 - added, modified, and deleted regular files;
 - executable versus non-executable file mode;
@@ -20,6 +21,15 @@ The canonical manifest is immutable. Changed file bodies are stored as
 SHA-256-addressed blobs, so identical content is retained once. Unchanged files
 and empty directories are not copied. `.git` paths, absolute or escaping
 symlinks, sockets, devices, FIFOs, and other special files fail closed.
+
+Untracked files ignored by the pinned rules are excluded before the workspace
+path ceiling is counted. Matching uses Git's `check-ignore` semantics with
+global excludes disabled. Every baseline path remains protected, so a tracked
+file is still compared even if an ignore rule matches it. `.gitignore` files
+are always compared as ordinary work: replacing one with `*` cannot conceal
+the worker's other changes because capture uses the immutable baseline copy,
+not the worker-edited rules. If the pinned rules cannot be read securely or
+evaluated by Git, capture fails closed.
 
 One result is bounded to 100,000 workspace paths, 64 MiB of changed file
 content, and a 16 MiB manifest. The result and staging roots must be private
@@ -35,10 +45,14 @@ nonzero, cancelled, and recoverable post-start failure outcomes. Only after the
 result is recorded may the attempt become terminal.
 
 If capture or its database binding fails, Magic Glass Box cleans the container
-and gateway but retains the workspace and active attempt. A later
-`run reconcile` may take ownership only after the original heartbeat lease
-expires, retry capture, and then finish cleanup. Reconciliation never treats a
-currently leased attempt as abandoned.
+and gateway, retains the workspace for manual recovery, and terminalizes the
+attempt without a result after cleanup succeeds. This prevents an unbounded or
+invalid workspace from wedging the run forever while preserving the files an
+operator may need to inspect. Reconciliation applies the same rule to an
+expired running attempt; it does not repeatedly retry a capture that violated
+the result boundary. Cleanup failures still leave the attempt active for later
+reconciliation, and reconciliation never treats a currently leased attempt as
+abandoned.
 
 ## Inspect and apply
 

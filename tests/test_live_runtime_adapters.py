@@ -12,7 +12,9 @@ from scripts.check_live_runtime_adapters import (
     _anthropic_sse,
     _assert_observations,
     _assert_sandbox_plans,
+    _codex_fixture_response,
     _openai_sse,
+    _openai_tool_sse,
     _provider_policy,
 )
 
@@ -44,6 +46,66 @@ class LiveRuntimeProofContractTests(unittest.TestCase):
         response = completed["response"]  # type: ignore[index]
         self.assertEqual(response["model"], CODEX_MODEL)
         self.assertEqual(response["output"][0]["content"][0]["text"], PROOF_TEXT)
+
+    def test_openai_tool_fixture_streams_one_bounded_exec_call(self) -> None:
+        events = _events(_openai_tool_sse(CODEX_MODEL, "true", 2))
+
+        self.assertEqual(
+            [name for name, _ in events],
+            [
+                "response.created",
+                "response.output_item.added",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.completed",
+                None,
+            ],
+        )
+        completed = events[-2][1]
+        self.assertIsInstance(completed, dict)
+        call = completed["response"]["output"][0]  # type: ignore[index]
+        self.assertEqual(call["name"], "exec_command")
+        self.assertEqual(
+            json.loads(call["arguments"]),
+            {"cmd": "true", "yield_time_ms": 30_000},
+        )
+
+    def test_codex_fixture_drives_handoff_and_replacement_gateway_calls(self) -> None:
+        interaction_id = "int_" + "7" * 32
+
+        first = _events(_codex_fixture_response(1, CODEX_MODEL, {}))[-2][1]
+        handoff = _events(
+            _codex_fixture_response(
+                2,
+                CODEX_MODEL,
+                {"input": [{"output": interaction_id}]},
+            )
+        )[-2][1]
+        describe = _events(_codex_fixture_response(4, CODEX_MODEL, {}))[-2][1]
+        read = _events(
+            _codex_fixture_response(
+                5,
+                CODEX_MODEL,
+                {"input": [{"output": interaction_id}]},
+            )
+        )[-2][1]
+
+        commands = []
+        for completed in (first, handoff, describe, read):
+            self.assertIsInstance(completed, dict)
+            arguments = completed["response"]["output"][0]["arguments"]  # type: ignore[index]
+            commands.append(json.loads(arguments)["cmd"])
+        self.assertIn("node_modules/runtime-proof", commands[0])
+        self.assertIn("interaction.open", commands[0])
+        self.assertIn("handoff.submit", commands[1])
+        self.assertIn(interaction_id, commands[1])
+        self.assertIn("run.describe", commands[2])
+        self.assertIn("interaction.read", commands[3])
+        self.assertIn(interaction_id, commands[3])
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected provider request"):
+            _codex_fixture_response(7, CODEX_MODEL, {})
 
     def test_anthropic_fixture_is_a_complete_stream_for_the_pinned_model(self) -> None:
         events = _events(_anthropic_sse(ANTHROPIC_MODEL))
@@ -80,16 +142,20 @@ class LiveRuntimeProofContractTests(unittest.TestCase):
         self.assertEqual(anthropic.credential_prefix, "")
 
     def test_proof_assertions_reject_wrong_upstream_or_sandbox_evidence(self) -> None:
-        valid_observations = (
-            ProviderObservation("openai-responses", True, CODEX_MODEL, True),
-            ProviderObservation("anthropic-messages", True, ANTHROPIC_MODEL, True),
-        )
+        valid_observations = tuple(
+            ProviderObservation(
+                "openai-responses", True, CODEX_MODEL, True, request_number
+            )
+            for request_number in range(1, 7)
+        ) + (ProviderObservation("anthropic-messages", True, ANTHROPIC_MODEL, True, 1),)
         _assert_observations(valid_observations)
         with self.assertRaisesRegex(RuntimeError, "credential"):
             _assert_observations(
                 (
-                    ProviderObservation("openai-responses", False, CODEX_MODEL, True),
-                    valid_observations[1],
+                    ProviderObservation(
+                        "openai-responses", False, CODEX_MODEL, True, 1
+                    ),
+                    *valid_observations[1:],
                 )
             )
 
@@ -113,6 +179,12 @@ class LiveRuntimeProofContractTests(unittest.TestCase):
                 "sha256:" + "a" * 64,
                 ("container", "create", "--network", "none"),
             ),
+            SandboxPlan(
+                "run_" + "3" * 32,
+                "magic-glass-box-" + "3" * 32,
+                "sha256:" + "a" * 64,
+                ("container", "create", "--network", "none"),
+            ),
         )
         _assert_sandbox_plans(plans, ("openai-private", "anthropic-private"))
         escaped = SandboxPlan(
@@ -122,7 +194,7 @@ class LiveRuntimeProofContractTests(unittest.TestCase):
             ("container", "create", "--network", "bridge"),
         )
         with self.assertRaisesRegex(RuntimeError, "networkless"):
-            _assert_sandbox_plans((escaped, plans[1]), ())
+            _assert_sandbox_plans((escaped, plans[1], plans[2]), ())
 
 
 if __name__ == "__main__":

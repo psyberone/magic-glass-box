@@ -245,15 +245,28 @@ The bounded Python protocol, registry, legacy `command` adapter, Codex JSONL
 adapter, Claude Code JSON-result adapter, profile default, per-attempt override,
 transient output capture, control-room visibility, explicit runtime-to-grant
 binding, committed-file client, loopback vendor bridge, and buffered SSE
-provider adapters are implemented. Legacy profiles retain their content
-digests. The live proof builds one pinned image containing the real Codex and
-Claude Code CLIs, then runs each through the coordinator, real Docker executor,
-committed-file gateway, trusted provider broker, and a host-only deterministic
-SSE fixture. Both containers use Docker network policy `none`; reusable
-credentials and transient model output remain outside durable worker state.
+provider adapters are implemented. The hardening pass also binds provider
+authority to a live attempt, delegates provider duration to the host policy,
+detaches gateway cleanup from blocked upstream calls, tolerates transient lease
+storage contention within the safety window, expands the bounded runtime-log
+envelope, and captures results using the source revision's pinned Git ignore
+rules. Legacy profiles retain their content digests.
+
+The live proof builds one pinned image containing the real Codex and Claude
+Code CLIs, then launches three containers through the coordinator, real Docker
+executor, committed-file gateway, trusted provider broker, and a host-only
+deterministic SSE fixture. A Codex worker opens a durable interaction and hands
+off; a clean replacement reads that handoff and accepted answer before
+finishing. The first attempt also creates an ignored dependency tree larger
+than the proof's result path ceiling, demonstrating that only its intended file
+is retained. Claude Code exercises the second protocol. Every container uses
+Docker network policy `none`; reusable credentials, private interaction
+content, and transient model output remain outside durable worker state.
 
 **Exit proof:** the golden-path demonstration in the product thesis succeeds
-with two interchangeable worker implementations.
+with two interchangeable worker implementations, including a real
+interaction/handoff/replacement cycle, under the end-of-phase review gate in
+`CONTRIBUTING.md`.
 
 ## Milestone 6: autonomous supervision and escalation
 

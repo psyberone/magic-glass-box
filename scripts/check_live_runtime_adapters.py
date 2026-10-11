@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -34,18 +36,27 @@ from magic_glass_box.executor import (
     SandboxPlan,
 )
 from magic_glass_box.gateway import FileGatewayManager
-from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.krab import KrabIdentity, KrabUserRef, SessionItem
 from magic_glass_box.orchestration import RunCoordinator
 from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.workspace import GitSnapshotter, WorkspaceManager
 
 PROOF_TEXT = "MGB_RUNTIME_PROOF_OK"
+PRIVATE_QUESTION = "Which deterministic proof path should continue?"
+PRIVATE_RESPONSE = "Continue the pinned replacement proof."
 CODEX_MODEL = "magic-glass-box-pinned"
 ANTHROPIC_MODEL = "claude-opus-5-5"
 RUNTIME_IMAGE = "magic-glass-box/runtime-proof:local"
 CODEX_VERSION = "0.161.0"
 CLAUDE_CODE_VERSION = "2.1.296"
+AGENT_USER_ID = "usr_" + "1" * 32
+REVIEWER_USER_ID = "usr_" + "3" * 32
+SESSION_ID = "ses_" + "4" * 32
+REQUEST_ITEM_ID = "itm_" + "5" * 32
+RESPONSE_ITEM_ID = "itm_" + "6" * 32
+AGENT_TOKEN = f"krab_{AGENT_USER_ID}_" + "A" * 43
+REVIEWER_TOKEN = f"krab_{REVIEWER_USER_ID}_" + "B" * 43
 
 
 def _sse_event(name: str, value: dict[str, Any]) -> bytes:
@@ -178,6 +189,103 @@ def _openai_sse(model: str) -> bytes:
     return b"".join(frames)
 
 
+def _openai_tool_sse(model: str, command: str, request_number: int) -> bytes:
+    item_id = f"fc_mgb_runtime_proof_{request_number}"
+    call_id = f"call_mgb_runtime_proof_{request_number}"
+    arguments = json.dumps(
+        {"cmd": command, "yield_time_ms": 30_000},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    call = {
+        "id": item_id,
+        "type": "function_call",
+        "status": "completed",
+        "arguments": arguments,
+        "call_id": call_id,
+        "name": "exec_command",
+    }
+    response = {
+        "id": f"resp_mgb_runtime_proof_{request_number}",
+        "object": "response",
+        "created_at": 1_700_000_000 + request_number,
+        "status": "completed",
+        "background": False,
+        "error": None,
+        "incomplete_details": None,
+        "instructions": None,
+        "max_output_tokens": None,
+        "model": model,
+        "output": [call],
+        "parallel_tool_calls": True,
+        "previous_response_id": None,
+        "reasoning": {"effort": "medium", "summary": None},
+        "store": False,
+        "temperature": 1.0,
+        "text": {"format": {"type": "text"}},
+        "tool_choice": "auto",
+        "tools": [],
+        "top_logprobs": 0,
+        "top_p": 1.0,
+        "truncation": "disabled",
+        "usage": {
+            "input_tokens": 1,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 1,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 2,
+        },
+        "metadata": {},
+    }
+    created = {**response, "status": "in_progress", "output": [], "usage": None}
+    events = (
+        ("response.created", {"type": "response.created", "response": created}),
+        (
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**call, "status": "in_progress", "arguments": ""},
+            },
+        ),
+        (
+            "response.function_call_arguments.delta",
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item_id,
+                "output_index": 0,
+                "delta": arguments,
+            },
+        ),
+        (
+            "response.function_call_arguments.done",
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": item_id,
+                "output_index": 0,
+                "arguments": arguments,
+            },
+        ),
+        (
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": call,
+            },
+        ),
+        (
+            "response.completed",
+            {"type": "response.completed", "response": response},
+        ),
+    )
+    frames = []
+    for sequence, (name, value) in enumerate(events):
+        frames.append(_sse_event(name, {**value, "sequence_number": sequence}))
+    frames.append(b"data: [DONE]\n\n")
+    return b"".join(frames)
+
+
 def _anthropic_sse(model: str) -> bytes:
     events = (
         (
@@ -231,12 +339,169 @@ def _anthropic_sse(model: str) -> bytes:
     return b"".join(_sse_event(name, value) for name, value in events)
 
 
+def _session_item(
+    *,
+    item_id: str,
+    creator: KrabUserRef,
+    recipient: KrabUserRef,
+    title: str,
+    body: str,
+) -> SessionItem:
+    return SessionItem(
+        item_id=item_id,
+        project_key="runtime-proof",
+        session_id=SESSION_ID,
+        creator=creator,
+        recipient=recipient,
+        work_claim=None,
+        status="open.pending",
+        version=1,
+        created_at="2026-10-11T12:00:00Z",
+        updated_at="2026-10-11T12:00:00Z",
+        event_seq=7 if item_id == REQUEST_ITEM_ID else None,
+        untrusted_title=title,
+        untrusted_body=body,
+        content_risk_flags=("untrusted_text",),
+        history=(),
+    )
+
+
+class _RuntimeProofKrabClient:
+    def __init__(self) -> None:
+        self.identity = KrabIdentity(AGENT_USER_ID, "runtime_proof", 1)
+        self.request_item = _session_item(
+            item_id=REQUEST_ITEM_ID,
+            creator=KrabUserRef(AGENT_USER_ID, "runtime_proof"),
+            recipient=KrabUserRef(REVIEWER_USER_ID, "reviewer"),
+            title="Runtime proof question",
+            body=PRIVATE_QUESTION,
+        )
+        self.response_item = _session_item(
+            item_id=RESPONSE_ITEM_ID,
+            creator=KrabUserRef(REVIEWER_USER_ID, "reviewer"),
+            recipient=KrabUserRef(AGENT_USER_ID, "runtime_proof"),
+            title="Runtime proof response",
+            body=PRIVATE_RESPONSE,
+        )
+
+    def whoami(self) -> KrabIdentity:
+        return self.identity
+
+    def create_session_item(
+        self, project_key: str, session_id: str, **kwargs: Any
+    ) -> SessionItem:
+        if (
+            project_key != "runtime-proof"
+            or session_id != SESSION_ID
+            or kwargs.get("recipient_handle") != "reviewer"
+            or kwargs.get("body") != PRIVATE_QUESTION
+        ):
+            raise RuntimeError("runtime proof emitted an unexpected interaction")
+        return self.request_item
+
+    def get_session_item(
+        self, project_key: str, session_id: str, item_id: str
+    ) -> SessionItem:
+        if (
+            project_key != "runtime-proof"
+            or session_id != SESSION_ID
+            or item_id != RESPONSE_ITEM_ID
+        ):
+            raise RuntimeError("runtime proof read an unexpected interaction")
+        return self.response_item
+
+
 @dataclass(frozen=True)
 class ProviderObservation:
     protocol: str
     credential_valid: bool
     model: object
     stream: object
+    request_number: int
+
+
+def _gateway_command(operation: str, payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return " ".join(
+        (
+            "magic-glass-box-worker",
+            "call",
+            shlex.quote(operation),
+            shlex.quote(encoded),
+        )
+    )
+
+
+def _request_interaction_id(request: dict[str, Any]) -> str:
+    identifiers = set(re.findall(r"int_[0-9a-f]{32}", json.dumps(request)))
+    if len(identifiers) != 1:
+        raise RuntimeError("vendor request did not carry one interaction identifier")
+    return identifiers.pop()
+
+
+def _codex_fixture_response(
+    request_number: int, model: str, request: dict[str, Any]
+) -> bytes:
+    if request_number == 1:
+        create_files = (
+            "from pathlib import Path; "
+            "root=Path('node_modules/runtime-proof'); "
+            "root.mkdir(parents=True, exist_ok=True); "
+            "[(root / f'dependency-{index}.txt').write_text('ignored\\n', "
+            "encoding='utf-8') for index in range(64)]; "
+            "Path('runtime-proof.txt').write_text('retained work\\n', "
+            "encoding='utf-8')"
+        )
+        question = _gateway_command(
+            "interaction.open",
+            {
+                "body": PRIVATE_QUESTION,
+                "idempotency_key": "runtime-proof-question-1",
+                "kind": "question",
+                "recipient_handle": "reviewer",
+                "title": "Runtime proof question",
+            },
+        )
+        command = f"python3 -c {shlex.quote(create_files)} && {question}"
+        return _openai_tool_sse(model, command, request_number)
+    if request_number == 2:
+        interaction_id = _request_interaction_id(request)
+        command = _gateway_command(
+            "handoff.submit",
+            {
+                "artifacts": [
+                    {
+                        "description": "Retained proof work",
+                        "path": "runtime-proof.txt",
+                    }
+                ],
+                "decisions": ["Dependency output stays ignored."],
+                "next_steps": ["Read the accepted response."],
+                "pending_interaction_ids": [interaction_id],
+                "schema_version": 1,
+                "summary": "Continue from the durable interaction response.",
+                "work_state": "waiting_for_input",
+            },
+        )
+        return _openai_tool_sse(model, command, request_number)
+    if request_number == 3:
+        return _openai_sse(model)
+    if request_number == 4:
+        return _openai_tool_sse(
+            model,
+            _gateway_command("run.describe", {}),
+            request_number,
+        )
+    if request_number == 5:
+        interaction_id = _request_interaction_id(request)
+        return _openai_tool_sse(
+            model,
+            _gateway_command("interaction.read", {"interaction_id": interaction_id}),
+            request_number,
+        )
+    if request_number == 6:
+        return _openai_sse(model)
+    raise RuntimeError("Codex made an unexpected provider request")
 
 
 class _ProviderFixture:
@@ -244,6 +509,10 @@ class _ProviderFixture:
         self.openai_secret = openai_secret
         self.anthropic_secret = anthropic_secret
         self.observations: list[ProviderObservation] = []
+        self._request_counts = {
+            "openai-responses": 0,
+            "anthropic-messages": 0,
+        }
         self._lock = threading.Lock()
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
@@ -280,19 +549,24 @@ class _ProviderFixture:
                     credential_valid = (
                         self.headers.get("x-api-key") == fixture.anthropic_secret
                     )
-                observation = ProviderObservation(
-                    protocol,
-                    credential_valid,
-                    value.get("model"),
-                    value.get("stream"),
-                )
                 with fixture._lock:
+                    fixture._request_counts[protocol] += 1
+                    request_number = fixture._request_counts[protocol]
+                    observation = ProviderObservation(
+                        protocol,
+                        credential_valid,
+                        value.get("model"),
+                        value.get("stream"),
+                        request_number,
+                    )
                     fixture.observations.append(observation)
                 if not credential_valid:
                     self.send_error(401)
                     return
                 body = (
-                    _openai_sse(str(value.get("model")))
+                    _codex_fixture_response(
+                        request_number, str(value.get("model")), value
+                    )
                     if protocol == "openai-responses"
                     else _anthropic_sse(str(value.get("model")))
                 )
@@ -376,14 +650,14 @@ def _provider_policy(port: int, runtime: str) -> ProviderGrantSpec:
 
 
 def _assert_observations(observations: tuple[ProviderObservation, ...]) -> None:
-    if tuple(item.protocol for item in observations) != (
-        "openai-responses",
-        "anthropic-messages",
-    ):
-        raise RuntimeError("vendor requests did not traverse both pinned protocols")
+    expected_protocols = ("openai-responses",) * 6 + ("anthropic-messages",)
+    if tuple(item.protocol for item in observations) != expected_protocols:
+        raise RuntimeError("vendor requests did not traverse the full proof sequence")
+    if tuple(item.request_number for item in observations) != (*range(1, 7), 1):
+        raise RuntimeError("provider fixture request sequence is inconsistent")
     if not all(item.credential_valid for item in observations):
         raise RuntimeError("provider credential was not injected by the trusted broker")
-    expected_models = (CODEX_MODEL, ANTHROPIC_MODEL)
+    expected_models = (CODEX_MODEL,) * 6 + (ANTHROPIC_MODEL,)
     if tuple(item.model for item in observations) != expected_models:
         raise RuntimeError("provider model was not pinned by policy")
     if not all(item.stream is True for item in observations):
@@ -393,8 +667,8 @@ def _assert_observations(observations: tuple[ProviderObservation, ...]) -> None:
 def _assert_sandbox_plans(
     plans: tuple[SandboxPlan, ...], credentials: tuple[str, ...]
 ) -> None:
-    if len(plans) != 2:
-        raise RuntimeError("proof did not launch both runtime sandboxes")
+    if len(plans) != 3:
+        raise RuntimeError("proof did not launch the handoff and runtime sandboxes")
     for plan in plans:
         arguments = plan.create_args
         try:
@@ -436,7 +710,8 @@ def _create_repository(root: Path) -> Path:
     repository.mkdir(mode=0o700)
     _run_checked([git, "init", "--quiet", "--initial-branch", "main"], cwd=repository)
     (repository / "README.md").write_text("runtime proof\n", encoding="utf-8")
-    _run_checked([git, "add", "README.md"], cwd=repository)
+    (repository / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    _run_checked([git, "add", "README.md", ".gitignore"], cwd=repository)
     _run_checked(
         [
             git,
@@ -474,11 +749,22 @@ def _prepare_runs(
     database = control.database
     database.initialize()
     user = database.create_user("operator", "Runtime Proof Operator")
+    reviewer = database.create_user("reviewer", "Runtime Proof Reviewer")
     instance = database.create_krab_instance("Proof Krab", "http://127.0.0.1:8765")
+    agent_token_path = _write_secret(credential_directory, "krab", AGENT_TOKEN)
+    reviewer_token_path = _write_secret(
+        credential_directory, "reviewer-krab", REVIEWER_TOKEN
+    )
     identity = database.store_krab_identity(
         instance["id"],
-        KrabIdentity("usr_" + "1" * 32, "runtime_proof", 1),
-        "file:/not-mounted/krab.token",
+        KrabIdentity(AGENT_USER_ID, "runtime_proof", 1),
+        "file:" + str(agent_token_path),
+    )
+    database.store_krab_identity(
+        instance["id"],
+        KrabIdentity(REVIEWER_USER_ID, "reviewer", 1),
+        "file:" + str(reviewer_token_path),
+        user_id=reviewer["id"],
     )
     database.create_project(
         instance_id=instance["id"],
@@ -527,9 +813,12 @@ def _prepare_runs(
             runtime_adapter=runtime,
             runtime_provider_grant=grant,
             network_mode=NetworkMode.GATEWAY_ONLY,
-            credential_names=(grant,),
+            credential_names=("krab", grant),
             gateway_capabilities=(
                 GatewayCapability.RUN_DESCRIBE,
+                GatewayCapability.INTERACTION_OPEN,
+                GatewayCapability.INTERACTION_READ,
+                GatewayCapability.HANDOFF_SUBMIT,
                 GatewayCapability.PROVIDER_INVOKE,
             ),
         )
@@ -544,6 +833,7 @@ def _prepare_runs(
             profile_name=profile_name,
             work_item_id=work_item["id"],
             requested_by=user["id"],
+            krab_session_id=SESSION_ID,
         )
         runs[runtime] = run["id"]
     return runs
@@ -606,7 +896,20 @@ def main(argv: list[str] | None = None) -> int:
             repository = _create_repository(root)
             database = Database(root / "control-plane.db")
             resolver = PrivateFileCredentialResolver()
-            control = ControlPlane(database, credential_resolver=resolver)
+            krab_client = _RuntimeProofKrabClient()
+
+            def client_factory(_base_url: str, token: str) -> Any:
+                if token != AGENT_TOKEN:
+                    raise RuntimeError(
+                        "runtime proof resolved an unexpected Krab token"
+                    )
+                return krab_client
+
+            control = ControlPlane(
+                database,
+                credential_resolver=resolver,
+                client_factory=client_factory,
+            )
             runs = _prepare_runs(
                 control,
                 repository=repository,
@@ -623,20 +926,47 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             gateways = FileGatewayManager(root / "gateways", control)
+            result_store = WorkspaceResultStore(root / "results", max_paths=16)
             coordinator = RunCoordinator(
                 database,
                 DockerExecutor(docker_engine),
                 WorkspaceManager(root / "workspaces", GitSnapshotter()),
                 resolver,
                 gateways,
-                WorkspaceResultStore(root / "results"),
+                result_store,
                 lease_seconds=30,
                 heartbeat_interval=5,
             )
             completed: dict[str, dict[str, Any]] = {}
             try:
-                for runtime in ("codex", "claude-code"):
-                    completed[runtime] = coordinator.execute(runs[runtime])
+                handed_off = coordinator.execute(runs["codex"])
+                if handed_off["state"] != RunState.WAITING_FOR_INPUT.value:
+                    raise RuntimeError("Codex did not stop at the durable interaction")
+                if (
+                    len(handed_off["attempts"]) != 1
+                    or handed_off["attempts"][0]["state"] != "handed_off"
+                    or handed_off["attempts"][0]["handoff"] is None
+                ):
+                    raise RuntimeError("Codex did not retain its structured handoff")
+                first_manifest = result_store.inspect(handed_off["attempts"][0]["id"])
+                if [change.path for change in first_manifest.changes] != [
+                    "runtime-proof.txt"
+                ]:
+                    raise RuntimeError(
+                        "pinned ignore rules did not exclude the dependency tree"
+                    )
+                interactions = handed_off["interactions"]
+                if len(interactions) != 1 or interactions[0]["state"] != "open":
+                    raise RuntimeError("Codex did not leave one durable interaction")
+                accepted = control.accept_interaction_response(
+                    interactions[0]["id"],
+                    response_item_id=RESPONSE_ITEM_ID,
+                    expected_version=interactions[0]["version"],
+                )
+                if accepted.run_state != RunState.QUEUED.value:
+                    raise RuntimeError("accepted input did not queue a replacement")
+                completed["codex"] = coordinator.execute(runs["codex"])
+                completed["claude-code"] = coordinator.execute(runs["claude-code"])
             finally:
                 gateways.close()
 
@@ -644,24 +974,44 @@ def main(argv: list[str] | None = None) -> int:
                 if run["state"] != RunState.SUCCEEDED.value:
                     raise RuntimeError(f"{runtime} proof run did not succeed")
                 attempts = run["attempts"]
-                if (
-                    len(attempts) != 1
-                    or attempts[0]["runtime_adapter"] != runtime
-                    or attempts[0]["state"] != "succeeded"
-                    or attempts[0]["result"]["changed_paths"] != 0
-                ):
-                    raise RuntimeError(f"{runtime} attempt evidence is incomplete")
+                if runtime == "codex":
+                    if (
+                        len(attempts) != 2
+                        or [attempt["runtime_adapter"] for attempt in attempts]
+                        != ["codex", "codex"]
+                        or [attempt["state"] for attempt in attempts]
+                        != ["handed_off", "succeeded"]
+                        or [attempt["result"]["changed_paths"] for attempt in attempts]
+                        != [1, 0]
+                        or run["interactions"][0]["state"] != "answered"
+                    ):
+                        raise RuntimeError("Codex replacement evidence is incomplete")
+                    expected_invocations = 6
+                else:
+                    if (
+                        len(attempts) != 1
+                        or attempts[0]["runtime_adapter"] != runtime
+                        or attempts[0]["state"] != "succeeded"
+                        or attempts[0]["result"]["changed_paths"] != 0
+                    ):
+                        raise RuntimeError(f"{runtime} attempt evidence is incomplete")
+                    expected_invocations = 1
                 invocations = database.list_provider_invocations(runs[runtime])
                 if (
-                    len(invocations) != 1
-                    or invocations[0]["outcome"] != "succeeded"
-                    or invocations[0]["http_status"] != 200
+                    len(invocations) != expected_invocations
+                    or any(item["outcome"] != "succeeded" for item in invocations)
+                    or any(item["http_status"] != 200 for item in invocations)
                 ):
                     raise RuntimeError(f"{runtime} provider invocation was not audited")
                 if docker_engine.managed_containers(runs[runtime]):
                     raise RuntimeError(f"{runtime} container was not removed")
 
-            secrets_used = (openai_secret, anthropic_secret)
+            secrets_used = (
+                openai_secret,
+                anthropic_secret,
+                AGENT_TOKEN,
+                REVIEWER_TOKEN,
+            )
             _assert_observations(tuple(fixture.observations))
             _assert_sandbox_plans(tuple(docker_engine.plans), secrets_used)
             durable = database.path.read_bytes()
@@ -669,6 +1019,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("provider credential leaked into durable state")
             if PROOF_TEXT.encode() in durable:
                 raise RuntimeError("transient model output leaked into durable state")
+            if (
+                PRIVATE_QUESTION.encode() in durable
+                or PRIVATE_RESPONSE.encode() in durable
+            ):
+                raise RuntimeError(
+                    "private interaction content leaked into durable state"
+                )
     finally:
         server.shutdown()
         server.server_close()
@@ -690,7 +1047,9 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 },
                 "credential_exposure": "none",
+                "durable_interaction": "handoff and replacement passed",
                 "direct_network": "denied",
+                "ignored_dependency_tree": "excluded by pinned policy",
                 "provider_fixture": "host-only deterministic SSE",
                 "runtime_output_persisted": False,
                 "status": "passed",

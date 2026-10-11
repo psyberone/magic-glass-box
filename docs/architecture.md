@@ -164,11 +164,14 @@ For an execution request, Magic Glass Box:
 
 Operational failures become audited `failed` runs only after cleanup succeeds.
 If a started worker fails, its recoverable changes are captured before cleanup.
-If capture or cleanup cannot be proven, the run remains active and its
-workspace is retained when needed so `run reconcile` can retry after the owner
-lease expires. Reconciliation finds containers by product and run-ID labels
-rather than trusting an in-memory container handle. It also recognizes the
-retired label namespace so an upgrade can clean interrupted legacy containers.
+If result capture fails, the container and gateway are cleaned, the workspace
+is retained for manual recovery, and the attempt becomes terminal without a
+result; an invalid or unbounded workspace is not retried forever. If cleanup
+cannot be proven, the run remains active so `run reconcile` can retry after the
+owner lease expires. Reconciliation finds containers by product and run-ID
+labels rather than trusting an in-memory container handle. It also recognizes
+the retired label namespace so an upgrade can clean interrupted legacy
+containers.
 
 The result store is trusted host state beside the control-plane database. It
 contains a canonical manifest plus deduplicated changed-file blobs, never a Git
@@ -183,8 +186,10 @@ that authority. See [results.md](results.md).
 The Docker boundary rejects images with Dockerfile-declared volumes, validates
 host paths before mounting them, runs as the host's non-root numeric identity,
 uses a read-only root filesystem, drops all capabilities, applies resource
-ceilings, and bounds local logs. Both `none` and `gateway_only` use Docker
-network policy `none`; `gateway_only` adds a private committed-file mailbox.
+ceilings, and bounds local logs. Runtime output has a 24 MiB read/parser cap
+over Docker's two rotating 10 MiB local log files; small Docker control
+responses retain a 1 MiB cap. Both `none` and `gateway_only` use Docker network
+policy `none`; `gateway_only` adds a private committed-file mailbox.
 Bundled vendor adapters put a loopback-only HTTP bridge inside that same
 network namespace. It translates the vendor protocol to serialized mailbox
 operations; only the trusted host broker owns an outbound socket or reusable
@@ -200,11 +205,13 @@ cover run description, interactions, handoff, provider invocation, and the
 typed work-memory read/append/checkpoint/assignment lifecycle; none accepts a
 run ID or credential value. Provider calls additionally pin the destination,
 method, model, headers, byte limits, timeout, and concurrency in
-administrator-owned policy. Opening an interaction tells a handoff-capable
-worker to submit bounded replacement state and exit. Cleanup removes its
-resources, and the durable run remains `waiting_for_input`. A verified response
-becomes available to the current attempt, but a replacement is queued only
-after that attempt has exited. See [agent-gateway.md](agent-gateway.md),
+administrator-owned policy. Provider authority also requires a live running
+attempt, including during the short `waiting_for_input` handoff window; a
+parked run cannot call upstream. Opening an interaction tells a
+handoff-capable worker to submit bounded replacement state and exit. Cleanup
+removes its resources, and the durable run remains `waiting_for_input`. A
+verified response becomes available to the current attempt, but a replacement
+is queued only after that attempt has exited. See [agent-gateway.md](agent-gateway.md),
 [provider-broker.md](provider-broker.md), [results.md](results.md), and
 [work-memory.md](work-memory.md).
 

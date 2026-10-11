@@ -23,6 +23,7 @@ RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024
+MAX_DOCKER_LOG_BYTES = 24 * 1024 * 1024
 MIN_MEMORY_BYTES = 64 * 1024 * 1024
 MAX_MEMORY_BYTES = 64 * 1024 * 1024 * 1024
 MIN_TMPFS_BYTES = 16 * 1024 * 1024
@@ -525,6 +526,7 @@ class DockerCLI:
         *,
         timeout: float | None = None,
         use_command_timeout: bool = True,
+        max_output_bytes: int = MAX_DOCKER_OUTPUT_BYTES,
     ) -> str:
         effective_timeout = self.command_timeout if use_command_timeout else timeout
         try:
@@ -545,7 +547,7 @@ class DockerCLI:
             if not detail:
                 detail = "unknown daemon error"
             raise ExecutionError(f"Docker command failed: {detail[:4096]}")
-        if len(completed.stdout.encode("utf-8")) > MAX_DOCKER_OUTPUT_BYTES:
+        if len(completed.stdout.encode("utf-8")) > max_output_bytes:
             raise ExecutionError("Docker command output exceeds the size limit")
         return completed.stdout
 
@@ -605,7 +607,13 @@ class DockerCLI:
         return exit_code
 
     def logs(self, container_id: str) -> str:
-        return self._run(("container", "logs", container_id))
+        # The local Docker logging policy retains at most two 10 MiB files. Keep
+        # a small rotation margin while preserving a tighter cap for every
+        # control-plane command whose output is expected to be tiny.
+        return self._run(
+            ("container", "logs", container_id),
+            max_output_bytes=MAX_DOCKER_LOG_BYTES,
+        )
 
     def stop(self, container_id: str) -> None:
         self._run(("container", "stop", container_id))

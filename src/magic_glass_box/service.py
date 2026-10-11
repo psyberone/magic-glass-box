@@ -181,7 +181,11 @@ class ControlPlane:
         request: dict[str, Any],
     ) -> AcceptedProviderResponse:
         route = self.database.get_run_transport(run_id)
-        if route["state"] != RunState.RUNNING.value:
+        live_attempt_has_authority = (
+            route["state"] in (RunState.RUNNING.value, RunState.WAITING_FOR_INPUT.value)
+            and route["active_attempt_state"] == "running"
+        )
+        if not live_attempt_has_authority:
             raise ConflictError(f"run is not running: {route['state']}")
         grant = self.database.get_run_provider_grant(run_id, grant_name)
         try:
