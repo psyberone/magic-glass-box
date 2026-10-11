@@ -9,6 +9,8 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   control-room show
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   control-room show --history-limit 100 --refresh-krab
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  control-room serve --host 127.0.0.1 --port 8766
 ```
 
 The default view performs no network or credential access. `--refresh-krab`
@@ -74,10 +76,58 @@ The local timestamp is the consistency point for the SQLite projection. A live
 Krab refresh has its own `refreshed_at` timestamp because no transaction can
 span the two independent projects.
 
-## Current boundary
+## Interactive browser
 
-This first control-room slice is read-only. Existing explicit CLI operations
-remain the action surface for cancellation, provider revocation, retained-result
-application, and reconciliation. The next control-room slice can build a local
-browser and explicit retry/reassignment workflows on this projection without
-teaching every screen to query private tables or Krab independently.
+`control-room serve` prints a fresh private URL and serves the same projection
+as a server-rendered local browser. It accepts only a numeric loopback address;
+binding to a LAN or wildcard address fails. The random URL capability exists
+only for that process. State-changing forms additionally require a distinct
+CSRF capability and an exact same-origin request. Responses disable caching,
+framing, referrers, and every content source except the nonce-bearing local
+stylesheet. The page has no JavaScript and loads no external assets.
+
+The Host header, path capability, form content type, body size, exact field
+set, duplicate fields, CSRF token, and optimistic object version are all
+checked before an action reaches the control plane. Visible titles and every
+other rendered value are HTML-escaped. Errors returned to the browser do not
+include credential, filesystem, upstream, or cleanup details.
+
+The process is a local administrative surface, not a multi-user authentication
+server. Anyone who can read the printed private URL and reach the loopback
+socket has operator access for the life of that process. Do not proxy or share
+the URL.
+
+## Explicit actions
+
+| Action | Contract |
+| --- | --- |
+| Cancel | Records an optimistic cancellation request. A queued or waiting run becomes terminal immediately; an owned attempt stops through its coordinator heartbeat path. |
+| Retry | Creates one queued successor to a terminal run with the same immutable context, profile, work-item version, work thread, source revision, Krab route, and exact provider grants. Unavailable pinned authority fails closed. |
+| Reassign | Creates a queued successor to a terminal run with the same work identity and source but an explicitly selected profile's latest revision and current provider grants. |
+| Revoke | Revokes an active provider grant under optimistic concurrency; already-pinned runs observe the live kill switch. |
+| Reconcile | Recovers only expired or orphaned execution ownership using the existing lease-aware coordinator path. |
+
+Retry and reassignment never reopen or edit the predecessor. The predecessor's
+event stream records the successor ID and acting local user, and the successor
+stores immutable lineage. Only one direct successor may be active at once.
+Both operations require an active project and work-memory generation.
+
+A reassigned run inherits the predecessor's Krab session and claim IDs so its
+communication remains correlated, but Magic Glass Box does not change Krab's
+authoritative session membership or claim assignee. Those must already permit
+the selected profile, or interaction delivery will fail closed. This keeps the
+control-plane action from becoming an implicit Krab administration write.
+
+Retained-result application stays in the CLI because it requires an explicit
+absolute checkout path and performs host filesystem writes. The browser shows
+only result IDs, counts, byte totals, and digests.
+
+Equivalent successor commands are available without the browser:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  run retry run_<id> --expected-version <version> --requested-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  run reassign run_<id> --profile Reviewer --expected-version <version> \
+  --requested-by operator
+```

@@ -461,6 +461,36 @@ class ControlPlane:
             reason=reason,
         )
 
+    def retry_run(
+        self,
+        run_id: str,
+        *,
+        requested_by_handle: str,
+        expected_run_version: int,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(requested_by_handle)
+        return self.database.retry_run(
+            run_id,
+            requested_by=operator["id"],
+            expected_run_version=expected_run_version,
+        )
+
+    def reassign_run(
+        self,
+        run_id: str,
+        *,
+        profile_name: str,
+        requested_by_handle: str,
+        expected_run_version: int,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(requested_by_handle)
+        return self.database.reassign_run(
+            run_id,
+            profile_name=profile_name,
+            requested_by=operator["id"],
+            expected_run_version=expected_run_version,
+        )
+
     def submit_handoff(self, run_id: str, handoff: HandoffEnvelope) -> dict[str, Any]:
         """Persist bounded replacement state for the run's active attempt."""
 

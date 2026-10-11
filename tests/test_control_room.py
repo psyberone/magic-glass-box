@@ -234,7 +234,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 8)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], 9)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",
@@ -546,6 +546,8 @@ class ControlRoomTests(unittest.TestCase):
                 "work_thread_id",
                 "untrusted_work_item_title",
                 "source_revision",
+                "predecessor_run_id",
+                "replacement_kind",
                 "krab_session_id",
                 "krab_claim_id",
                 "created_at",

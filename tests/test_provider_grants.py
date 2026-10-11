@@ -275,7 +275,7 @@ class ProviderGrantMigrationTests(unittest.TestCase):
             database = Database(path)
             first = database.initialize()
             second = database.initialize()
-            self.assertEqual(first["schema_version"], 8)
+            self.assertEqual(first["schema_version"], 9)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["provider_grants"], 0)

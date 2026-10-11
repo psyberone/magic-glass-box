@@ -80,6 +80,13 @@ project-activity projection.
   evidence until an operator explicitly applies them to a checkout.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
+- Retrying or reassigning terminal work creates a new queued successor and an
+  event on its predecessor. Retry preserves the exact context, profile,
+  work-item, source, provider-authority, and communication pins. Reassignment
+  preserves the work identity but selects an explicit current profile revision
+  and its current provider authorities. The shared work thread carries durable
+  memory across both operations; historical runs are never reopened or
+  rewritten.
 - A human interaction records only its type, lifecycle, recipient, run, and
   Krab item IDs. Its question and answer remain private content in Krab.
 - Opening an interaction sends an idempotent Krab session item only after the
@@ -174,10 +181,8 @@ Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
 broker, structured worker replacement, multi-agent work memory, work-item
-completion, execution integrity, and the transactionally consistent
-control-room read model are complete. The next slice is the interactive
-control-room action surface over projects, authority, work threads,
-assignments, runs, attempts, interactions, retained results, and recovery
-actions without private message bodies or transcripts. See
+completion, execution integrity, and the redacted interactive control room are
+complete. The next slice is the runtime adapter contract and its conformance
+suite. See
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 and [work-memory.md](work-memory.md).

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .control_room_web import build_control_room_server
 from .credentials import CredentialError
 from .db import Database, StorageError, default_db_path
 from .domain import (
@@ -50,6 +51,18 @@ def _history_limit(value: str) -> int:
         ) from exc
     if not 0 <= parsed <= 500:
         raise argparse.ArgumentTypeError("must be an integer between 0 and 500")
+    return parsed
+
+
+def _port(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be an integer between 0 and 65535"
+        ) from exc
+    if not 0 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError("must be an integer between 0 and 65535")
     return parsed
 
 
@@ -135,6 +148,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--refresh-krab",
         action="store_true",
         help="resolve configured identities and read live roles and claim queues",
+    )
+    control_room_serve = control_room_commands.add_parser(
+        "serve", help="serve the interactive loopback control room"
+    )
+    control_room_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="loopback IP address to bind (default: 127.0.0.1)",
+    )
+    control_room_serve.add_argument(
+        "--port",
+        type=_port,
+        default=8766,
+        help="loopback TCP port, or 0 for an ephemeral port (default: 8766)",
+    )
+    control_room_serve.add_argument(
+        "--history-limit",
+        type=_history_limit,
+        default=25,
+        help="terminal runs to include in addition to every active run (0-500)",
     )
 
     user = commands.add_parser("user", help="manage local users")
@@ -267,6 +300,19 @@ def build_parser() -> argparse.ArgumentParser:
     run_cancel.add_argument("--expected-version", required=True, type=int)
     run_cancel.add_argument("--requested-by", required=True)
     run_cancel.add_argument("--reason", required=True)
+    run_retry = run_commands.add_parser(
+        "retry", help="create an audited successor with the same pinned profile"
+    )
+    run_retry.add_argument("run_id")
+    run_retry.add_argument("--expected-version", required=True, type=int)
+    run_retry.add_argument("--requested-by", required=True)
+    run_reassign = run_commands.add_parser(
+        "reassign", help="create an audited successor for another profile"
+    )
+    run_reassign.add_argument("run_id")
+    run_reassign.add_argument("--profile", required=True)
+    run_reassign.add_argument("--expected-version", required=True, type=int)
+    run_reassign.add_argument("--requested-by", required=True)
     run_show = run_commands.add_parser("show", help="show a run and its event stream")
     run_show.add_argument("run_id")
     run_execute = run_commands.add_parser(
@@ -321,6 +367,38 @@ def _build_run_coordinator(
         ),
         result_store or _build_result_store(control),
     )
+
+
+def _serve_control_room(
+    args: argparse.Namespace,
+    control: ControlPlane,
+    coordinator: RunCoordinator,
+) -> int:
+    try:
+        server = build_control_room_server(
+            control,
+            coordinator,
+            host=args.host,
+            port=args.port,
+            history_limit=args.history_limit,
+        )
+    except (OSError, ValueError) as exc:
+        raise InputError(str(exc)) from exc
+    _emit(
+        {
+            "control_room_url": server.control_url,
+            "binding": server.origin,
+            "network_scope": "loopback_only",
+        }
+    )
+    sys.stdout.flush()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
 
 
 def _dispatch(
@@ -451,6 +529,19 @@ def _dispatch(
                 coordinator.reconcile(args.run_id)
                 return control.database.get_run(args.run_id)
             return requested
+        if args.run_command == "retry":
+            return control.retry_run(
+                args.run_id,
+                requested_by_handle=args.requested_by,
+                expected_run_version=args.expected_version,
+            )
+        if args.run_command == "reassign":
+            return control.reassign_run(
+                args.run_id,
+                profile_name=args.profile,
+                requested_by_handle=args.requested_by,
+                expected_run_version=args.expected_version,
+            )
         if args.run_command == "show":
             return control.database.get_run(args.run_id)
         if args.run_command == "execute" and coordinator is not None:
@@ -493,8 +584,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 result_store=result_store,
             )
+        elif args.command == "control-room" and args.control_room_command == "serve":
+            result_store = _build_result_store(control)
+            coordinator = _build_run_coordinator(
+                control,
+                result_store=result_store,
+            )
         elif args.command == "result":
             result_store = _build_result_store(control)
+        if (
+            args.command == "control-room"
+            and args.control_room_command == "serve"
+            and coordinator is not None
+        ):
+            return _serve_control_room(args, control, coordinator)
         result = _dispatch(args, control, coordinator, result_store)
     except (
         CredentialError,

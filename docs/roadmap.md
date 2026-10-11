@@ -198,14 +198,22 @@ local state or exposing credential references.
 
 ### 4B. Operator action surface
 
+**Status: complete**
+
 - Show projects, users, roles, profiles, work claims, runs, attempts, and
   retained results.
 - Make pending questions, approvals, owners, and blockers prominent.
 - Expose policy and lifecycle metadata without private bodies or transcripts.
 - Provide explicit cancel, retry, reassign, revoke, and reconcile actions.
+- Serve the browser only on a loopback IP behind per-process access and CSRF
+  capabilities, with no scripts or external assets.
+- Model retry and reassignment as optimistic, audited successor runs rather
+  than rewriting a terminal run or any of its immutable pins.
 
 **Exit proof:** an operator can understand and safely control every active run
-without entering an agent container or reading its private conversation.
+without entering an agent container or reading its private conversation. HTTP
+tests exercise all five actions, reject cross-origin and malformed requests,
+escape hostile visible titles, and prove that private fields are not rendered.
 
 ## Milestone 5: runtime adapter contract
 

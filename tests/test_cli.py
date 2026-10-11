@@ -15,6 +15,7 @@ from magic_glass_box.cli import (
     _build_run_coordinator,
     _emit,
     _json_file,
+    _serve_control_room,
     build_parser,
     main,
 )
@@ -123,6 +124,12 @@ class FakeControlPlane:
     ) -> dict[str, object]:
         return self._called("run.cancel", run_id=run_id, **kwargs)
 
+    def retry_run(self, run_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("run.retry", run_id=run_id, **kwargs)
+
+    def reassign_run(self, run_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("run.reassign", run_id=run_id, **kwargs)
+
 
 class FakeRunCoordinator:
     def __init__(self) -> None:
@@ -214,7 +221,10 @@ class CLITests(unittest.TestCase):
             ("control-room",): (
                 "control_room_command",
                 True,
-                (("show", "show one consistent redacted snapshot"),),
+                (
+                    ("show", "show one consistent redacted snapshot"),
+                    ("serve", "serve the interactive loopback control room"),
+                ),
             ),
             ("krab",): (
                 "krab_command",
@@ -272,6 +282,14 @@ class CLITests(unittest.TestCase):
                 (
                     ("create", "create a pinned run record"),
                     ("cancel", "request stop for a queued or active run"),
+                    (
+                        "retry",
+                        "create an audited successor with the same pinned profile",
+                    ),
+                    (
+                        "reassign",
+                        "create an audited successor for another profile",
+                    ),
                     ("show", "show a run and its event stream"),
                     (
                         "execute",
@@ -395,6 +413,12 @@ class CLITests(unittest.TestCase):
                     "--requested-by",
                     "--reason",
                 ),
+                ("run", "retry"): ("--expected-version", "--requested-by"),
+                ("run", "reassign"): (
+                    "--profile",
+                    "--expected-version",
+                    "--requested-by",
+                ),
                 ("result", "apply"): ("--repository",),
             },
         )
@@ -403,7 +427,7 @@ class CLITests(unittest.TestCase):
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 8)
+        self.assertEqual(initialized["schema_version"], 9)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -843,6 +867,51 @@ class CLITests(unittest.TestCase):
                 ("run.show", {"run_id": "run_123"}),
                 {"operation": "run.show", "run_id": "run_123"},
             ),
+            (
+                "run.retry",
+                [
+                    "run",
+                    "retry",
+                    "run_123",
+                    "--expected-version",
+                    "4",
+                    "--requested-by",
+                    "operator",
+                ],
+                (
+                    "run.retry",
+                    {
+                        "run_id": "run_123",
+                        "expected_run_version": 4,
+                        "requested_by_handle": "operator",
+                    },
+                ),
+                {"operation": "run.retry"},
+            ),
+            (
+                "run.reassign",
+                [
+                    "run",
+                    "reassign",
+                    "run_123",
+                    "--profile",
+                    "Reviewer",
+                    "--expected-version",
+                    "5",
+                    "--requested-by",
+                    "operator",
+                ],
+                (
+                    "run.reassign",
+                    {
+                        "run_id": "run_123",
+                        "profile_name": "Reviewer",
+                        "expected_run_version": 5,
+                        "requested_by_handle": "operator",
+                    },
+                ),
+                {"operation": "run.reassign"},
+            ),
         )
         for expected, arguments, expected_call, expected_result in cases:
             with self.subTest(expected=expected):
@@ -905,6 +974,10 @@ class CLITests(unittest.TestCase):
         room = parser.parse_args(["control-room", "show"])
         self.assertEqual(room.history_limit, 25)
         self.assertFalse(room.refresh_krab)
+        served = parser.parse_args(["control-room", "serve"])
+        self.assertEqual(served.host, "127.0.0.1")
+        self.assertEqual(served.port, 8766)
+        self.assertEqual(served.history_limit, 25)
         for invalid_limit in ("-1", "501", "1.5"):
             with (
                 self.subTest(invalid_limit=invalid_limit),
@@ -914,6 +987,14 @@ class CLITests(unittest.TestCase):
                 parser.parse_args(
                     ["control-room", "show", "--history-limit", invalid_limit]
                 )
+            self.assertEqual(invalid.exception.code, 2)
+        for invalid_port in ("-1", "65536", "1.5"):
+            with (
+                self.subTest(invalid_port=invalid_port),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as invalid,
+            ):
+                parser.parse_args(["control-room", "serve", "--port", invalid_port])
             self.assertEqual(invalid.exception.code, 2)
         for invalid_timeout in ("0", "-1", "nan", "inf", "not-a-number"):
             with (
@@ -1018,6 +1099,7 @@ class CLITests(unittest.TestCase):
         expected_nested = {
             "control-room": {
                 "show": "show one consistent redacted snapshot",
+                "serve": "serve the interactive loopback control room",
             },
             "user": {"add": "add a local user"},
             "krab": {
@@ -1047,6 +1129,8 @@ class CLITests(unittest.TestCase):
             "run": {
                 "create": "create a pinned run record",
                 "cancel": "request stop for a queued or active run",
+                "retry": ("create an audited successor with the same pinned profile"),
+                "reassign": "create an audited successor for another profile",
                 "show": "show a run and its event stream",
                 "execute": "execute one queued run in its pinned sandbox",
                 "reconcile": (
@@ -1136,6 +1220,90 @@ class CLITests(unittest.TestCase):
                 },
             ),
         )
+
+    def test_control_room_server_prints_the_private_url_and_closes_cleanly(
+        self,
+    ) -> None:
+        class FakeServer:
+            control_url = "http://127.0.0.1:8766/private-token/"
+            origin = "http://127.0.0.1:8766"
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def server_close(self) -> None:
+                self.closed = True
+
+        server = FakeServer()
+        args = argparse.Namespace(host="127.0.0.1", port=8766, history_limit=25)
+        stdout = io.StringIO()
+        with (
+            mock.patch(
+                "magic_glass_box.cli.build_control_room_server",
+                return_value=server,
+            ) as build,
+            redirect_stdout(stdout),
+        ):
+            status = _serve_control_room(args, FakeControlPlane(), FakeRunCoordinator())
+
+        self.assertEqual(status, 0)
+        self.assertTrue(server.closed)
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "binding": "http://127.0.0.1:8766",
+                "control_room_url": "http://127.0.0.1:8766/private-token/",
+                "network_scope": "loopback_only",
+            },
+        )
+        self.assertEqual(build.call_args.kwargs["history_limit"], 25)
+
+        with (
+            mock.patch(
+                "magic_glass_box.cli.build_control_room_server",
+                side_effect=OSError("address already in use"),
+            ),
+            self.assertRaisesRegex(InputError, "address already in use"),
+        ):
+            _serve_control_room(args, FakeControlPlane(), FakeRunCoordinator())
+
+    def test_control_room_serve_main_route_builds_one_coordinator(self) -> None:
+        control = FakeControlPlane()
+        coordinator = FakeRunCoordinator()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch(
+                "magic_glass_box.cli._build_run_coordinator",
+                return_value=coordinator,
+            ) as build,
+            mock.patch("magic_glass_box.cli._build_result_store") as result_store,
+            mock.patch(
+                "magic_glass_box.cli._serve_control_room", return_value=0
+            ) as serve,
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "control-room",
+                    "serve",
+                    "--port",
+                    "0",
+                    "--history-limit",
+                    "3",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        result_store.assert_called_once_with(control)
+        build.assert_called_once()
+        serve.assert_called_once()
+        served_args = serve.call_args.args[0]
+        self.assertEqual(served_args.port, 0)
+        self.assertEqual(served_args.history_limit, 3)
 
     def test_result_routes_verify_database_binding_before_show_or_apply(self) -> None:
         control = FakeControlPlane()

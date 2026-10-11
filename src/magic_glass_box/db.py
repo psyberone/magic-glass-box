@@ -40,7 +40,7 @@ from .domain import (
 from .krab import IDEMPOTENCY_KEY_RE, KrabIdentity, validate_base_url
 from .results import ResultError, ResultManifest
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -975,6 +975,41 @@ BEGIN
 END;
 """
 
+RUN_REPLACEMENT_SCHEMA = """
+ALTER TABLE runs ADD COLUMN predecessor_run_id TEXT
+    REFERENCES runs(id) ON DELETE RESTRICT;
+ALTER TABLE runs ADD COLUMN replacement_kind TEXT
+    CHECK (replacement_kind IN ('retry', 'reassign'));
+
+CREATE INDEX run_predecessor_created
+    ON runs(predecessor_run_id, created_at DESC)
+    WHERE predecessor_run_id IS NOT NULL;
+CREATE UNIQUE INDEX run_one_active_successor
+    ON runs(predecessor_run_id)
+    WHERE predecessor_run_id IS NOT NULL
+      AND state IN ('queued', 'preparing', 'running', 'waiting_for_input');
+
+CREATE TRIGGER run_replacement_consistent_insert
+BEFORE INSERT ON runs
+WHEN (NEW.predecessor_run_id IS NULL) <> (NEW.replacement_kind IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'run replacement metadata is incomplete');
+END;
+CREATE TRIGGER run_replacement_consistent_update
+BEFORE UPDATE ON runs
+WHEN (NEW.predecessor_run_id IS NULL) <> (NEW.replacement_kind IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'run replacement metadata is incomplete');
+END;
+CREATE TRIGGER run_replacement_immutable_update
+BEFORE UPDATE OF predecessor_run_id, replacement_kind ON runs
+WHEN NEW.predecessor_run_id IS NOT OLD.predecessor_run_id
+  OR NEW.replacement_kind IS NOT OLD.replacement_kind
+BEGIN
+    SELECT RAISE(ABORT, 'run replacement metadata is immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -984,6 +1019,7 @@ SCHEMA = (
     + WORK_MEMORY_SCHEMA
     + WORK_THREAD_LIFECYCLE_SCHEMA
     + EXECUTION_INTEGRITY_SCHEMA
+    + RUN_REPLACEMENT_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -993,6 +1029,7 @@ MIGRATIONS = {
     5: WORK_MEMORY_SCHEMA,
     6: WORK_THREAD_LIFECYCLE_SCHEMA,
     7: EXECUTION_INTEGRITY_SCHEMA,
+    8: RUN_REPLACEMENT_SCHEMA,
 }
 
 
@@ -2330,6 +2367,268 @@ class Database:
                 connection.rollback()
                 raise ConflictError("run could not be created") from exc
         return self.get_run(run_id)
+
+    def retry_run(
+        self,
+        run_id: str,
+        *,
+        requested_by: str,
+        expected_run_version: int,
+    ) -> dict[str, Any]:
+        """Create a successor with the terminal run's exact immutable pins."""
+
+        return self._create_replacement_run(
+            run_id,
+            requested_by=requested_by,
+            expected_run_version=expected_run_version,
+            replacement_kind="retry",
+            profile_name=None,
+        )
+
+    def reassign_run(
+        self,
+        run_id: str,
+        *,
+        profile_name: str,
+        requested_by: str,
+        expected_run_version: int,
+    ) -> dict[str, Any]:
+        """Create a successor pinned to the named profile's latest revision."""
+
+        return self._create_replacement_run(
+            run_id,
+            requested_by=requested_by,
+            expected_run_version=expected_run_version,
+            replacement_kind="reassign",
+            profile_name=validate_name(profile_name, field="profile name"),
+        )
+
+    def _create_replacement_run(
+        self,
+        run_id: str,
+        *,
+        requested_by: str,
+        expected_run_version: int,
+        replacement_kind: str,
+        profile_name: str | None,
+    ) -> dict[str, Any]:
+        run_id = require_string(run_id, field="run_id", max_bytes=64)
+        requested_by = require_string(requested_by, field="requested_by", max_bytes=64)
+        if (
+            isinstance(expected_run_version, bool)
+            or not isinstance(expected_run_version, int)
+            or expected_run_version < 1
+        ):
+            raise ValidationError("expected_run_version must be a positive integer")
+        if replacement_kind not in {"retry", "reassign"}:
+            raise ValidationError("replacement_kind is invalid")
+        if (replacement_kind == "retry") != (profile_name is None):
+            raise ValidationError("replacement profile does not match the action")
+
+        replacement_run_id = self.new_id("run")
+        now = self.now()
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                actor = connection.execute(
+                    "SELECT active FROM users WHERE id = ?", (requested_by,)
+                ).fetchone()
+                if actor is None or not actor["active"]:
+                    raise NotFoundError("replacement operator is not an active user")
+                source = connection.execute(
+                    "SELECT r.project_id, r.context_version_id, "
+                    "r.profile_version_id, r.work_item_version_id, "
+                    "r.work_thread_id, r.state, r.version, r.source_revision, "
+                    "r.krab_session_id, r.krab_claim_id, p.active AS project_active, "
+                    "p.krab_instance_id, wt.state AS thread_state, "
+                    "ap.active AS profile_active, ap.name AS profile_name "
+                    "FROM runs r JOIN projects p ON p.id = r.project_id "
+                    "JOIN work_threads wt ON wt.id = r.work_thread_id "
+                    "JOIN agent_profile_versions av "
+                    "ON av.id = r.profile_version_id JOIN agent_profiles ap "
+                    "ON ap.id = av.profile_id WHERE r.id = ?",
+                    (run_id,),
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError(f"run not found: {run_id}")
+                if source["version"] != expected_run_version:
+                    raise ConcurrentUpdateError(
+                        f"run version is {source['version']}, "
+                        f"expected {expected_run_version}"
+                    )
+                if source["state"] not in {"succeeded", "failed", "cancelled"}:
+                    raise ConflictError(f"run is not terminal: {source['state']}")
+                if source["thread_state"] != "active":
+                    raise ConflictError("run work thread is not active")
+                if not source["project_active"]:
+                    raise ConflictError("run project is not active")
+                active_successor = connection.execute(
+                    "SELECT id FROM runs WHERE predecessor_run_id = ? "
+                    "AND state IN ('queued','preparing','running','waiting_for_input')",
+                    (run_id,),
+                ).fetchone()
+                if active_successor is not None:
+                    raise ConflictError(
+                        "run already has an active successor: " + active_successor["id"]
+                    )
+
+                if replacement_kind == "retry":
+                    if not source["profile_active"]:
+                        raise ConflictError("run profile is not active")
+                    profile_version_id = source["profile_version_id"]
+                    authority_rows = connection.execute(
+                        "SELECT rpg.authority_name, pg.id, pg.state, pg.expires_at "
+                        "FROM run_provider_grants rpg JOIN provider_grants pg "
+                        "ON pg.id = rpg.provider_grant_id WHERE rpg.run_id = ? "
+                        "ORDER BY rpg.authority_name",
+                        (run_id,),
+                    ).fetchall()
+                    unavailable = next(
+                        (
+                            row["authority_name"]
+                            for row in authority_rows
+                            if row["state"] != "active"
+                            or (
+                                row["expires_at"] is not None
+                                and row["expires_at"] <= now
+                            )
+                        ),
+                        None,
+                    )
+                    if unavailable is not None:
+                        raise ConflictError(
+                            f"pinned provider grant is unavailable: {unavailable}"
+                        )
+                    authorities = [
+                        (row["authority_name"], row["id"]) for row in authority_rows
+                    ]
+                else:
+                    if profile_name == source["profile_name"]:
+                        raise ConflictError(
+                            "target profile is already assigned; use retry"
+                        )
+                    target = connection.execute(
+                        "SELECT av.id AS profile_version_id, av.spec_json, "
+                        "av.content_sha256, ki.krab_instance_id "
+                        "FROM agent_profiles ap JOIN agent_profile_versions av "
+                        "ON av.profile_id = ap.id JOIN krab_identities ki "
+                        "ON ki.id = av.krab_identity_id WHERE ap.name = ? "
+                        "AND ap.active = 1 ORDER BY av.version DESC LIMIT 1",
+                        (profile_name,),
+                    ).fetchone()
+                    if target is None:
+                        raise NotFoundError(
+                            f"active agent profile not found: {profile_name}"
+                        )
+                    if target["krab_instance_id"] != source["krab_instance_id"]:
+                        raise ConflictError(
+                            "agent profile and project belong to different "
+                            "Krab instances"
+                        )
+                    try:
+                        target_spec = AgentProfileSpec.from_mapping(
+                            json.loads(target["spec_json"])
+                        )
+                    except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                        raise StorageError("stored agent profile is invalid") from exc
+                    if target_spec.digest != target["content_sha256"]:
+                        raise StorageError("stored agent profile digest does not match")
+                    profile_version_id = target["profile_version_id"]
+                    authority_rows = self._available_provider_grants(
+                        connection, target_spec
+                    )
+                    authorities = [(row["name"], row["id"]) for row in authority_rows]
+
+                connection.execute(
+                    "INSERT INTO runs "
+                    "(id, project_id, context_version_id, profile_version_id, "
+                    "work_item_version_id, work_thread_id, requested_by, state, "
+                    "version, source_revision, krab_session_id, krab_claim_id, "
+                    "created_at, updated_at, predecessor_run_id, replacement_kind) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        replacement_run_id,
+                        source["project_id"],
+                        source["context_version_id"],
+                        profile_version_id,
+                        source["work_item_version_id"],
+                        source["work_thread_id"],
+                        requested_by,
+                        source["source_revision"],
+                        source["krab_session_id"],
+                        source["krab_claim_id"],
+                        now,
+                        now,
+                        run_id,
+                        replacement_kind,
+                    ),
+                )
+                created_metadata = canonical_json(
+                    {
+                        "predecessor_run_id": run_id,
+                        "replacement_kind": replacement_kind,
+                    }
+                )
+                connection.execute(
+                    "INSERT INTO run_events "
+                    "(run_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) "
+                    "VALUES (?, 1, 'run.created', NULL, 'queued', ?, ?)",
+                    (replacement_run_id, created_metadata, now),
+                )
+                for authority_name, grant_id in authorities:
+                    connection.execute(
+                        "INSERT INTO run_provider_grants "
+                        "(run_id, authority_name, provider_grant_id, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            replacement_run_id,
+                            authority_name,
+                            grant_id,
+                            now,
+                        ),
+                    )
+
+                changed = connection.execute(
+                    "UPDATE runs SET version = version + 1, updated_at = ? "
+                    "WHERE id = ? AND version = ?",
+                    (now, run_id, expected_run_version),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError("run changed concurrently")
+                event_kind = (
+                    "run.retry_created"
+                    if replacement_kind == "retry"
+                    else "run.reassigned"
+                )
+                event_metadata: dict[str, Any] = {
+                    "replacement_run_id": replacement_run_id,
+                    "requested_by": requested_by,
+                }
+                if replacement_kind == "reassign":
+                    event_metadata["profile_version_id"] = profile_version_id
+                connection.execute(
+                    "INSERT INTO run_events "
+                    "(run_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        expected_run_version + 1,
+                        event_kind,
+                        source["state"],
+                        source["state"],
+                        canonical_json(event_metadata),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (NotFoundError, ConflictError, StorageError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("replacement run could not be created") from exc
+        return self.get_run(replacement_run_id)
 
     def begin_run_attempt(
         self,
@@ -5125,7 +5424,7 @@ class Database:
         with closing(self.connect()) as connection:
             row = connection.execute(
                 "SELECT r.id, r.state, r.version, r.source_revision, "
-                "r.work_thread_id, "
+                "r.work_thread_id, r.predecessor_run_id, r.replacement_kind, "
                 "p.krab_project_key AS project_key, c.context_json, "
                 "av.spec_json, ki.credential_ref, wi.id AS work_item_id, "
                 "wi.source AS work_item_source, "
@@ -5235,7 +5534,7 @@ class Database:
         with closing(self.connect()) as connection:
             row = connection.execute(
                 "SELECT r.id, r.state, r.version, r.source_revision, "
-                "r.work_thread_id, "
+                "r.work_thread_id, r.predecessor_run_id, r.replacement_kind, "
                 "r.krab_session_id, r.krab_claim_id, r.created_at, r.updated_at, "
                 "r.started_at, r.finished_at, p.krab_project_key AS project_key, "
                 "c.id AS context_version_id, c.version AS context_version, "

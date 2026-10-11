@@ -49,9 +49,10 @@ This repository currently contains the first executable vertical slice:
   reopen into a blank next-generation memory thread;
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues;
-  and
-- an administrative CLI that can execute or cancel runs, reconcile interrupted
-  ones, and inspect or apply retained results.
+- a loopback-only, capability-addressed browser control room with explicit
+  cancel, retry, reassign, revoke, and reconcile forms; and
+- an administrative CLI that can execute, cancel, retry, or reassign runs,
+  reconcile interrupted ones, and inspect or apply retained results.
 
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
@@ -109,7 +110,14 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run reconcile
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   control-room show --refresh-krab
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  control-room serve
 ```
+
+`control-room serve` prints a per-process private URL and binds only to
+`127.0.0.1` by default. The browser can refresh live Krab role/claim metadata
+and perform lifecycle actions, but it never displays private interaction
+bodies, work-log text, handoffs, result paths, or credential references.
 
 After an attempt exits, verify or explicitly apply its retained changes:
 

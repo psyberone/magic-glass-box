@@ -525,6 +525,7 @@ class ControlRoom:
             "('queued','preparing','running','waiting_for_input') UNION ALL "
             "SELECT id, 1 AS group_order FROM terminal"
             ") SELECT r.id, r.state, r.version, r.source_revision, "
+            "r.predecessor_run_id, r.replacement_kind, "
             "r.krab_session_id, r.krab_claim_id, r.created_at, r.updated_at, "
             "r.started_at, r.finished_at, visible.group_order, "
             "p.krab_project_key AS project_key, c.id AS context_version_id, "
@@ -571,6 +572,8 @@ class ControlRoom:
                     "work_thread_id": row["work_thread_id"],
                     "untrusted_work_item_title": title,
                     "source_revision": row["source_revision"],
+                    "predecessor_run_id": row["predecessor_run_id"],
+                    "replacement_kind": row["replacement_kind"],
                     "krab_session_id": row["krab_session_id"],
                     "krab_claim_id": row["krab_claim_id"],
                     "created_at": row["created_at"],
