@@ -110,6 +110,71 @@ class DatabaseTests(unittest.TestCase):
             source_revision="abc123",
         )
 
+    def test_composite_run_reads_share_one_snapshot_connection(self) -> None:
+        run = self.create_run()
+        readers = (
+            ("run", lambda: self.database.get_run(run["id"])),
+            ("execution", lambda: self.database.get_run_execution(run["id"])),
+            ("active runs", lambda: list(self.database.iter_active_runs())),
+        )
+        original_connect = self.database.connect
+
+        for label, reader in readers:
+            statements: list[str] = []
+
+            def traced_connect(trace: list[str] = statements) -> sqlite3.Connection:
+                connection = original_connect()
+                connection.set_trace_callback(trace.append)
+                return connection
+
+            with (
+                self.subTest(reader=label),
+                mock.patch.object(
+                    self.database,
+                    "connect",
+                    side_effect=traced_connect,
+                ) as connect,
+            ):
+                reader()
+
+            self.assertEqual(connect.call_count, 1)
+            self.assertEqual(statements[0], "BEGIN")
+            self.assertEqual(statements[-1], "COMMIT")
+
+    def test_composite_read_rolls_back_a_failed_snapshot(self) -> None:
+        run = self.create_run()
+        connection = self.database.connect()
+        try:
+            connection.execute("DROP TRIGGER work_item_version_immutable_update")
+            connection.execute(
+                "UPDATE work_item_versions SET content_json = 'not-json' WHERE id = ?",
+                (run["work_item_version_id"],),
+            )
+        finally:
+            connection.close()
+
+        statements: list[str] = []
+        original_connect = self.database.connect
+
+        def traced_connect() -> sqlite3.Connection:
+            traced = original_connect()
+            traced.set_trace_callback(statements.append)
+            return traced
+
+        with (
+            mock.patch.object(
+                self.database,
+                "connect",
+                side_effect=traced_connect,
+            ) as connect,
+            self.assertRaisesRegex(StorageError, "pinned work item data is invalid"),
+        ):
+            self.database.get_run(run["id"])
+
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(statements[0], "BEGIN")
+        self.assertEqual(statements[-1], "ROLLBACK")
+
     def test_database_is_private_and_reports_counts(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         status = self.database.status()
@@ -124,7 +189,7 @@ class DatabaseTests(unittest.TestCase):
         db_override = Path(self.temporary.name) / "explicit.db"
         with (
             mock.patch.dict(os.environ, {}, clear=True),
-            mock.patch("magic_glass_box.db.Path.home", return_value=home),
+            mock.patch("magic_glass_box.storage.core.Path.home", return_value=home),
         ):
             self.assertEqual(
                 default_db_path(),

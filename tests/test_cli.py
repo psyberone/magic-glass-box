@@ -1053,7 +1053,7 @@ class CLITests(unittest.TestCase):
             with (
                 self.subTest(environment=environment),
                 mock.patch.dict(os.environ, isolated_environment, clear=True),
-                mock.patch("magic_glass_box.db.Path.home", return_value=home),
+                mock.patch("magic_glass_box.storage.core.Path.home", return_value=home),
             ):
                 parsed = build_parser().parse_args(["status"])
             self.assertEqual(parsed.db, expected)

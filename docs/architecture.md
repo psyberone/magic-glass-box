@@ -109,6 +109,22 @@ caller must retain and reuse its stable idempotency key until local correlation
 succeeds. A retry then resolves to the same Krab item rather than sending a
 duplicate private request.
 
+## Persistence boundary
+
+`magic_glass_box.db` is the stable compatibility facade. Its implementation is
+split beneath `magic_glass_box.storage` into schema and migration ownership,
+SQLite connection ownership, and stores for the catalog, work-item lifecycle,
+work memory, runs, attempts, interactions and provider activity, retained
+artifacts, and composite query projections. Schema v9 was preserved during the
+split.
+
+Each mutation continues to own its complete SQLite transaction. Composite read
+projections open one explicit read transaction and pass that connection to
+nested store operations; nested repositories never discover or open a second
+connection implicitly. A projection therefore represents one database state,
+including its base run, events, attempts, interactions, provider authority, and
+work memory.
+
 ## Execution lifecycle
 
 For an execution request, Magic Glass Box:
@@ -181,8 +197,8 @@ Implementation is ordered around demonstrable product guarantees rather than
 independent subsystems. See [roadmap.md](roadmap.md) for the current sequence and
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
 broker, structured worker replacement, multi-agent work memory, work-item
-completion, execution integrity, and the redacted interactive control room are
-complete. The next slice is the runtime adapter contract and its conformance
-suite. See
+completion, execution integrity, the redacted interactive control room, and the
+storage-boundary refactor are complete. The next slice is the runtime adapter
+contract and its conformance suite. See
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 and [work-memory.md](work-memory.md).

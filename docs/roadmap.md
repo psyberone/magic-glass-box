@@ -215,6 +215,23 @@ without entering an agent container or reading its private conversation. HTTP
 tests exercise all five actions, reject cross-origin and malformed requests,
 escape hostile visible titles, and prove that private fields are not rendered.
 
+## Milestone 4.5: storage boundaries
+
+**Status: complete**
+
+- Preserve `magic_glass_box.db.Database` as the stable persistence facade.
+- Isolate schema and migrations from connection ownership and aggregate stores.
+- Split catalog, work-item, work-memory, run, attempt, interaction/provider,
+  artifact, and query-projection persistence along durable-model boundaries.
+- Give composite run projections one explicit SQLite read transaction and pass
+  its connection into nested repository reads.
+- Keep schema v9 and every public persistence operation behaviorally compatible.
+
+**Exit proof:** `get_run`, `get_run_execution`, and active-run iteration each
+open exactly one read connection, begin one snapshot, and commit or roll back
+that snapshot as a unit. The existing migration, lifecycle, concurrency, and
+immutability suite passes without a schema migration.
+
 ## Milestone 5: runtime adapter contract
 
 - Publish the minimal adapter protocol and conformance tests.
