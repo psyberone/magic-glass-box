@@ -217,6 +217,18 @@ PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
 
 Use `--image` to select another local, volume-free image with Python installed.
 
+The live runtime proof builds an intentionally narrow image with pinned Codex
+and Claude Code CLIs, then runs both through the real networkless Docker and
+provider-gateway path against a host-only deterministic protocol fixture:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build
+```
+
+It makes no remote provider request and needs no provider credential. See
+[docs/runtime-adapters.md](docs/runtime-adapters.md) for the exact proof
+boundary.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the exact scoring rules and workflow.
 
 See [docs/product-thesis.md](docs/product-thesis.md) for the product contract,

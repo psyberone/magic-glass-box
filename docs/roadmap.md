@@ -234,7 +234,7 @@ immutability suite passes without a schema migration.
 
 ## Milestone 5: runtime adapter contract
 
-**Status: in progress**
+**Status: complete**
 
 - Publish the minimal adapter protocol and conformance tests.
 - Support at least two meaningfully different headless agent runtimes.
@@ -246,12 +246,91 @@ adapter, Claude Code JSON-result adapter, profile default, per-attempt override,
 transient output capture, control-room visibility, explicit runtime-to-grant
 binding, committed-file client, loopback vendor bridge, and buffered SSE
 provider adapters are implemented. Legacy profiles retain their content
-digests. The remaining work is one live golden-path demonstration through both
-vendor dialects; direct network access and reusable provider credentials remain
-out of scope for an adapter.
+digests. The live proof builds one pinned image containing the real Codex and
+Claude Code CLIs, then runs each through the coordinator, real Docker executor,
+committed-file gateway, trusted provider broker, and a host-only deterministic
+SSE fixture. Both containers use Docker network policy `none`; reusable
+credentials and transient model output remain outside durable worker state.
 
 **Exit proof:** the golden-path demonstration in the product thesis succeeds
 with two interchangeable worker implementations.
+
+## Milestone 6: autonomous supervision and escalation
+
+**Status: planned**
+
+- Run reconciliation, queued execution, answered-work resumption, and bounded
+  retry/backoff from one long-lived supervisor loop.
+- Make automatic execution an explicit project or run policy rather than an
+  implicit side effect of creating work.
+- Attach aging policies to questions, idle attempts, expired ownership, and
+  other operator-attention states.
+- Emit deduplicated escalation events through Krab and the control room without
+  retaining private message content.
+- Preserve leader-safe, idempotent transitions so two orchestrators cannot
+  launch or recover the same attempt.
+
+**Exit proof:** queued work advances without a cron or button, an answered run
+resumes automatically, an expired attempt is recovered without touching a live
+lease, and an intentionally stalled question produces one bounded escalation
+at each configured threshold.
+
+## Milestone 7: integration state and forge sidecars
+
+**Status: planned**
+
+- Model candidate base/head revisions, exact-head independent review, CI and
+  approval gates, inter-work-item landing order, and durable landing receipts.
+- Invalidate head-bound gates when a candidate changes and enqueue a re-fold
+  when its pinned base is no longer current.
+- Keep provider-specific GitHub, GitLab, and future forge mechanics out of the
+  core. Optional pinned sidecars implement a small versioned operation protocol.
+- Give a sidecar—not a worker—the user's explicitly approved configuration
+  directory such as `GH_CONFIG_DIR`. The worker receives only named `forge.*`
+  capabilities through the existing run-scoped gateway.
+- Have Magic Glass Box authorize the operation, repository, account, exact
+  revision, limits, and idempotency key before the sidecar performs a push,
+  opens a change, reads checks, or merges. Record bounded receipts, never the
+  reusable credential.
+- Retain a manual actuator: when no sidecar is configured, produce the exact
+  commands and proposed change title/body while preserving the same gate state.
+
+**Exit proof:** one candidate cannot become ready until a separate run reviews
+its exact head and every configured gate passes; a base advance invalidates the
+candidate until re-folded; then either a human or an authorized sidecar lands it
+and records the resulting immutable revision without exposing forge credentials
+to a worker or the control-plane database.
+
+## Milestone 8: provider usage, budgets, and quota recovery
+
+**Status: planned**
+
+- Retain bounded token and usage metadata from provider responses without
+  retaining prompts, responses, or transcripts.
+- Enforce per-run, per-project, and per-grant ceilings using versioned policy.
+- Classify quota and rate-limit responses, honor bounded retry timing, and pause
+  recoverable work instead of treating every upstream refusal as terminal.
+- Surface spend estimates and remaining policy budget in the control room.
+
+**Exit proof:** a run cannot exceed its pinned budget, a simulated quota outage
+pauses and later resumes the same durable work, and usage totals reconcile with
+audited provider invocations.
+
+## Milestone 9: destructive continuity proof
+
+**Status: planned**
+
+- Kill a worker during active file edits rather than at a clean interaction
+  boundary.
+- Retain a bounded, trusted checkpoint of recoverable work product alongside
+  the existing structured handoff and work-memory log.
+- Start a compatible replacement from the pinned revision plus that checkpoint
+  and prove it completes without silently dropping or redoing accepted work.
+- Use “replacement recovery” rather than “resume” anywhere the stronger
+  continuity contract is not demonstrated.
+
+**Exit proof:** an adversarial mid-task kill followed by replacement produces
+the expected final result and audit trail with no unaccounted file loss.
 
 ## Continuous gates
 

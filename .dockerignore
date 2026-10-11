@@ -1,0 +1,8 @@
+**
+!README.md
+!pyproject.toml
+!src/
+!src/magic_glass_box/
+!src/magic_glass_box/**
+!docker/
+!docker/runtime-proof.Dockerfile

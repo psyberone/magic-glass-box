@@ -41,7 +41,14 @@ interaction correlation, credential grants, cleanup, and audit metadata.
 External work enters through a versioned, forge-neutral import document. Its
 text is untrusted input, not authority: it cannot choose a project, profile,
 credential, network policy, or lifecycle transition. Magic Glass Box does not
-export or synchronize work items back to their source.
+silently synchronize work items back to their source.
+
+Magic Glass Box owns integration semantics: candidate revisions, dependencies,
+exact-head gates, authorization, and durable receipts. It does not bake a forge
+client or forge credential into the core. Optional provider sidecars may perform
+explicitly authorized effects using user-supplied configuration that is mounted
+only into that sidecar. Agents receive narrow capabilities, never the
+configuration directory or reusable credential.
 
 Imitation Krab owns identities, project roles, private message content,
 sessions, work claims, delivery, and message status. Magic Glass Box may retain
@@ -75,7 +82,7 @@ Magic Glass Box is not:
 - a general chat service or replacement for Imitation Krab;
 - an agent reasoning framework, prompt framework, or model router;
 - a general-purpose DAG or business-workflow engine;
-- a GitHub or GitLab issue synchronizer in the initial product;
+- a built-in GitHub or GitLab client or credential store;
 - a transcript warehouse or chain-of-thought viewer; or
 - a promise that sandboxing makes arbitrary code safe on every host.
 

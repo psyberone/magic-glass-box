@@ -139,6 +139,30 @@ on the fixed request file. Sequence, size, digest, response correlation, and
 timeouts are verified on every exchange. The image remains incompatible if it
 contains only a stock vendor CLI and not this worker entry point.
 
-The remaining Milestone 5 exit proof is a live, single golden-path
-demonstration using that worker-side provider transport with both bundled
-vendor dialects.
+## Live two-runtime proof
+
+The Milestone 5 exit proof uses the real pinned vendor CLIs without requiring
+or spending a remote provider credential. Build the dedicated proof image and
+run:
+
+```console
+docker build --file docker/runtime-proof.Dockerfile \
+  --tag magic-glass-box/runtime-proof:local .
+PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py
+```
+
+Or let the proof build the image itself:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build
+```
+
+The image pins Codex CLI and Claude Code versions and contains this package's
+worker entry point. The proof runs both CLIs through the real coordinator and
+Docker executor. A host-only provider fixture returns valid deterministic SSE;
+it is reached only by the trusted broker. The proof verifies both attempts and
+provider audits, Docker network policy `none`, absence of credential mounts,
+host-side credential injection, container cleanup, and that neither the
+credential nor transient model output entered SQLite. It therefore tests the
+runtime and protocol seam rather than a provider account, entitlement, quota,
+or model quality.

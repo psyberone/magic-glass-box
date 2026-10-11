@@ -19,6 +19,14 @@ receives reusable credentials. It also never receives the Docker socket, a Krab
 admin token, the control-plane database, another run's workspace, or the source
 repository's Git metadata.
 
+Optional integration sidecars are trusted credential actuators, not workers.
+They contain provider-specific GitHub, GitLab, or other forge mechanics behind
+a small versioned operation protocol. A user may explicitly expose a local
+configuration directory such as `GH_CONFIG_DIR` to the selected sidecar only;
+it is never mounted into an agent container or copied into control-plane state.
+Magic Glass Box remains responsible for deciding whether a specific operation,
+repository, account, and exact revision are authorized.
+
 ## Trust flow
 
 ```text
@@ -30,6 +38,11 @@ Magic Glass Box ------ stable IDs / metadata ----> imitation-krab
       +---- run-scoped typed capability ----> sandboxed worker
       |
       <---- structured events/questions -----+
+      |
+      +---- bounded authorized operation ----> optional forge sidecar
+                                                    |
+                                                    v
+                                             GitHub / GitLab / forge
 ```
 
 Krab metadata is structurally validated. Work-item titles are retained as
@@ -163,7 +176,9 @@ repository or an executable action. Applying a result verifies the database
 digest, checks every affected path against its captured baseline before making
 any change, and then reconstructs files, safe relative symlinks, deletions, and
 executable modes. It never commits, pushes, opens a pull request, or needs forge
-credentials. See [results.md](results.md).
+credentials. A future integration state machine may authorize those effects
+through an optional sidecar, but neither the result artifact nor a worker gains
+that authority. See [results.md](results.md).
 
 The Docker boundary rejects images with Dockerfile-declared volumes, validates
 host paths before mounting them, runs as the host's non-root numeric identity,
@@ -196,11 +211,17 @@ after that attempt has exited. See [agent-gateway.md](agent-gateway.md),
 ## Work-item boundary
 
 The core accepts only the normalized v1 document described in
-[work-items.md](work-items.md). It has no forge client and performs no outbound
-work-item action. Source adapters run outside the control plane and may only
-submit content; project selection, assignment, profiles, credentials, network
-policy, and lifecycle remain trusted local decisions. Imported content is
-therefore never an authority channel.
+[work-items.md](work-items.md). It has no built-in forge client. Import adapters
+run outside the control plane and may only submit content; project selection,
+assignment, profiles, credentials, network policy, and lifecycle remain trusted
+local decisions. Imported content is therefore never an authority channel.
+
+Provider-specific outbound effects belong to optional sidecars. A worker asks
+through a narrow `forge.*` gateway operation; the core checks durable gates and
+pinned authority, then passes one bounded request to the sidecar. The sidecar
+returns an idempotent receipt such as a remote change ID or landed revision.
+Without a configured sidecar, the same state machine stops at a human-executable
+command plan rather than silently weakening the gate.
 
 ## Planned slices
 
@@ -209,7 +230,7 @@ independent subsystems. See [roadmap.md](roadmap.md) for the current sequence an
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
 broker, structured worker replacement, multi-agent work memory, work-item
 completion, execution integrity, the redacted interactive control room, and the
-storage-boundary refactor are complete. The runtime adapter contract and its
-conformance suite are in progress. See
+storage-boundary refactor, runtime adapter contract, and live dual-runtime proof
+are complete. Autonomous supervision and aging escalation are next. See
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 [runtime-adapters.md](runtime-adapters.md), and [work-memory.md](work-memory.md).
