@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import io
 import json
@@ -8,6 +9,7 @@ import os
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -193,7 +195,7 @@ class FileGatewayClientTests(unittest.TestCase):
             )
             self.assertEqual((mailbox / "request.json").read_bytes(), b"")
 
-    def test_provider_exchange_has_margin_over_the_maximum_upstream_deadline(
+    def test_provider_exchange_continues_while_the_host_publishes_progress(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
@@ -202,17 +204,22 @@ class FileGatewayClientTests(unittest.TestCase):
             invoke = control.invoke_provider
 
             def delayed_invoke(*args: Any, **kwargs: Any) -> AcceptedProviderResponse:
-                time.sleep(0.15)
+                time.sleep(0.25)
                 return invoke(*args, **kwargs)
 
             control.invoke_provider = delayed_invoke  # type: ignore[method-assign]
             manager = FileGatewayManager(root, control, poll_interval=0.005)
             try:
-                endpoint = manager.open(
-                    RUN_ID,
-                    capabilities=("provider.invoke",),
-                    credential_names=("openai-main",),
-                )
+                with mock.patch(
+                    "magic_glass_box.gateway.GATEWAY_PROGRESS_INTERVAL_SECONDS",
+                    0.02,
+                    create=True,
+                ):
+                    endpoint = manager.open(
+                        RUN_ID,
+                        capabilities=("provider.invoke",),
+                        credential_names=("openai-main",),
+                    )
                 client = FileGatewayClient(endpoint.directory, timeout=0.1)
                 transport = ProviderHTTPTransport(
                     client,
@@ -220,15 +227,150 @@ class FileGatewayClientTests(unittest.TestCase):
                     grant="openai-main",
                 )
 
-                response = transport.invoke(
-                    "/v1/responses",
-                    b'{"input":"slow","model":"worker-model","stream":true}',
-                )
+                with mock.patch(
+                    "magic_glass_box.worker_transport.PROVIDER_GATEWAY_TIMEOUT_SECONDS",
+                    0.1,
+                ):
+                    response = transport.invoke(
+                        "/v1/responses",
+                        b'{"input":"slow","model":"worker-model","stream":true}',
+                    )
 
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(PROVIDER_GATEWAY_TIMEOUT_SECONDS, 130.0)
             finally:
                 manager.close()
+
+    def test_stale_provider_progress_cannot_extend_the_wait_forever(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            client = FileGatewayClient(mailbox, timeout=0.1)
+
+            def publish_one_progress_frame() -> None:
+                deadline = time.monotonic() + 1
+                while not (mailbox / "request.ready").read_bytes():
+                    if time.monotonic() >= deadline:
+                        return
+                    time.sleep(0.005)
+                time.sleep(0.05)
+                request = json.loads((mailbox / "request.json").read_bytes())
+                raw = (
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "request_id": request["request_id"],
+                            "pending": True,
+                            "heartbeat": 1,
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
+                (mailbox / "response.json").write_bytes(raw)
+                marker = {
+                    "sequence": 1,
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "size": len(raw),
+                }
+                (mailbox / "response.ready").write_text(
+                    json.dumps(marker, separators=(",", ":"), sort_keys=True) + "\n"
+                )
+
+            publisher = threading.Thread(target=publish_one_progress_frame)
+            publisher.start()
+            try:
+                with self.assertRaisesRegex(WorkerTransportError, "timed out"):
+                    client.exchange("provider.invoke", {}, timeout=0.1)
+            finally:
+                publisher.join(1)
+            self.assertFalse(publisher.is_alive())
+
+    def test_response_commit_race_retries_the_newer_bounded_body(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            client = FileGatewayClient(mailbox, timeout=0.5)
+            request_id = "worker-" + "1" * 32
+            progress = (
+                json.dumps(
+                    {
+                        "heartbeat": 1,
+                        "pending": True,
+                        "request_id": request_id,
+                        "version": 1,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            final = (
+                json.dumps(
+                    {
+                        "ok": True,
+                        "request_id": request_id,
+                        "result": {"padding": "x" * 200},
+                        "version": 1,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+
+            def marker(raw: bytes) -> bytes:
+                return (
+                    json.dumps(
+                        {
+                            "sequence": 1,
+                            "sha256": hashlib.sha256(raw).hexdigest(),
+                            "size": len(raw),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
+
+            ready_reads = iter((marker(progress), marker(final)))
+
+            def racing_read(path: Path, limit: int) -> bytes:
+                if path.name == "response.ready":
+                    return next(ready_reads)
+                if limit < len(final):
+                    raise WorkerTransportError(
+                        "gateway mailbox response exceeds its size limit"
+                    )
+                return final
+
+            with mock.patch(
+                "magic_glass_box.worker_transport._read_file",
+                side_effect=racing_read,
+            ):
+                response = client._wait_response(  # noqa: SLF001
+                    1,
+                    request_id,
+                    0.5,
+                    allow_progress=True,
+                )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["result"]["padding"], "x" * 200)
 
 
 class RecordingGateway:
@@ -260,7 +402,7 @@ class RecordingGateway:
         operation: str,
         payload: dict[str, Any],
         *,
-        timeout: float | None = 30.0,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         self.calls.append((operation, payload))
         self.timeouts.append(timeout)
@@ -367,8 +509,28 @@ class ProviderHTTPTransportTests(unittest.TestCase):
             gateway, dialect="openai-responses", grant="provider-main"
         )
         request = b'{"model":"x","stream":true}'
-        cases: tuple[object, ...] = ("", "feature\nvalue", "x" * 8193, 7)
-        for value in cases:
+        accepted = (" ", "~", "x" * 8192)
+        for value in accepted:
+            with self.subTest(accepted=repr(value)[:80]):
+                response = transport.invoke(
+                    "/v1/responses",
+                    request,
+                    headers={"x-codex-beta-features": value},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    gateway.calls[-1][1]["request"]["headers"],
+                    {"x-codex-beta-features": value},
+                )
+
+        rejected: tuple[object, ...] = (
+            "",
+            "feature\nvalue",
+            "\x7f",
+            "x" * 8193,
+            7,
+        )
+        for value in rejected:
             with (
                 self.subTest(value=repr(value)[:80]),
                 self.assertRaisesRegex(WorkerTransportError, "header"),
@@ -378,7 +540,7 @@ class ProviderHTTPTransportTests(unittest.TestCase):
                     request,
                     headers={"x-codex-beta-features": value},  # type: ignore[dict-item]
                 )
-        self.assertEqual(gateway.calls, [])
+        self.assertEqual(len(gateway.calls), len(accepted))
 
     def test_gateway_errors_and_malformed_responses_are_redacted(self) -> None:
         gateway = RecordingGateway("openai-responses")

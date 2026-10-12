@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from .domain import MAX_PROVIDER_TIMEOUT_MS, canonical_json
+from .domain import canonical_json
 from .gateway import (
     GATEWAY_FILE_NAMES,
     GATEWAY_PROTOCOL_VERSION,
@@ -36,7 +36,7 @@ from .gateway import (
 TRANSPORT_HOST = "127.0.0.1"
 TRANSPORT_PORT = 8766
 MAX_VENDOR_REQUEST_BYTES = 2 * 1024 * 1024
-PROVIDER_GATEWAY_TIMEOUT_SECONDS = MAX_PROVIDER_TIMEOUT_MS / 1000 + 10
+PROVIDER_GATEWAY_TIMEOUT_SECONDS = 30.0
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 _DEFAULT_GATEWAY_TIMEOUT = object()
@@ -281,6 +281,7 @@ class FileGatewayClient:
                 sequence,
                 request_id,
                 float(effective_timeout),
+                allow_progress=operation == "provider.invoke",
             )
         finally:
             try:
@@ -290,9 +291,15 @@ class FileGatewayClient:
         return response
 
     def _wait_response(
-        self, sequence: int, request_id: str, timeout: float
+        self,
+        sequence: int,
+        request_id: str,
+        timeout: float,
+        *,
+        allow_progress: bool,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
+        last_heartbeat = 0
         while time.monotonic() < deadline:
             ready_raw = _read_file(
                 self.directory / GATEWAY_RESPONSE_READY_NAME,
@@ -305,7 +312,10 @@ class FileGatewayClient:
             if marker is None or marker.sequence != sequence:
                 time.sleep(0.01)
                 continue
-            raw = _read_file(self.directory / GATEWAY_RESPONSE_NAME, marker.size)
+            raw = _read_file(
+                self.directory / GATEWAY_RESPONSE_NAME,
+                MAX_GATEWAY_RESPONSE_BYTES,
+            )
             if (
                 len(raw) != marker.size
                 or hashlib.sha256(raw).hexdigest() != marker.sha256
@@ -317,6 +327,24 @@ class FileGatewayClient:
                 subject="gateway response",
                 limit=MAX_GATEWAY_RESPONSE_BYTES,
             )
+            if isinstance(value, dict) and value.get("pending") is True:
+                heartbeat = value.get("heartbeat")
+                if (
+                    not allow_progress
+                    or set(value) != {"heartbeat", "pending", "request_id", "version"}
+                    or value.get("version") != GATEWAY_PROTOCOL_VERSION
+                    or value.get("request_id") != request_id
+                    or isinstance(heartbeat, bool)
+                    or not isinstance(heartbeat, int)
+                    or not 1 <= heartbeat <= MAX_GATEWAY_SEQUENCE
+                    or heartbeat < last_heartbeat
+                ):
+                    raise WorkerTransportError("gateway returned an invalid response")
+                if heartbeat > last_heartbeat:
+                    last_heartbeat = heartbeat
+                    deadline = time.monotonic() + timeout
+                time.sleep(0.01)
+                continue
             if (
                 not isinstance(value, dict)
                 or value.get("version") != GATEWAY_PROTOCOL_VERSION

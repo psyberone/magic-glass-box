@@ -962,7 +962,6 @@ class GatewayCapability(StrEnum):
 
 
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-MAX_PROVIDER_TIMEOUT_MS = 120_000
 HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
 PROVIDER_RESERVED_HEADERS = {
     "accept",
@@ -1164,7 +1163,7 @@ class ProviderGrantSpec:
                 value["timeout_ms"],
                 field="timeout_ms",
                 minimum=100,
-                maximum=MAX_PROVIDER_TIMEOUT_MS,
+                maximum=120_000,
             ),
             max_concurrency=_bounded_integer(
                 value["max_concurrency"],

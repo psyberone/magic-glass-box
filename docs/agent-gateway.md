@@ -193,13 +193,16 @@ The JSON object response is transient and explicitly untrusted. Only status,
 byte counts, outcome, error category, timestamps, and grant/run IDs are
 durable. See [provider-broker.md](provider-broker.md).
 
-Every mailbox operation retains a worker-side deadline. A provider exchange
-waits at most 130 seconds: ten seconds beyond the largest permitted 120-second
-grant timeout, leaving the trusted host time to publish the bounded result. If
-the gateway stops without publishing, the worker releases the mailbox lock and
-fails the request instead of waiting forever. Closing a gateway detaches from
-an in-flight provider handler immediately; cleanup does not wait for a blocked
-upstream operation, and the handler cannot publish into the removed mailbox.
+Every mailbox operation retains a worker-side deadline. Provider exchanges use
+that deadline as a 30-second host-liveness window rather than an absolute model
+turn limit. While a provider operation is pending, the trusted host publishes
+monotonic progress frames through the read-only response side of the mailbox;
+each fresh frame renews the worker's liveness window. Replayed or frozen frames
+do not. A healthy long provider stream can therefore finish, while a dead
+gateway causes the worker to release the mailbox lock and fail the request.
+Closing a gateway detaches from an in-flight provider handler immediately;
+cleanup does not wait for a blocked upstream operation, and the handler cannot
+publish into the removed mailbox.
 
 ## Resume and recovery
 

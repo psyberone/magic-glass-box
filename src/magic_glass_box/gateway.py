@@ -41,6 +41,7 @@ MAX_GATEWAY_RESPONSE_BYTES = 9 * 1024 * 1024
 MAX_GATEWAY_MARKER_BYTES = 512
 MAX_GATEWAY_SEQUENCE = (1 << 53) - 1
 MAX_GATEWAY_INTERACTIONS = 128
+GATEWAY_PROGRESS_INTERVAL_SECONDS = 1.0
 GATEWAY_REQUEST_NAME = "request.json"
 GATEWAY_REQUEST_READY_NAME = "request.ready"
 GATEWAY_RESPONSE_NAME = "response.json"
@@ -798,11 +799,13 @@ class _FileGatewayChannel:
         *,
         poll_interval: float,
         request_timeout: float,
+        progress_interval: float,
     ):
         self.directory = directory
         self.gateway = gateway
         self.poll_interval = poll_interval
         self.request_timeout = request_timeout
+        self.progress_interval = progress_interval
         self.stop_event = threading.Event()
         self.failure: BaseException | None = None
 
@@ -826,6 +829,22 @@ class _FileGatewayChannel:
         )
         _write_all(self.directory / GATEWAY_RESPONSE_NAME, encoded)
         _write_all(self.directory / GATEWAY_RESPONSE_READY_NAME, marker.encode())
+
+    def _publish_progress(
+        self,
+        sequence: int,
+        request_id: str,
+        heartbeat: int,
+    ) -> None:
+        self._publish(
+            sequence,
+            {
+                "version": GATEWAY_PROTOCOL_VERSION,
+                "request_id": request_id,
+                "pending": True,
+                "heartbeat": heartbeat,
+            },
+        )
 
     def _handle_request(
         self,
@@ -922,9 +941,32 @@ class _FileGatewayChannel:
                         daemon=True,
                     )
                     operation.start()
+                    progress_request_id = None
+                    if (
+                        isinstance(request, dict)
+                        and request.get("operation") == "provider.invoke"
+                        and isinstance(request.get("request_id"), str)
+                        and REQUEST_ID_RE.fullmatch(request["request_id"]) is not None
+                    ):
+                        progress_request_id = request["request_id"]
+                    heartbeat = 0
+                    next_progress = time.monotonic() + self.progress_interval
                     while not finished.wait(self.poll_interval):
                         if self.stop_event.is_set():
                             return
+                        now = time.monotonic()
+                        if (
+                            progress_request_id is not None
+                            and now >= next_progress
+                            and heartbeat < MAX_GATEWAY_SEQUENCE
+                        ):
+                            heartbeat += 1
+                            self._publish_progress(
+                                marker.sequence,
+                                progress_request_id,
+                                heartbeat,
+                            )
+                            next_progress = now + self.progress_interval
                     if self.stop_event.is_set():
                         return
                     if failures:
@@ -1047,6 +1089,7 @@ class FileGatewayManager:
                     gateway,
                     poll_interval=self.poll_interval,
                     request_timeout=self.request_timeout,
+                    progress_interval=GATEWAY_PROGRESS_INTERVAL_SECONDS,
                 )
                 thread = threading.Thread(
                     target=channel.serve,

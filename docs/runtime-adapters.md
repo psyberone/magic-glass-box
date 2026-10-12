@@ -139,12 +139,13 @@ magic-glass-box-worker call work.read '{"after_sequence":null,"limit":16}'
 
 Independent bridge and tool processes serialize access with an advisory lock
 on the fixed request file. Sequence, size, digest, response correlation, and
-timeouts are verified on every exchange. Ordinary tool calls have a bounded
-worker-side mailbox deadline. Provider exchanges deliberately do not add a
-second worker deadline: the trusted grant's outbound timeout and run
-cancellation own that operation, so a valid long provider stream cannot lose a
-race to the mailbox client. The image remains incompatible if it contains only
-a stock vendor CLI and not this worker entry point.
+timeouts are verified on every exchange. Ordinary tool calls have an absolute
+worker-side mailbox deadline. A provider exchange instead has a 30-second
+host-liveness window renewed only by fresh, monotonic progress frames from the
+read-only response side of the mailbox. This prevents a dead gateway from
+holding the lock forever without imposing an absolute deadline on a healthy
+long provider stream. The image remains incompatible if it contains only a
+stock vendor CLI and not this worker entry point.
 
 ## Live two-runtime proof
 
