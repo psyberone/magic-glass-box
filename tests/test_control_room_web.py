@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import socket
 import threading
 import unittest
 from collections import Counter
@@ -11,6 +12,7 @@ from unittest import mock
 from urllib.parse import urlencode, urlsplit
 
 from magic_glass_box.control_room_web import (
+    _ControlRoomHandler,
     _escape,
     _render_control_room,
     build_control_room_server,
@@ -1361,6 +1363,18 @@ class ControlRoomWebTests(unittest.TestCase):
                 access_token=ACCESS_TOKEN,
                 csrf_token=ACCESS_TOKEN,
             )
+
+    def test_stalled_connections_have_a_bounded_socket_idle_time(self) -> None:
+        self.assertIsInstance(_ControlRoomHandler.timeout, float)
+        self.assertEqual(_ControlRoomHandler.timeout, 15.0)
+
+        with (
+            mock.patch.object(_ControlRoomHandler, "timeout", 0.05),
+            socket.create_connection(self.server.server_address, timeout=1) as client,
+        ):
+            client.settimeout(1)
+            client.sendall(b"POST /incomplete HTTP/1.1\r\nHost: 127.0.0.1")
+            self.assertEqual(client.recv(1), b"")
 
 
 if __name__ == "__main__":

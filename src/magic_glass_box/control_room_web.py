@@ -17,6 +17,7 @@ MAX_FORM_BYTES = 16 * 1024
 MAX_FORM_FIELDS = 8
 TOKEN_MIN_LENGTH = 32
 TOKEN_MAX_LENGTH = 128
+CONTROL_ROOM_SOCKET_TIMEOUT_SECONDS = 15.0
 ACTIVE_RUN_STATES = {"queued", "preparing", "running", "waiting_for_input"}
 TERMINAL_RUN_STATES = {"succeeded", "failed", "cancelled"}
 CONTROL_ROOM_CSS = """
@@ -833,6 +834,10 @@ class _ControlRoomHTTPServerV6(ControlRoomHTTPServer):
 class _ControlRoomHandler(BaseHTTPRequestHandler):
     server: ControlRoomHTTPServer
     protocol_version = "HTTP/1.1"
+    # StreamRequestHandler applies this to the accepted socket before parsing
+    # request headers. It therefore bounds incomplete headers, partial bodies,
+    # idle keep-alive connections, and stalled response writes.
+    timeout = CONTROL_ROOM_SOCKET_TIMEOUT_SECONDS
 
     def log_message(self, _format: str, *_args: object) -> None:
         return

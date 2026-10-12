@@ -90,9 +90,12 @@ stylesheet. The page has no JavaScript and loads no external assets.
 
 The Host header, path capability, form content type, body size, exact field
 set, duplicate fields, CSRF token, and optimistic object version are all
-checked before an action reaches the control plane. Visible titles and every
-other rendered value are HTML-escaped. Errors returned to the browser do not
-include credential, filesystem, upstream, or cleanup details.
+checked before an action reaches the control plane. Accepted sockets have a
+15-second idle timeout so incomplete headers, partial bodies, idle keep-alive
+connections, and stalled writes cannot retain a handler thread indefinitely.
+Visible titles and every other rendered value are HTML-escaped. Errors returned
+to the browser do not include credential, filesystem, upstream, or cleanup
+details.
 
 The process is a local administrative surface, not a multi-user authentication
 server. Anyone who can read the printed private URL and reach the loopback
