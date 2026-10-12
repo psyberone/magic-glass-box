@@ -283,6 +283,32 @@ class WorkspaceResultStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ResultError, "reserved .git path"):
             self.results.stage("att_" + "9" * 32, other, COMMIT)
 
+    def test_stage_rejects_cross_platform_aliases_for_git_metadata(self) -> None:
+        aliases = (
+            ".GIT",
+            ".Git . . .",
+            "git~1",
+            ".git::$INDEX_ALLOCATION",
+            ".g\u200cit",
+        )
+        for index, alias in enumerate(aliases):
+            with self.subTest(alias=alias):
+                workspace = self.root / f"reserved-workspace-{index}"
+                hook = workspace / alias / "hooks" / "pre-commit"
+                hook.parent.mkdir(parents=True)
+                hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                hook.chmod(0o755)
+                store = WorkspaceResultStore(self.root / f"reserved-results-{index}")
+                with self.assertRaisesRegex(ResultError, "reserved .git path"):
+                    store.stage("att_" + f"{index:x}" * 32, workspace, COMMIT)
+
+        safe_workspace = self.root / "safe-workspace"
+        workflow = safe_workspace / ".github" / "workflows" / "ci.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        safe_store = WorkspaceResultStore(self.root / "safe-results")
+        safe_store.stage("att_" + "f" * 32, safe_workspace, COMMIT)
+
 
 if __name__ == "__main__":
     unittest.main()

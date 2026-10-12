@@ -32,6 +32,26 @@ READ_CHUNK_BYTES = 1024 * 1024
 MAX_PINNED_IGNORE_BYTES = 1024 * 1024
 MAX_IGNORE_BATCH_BYTES = 256 * 1024
 IGNORE_COMMAND_TIMEOUT = 10.0
+HFS_GIT_IGNORABLES = frozenset(
+    {
+        "\u200c",
+        "\u200d",
+        "\u200e",
+        "\u200f",
+        "\u202a",
+        "\u202b",
+        "\u202c",
+        "\u202d",
+        "\u202e",
+        "\u206a",
+        "\u206b",
+        "\u206c",
+        "\u206d",
+        "\u206e",
+        "\u206f",
+        "\ufeff",
+    }
+)
 
 
 class ResultError(RuntimeError):
@@ -137,6 +157,31 @@ def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _reserved_git_component(value: str) -> bool:
+    # Match Git's cross-platform .git protections: HFS ignores these Unicode
+    # code points, while NTFS folds case, trims trailing dots/spaces, assigns
+    # .git the short name git~1, and exposes alternate data streams after ':'.
+    hfs_name = "".join(
+        character for character in value if character not in HFS_GIT_IGNORABLES
+    )
+    if hfs_name.casefold() == ".git":
+        return True
+
+    ntfs_name = value.casefold()
+    if ntfs_name.startswith(".git"):
+        remainder = ntfs_name[4:]
+    elif ntfs_name.startswith("git~1"):
+        remainder = ntfs_name[5:]
+    else:
+        return False
+    for character in remainder:
+        if character == ":":
+            return True
+        if character not in {".", " "}:
+            return False
+    return True
+
+
 def _safe_path(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ResultError("result path must be a non-empty string")
@@ -151,7 +196,7 @@ def _safe_path(value: object) -> str:
         or any(part in {"", ".", ".."} for part in path.parts)
     ):
         raise ResultError("result path must be a safe relative POSIX path")
-    if ".git" in path.parts:
+    if any(_reserved_git_component(part) for part in path.parts):
         raise ResultError("result contains a reserved .git path")
     return value
 

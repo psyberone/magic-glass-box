@@ -19,8 +19,10 @@ workspace and retains:
 
 The canonical manifest is immutable. Changed file bodies are stored as
 SHA-256-addressed blobs, so identical content is retained once. Unchanged files
-and empty directories are not copied. `.git` paths, absolute or escaping
-symlinks, sockets, devices, FIFOs, and other special files fail closed.
+and empty directories are not copied. `.git` paths and their case-insensitive,
+HFS-ignorable, NTFS short-name, trailing-dot/space, and alternate-stream aliases
+fail closed. Absolute or escaping symlinks, sockets, devices, FIFOs, and other
+special files fail closed as well.
 
 Untracked files ignored by the pinned rules are excluded before the workspace
 path ceiling is counted. Matching uses Git's `check-ignore` semantics with
