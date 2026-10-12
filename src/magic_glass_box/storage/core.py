@@ -22,6 +22,45 @@ from .schema import (
 )
 
 
+class _StrictRow:
+    """SQLite row with exact-name lookup and sqlite3.Row-compatible access."""
+
+    __slots__ = ("_indexes", "_keys", "_values")
+
+    def __init__(self, cursor: sqlite3.Cursor, values: tuple[Any, ...]):
+        self._keys = tuple(column[0] for column in cursor.description or ())
+        self._values = values
+        self._indexes: dict[str, int] = {}
+        for index, key in enumerate(self._keys):
+            self._indexes.setdefault(key, index)
+
+    def __getitem__(self, key: int | slice | str) -> Any:
+        if isinstance(key, int | slice):
+            try:
+                return self._values[key]
+            except IndexError:
+                raise IndexError("tuple index out of range") from None
+        if isinstance(key, str):
+            try:
+                return self._values[self._indexes[key]]
+            except KeyError:
+                raise IndexError("No item with that key") from None
+        raise IndexError("Index must be int or string")
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def keys(self) -> list[str]:
+        return list(self._keys)
+
+
+def _strict_row_factory(cursor: sqlite3.Cursor, values: tuple[Any, ...]) -> _StrictRow:
+    return _StrictRow(cursor, values)
+
+
 def default_db_path() -> Path:
     override = os.environ.get("MAGIC_GLASS_BOX_DB")
     if override:
@@ -152,7 +191,7 @@ class DatabaseCore:
                 isolation_level=None,
                 check_same_thread=False,
             )
-            connection.row_factory = sqlite3.Row
+            connection.row_factory = _strict_row_factory
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA trusted_schema = OFF")
             connection.execute("PRAGMA busy_timeout = 5000")

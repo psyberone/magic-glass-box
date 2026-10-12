@@ -93,6 +93,23 @@ class DatabaseTests(unittest.TestCase):
             timedelta(0),
         )
 
+    def test_database_rows_require_exact_column_names(self) -> None:
+        connection = self.database.connect()
+        self.addCleanup(connection.close)
+        row = connection.execute("SELECT 7 AS exact_name, 9 AS other_name").fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["exact_name"], 7)
+        self.assertEqual(row[0], 7)
+        self.assertEqual(row[-1], 9)
+        self.assertEqual(row[:], (7, 9))
+        self.assertEqual(row.keys(), ["exact_name", "other_name"])
+        self.assertEqual(dict(row), {"exact_name": 7, "other_name": 9})
+        with self.assertRaises(IndexError):
+            row["EXACT_NAME"]
+        with self.assertRaises(IndexError):
+            row[2]
+
     def test_sqlite_operational_failures_do_not_escape_the_storage_boundary(
         self,
     ) -> None:
