@@ -153,8 +153,9 @@ For an execution request, Magic Glass Box:
 6. resolves the image reference to an immutable digest and creates the sandbox;
 7. records the commit, image, and container identity before starting it;
 8. waits for the agent while renewing its ownership lease and polling durable
-   cancellation; Docker command timeouts remain bounded, while agent runtime is
-   unlimited unless the operator supplies `--run-timeout`;
+   cancellation; Docker command timeouts remain bounded, and agent runtime has
+   a six-hour default ceiling that the operator may override with
+   `--run-timeout`;
 9. captures bounded stdout transiently, lets the adapter validate only its
    completion envelope, and retains none of that output;
 10. captures a bounded file-level result and binds its digest to the attempt;

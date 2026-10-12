@@ -786,6 +786,19 @@ class DockerExecutorTests(unittest.TestCase):
             ["inspect", "create", "start", "remove"],
         )
 
+    def test_wait_timeout_preserves_error_and_still_removes(self) -> None:
+        failure = ExecutionError("Docker command timed out")
+        self.engine.failure = ("wait", failure)
+
+        with self.assertRaisesRegex(ExecutionError, "timed out") as raised:
+            self.executor.execute(self.request)
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(
+            [operation for operation, _ in self.engine.calls],
+            ["inspect", "create", "start", "wait", "remove"],
+        )
+
     def test_primary_failure_records_a_secondary_cleanup_failure(self) -> None:
         class DoubleFailureEngine(FakeDockerEngine):
             def start(self, container_id: str) -> None:
@@ -987,14 +1000,22 @@ class DockerCLITests(unittest.TestCase):
                     runner=self.runner,
                     run_timeout=timeout,  # type: ignore[arg-type]
                 )
+        subsecond = DockerCLI(
+            binary=Path("/bin/docker"),
+            runner=self.runner,
+            command_timeout=0.5,
+            run_timeout=0.5,
+        )
+        self.assertEqual(subsecond.command_timeout, 0.5)
+        self.assertEqual(subsecond.run_timeout, 0.5)
 
-    def test_wait_has_no_accidental_command_timeout_and_allows_a_run_deadline(
+    def test_wait_uses_default_run_deadline_and_allows_an_override(
         self,
     ) -> None:
         self.runner.return_value = self.completed("0\n")
 
         self.assertEqual(self.client.wait(CONTAINER_ID), 0)
-        self.assertIsNone(self.runner.call_args.kwargs["timeout"])
+        self.assertEqual(self.runner.call_args.kwargs["timeout"], 21_600.0)
 
         bounded = DockerCLI(
             binary=Path("/usr/local/bin/docker"),

@@ -79,9 +79,13 @@ while time.monotonic() < deadline:
                 and hashlib.sha256(response_raw).hexdigest() == ready["sha256"]
             ):
                 response = json.loads(response_raw)
-                if response["ok"] and response["result"]["run_id"] == os.environ[
-                    "MAGIC_GLASS_BOX_RUN_ID"
-                ]:
+                result = response.get("result", {})
+                if (
+                    response["ok"]
+                    and result["run_id"] == os.environ["MAGIC_GLASS_BOX_RUN_ID"]
+                    and result["handoff"] is None
+                    and result["work_memory"] is None
+                ):
                     raise SystemExit(0)
                 raise SystemExit("gateway returned an invalid response")
     time.sleep(0.025)
@@ -120,6 +124,8 @@ class ProofDatabase:
                 "gateway_capabilities": ["run.describe"],
             },
             "work_item": None,
+            "handoff": None,
+            "work_memory": None,
         }
 
     def get_run(self, run_id: str) -> dict[str, Any]:

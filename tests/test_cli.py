@@ -980,6 +980,16 @@ class CLITests(unittest.TestCase):
             ["run", "execute", "run_" + "1" * 32, "--run-timeout", "12.5"]
         )
         self.assertEqual(timed.run_timeout, 12.5)
+        default_timed = parser.parse_args(["run", "execute", "run_" + "1" * 32])
+        self.assertEqual(default_timed.run_timeout, 21_600.0)
+        help_output = io.StringIO()
+        with redirect_stdout(help_output), self.assertRaises(SystemExit) as help_exit:
+            parser.parse_args(["run", "execute", "run_" + "1" * 32, "--help"])
+        self.assertEqual(help_exit.exception.code, 0)
+        self.assertIn(
+            "maximum agent runtime in seconds (default: 21600)",
+            help_output.getvalue(),
+        )
         room = parser.parse_args(["control-room", "show"])
         self.assertEqual(room.history_limit, 25)
         self.assertFalse(room.refresh_krab)

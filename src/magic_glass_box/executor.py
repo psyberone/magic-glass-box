@@ -24,6 +24,7 @@ IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024
 MAX_DOCKER_LOG_BYTES = 24 * 1024 * 1024
+DEFAULT_RUN_TIMEOUT_SECONDS = 6 * 60 * 60
 MIN_MEMORY_BYTES = 64 * 1024 * 1024
 MAX_MEMORY_BYTES = 64 * 1024 * 1024 * 1024
 MIN_TMPFS_BYTES = 16 * 1024 * 1024
@@ -496,7 +497,7 @@ class DockerCLI:
         binary: Path | None = None,
         runner: Runner | None = None,
         command_timeout: float = 30.0,
-        run_timeout: float | None = None,
+        run_timeout: float | None = DEFAULT_RUN_TIMEOUT_SECONDS,
     ):
         if binary is None:
             discovered = shutil.which("docker")
@@ -518,7 +519,9 @@ class DockerCLI:
         self.binary = Path(binary)
         self.runner = runner or subprocess.run
         self.command_timeout = float(command_timeout)
-        self.run_timeout = None if run_timeout is None else float(run_timeout)
+        self.run_timeout = float(
+            DEFAULT_RUN_TIMEOUT_SECONDS if run_timeout is None else run_timeout
+        )
 
     def _run(
         self,

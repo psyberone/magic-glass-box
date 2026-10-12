@@ -18,7 +18,12 @@ from .domain import (
     ValidationError,
     WorkItemEnvelope,
 )
-from .executor import DockerCLI, DockerExecutor, ExecutionError
+from .executor import (
+    DEFAULT_RUN_TIMEOUT_SECONDS,
+    DockerCLI,
+    DockerExecutor,
+    ExecutionError,
+)
 from .gateway import FileGatewayManager, default_gateway_root
 from .krab import KrabError
 from .orchestration import RunCoordinator, RunOrchestrationError
@@ -323,7 +328,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_execute.add_argument(
         "--run-timeout",
         type=_positive_seconds,
-        help="optional maximum agent runtime in seconds",
+        default=DEFAULT_RUN_TIMEOUT_SECONDS,
+        help="maximum agent runtime in seconds (default: %(default)s)",
     )
     run_execute.add_argument(
         "--runtime-adapter",
@@ -354,7 +360,7 @@ def _build_result_store(control: ControlPlane) -> WorkspaceResultStore:
 def _build_run_coordinator(
     control: ControlPlane,
     *,
-    run_timeout: float | None = None,
+    run_timeout: float | None = DEFAULT_RUN_TIMEOUT_SECONDS,
     result_store: WorkspaceResultStore | None = None,
 ) -> RunCoordinator:
     workspaces = WorkspaceManager(

@@ -7,7 +7,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from magic_glass_box.db import SCHEMA, ConflictError, Database
+from magic_glass_box.db import SCHEMA, ConflictError, Database, NotFoundError
 from magic_glass_box.domain import (
     AgentProfileSpec,
     HandoffEnvelope,
@@ -20,6 +20,7 @@ from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import FileState, ResultChange, ResultManifest
 
 OWNER_ID = "orchestrator-test-owner"
+IMAGE_ID = "sha256:" + "c" * 64
 
 
 class RunAttemptTests(unittest.TestCase):
@@ -113,9 +114,111 @@ class RunAttemptTests(unittest.TestCase):
             source_revision="a" * 40,
             container_id="b" * 64,
             container_name="magic-glass-box-test",
-            image_id="sha256:" + "c" * 64,
+            image_id=IMAGE_ID,
         )
         return run, running
+
+    def test_start_attempt_validates_boundaries_and_records_exact_audit(self) -> None:
+        defaults = {
+            "expected_attempt_version": 1,
+            "expected_run_version": 2,
+            "source_revision": "a" * 40,
+            "container_id": "b" * 64,
+            "container_name": "magic-glass-box-test",
+            "image_id": IMAGE_ID,
+        }
+        with self.assertRaises(NotFoundError):
+            self.database.start_run_attempt("x" * 64, **defaults)
+        for value, message in (
+            (None, "attempt_id must be text"),
+            ("", "attempt_id must not be empty"),
+            ("x" * 65, "attempt_id exceeds 64 UTF-8 bytes"),
+        ):
+            with (
+                self.subTest(attempt_id=value),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.start_run_attempt(  # type: ignore[arg-type]
+                    value, **defaults
+                )
+            self.assertEqual(str(raised.exception), message)
+
+        for field in (
+            "source_revision",
+            "container_id",
+            "container_name",
+            "image_id",
+        ):
+            for value, suffix in (
+                (None, "must be text"),
+                ("", "must not be empty"),
+                ("x" * 513, "exceeds 512 UTF-8 bytes"),
+            ):
+                with (
+                    self.subTest(field=field, value=value),
+                    self.assertRaises(ValidationError) as raised,
+                ):
+                    self.database.start_run_attempt(
+                        "att_" + "0" * 32,
+                        **(defaults | {field: value}),  # type: ignore[dict-item]
+                    )
+                self.assertEqual(str(raised.exception), f"{field} {suffix}")
+
+            run = self.create_run()
+            attempt = self.database.begin_run_attempt(
+                run["id"],
+                runtime_adapter="docker",
+                owner_id=OWNER_ID,
+                expected_run_version=1,
+            )
+            started = self.database.start_run_attempt(
+                attempt["id"],
+                **(defaults | {field: "x" * 512}),
+            )
+            self.assertEqual(started[field], "x" * 512)
+
+        for field in ("expected_attempt_version", "expected_run_version"):
+            for value in (True, 0, 1.5, "1"):
+                with (
+                    self.subTest(field=field, value=value),
+                    self.assertRaises(ValidationError) as raised,
+                ):
+                    self.database.start_run_attempt(
+                        "att_" + "0" * 32,
+                        **(defaults | {field: value}),  # type: ignore[dict-item]
+                    )
+                self.assertEqual(
+                    str(raised.exception), f"{field} must be a positive integer"
+                )
+
+        run = self.create_run()
+        attempt = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
+        )
+        started = self.database.start_run_attempt(attempt["id"], **defaults)
+        expected_metadata = {
+            "container_id": "b" * 64,
+            "container_name": "magic-glass-box-test",
+            "image_id": IMAGE_ID,
+            "source_revision": "a" * 40,
+        }
+        self.assertEqual(started["state"], "running")
+        self.assertEqual(started["version"], 2)
+        self.assertEqual(started["run_state"], "running")
+        self.assertEqual(started["run_version"], 3)
+        self.assertEqual(started["events"][-1]["sequence"], 2)
+        self.assertEqual(started["events"][-1]["kind"], "attempt.started")
+        self.assertEqual(started["events"][-1]["from_state"], "preparing")
+        self.assertEqual(started["events"][-1]["to_state"], "running")
+        self.assertEqual(started["events"][-1]["metadata"], expected_metadata)
+        run_event = self.database.get_run(run["id"])["events"][-1]
+        self.assertEqual(run_event["sequence"], 3)
+        self.assertEqual(run_event["from_state"], "preparing")
+        self.assertEqual(run_event["to_state"], "running")
+        self.assertEqual(run_event["metadata"], expected_metadata)
 
     @staticmethod
     def manifest(attempt_id: str, *, changed: bool = False) -> ResultManifest:
@@ -163,7 +266,7 @@ class RunAttemptTests(unittest.TestCase):
             running["id"],
             expected_attempt_version=running["version"],
             exit_code=0,
-            image_id="sha256:" + "c" * 64,
+            image_id=IMAGE_ID,
         )
 
         self.assertEqual(repeated, first)
@@ -182,8 +285,18 @@ class RunAttemptTests(unittest.TestCase):
             {
                 "container_id": "b" * 64,
                 "container_name": "magic-glass-box-test",
-                "image_id": "sha256:" + "c" * 64,
+                "image_id": IMAGE_ID,
                 "source_revision": "a" * 40,
+            },
+        )
+        self.assertEqual(
+            finished_attempt["events"][-1]["metadata"],
+            {
+                "exit_code": 0,
+                "handoff_id": first["id"],
+                "image_id": IMAGE_ID,
+                "result_id": finished_attempt["result"]["id"],
+                "result_sha256": finished_attempt["result"]["content_sha256"],
             },
         )
         self.assertNotIn("transcript", str(first))
@@ -229,10 +342,12 @@ class RunAttemptTests(unittest.TestCase):
             running["id"],
             expected_attempt_version=running["version"],
             exit_code=0,
-            image_id="sha256:" + "c" * 64,
+            image_id=IMAGE_ID,
         )
         self.assertEqual(finished["state"], "interrupted")
-        self.assertIn("without a handoff", finished["reason"])
+        self.assertEqual(
+            finished["reason"], "worker exited while paused without a handoff"
+        )
         self.assertEqual(self.database.get_run(run["id"])["state"], "waiting_for_input")
 
     def test_fast_response_does_not_race_handoff_persistence(self) -> None:
@@ -254,17 +369,30 @@ class RunAttemptTests(unittest.TestCase):
         handoff = self.database.create_attempt_handoff(
             run["id"], self.envelope(interaction["id"])
         )
-        self.record_result(running["id"])
+        result = self.record_result(running["id"])
         completed = self.database.complete_run_attempt(
             running["id"],
             expected_attempt_version=running["version"],
             exit_code=0,
-            image_id="sha256:" + "c" * 64,
+            image_id=IMAGE_ID,
         )
 
         self.assertEqual(handoff["pending_interaction_ids"], [interaction["id"]])
         self.assertEqual(completed["state"], "handed_off")
         self.assertEqual(completed["run_state"], "queued")
+        self.assertEqual(completed["run_version"], 5)
+        run_event = self.database.get_run(run["id"])["events"][-1]
+        self.assertEqual(run_event["sequence"], 5)
+        self.assertEqual(run_event["from_state"], "waiting_for_input")
+        self.assertEqual(run_event["to_state"], "queued")
+        self.assertEqual(
+            run_event["metadata"],
+            {
+                "attempt_id": running["id"],
+                "result_id": result["id"],
+                "result_sha256": result["content_sha256"],
+            },
+        )
 
     def test_direct_attempt_failure_is_atomic_and_audited(self) -> None:
         run = self.create_run()
@@ -286,12 +414,107 @@ class RunAttemptTests(unittest.TestCase):
         self.assertEqual(failed["reason"], "workspace preparation failed")
         self.assertEqual(failed["events"][-1]["kind"], "attempt.failed")
         self.assertEqual(failed["events"][-1]["from_state"], "preparing")
+        self.assertEqual(failed["events"][-1]["to_state"], "failed")
+        self.assertEqual(
+            failed["events"][-1]["metadata"],
+            {"reason": "workspace preparation failed"},
+        )
         run_event = self.database.get_run(run["id"])["events"][-1]
         self.assertEqual(run_event["kind"], "run.transitioned")
         self.assertEqual(run_event["from_state"], "preparing")
         self.assertEqual(run_event["to_state"], "failed")
         self.assertEqual(
             run_event["metadata"], {"reason": "workspace preparation failed"}
+        )
+
+    def test_fail_attempt_validates_boundaries_and_records_interruption(self) -> None:
+        defaults = {
+            "expected_attempt_version": 1,
+            "reason": "cleanup failed",
+        }
+        with self.assertRaises(NotFoundError):
+            self.database.fail_run_attempt("x" * 64, **defaults)
+        for value, message in (
+            (None, "attempt_id must be text"),
+            ("", "attempt_id must not be empty"),
+            ("x" * 65, "attempt_id exceeds 64 UTF-8 bytes"),
+        ):
+            with (
+                self.subTest(attempt_id=value),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.fail_run_attempt(  # type: ignore[arg-type]
+                    value, **defaults
+                )
+            self.assertEqual(str(raised.exception), message)
+
+        for value, message in (
+            (None, "reason must be text"),
+            ("", "reason must not be empty"),
+            ("x" * 4097, "reason exceeds 4096 UTF-8 bytes"),
+        ):
+            with (
+                self.subTest(reason=value),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.fail_run_attempt(
+                    "att_" + "0" * 32,
+                    **(defaults | {"reason": value}),  # type: ignore[dict-item]
+                )
+            self.assertEqual(str(raised.exception), message)
+
+        for value in (True, 0, 1.5, "1"):
+            with (
+                self.subTest(version=value),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.fail_run_attempt(
+                    "att_" + "0" * 32,
+                    **(defaults | {"expected_attempt_version": value}),  # type: ignore[dict-item]
+                )
+            self.assertEqual(
+                str(raised.exception),
+                "expected_attempt_version must be a positive integer",
+            )
+        for value in (None, 0, 1, "true"):
+            with (
+                self.subTest(interrupted=value),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.fail_run_attempt(
+                    "att_" + "0" * 32,
+                    **defaults,
+                    interrupted=value,  # type: ignore[arg-type]
+                )
+            self.assertEqual(str(raised.exception), "interrupted must be boolean")
+
+        run = self.create_run()
+        attempt = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
+        )
+        interrupted = self.database.fail_run_attempt(
+            attempt["id"],
+            expected_attempt_version=1,
+            reason="x" * 4096,
+            interrupted=True,
+        )
+        self.assertEqual(interrupted["state"], "interrupted")
+        self.assertEqual(interrupted["run_state"], "failed")
+        self.assertEqual(interrupted["reason"], "x" * 4096)
+        self.assertEqual(interrupted["events"][-1]["kind"], "attempt.interrupted")
+        self.assertEqual(interrupted["events"][-1]["sequence"], 2)
+        self.assertEqual(interrupted["events"][-1]["from_state"], "preparing")
+        self.assertEqual(interrupted["events"][-1]["to_state"], "interrupted")
+        self.assertEqual(interrupted["events"][-1]["metadata"], {"reason": "x" * 4096})
+        run_event = self.database.get_run(run["id"])["events"][-1]
+        self.assertEqual(run_event["sequence"], 3)
+        self.assertEqual(run_event["from_state"], "preparing")
+        self.assertEqual(run_event["to_state"], "failed")
+        self.assertEqual(
+            run_event["metadata"], {"reason": "x" * 4096, "reconciled": True}
         )
 
     def test_successful_attempt_terminally_completes_its_run(self) -> None:
@@ -302,27 +525,144 @@ class RunAttemptTests(unittest.TestCase):
             running["id"],
             expected_attempt_version=running["version"],
             exit_code=0,
-            image_id="sha256:" + "c" * 64,
+            image_id=IMAGE_ID,
         )
 
         self.assertEqual(completed["state"], "succeeded")
         self.assertEqual(completed["run_state"], "succeeded")
+        self.assertEqual(completed["run_version"], 4)
+        self.assertEqual(completed["exit_code"], 0)
+        self.assertIsNone(completed["reason"])
         self.assertEqual(completed["result"], result)
+        expected_metadata = {
+            "exit_code": 0,
+            "image_id": IMAGE_ID,
+            "result_id": result["id"],
+            "result_sha256": result["content_sha256"],
+        }
+        self.assertEqual(completed["events"][-1]["kind"], "attempt.completed")
+        self.assertEqual(completed["events"][-1]["from_state"], "running")
+        self.assertEqual(completed["events"][-1]["to_state"], "succeeded")
+        self.assertEqual(completed["events"][-1]["metadata"], expected_metadata)
         event = self.database.get_run(run["id"])["events"][-1]
         self.assertEqual(event["kind"], "run.transitioned")
+        self.assertEqual(event["sequence"], 4)
         self.assertEqual(event["from_state"], "running")
         self.assertEqual(event["to_state"], "succeeded")
+        self.assertEqual(event["metadata"], expected_metadata)
+
+    def test_attempt_completion_validates_exact_input_boundaries(self) -> None:
+        arguments = {
+            "expected_attempt_version": 1,
+            "exit_code": 0,
+            "image_id": IMAGE_ID,
+        }
+        for attempt_id, message in (
+            (None, "attempt_id must be text"),
+            ("", "attempt_id must not be empty"),
+            ("x" * 65, "attempt_id exceeds 64 UTF-8 bytes"),
+        ):
+            with (
+                self.subTest(attempt_id=attempt_id),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.complete_run_attempt(  # type: ignore[arg-type]
+                    attempt_id, **arguments
+                )
+            self.assertEqual(str(raised.exception), message)
+        with self.assertRaises(NotFoundError):
+            self.database.complete_run_attempt("x" * 64, **arguments)
+
+        for image_id, message in (
+            (None, "image_id must be text"),
+            ("", "image_id must not be empty"),
+            ("x" * 513, "image_id exceeds 512 UTF-8 bytes"),
+        ):
+            with (
+                self.subTest(image_id=image_id),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.complete_run_attempt(
+                    "att_" + "0" * 32,
+                    **(arguments | {"image_id": image_id}),  # type: ignore[dict-item]
+                )
+            self.assertEqual(str(raised.exception), message)
+        with self.assertRaises(NotFoundError):
+            self.database.complete_run_attempt(
+                "att_" + "0" * 32,
+                **(arguments | {"image_id": "x" * 512}),
+            )
+
+        for version in (True, 0, 1.5, "1"):
+            with (
+                self.subTest(expected_attempt_version=version),
+                self.assertRaisesRegex(ValidationError, "expected_attempt_version"),
+            ):
+                self.database.complete_run_attempt(
+                    "att_" + "0" * 32,
+                    **(arguments | {"expected_attempt_version": version}),  # type: ignore[dict-item]
+                )
+
+        run = self.create_run()
+        preparing = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
+        )
+        with self.assertRaisesRegex(ConflictError, "not running"):
+            self.database.complete_run_attempt(
+                preparing["id"],
+                expected_attempt_version=1,
+                exit_code=0,
+                image_id=IMAGE_ID,
+            )
+
+        for exit_code in (True, 1.5, -(1 << 31) - 1, 1 << 31):
+            with (
+                self.subTest(exit_code=exit_code),
+                self.assertRaisesRegex(ValidationError, "exit_code"),
+            ):
+                self.database.complete_run_attempt(
+                    "att_" + "0" * 32,
+                    **(arguments | {"exit_code": exit_code}),  # type: ignore[dict-item]
+                )
+
+        _, running = self.running_attempt()
+        result = self.record_result(running["id"])
+        completed = self.database.complete_run_attempt(
+            running["id"],
+            expected_attempt_version=running["version"],
+            exit_code=-(1 << 31),
+            image_id=IMAGE_ID,
+        )
+        self.assertEqual(completed["state"], "failed")
+        self.assertEqual(completed["run_state"], "failed")
+        self.assertEqual(completed["exit_code"], -(1 << 31))
+        self.assertEqual(completed["reason"], "agent exited with code -2147483648")
+        expected_metadata = {
+            "exit_code": -(1 << 31),
+            "image_id": IMAGE_ID,
+            "reason": "agent exited with code -2147483648",
+            "result_id": result["id"],
+            "result_sha256": result["content_sha256"],
+        }
+        self.assertEqual(completed["events"][-1]["metadata"], expected_metadata)
+        self.assertEqual(completed["events"][-1]["to_state"], "failed")
 
     def test_running_attempt_requires_a_captured_result_before_completion(self) -> None:
         _, running = self.running_attempt()
 
-        with self.assertRaisesRegex(ConflictError, "result has not been captured"):
+        with self.assertRaises(ConflictError) as raised:
             self.database.complete_run_attempt(
                 running["id"],
                 expected_attempt_version=running["version"],
                 exit_code=0,
-                image_id="sha256:" + "c" * 64,
+                image_id=IMAGE_ID,
             )
+        self.assertEqual(
+            str(raised.exception), "run attempt result has not been captured"
+        )
 
     def test_result_metadata_is_immutable_content_addressed_and_idempotent(
         self,
@@ -396,15 +736,22 @@ class RunAttemptTests(unittest.TestCase):
         self,
     ) -> None:
         run, running = self.running_attempt()
+        interaction = self.database.open_interaction(
+            run["id"],
+            kind=InteractionKind.QUESTION,
+            recipient_krab_identity_id=self.identity["id"],
+            request_item_id="itm_" + "a" * 32,
+            expected_run_version=running["run_version"],
+        )
 
         requested = self.database.request_run_cancellation(
             run["id"],
             requested_by=self.user["id"],
-            expected_run_version=running["run_version"],
+            expected_run_version=interaction["run_version"],
             reason="operator requested stop",
         )
 
-        self.assertEqual(requested["state"], "running")
+        self.assertEqual(requested["state"], "waiting_for_input")
         self.assertEqual(requested["events"][-1]["kind"], "run.cancel_requested")
         active = requested["attempts"][-1]
         self.assertEqual(active["cancel_requested_by"], self.user["id"])
@@ -414,18 +761,40 @@ class RunAttemptTests(unittest.TestCase):
         )
         self.assertTrue(control["cancel_requested"])
 
-        self.record_result(running["id"])
+        result = self.record_result(running["id"])
         completed = self.database.complete_run_attempt(
             running["id"],
             expected_attempt_version=running["version"],
             exit_code=143,
-            image_id="sha256:" + "c" * 64,
+            image_id=IMAGE_ID,
         )
         self.assertEqual(completed["state"], "cancelled")
         self.assertEqual(completed["run_state"], "cancelled")
+        self.assertEqual(completed["run_version"], 6)
+        self.assertEqual(completed["exit_code"], 143)
+        self.assertEqual(completed["reason"], "operator requested stop")
+        attempt_metadata = {
+            "exit_code": 143,
+            "image_id": IMAGE_ID,
+            "reason": "operator requested stop",
+            "result_id": result["id"],
+            "result_sha256": result["content_sha256"],
+        }
+        self.assertEqual(completed["events"][-1]["metadata"], attempt_metadata)
+        run_event = self.database.get_run(run["id"])["events"][-1]
+        self.assertEqual(run_event["sequence"], 6)
+        self.assertEqual(run_event["to_state"], "cancelled")
         self.assertEqual(
-            self.database.get_run(run["id"])["events"][-1]["to_state"],
-            "cancelled",
+            run_event["metadata"],
+            attempt_metadata | {"requested_by": self.user["id"]},
+        )
+        cancelled_interaction = self.database.get_run(run["id"])["interactions"][0]
+        self.assertEqual(cancelled_interaction["id"], interaction["id"])
+        self.assertEqual(cancelled_interaction["state"], "cancelled")
+        self.assertEqual(cancelled_interaction["version"], 2)
+        self.assertIsNotNone(cancelled_interaction["resolved_at"])
+        self.assertEqual(
+            cancelled_interaction["events"][-1]["kind"], "interaction.cancelled"
         )
 
     def test_attempt_event_and_handoff_records_are_immutable(self) -> None:

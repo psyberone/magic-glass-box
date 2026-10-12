@@ -107,7 +107,7 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run create --project box-project --profile Worker \
   --work-item wki_<id> --requested-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
-  run execute run_<id> --run-timeout 21600 --runtime-adapter codex
+  run execute run_<id> --runtime-adapter codex
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run cancel run_<id> --expected-version <version> \
   --requested-by operator --reason "Stop requested"
@@ -117,6 +117,10 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   control-room serve
 ```
+
+Agent execution has a six-hour wall-clock ceiling by default. Pass
+`--run-timeout SECONDS` to choose another positive bound for an individual
+attempt.
 
 `control-room serve` prints a per-process private URL and binds only to
 `127.0.0.1` by default. The browser can refresh live Krab role/claim metadata

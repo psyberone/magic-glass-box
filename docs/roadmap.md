@@ -151,8 +151,9 @@ with no log, checkpoint, or assignments.
 
 **Status: complete**
 
-- Separate short Docker command timeouts from an optional deliberate agent
-  runtime limit; ordinary runs no longer inherit a hidden 30-second ceiling.
+- Separate short Docker command timeouts from a deliberate six-hour default
+  agent runtime limit; operators may override the limit without making ordinary
+  runs inherit a hidden 30-second ceiling.
 - Give every active attempt an owner, heartbeat, and expiring lease so recovery
   cannot destroy another live orchestrator's container.
 - Replace the generic operator transition command with an audited cancellation
