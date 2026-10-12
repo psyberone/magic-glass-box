@@ -9,6 +9,7 @@ import os
 import secrets
 import tempfile
 import threading
+from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,14 @@ from magic_glass_box.domain import (
     NetworkMode,
     ProjectContext,
     ProviderGrantSpec,
-    RunState,
     WorkItemEnvelope,
 )
-from magic_glass_box.executor import DockerCLI, DockerExecutor, SandboxRequest
+from magic_glass_box.executor import (
+    DockerCLI,
+    DockerExecutor,
+    SandboxPlan,
+    SandboxRequest,
+)
 from magic_glass_box.gateway import FileGatewayManager
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.runtime import RuntimeLaunch
@@ -178,11 +183,11 @@ class RecordingProvider:
         return Handler
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="python:3.12-slim")
     parser.add_argument("--docker-timeout", type=float, default=60.0)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _provider_policy(port: int) -> ProviderGrantSpec:
@@ -209,7 +214,7 @@ def _prepare_run(
     secret_path: Path,
     policy: ProviderGrantSpec,
     image: str,
-) -> tuple[str, AgentProfileSpec]:
+) -> tuple[str, AgentProfileSpec, dict[str, Any]]:
     database = control.database
     database.initialize()
     user = database.create_user("operator", "Live Proof Operator")
@@ -267,16 +272,40 @@ def _prepare_run(
         work_item_id=work_item["id"],
         requested_by=user["id"],
     )
-    preparing = database.transition_run(
-        run["id"], target=RunState.PREPARING, expected_version=1
-    )
-    running = database.transition_run(
+    attempt = database.begin_run_attempt(
         run["id"],
-        target=RunState.RUNNING,
-        expected_version=preparing["version"],
-        source_revision="live-proof",
+        runtime_adapter="command",
+        owner_id="live-provider-proof",
+        expected_run_version=run["version"],
     )
-    return running["id"], profile
+    return run["id"], profile, attempt
+
+
+def _assert_proof(
+    *,
+    exit_code: int,
+    provider_requests: list[dict[str, Any]],
+    audit_invocations: list[dict[str, Any]],
+    credential: str,
+    durable_bytes: bytes,
+    gateway_bytes: bytes,
+) -> None:
+    if exit_code != 0:
+        raise RuntimeError(f"live provider worker exited {exit_code}")
+    if provider_requests != [
+        {
+            "authorization": "Bearer " + credential,
+            "body": {"input": "live hello", "model": "pinned-model"},
+        }
+    ]:
+        raise RuntimeError("provider did not receive exactly the pinned request")
+    if len(audit_invocations) != 1 or audit_invocations[0]["outcome"] != "succeeded":
+        raise RuntimeError("successful provider invocation was not audited")
+    credential_bytes = credential.encode("ascii")
+    if credential_bytes in durable_bytes:
+        raise RuntimeError("provider secret leaked into durable state")
+    if credential_bytes in gateway_bytes:
+        raise RuntimeError("provider secret leaked across the worker gateway")
 
 
 def main() -> int:
@@ -303,7 +332,7 @@ def main() -> int:
                 database,
                 credential_resolver=PrivateFileCredentialResolver(),
             )
-            run_id, pinned_profile = _prepare_run(
+            run_id, pinned_profile, attempt = _prepare_run(
                 control,
                 secret_path,
                 _provider_policy(server.server_port),
@@ -321,6 +350,18 @@ def main() -> int:
                     capabilities=pinned_profile.gateway_capabilities,
                     credential_names=pinned_profile.credential_names,
                 )
+
+                def before_start(plan: SandboxPlan, container_id: str) -> None:
+                    database.start_run_attempt(
+                        attempt["id"],
+                        expected_attempt_version=attempt["version"],
+                        expected_run_version=attempt["run_version"],
+                        source_revision="live-proof",
+                        container_id=container_id,
+                        container_name=plan.container_name,
+                        image_id=plan.image_id,
+                    )
+
                 result = DockerExecutor(
                     DockerCLI(
                         command_timeout=args.docker_timeout,
@@ -334,31 +375,23 @@ def main() -> int:
                         launch=RuntimeLaunch(pinned_profile.command),
                         credential_files={},
                         gateway_directory=endpoint.directory,
-                    )
+                    ),
+                    before_start=before_start,
                 )
                 gateway_bytes = b"".join(
                     path.read_bytes() for path in endpoint.directory.iterdir()
                 )
             finally:
                 manager.cleanup(run_id)
-            if result.exit_code != 0:
-                raise RuntimeError(f"live provider worker exited {result.exit_code}")
-            if recorder.requests != [
-                {
-                    "authorization": "Bearer " + credential,
-                    "body": {"input": "live hello", "model": "pinned-model"},
-                }
-            ]:
-                raise RuntimeError(
-                    "provider did not receive exactly the pinned request"
-                )
             invocations = database.list_provider_invocations(run_id)
-            if len(invocations) != 1 or invocations[0]["outcome"] != "succeeded":
-                raise RuntimeError("successful provider invocation was not audited")
-            if credential.encode("ascii") in database.path.read_bytes():
-                raise RuntimeError("provider secret leaked into durable state")
-            if credential.encode("ascii") in gateway_bytes:
-                raise RuntimeError("provider secret leaked across the worker gateway")
+            _assert_proof(
+                exit_code=result.exit_code,
+                provider_requests=recorder.requests,
+                audit_invocations=invocations,
+                credential=credential,
+                durable_bytes=database.path.read_bytes(),
+                gateway_bytes=gateway_bytes,
+            )
     finally:
         server.shutdown()
         server.server_close()

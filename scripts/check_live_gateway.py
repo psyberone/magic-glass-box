@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -150,11 +151,18 @@ class ProofControl:
         raise AssertionError("proof worker was not granted interaction.read")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="python:3.12-slim")
     parser.add_argument("--docker-timeout", type=float, default=60.0)
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _assert_proof(*, exit_code: int, describe_calls: int) -> None:
+    if exit_code != 0:
+        raise RuntimeError(f"live gateway worker exited {exit_code}")
+    if describe_calls != 1:
+        raise RuntimeError("live gateway request was not dispatched exactly once")
 
 
 def main() -> int:
@@ -202,10 +210,10 @@ def main() -> int:
             )
         finally:
             manager.cleanup(RUN_ID)
-        if result.exit_code != 0:
-            raise RuntimeError(f"live gateway worker exited {result.exit_code}")
-        if control.database.describe_calls != 1:
-            raise RuntimeError("live gateway request was not dispatched exactly once")
+        _assert_proof(
+            exit_code=result.exit_code,
+            describe_calls=control.database.describe_calls,
+        )
     print(
         json.dumps(
             {
