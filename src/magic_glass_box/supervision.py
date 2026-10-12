@@ -24,6 +24,10 @@ class SupervisorError(RuntimeError):
     """The autonomous supervisor was configured or stopped incorrectly."""
 
 
+class SupervisorActionTimeout(SupervisorError):
+    """A coordinator action outlived the supervisor's ownership deadline."""
+
+
 class RunAdvancer(Protocol):
     def execute(self, run_id: str) -> dict[str, Any]: ...
 
@@ -45,6 +49,7 @@ class _ClaimWorker:
     thread: threading.Thread
     claim_id: str
     version: int
+    deadline: float | None
 
 
 class Supervisor:
@@ -63,6 +68,7 @@ class Supervisor:
         max_escalations_per_tick: int = 32,
         escalation_timeout: float | None = None,
         shutdown_timeout: float = 30.0,
+        action_timeout: float = 21_900.0,
     ) -> None:
         if (
             isinstance(poll_interval, bool)
@@ -111,6 +117,15 @@ class Supervisor:
             raise SupervisorError(
                 "shutdown_timeout must be between 0.05 and 300 seconds"
             )
+        if (
+            isinstance(action_timeout, bool)
+            or not isinstance(action_timeout, (int, float))
+            or not math.isfinite(action_timeout)
+            or not 0.05 <= action_timeout <= 2_592_000.0
+        ):
+            raise SupervisorError(
+                "action_timeout must be between 0.05 and 2592000 seconds"
+            )
         if supervisor_id is None:
             supervisor_id = "supervisor-" + secrets.token_hex(16)
         if (
@@ -130,6 +145,7 @@ class Supervisor:
         self.max_escalations_per_tick = max_escalations_per_tick
         self.escalation_timeout = float(escalation_timeout)
         self.shutdown_timeout = float(shutdown_timeout)
+        self.action_timeout = float(action_timeout)
         self._lease_refresh_interval = min(
             self.poll_interval, self.action_lease_seconds / 3
         )
@@ -143,6 +159,7 @@ class Supervisor:
         """Discover, claim, and start one bounded batch of durable work."""
 
         completed = self._reap()
+        self._raise_if_action_overdue()
         self._renew_active_leases()
         actions_created = len(self.database.enqueue_supervisor_actions())
         escalations_created = len(self.database.create_due_supervisor_escalations())
@@ -176,6 +193,8 @@ class Supervisor:
             while not self._stop.is_set():
                 try:
                     self.tick()
+                except SupervisorActionTimeout:
+                    raise
                 except Exception as exc:
                     failure_streak = min(failure_streak + 1, 6)
                     self.last_loop_error = type(exc).__name__
@@ -209,12 +228,23 @@ class Supervisor:
             raise SupervisorError("timeout must be a non-negative finite number")
         deadline = time.monotonic() + effective_timeout
         while True:
+            self._reap()
             workers = self._workers()
             if not workers:
                 return True
+            if self._overdue_action_ids():
+                self.stop()
+                self.last_loop_error = SupervisorActionTimeout.__name__
+                return False
             for worker in workers:
                 remaining = max(0.0, deadline - time.monotonic())
-                worker.thread.join(timeout=min(remaining, self._lease_refresh_interval))
+                join_timeout = min(remaining, self._lease_refresh_interval)
+                if worker.deadline is not None:
+                    join_timeout = min(
+                        join_timeout,
+                        max(0.0, worker.deadline - time.monotonic()),
+                    )
+                worker.thread.join(timeout=join_timeout)
                 if time.monotonic() >= deadline:
                     self._reap()
                     return self._total_worker_count() == 0
@@ -252,6 +282,7 @@ class Supervisor:
                 thread=thread,
                 claim_id=action_id,
                 version=int(action["version"]),
+                deadline=time.monotonic() + self.action_timeout,
             )
             thread.start()
 
@@ -268,6 +299,7 @@ class Supervisor:
                 thread=thread,
                 claim_id=escalation_id,
                 version=int(escalation["version"]),
+                deadline=None,
             )
             thread.start()
 
@@ -289,12 +321,39 @@ class Supervisor:
                 self._escalation_workers.pop(escalation_id, None)
         return len(finished_actions)
 
+    def _overdue_action_ids(self) -> tuple[str, ...]:
+        now = time.monotonic()
+        with self._threads_lock:
+            return tuple(
+                action_id
+                for action_id, worker in self._action_workers.items()
+                if worker.thread.is_alive()
+                and worker.deadline is not None
+                and now >= worker.deadline
+            )
+
+    def _raise_if_action_overdue(self) -> None:
+        overdue = self._overdue_action_ids()
+        if not overdue:
+            return
+        self.stop()
+        self.last_loop_error = SupervisorActionTimeout.__name__
+        raise SupervisorActionTimeout(
+            f"supervisor action {overdue[0]} exceeded its "
+            f"{self.action_timeout:g} second deadline"
+        )
+
     def _renew_active_leases(self) -> None:
         with self._threads_lock:
             action_workers = tuple(self._action_workers.values())
             escalation_workers = tuple(self._escalation_workers.values())
+        now = time.monotonic()
         for worker in action_workers:
-            if not worker.thread.is_alive():
+            if (
+                not worker.thread.is_alive()
+                or worker.deadline is not None
+                and now >= worker.deadline
+            ):
                 continue
             with suppress(ConcurrentUpdateError, ConflictError, NotFoundError):
                 self.database.renew_supervisor_action_lease(

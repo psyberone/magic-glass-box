@@ -18,7 +18,9 @@ passes until stopped. `SIGTERM` and `Ctrl-C` both enter the same graceful
 shutdown path. That path stops discovery, waits up to 30 seconds for in-flight
 dispatcher work, and then leaves any remaining claims for lease-based recovery.
 `--run-timeout` controls the agent wall-clock limit; `--action-lease-seconds`
-controls only claims on durable dispatcher work.
+controls only claims on durable dispatcher work. `--action-timeout` bounds the
+entire coordinator call and must exceed the agent limit. When omitted, it is
+the run timeout plus five minutes for setup, result capture, and cleanup.
 
 ## Explicit run policy
 
@@ -75,13 +77,16 @@ This gives two independent safety layers:
 While an action is running, its dispatcher renews the claim without changing
 the claim's optimistic-lock version. Polling and shutdown waits are capped by
 the renewal cadence, so a healthy owner does not silently lose a long-running
-claim. If the process dies or a bounded shutdown expires, renewal stops and a
-replacement may reclaim the action after lease expiry. The underlying run or
-attempt transition remains the final defense against duplicate worker launch
-or premature recovery. An obsolete action settles without repeating the
-effect. Operational failures retain only a safe exception class, wait for the
-pinned finite backoff, and become `exhausted` after the final attempt. There is
-no unbounded retry loop.
+claim. If a coordinator call exceeds the action timeout, the supervisor stops
+renewing that claim, stops discovery, performs its bounded drain, and exits
+nonzero so a service manager can replace it. Python worker threads are not
+force-killed in-process. If the process dies, an action deadline is exceeded,
+or a bounded shutdown expires, a replacement may reclaim the action after
+lease expiry. The underlying run or attempt transition remains the final
+defense against duplicate worker launch or premature recovery. An obsolete
+action settles without repeating the effect. Operational failures retain only
+a safe exception class, wait for the pinned finite backoff, and become
+`exhausted` after the final attempt. There is no unbounded retry loop.
 
 Answered interactions queue their run only when the previous attempt is gone.
 An opted-in queued run is then discovered by the same normal action path; no

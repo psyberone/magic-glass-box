@@ -128,7 +128,9 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
 
 Agent execution has a six-hour wall-clock ceiling by default. Pass
 `--run-timeout SECONDS` to choose another positive bound for an individual
-attempt.
+attempt. The supervisor additionally bounds the complete coordinator call;
+`--action-timeout SECONDS` must exceed the run timeout and otherwise defaults
+to the run timeout plus five minutes for setup, capture, and cleanup.
 
 The supervision policy is optional. Omitting it keeps the run manual even when
 the supervisor service is running. Opted-in queued work, answered replacement

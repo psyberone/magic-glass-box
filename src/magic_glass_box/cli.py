@@ -422,6 +422,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RUN_TIMEOUT_SECONDS,
         help="maximum agent runtime in seconds (default: %(default)s)",
     )
+    supervisor_run.add_argument(
+        "--action-timeout",
+        type=_positive_seconds,
+        default=None,
+        help=(
+            "maximum coordinator action runtime; defaults to --run-timeout plus "
+            "300 seconds"
+        ),
+    )
 
     result = commands.add_parser("result", help="inspect and apply retained work")
     result_commands = result.add_subparsers(dest="result_command", required=True)
@@ -502,6 +511,11 @@ def _serve_supervisor(
     control: ControlPlane,
     coordinator: RunCoordinator,
 ) -> int:
+    action_timeout = (
+        args.run_timeout + 300.0 if args.action_timeout is None else args.action_timeout
+    )
+    if action_timeout <= args.run_timeout:
+        raise InputError("--action-timeout must exceed --run-timeout")
     control.initialize()
     supervisor = Supervisor(
         control.database,
@@ -510,6 +524,7 @@ def _serve_supervisor(
         poll_interval=args.poll_interval,
         max_workers=args.max_workers,
         action_lease_seconds=args.action_lease_seconds,
+        action_timeout=action_timeout,
     )
     _emit(
         {
@@ -517,6 +532,7 @@ def _serve_supervisor(
             "poll_interval_seconds": args.poll_interval,
             "max_workers": args.max_workers,
             "action_lease_seconds": args.action_lease_seconds,
+            "action_timeout_seconds": action_timeout,
             "authority": "explicit_run_policy",
         }
     )

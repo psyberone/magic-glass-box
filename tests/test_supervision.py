@@ -794,6 +794,10 @@ class SupervisionDatabaseTests(unittest.TestCase):
             ({"shutdown_timeout": 300.01}, "shutdown_timeout"),
             ({"shutdown_timeout": float("nan")}, "shutdown_timeout"),
             ({"shutdown_timeout": True}, "shutdown_timeout"),
+            ({"action_timeout": 0.049}, "action_timeout"),
+            ({"action_timeout": 2_592_000.01}, "action_timeout"),
+            ({"action_timeout": float("nan")}, "action_timeout"),
+            ({"action_timeout": True}, "action_timeout"),
             ({"supervisor_id": ""}, "supervisor_id"),
             ({"supervisor_id": "x" * 129}, "supervisor_id"),
             ({"supervisor_id": "supervisor\x00bad"}, "supervisor_id"),
@@ -824,6 +828,8 @@ class SupervisionDatabaseTests(unittest.TestCase):
             {"action_lease_seconds": 3600, "escalation_timeout": 60.0},
             {"shutdown_timeout": 0.05},
             {"shutdown_timeout": 300.0},
+            {"action_timeout": 0.05},
+            {"action_timeout": 2_592_000.0},
             {"supervisor_id": "x" * 128},
         ):
             with self.subTest(valid=kwargs):
@@ -951,6 +957,90 @@ class SupervisionDatabaseTests(unittest.TestCase):
         )
         coordinator.release.set()
         self.assertTrue(supervisor.drain(timeout=1))
+
+    def test_overdue_action_stops_renewal_and_fails_the_supervisor(self) -> None:
+        from magic_glass_box.supervision import (
+            Supervisor,
+            SupervisorActionTimeout,
+        )
+
+        self.create_run(self.automatic_policy())
+        coordinator = FakeCoordinator()
+        coordinator.started = threading.Event()
+        coordinator.release = threading.Event()
+        with mock.patch(
+            "magic_glass_box.supervision.time.monotonic", return_value=100.0
+        ):
+            supervisor = Supervisor(
+                self.database,
+                coordinator,
+                FakeEscalationTransport(),
+                supervisor_id="supervisor-action-deadline",
+                action_timeout=0.05,
+            )
+            supervisor.tick()
+        self.addCleanup(coordinator.release.set)
+        self.addCleanup(supervisor.close, wait=False)
+        self.assertTrue(coordinator.started.wait(timeout=1))
+
+        with (
+            mock.patch(
+                "magic_glass_box.supervision.time.monotonic", return_value=100.049
+            ),
+            mock.patch.object(
+                self.database,
+                "renew_supervisor_action_lease",
+                wraps=self.database.renew_supervisor_action_lease,
+            ) as renew,
+        ):
+            supervisor.tick()
+        renew.assert_called_once()
+
+        with (
+            mock.patch(
+                "magic_glass_box.supervision.time.monotonic", return_value=100.05
+            ),
+            mock.patch.object(
+                self.database,
+                "renew_supervisor_action_lease",
+                wraps=self.database.renew_supervisor_action_lease,
+            ) as renew,
+            self.assertRaisesRegex(
+                SupervisorActionTimeout, "exceeded its 0.05 second deadline"
+            ),
+        ):
+            supervisor.tick()
+        renew.assert_not_called()
+        self.assertEqual(supervisor.last_loop_error, "SupervisorActionTimeout")
+
+        coordinator.release.set()
+        with mock.patch(
+            "magic_glass_box.supervision.time.monotonic", return_value=100.049
+        ):
+            self.assertTrue(supervisor.drain(timeout=1))
+
+    def test_run_forever_propagates_a_fatal_action_timeout(self) -> None:
+        from magic_glass_box.supervision import (
+            Supervisor,
+            SupervisorActionTimeout,
+        )
+
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            FakeEscalationTransport(),
+        )
+        with (
+            mock.patch.object(
+                supervisor,
+                "tick",
+                side_effect=SupervisorActionTimeout("action deadline exceeded"),
+            ),
+            self.assertRaisesRegex(SupervisorActionTimeout, "deadline exceeded"),
+        ):
+            supervisor.run_forever()
+
+        self.assertTrue(supervisor.close())
 
     def test_answered_work_and_expired_ownership_advance_automatically(self) -> None:
         from magic_glass_box.supervision import Supervisor

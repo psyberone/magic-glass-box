@@ -1050,6 +1050,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(supervised.max_workers, 4)
         self.assertEqual(supervised.action_lease_seconds, 60)
         self.assertEqual(supervised.run_timeout, 21_600.0)
+        self.assertIsNone(supervised.action_timeout)
         for invalid_limit in ("-1", "501", "1.5"):
             with (
                 self.subTest(invalid_limit=invalid_limit),
@@ -1409,6 +1410,8 @@ class CLITests(unittest.TestCase):
             poll_interval=1.5,
             max_workers=3,
             action_lease_seconds=45,
+            run_timeout=90.0,
+            action_timeout=None,
         )
         control = FakeControlPlane()
         stdout = io.StringIO()
@@ -1427,6 +1430,7 @@ class CLITests(unittest.TestCase):
             json.loads(stdout.getvalue()),
             {
                 "action_lease_seconds": 45,
+                "action_timeout_seconds": 390.0,
                 "authority": "explicit_run_policy",
                 "max_workers": 3,
                 "poll_interval_seconds": 1.5,
@@ -1440,6 +1444,7 @@ class CLITests(unittest.TestCase):
             poll_interval=1.5,
             max_workers=3,
             action_lease_seconds=45,
+            action_timeout=390.0,
         )
 
     def test_sigterm_unwinds_a_service_and_restores_the_previous_handler(self) -> None:
@@ -1491,6 +1496,8 @@ class CLITests(unittest.TestCase):
                     "30",
                     "--run-timeout",
                     "90",
+                    "--action-timeout",
+                    "120",
                 ]
             )
 
@@ -1502,6 +1509,19 @@ class CLITests(unittest.TestCase):
             result_store=result_store.return_value,
         )
         serve.assert_called_once_with(mock.ANY, control, coordinator)
+        self.assertEqual(serve.call_args.args[0].action_timeout, 120.0)
+
+    def test_supervisor_action_timeout_must_exceed_the_agent_runtime(self) -> None:
+        args = argparse.Namespace(
+            poll_interval=1.5,
+            max_workers=3,
+            action_lease_seconds=45,
+            run_timeout=90.0,
+            action_timeout=90.0,
+        )
+
+        with self.assertRaisesRegex(InputError, "must exceed --run-timeout"):
+            _serve_supervisor(args, FakeControlPlane(), FakeRunCoordinator())
 
     def test_result_routes_verify_database_binding_before_show_or_apply(self) -> None:
         control = FakeControlPlane()

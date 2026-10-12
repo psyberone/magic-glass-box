@@ -156,7 +156,10 @@ existing run and attempt transitions remain the final authority. The same pass
 records due aging thresholds and dispatches open-interaction reminders through
 a separate bounded pool. Active claims are heartbeated without version drift,
 reminder I/O has a timeout shorter than its claim lease, and process shutdown
-drains for a finite interval before durable lease recovery takes over. See
+drains for a finite interval before durable lease recovery takes over. A hard
+coordinator-action deadline stops renewal and terminates an unhealthy
+supervisor, allowing a replacement process to recover the durable action
+without attempting unsafe in-process thread termination. See
 [supervision.md](supervision.md).
 
 For an execution request, Magic Glass Box:
