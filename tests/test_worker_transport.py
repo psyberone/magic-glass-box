@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from magic_glass_box.gateway import FileGatewayManager
+from magic_glass_box.gateway import MAX_GATEWAY_SEQUENCE, FileGatewayManager
 from magic_glass_box.service import AcceptedProviderResponse
 from magic_glass_box.worker_transport import (
+    PROVIDER_GATEWAY_TIMEOUT_SECONDS,
     FileGatewayClient,
     ProviderHTTPTransport,
     WorkerTransportError,
@@ -134,6 +135,12 @@ class FileGatewayClientTests(unittest.TestCase):
                 client.exchange("run.describe", [])  # type: ignore[arg-type]
             with self.assertRaisesRegex(WorkerTransportError, "timeout"):
                 client.exchange("run.describe", {}, timeout=0)
+            with self.assertRaises(WorkerTransportError) as rejected_timeout:
+                client.exchange("run.describe", {}, timeout=None)
+            self.assertEqual(
+                str(rejected_timeout.exception),
+                "gateway timeout is invalid",
+            )
             self.assertEqual((mailbox / "request.ready").read_bytes(), b"")
 
             with mock.patch.object(
@@ -155,7 +162,40 @@ class FileGatewayClientTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkerTransportError, "timed out"):
                 client.exchange("run.describe", {})
 
-    def test_provider_exchange_can_wait_for_the_host_owned_deadline(self) -> None:
+    def test_sequence_exhaustion_fails_before_overwriting_the_mailbox(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            (mailbox / "request.ready").write_text(
+                json.dumps(
+                    {
+                        "sequence": MAX_GATEWAY_SEQUENCE,
+                        "sha256": "0" * 64,
+                        "size": 1,
+                    }
+                )
+            )
+            client = FileGatewayClient(mailbox, timeout=0.1)
+
+            with self.assertRaises(WorkerTransportError) as exhausted:
+                client.exchange("run.describe", {})
+
+            self.assertEqual(
+                str(exhausted.exception),
+                "gateway mailbox sequence is exhausted",
+            )
+            self.assertEqual((mailbox / "request.json").read_bytes(), b"")
+
+    def test_provider_exchange_has_margin_over_the_maximum_upstream_deadline(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
             root = Path(temporary) / "gateway"
             control = ProviderControl()
@@ -174,20 +214,19 @@ class FileGatewayClientTests(unittest.TestCase):
                     credential_names=("openai-main",),
                 )
                 client = FileGatewayClient(endpoint.directory, timeout=0.1)
-
-                response = client.exchange(
-                    "provider.invoke",
-                    {
-                        "grant": "openai-main",
-                        "request": {
-                            "body": {"input": "slow"},
-                            "protocol": "openai-responses",
-                        },
-                    },
-                    timeout=None,
+                transport = ProviderHTTPTransport(
+                    client,
+                    dialect="openai-responses",
+                    grant="openai-main",
                 )
 
-                self.assertTrue(response["ok"])
+                response = transport.invoke(
+                    "/v1/responses",
+                    b'{"input":"slow","model":"worker-model","stream":true}',
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(PROVIDER_GATEWAY_TIMEOUT_SECONDS, 130.0)
             finally:
                 manager.close()
 
@@ -270,7 +309,7 @@ class ProviderHTTPTransportTests(unittest.TestCase):
                 self.assertEqual(payload["grant"], "provider-main")
                 self.assertEqual(payload["request"]["protocol"], dialect)
                 self.assertNotIn("model", payload["request"]["body"])
-                self.assertIsNone(gateway.timeouts[0])
+                self.assertEqual(gateway.timeouts[0], PROVIDER_GATEWAY_TIMEOUT_SECONDS)
                 self.assertEqual(
                     payload["request"]["headers"],
                     {
@@ -597,6 +636,27 @@ class WorkerTransportCLITests(unittest.TestCase):
                     2,
                 )
             self.assertNotIn("Traceback", error.getvalue())
+
+    def test_cli_help_and_empty_payload_errors_are_operator_readable(self) -> None:
+        output = io.StringIO()
+        with (
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as help_exit,
+        ):
+            main(["--help"])
+        self.assertEqual(help_exit.exception.code, 0)
+        self.assertIn(
+            "Use a run-scoped Magic Glass Box worker gateway.",
+            output.getvalue(),
+        )
+
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(main(["call", "run.describe", ""]), 2)
+        self.assertEqual(
+            error.getvalue(),
+            "magic-glass-box-worker: gateway payload JSON exceeds its size limit\n",
+        )
 
 
 if __name__ == "__main__":

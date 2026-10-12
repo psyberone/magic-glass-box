@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from .domain import canonical_json
+from .domain import MAX_PROVIDER_TIMEOUT_MS, canonical_json
 from .gateway import (
     GATEWAY_FILE_NAMES,
     GATEWAY_PROTOCOL_VERSION,
@@ -36,6 +36,7 @@ from .gateway import (
 TRANSPORT_HOST = "127.0.0.1"
 TRANSPORT_PORT = 8766
 MAX_VENDOR_REQUEST_BYTES = 2 * 1024 * 1024
+PROVIDER_GATEWAY_TIMEOUT_SECONDS = MAX_PROVIDER_TIMEOUT_MS / 1000 + 10
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 _DEFAULT_GATEWAY_TIMEOUT = object()
@@ -51,7 +52,7 @@ class GatewayClient(Protocol):
         operation: str,
         payload: dict[str, Any],
         *,
-        timeout: float | None = None,
+        timeout: float = PROVIDER_GATEWAY_TIMEOUT_SECONDS,
     ) -> dict[str, Any]: ...
 
 
@@ -186,7 +187,12 @@ class _Marker:
 class FileGatewayClient:
     """Serialize committed-file exchanges across worker processes."""
 
-    def __init__(self, directory: Path, *, timeout: float = 130.0):
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        timeout: float = PROVIDER_GATEWAY_TIMEOUT_SECONDS,
+    ):
         self.directory = Path(directory)
         if (
             isinstance(timeout, bool)
@@ -227,7 +233,7 @@ class FileGatewayClient:
         operation: str,
         payload: dict[str, Any],
         *,
-        timeout: float | None | object = _DEFAULT_GATEWAY_TIMEOUT,
+        timeout: float | object = _DEFAULT_GATEWAY_TIMEOUT,
     ) -> dict[str, Any]:
         if not isinstance(operation, str) or OPERATION_RE.fullmatch(operation) is None:
             raise WorkerTransportError("gateway operation is invalid")
@@ -236,7 +242,7 @@ class FileGatewayClient:
         effective_timeout = (
             self.timeout if timeout is _DEFAULT_GATEWAY_TIMEOUT else timeout
         )
-        if effective_timeout is not None and (
+        if (
             isinstance(effective_timeout, bool)
             or not isinstance(effective_timeout, (int, float))
             or not 0.1 <= effective_timeout <= 300
@@ -274,7 +280,7 @@ class FileGatewayClient:
             response = self._wait_response(
                 sequence,
                 request_id,
-                None if effective_timeout is None else float(effective_timeout),
+                float(effective_timeout),
             )
         finally:
             try:
@@ -284,10 +290,10 @@ class FileGatewayClient:
         return response
 
     def _wait_response(
-        self, sequence: int, request_id: str, timeout: float | None
+        self, sequence: int, request_id: str, timeout: float
     ) -> dict[str, Any]:
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while deadline is None or time.monotonic() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             ready_raw = _read_file(
                 self.directory / GATEWAY_RESPONSE_READY_NAME,
                 MAX_GATEWAY_MARKER_BYTES,
@@ -406,7 +412,7 @@ class ProviderHTTPTransport:
                     "headers": forwarded_headers,
                 },
             },
-            timeout=None,
+            timeout=PROVIDER_GATEWAY_TIMEOUT_SECONDS,
         )
         if response.get("ok") is not True:
             raise WorkerTransportError("provider gateway denied the request")
