@@ -56,8 +56,9 @@ This repository currently contains the first executable vertical slice:
 - a loopback-only, capability-addressed browser control room with explicit
   cancel, retry, reassign, revoke, and reconcile forms;
 - a leader-safe long-lived supervisor with per-run opt-in, finite durable
-  retries, automatic answered-work replacement, lease-safe recovery, and
-  bodyless threshold reminders through Krab; and
+  retries, renewable action ownership, graceful bounded shutdown, automatic
+  answered-work replacement, lease-safe recovery, and nonblocking bodyless
+  threshold reminders through Krab; and
 - an administrative CLI that can execute, cancel, retry, or reassign runs,
   reconcile interrupted ones, and inspect or apply retained results.
 

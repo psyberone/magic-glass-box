@@ -86,12 +86,18 @@ class ProofCoordinator:
 
 class ProofReminderTransport:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, float]] = []
         self._lock = threading.Lock()
 
-    def remind_interaction(self, interaction_id: str, *, idempotency_key: str) -> int:
+    def remind_interaction(
+        self,
+        interaction_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float,
+    ) -> int:
         with self._lock:
-            self.calls.append((interaction_id, idempotency_key))
+            self.calls.append((interaction_id, idempotency_key, timeout))
             return len(self.calls)
 
 
@@ -343,6 +349,7 @@ def run_proof() -> dict[str, Any]:
             "duplicate_action_subjects": len(action_subjects)
             != len(set(action_subjects)),
             "reminder_count": len(reminders.calls),
+            "reminder_timeouts": sorted({call[2] for call in reminders.calls}),
             "reminder_thresholds": sorted(
                 item["threshold_seconds"] for item in escalations
             ),
@@ -378,6 +385,8 @@ def _assert_proof(evidence: Mapping[str, Any]) -> None:
         raise RuntimeError("durable supervisor action did not settle")
     if evidence.get("reminder_count") != 2:
         raise RuntimeError("stalled interaction reminders were not deduplicated")
+    if evidence.get("reminder_timeouts") != [30.0]:
+        raise RuntimeError("reminder transport did not receive its bounded timeout")
     if evidence.get("reminder_thresholds") != [10, 30]:
         raise RuntimeError("configured escalation thresholds were not delivered")
     if evidence.get("reminder_states") != ["delivered", "delivered"]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -480,8 +481,15 @@ class KrabClient:
         self.host, self.port, self.base_url = validate_base_url(base_url)
         if not isinstance(token, str) or not token or len(token) > 256:
             raise KrabError("invalid Krab bearer token")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or not 0.05 <= timeout <= 60.0
+        ):
+            raise KrabError("Krab request timeout must be between 0.05 and 60 seconds")
         self._token = token
-        self.timeout = timeout
+        self.timeout = float(timeout)
         self._connection_factory = connection_factory or self._new_connection
 
     @staticmethod

@@ -296,7 +296,9 @@ reminder failures use finite policy-owned backoff before becoming exhausted
 attention. Krab reminders carry an empty body and a stable idempotency key.
 The repeatable proof runs two competing supervisor identities against the real
 durable state machine and satisfies every exit condition. See
-[supervision.md](supervision.md).
+[supervision.md](supervision.md). The end-of-milestone review additionally
+proved SIGTERM-aware bounded draining, renewable action and reminder claims,
+and isolation of reminder I/O from the main supervision loop.
 
 ## Milestone 7: integration state and forge sidecars
 

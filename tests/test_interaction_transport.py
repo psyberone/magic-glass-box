@@ -189,9 +189,11 @@ class InteractionTransportTests(unittest.TestCase):
         )
         self.client = FakeInteractionClient()
         self.factory_calls: list[tuple[str, str]] = []
+        self.factory_timeouts: list[float | None] = []
 
-        def factory(base_url: str, token: str) -> Any:
+        def factory(base_url: str, token: str, *, timeout: float | None = None) -> Any:
             self.factory_calls.append((base_url, token))
+            self.factory_timeouts.append(timeout)
             return self.client
 
         self.control = ControlPlane(
@@ -317,7 +319,7 @@ class InteractionTransportTests(unittest.TestCase):
         opened = self.open_interaction(run)
 
         event_sequence = self.control.remind_interaction(
-            opened["id"], idempotency_key="mgb.escalation:1234"
+            opened["id"], idempotency_key="mgb.escalation:1234", timeout=5.0
         )
 
         self.assertEqual(event_sequence, 9)
@@ -332,6 +334,7 @@ class InteractionTransportTests(unittest.TestCase):
                 )
             ],
         )
+        self.assertEqual(self.factory_timeouts[-1], 5.0)
 
         self.client.reminder = replace(self.client.reminder, recipient_id=AGENT_USER_ID)
         with self.assertRaisesRegex(KrabError, "recipient"):

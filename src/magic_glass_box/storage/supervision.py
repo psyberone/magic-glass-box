@@ -202,6 +202,68 @@ class SupervisionStorage:
             error_code=None,
         )
 
+    def renew_supervisor_action_lease(
+        self,
+        action_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Keep an in-flight action claim live without changing its version."""
+
+        action_id = require_string(action_id, field="action_id", max_bytes=64)
+        owner_id = self._supervisor_owner(owner_id)
+        self._positive_version(expected_version)
+        self._supervisor_lease_seconds(lease_seconds)
+        now = self.now()
+        expires_at = self._timestamp_after(now, lease_seconds)
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT state, version, owner_id FROM supervisor_actions "
+                    "WHERE id = ?",
+                    (action_id,),
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"supervisor action not found: {action_id}")
+                if row["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        f"supervisor action version is {row['version']}, "
+                        f"expected {expected_version}"
+                    )
+                if row["state"] != "claimed" or row["owner_id"] != owner_id:
+                    raise ConflictError(
+                        "supervisor action is not owned by this process"
+                    )
+                changed = connection.execute(
+                    "UPDATE supervisor_actions SET lease_expires_at = ?, "
+                    "updated_at = ? WHERE id = ? AND state = 'claimed' "
+                    "AND version = ? AND owner_id = ?",
+                    (expires_at, now, action_id, expected_version, owner_id),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "supervisor action changed concurrently"
+                    )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "supervisor action lease could not be renewed"
+                ) from exc
+        return self.get_supervisor_action(action_id)
+
     def defer_supervisor_action(
         self,
         action_id: str,
@@ -717,6 +779,72 @@ class SupervisionStorage:
             error_code=None,
             krab_event_seq=krab_event_seq,
         )
+
+    def renew_supervisor_escalation_lease(
+        self,
+        escalation_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Keep an in-flight reminder claim live without changing its version."""
+
+        escalation_id = require_string(
+            escalation_id, field="escalation_id", max_bytes=64
+        )
+        owner_id = self._supervisor_owner(owner_id)
+        self._positive_version(expected_version)
+        self._supervisor_lease_seconds(lease_seconds)
+        now = self.now()
+        expires_at = self._timestamp_after(now, lease_seconds)
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT state, version, owner_id FROM supervisor_escalations "
+                    "WHERE id = ?",
+                    (escalation_id,),
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(
+                        f"supervisor escalation not found: {escalation_id}"
+                    )
+                if row["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        f"supervisor escalation version is {row['version']}, "
+                        f"expected {expected_version}"
+                    )
+                if row["state"] != "claimed" or row["owner_id"] != owner_id:
+                    raise ConflictError(
+                        "supervisor escalation is not owned by this process"
+                    )
+                changed = connection.execute(
+                    "UPDATE supervisor_escalations SET lease_expires_at = ?, "
+                    "updated_at = ? WHERE id = ? AND state = 'claimed' "
+                    "AND version = ? AND owner_id = ?",
+                    (expires_at, now, escalation_id, expected_version, owner_id),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "supervisor escalation changed concurrently"
+                    )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "supervisor escalation lease could not be renewed"
+                ) from exc
+        return self.get_supervisor_escalation(escalation_id)
 
     def dismiss_supervisor_escalation(
         self,

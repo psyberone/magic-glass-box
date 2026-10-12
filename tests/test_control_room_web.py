@@ -12,6 +12,7 @@ from unittest import mock
 from urllib.parse import urlencode, urlsplit
 
 from magic_glass_box.control_room_web import (
+    ControlRoomHTTPServer,
     _ControlRoomHandler,
     _escape,
     _render_control_room,
@@ -1452,6 +1453,8 @@ class ControlRoomWebTests(unittest.TestCase):
             )
 
     def test_stalled_connections_have_a_bounded_socket_idle_time(self) -> None:
+        self.assertFalse(ControlRoomHTTPServer.daemon_threads)
+        self.assertTrue(ControlRoomHTTPServer.block_on_close)
         self.assertIsInstance(_ControlRoomHandler.timeout, float)
         self.assertEqual(_ControlRoomHandler.timeout, 15.0)
 

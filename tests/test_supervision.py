@@ -4,13 +4,14 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from magic_glass_box.db import SCHEMA, SUPERVISION_SCHEMA, Database
+from magic_glass_box.db import SCHEMA, SUPERVISION_SCHEMA, ConflictError, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     InteractionKind,
@@ -48,13 +49,43 @@ class FakeCoordinator:
 class FakeEscalationTransport:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.timeouts: list[float] = []
         self.error: Exception | None = None
 
-    def remind_interaction(self, interaction_id: str, *, idempotency_key: str) -> int:
+    def remind_interaction(
+        self,
+        interaction_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float = 40.0,
+    ) -> int:
         self.calls.append((interaction_id, idempotency_key))
+        self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
         return len(self.calls)
+
+
+class BlockingEscalationTransport(FakeEscalationTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def remind_interaction(
+        self,
+        interaction_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float = 40.0,
+    ) -> int:
+        self.started.set()
+        self.release.wait(timeout=2)
+        return super().remind_interaction(
+            interaction_id,
+            idempotency_key=idempotency_key,
+            timeout=timeout,
+        )
 
 
 class SupervisionDatabaseTests(unittest.TestCase):
@@ -505,6 +536,126 @@ class SupervisionDatabaseTests(unittest.TestCase):
         for forbidden in ("question", "answer", "body", "prompt", "transcript"):
             self.assertNotIn(f"'{forbidden}'", encoded)
 
+    def test_claimed_action_lease_can_be_renewed_without_changing_its_version(
+        self,
+    ) -> None:
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            self.create_run(self.automatic_policy())
+            self.database.enqueue_supervisor_actions()
+            claimed = self.database.claim_supervisor_action(
+                owner_id="supervisor-one", lease_seconds=10
+            )
+
+        self.assertIsNotNone(claimed)
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=(start + timedelta(seconds=5)).isoformat(
+                timespec="microseconds"
+            ),
+        ):
+            renewed = self.database.renew_supervisor_action_lease(
+                claimed["id"],
+                owner_id="supervisor-one",
+                expected_version=claimed["version"],
+                lease_seconds=10,
+            )
+        self.assertEqual(renewed["version"], claimed["version"])
+        self.assertEqual(renewed["attempt_count"], claimed["attempt_count"])
+        self.assertEqual(
+            renewed["lease_expires_at"],
+            (start + timedelta(seconds=15)).isoformat(timespec="microseconds"),
+        )
+
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=(start + timedelta(seconds=10)).isoformat(
+                timespec="microseconds"
+            ),
+        ):
+            self.assertIsNone(
+                self.database.claim_supervisor_action(
+                    owner_id="supervisor-two", lease_seconds=10
+                )
+            )
+            with self.assertRaisesRegex(ConflictError, "owned by this process"):
+                self.database.renew_supervisor_action_lease(
+                    claimed["id"],
+                    owner_id="supervisor-two",
+                    expected_version=claimed["version"],
+                    lease_seconds=10,
+                )
+
+    def test_claimed_escalation_lease_can_be_renewed_by_its_owner(self) -> None:
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            run = self.create_run(self.automatic_policy(), with_session=True)
+            attempt = self.database.begin_run_attempt(
+                run["id"],
+                runtime_adapter="command",
+                owner_id="live-owner",
+                expected_run_version=run["version"],
+                lease_seconds=3600,
+            )
+            running = self.database.start_run_attempt(
+                attempt["id"],
+                expected_attempt_version=attempt["version"],
+                expected_run_version=attempt["run_version"],
+                source_revision="a" * 40,
+                container_id="b" * 64,
+                container_name="magic-glass-box-reminder-heartbeat",
+                image_id="sha256:" + "c" * 64,
+            )
+            self.database.open_interaction(
+                run["id"],
+                kind=InteractionKind.QUESTION,
+                recipient_krab_identity_id=self.identity_id(),
+                request_item_id="itm_" + "d" * 32,
+                expected_run_version=running["run_version"],
+            )
+
+        due = start + timedelta(seconds=60)
+        with mock.patch.object(
+            self.database, "now", return_value=due.isoformat(timespec="microseconds")
+        ):
+            self.database.create_due_supervisor_escalations()
+            claimed = self.database.claim_supervisor_escalation(
+                owner_id="supervisor-one", lease_seconds=10
+            )
+
+        self.assertIsNotNone(claimed)
+        heartbeat = due + timedelta(seconds=5)
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=heartbeat.isoformat(timespec="microseconds"),
+        ):
+            renewed = self.database.renew_supervisor_escalation_lease(
+                claimed["id"],
+                owner_id="supervisor-one",
+                expected_version=claimed["version"],
+                lease_seconds=10,
+            )
+
+        self.assertEqual(renewed["version"], claimed["version"])
+        self.assertEqual(
+            renewed["lease_expires_at"],
+            (heartbeat + timedelta(seconds=10)).isoformat(timespec="microseconds"),
+        )
+        with self.assertRaisesRegex(ConflictError, "owned by this process"):
+            self.database.renew_supervisor_escalation_lease(
+                claimed["id"],
+                owner_id="supervisor-two",
+                expected_version=claimed["version"],
+                lease_seconds=10,
+            )
+
     def test_idle_attempt_age_restarts_at_the_latest_owner_heartbeat(self) -> None:
         start = datetime(2027, 1, 1, tzinfo=UTC)
         with mock.patch.object(
@@ -631,6 +782,18 @@ class SupervisionDatabaseTests(unittest.TestCase):
             ({"max_escalations_per_tick": 0}, "max_escalations_per_tick"),
             ({"max_escalations_per_tick": 257}, "max_escalations_per_tick"),
             ({"max_escalations_per_tick": True}, "max_escalations_per_tick"),
+            ({"escalation_timeout": 0.049}, "escalation_timeout"),
+            ({"escalation_timeout": 60.01}, "escalation_timeout"),
+            ({"escalation_timeout": float("nan")}, "escalation_timeout"),
+            ({"escalation_timeout": True}, "escalation_timeout"),
+            (
+                {"action_lease_seconds": 10, "escalation_timeout": 10},
+                "escalation_timeout",
+            ),
+            ({"shutdown_timeout": 0.049}, "shutdown_timeout"),
+            ({"shutdown_timeout": 300.01}, "shutdown_timeout"),
+            ({"shutdown_timeout": float("nan")}, "shutdown_timeout"),
+            ({"shutdown_timeout": True}, "shutdown_timeout"),
             ({"supervisor_id": ""}, "supervisor_id"),
             ({"supervisor_id": "x" * 129}, "supervisor_id"),
             ({"supervisor_id": "supervisor\x00bad"}, "supervisor_id"),
@@ -657,6 +820,10 @@ class SupervisionDatabaseTests(unittest.TestCase):
             {"action_lease_seconds": 3600},
             {"max_escalations_per_tick": 1},
             {"max_escalations_per_tick": 256},
+            {"action_lease_seconds": 10, "escalation_timeout": 0.05},
+            {"action_lease_seconds": 3600, "escalation_timeout": 60.0},
+            {"shutdown_timeout": 0.05},
+            {"shutdown_timeout": 300.0},
             {"supervisor_id": "x" * 128},
         ):
             with self.subTest(valid=kwargs):
@@ -681,6 +848,109 @@ class SupervisionDatabaseTests(unittest.TestCase):
                 self.assertRaisesRegex(SupervisorError, "timeout"),
             ):
                 supervisor.drain(timeout=timeout)
+
+    def test_close_drains_running_workers_by_default_with_a_bounded_wait(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        self.create_run(self.automatic_policy())
+        coordinator = FakeCoordinator()
+        coordinator.started = threading.Event()
+        coordinator.release = threading.Event()
+        supervisor = Supervisor(
+            self.database,
+            coordinator,
+            FakeEscalationTransport(),
+            supervisor_id="supervisor-shutdown",
+            shutdown_timeout=1,
+        )
+        self.addCleanup(coordinator.release.set)
+        self.addCleanup(supervisor.close, wait=False)
+        supervisor.tick()
+        self.assertTrue(coordinator.started.wait(timeout=1))
+
+        closed: list[bool] = []
+        close_finished = threading.Event()
+
+        def close() -> None:
+            closed.append(supervisor.close())
+            close_finished.set()
+
+        closer = threading.Thread(target=close)
+        closer.start()
+        self.assertFalse(close_finished.wait(timeout=0.05))
+        coordinator.release.set()
+        closer.join(timeout=1)
+
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(closed, [True])
+
+    def test_close_returns_false_when_a_worker_outlives_the_shutdown_budget(
+        self,
+    ) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        self.create_run(self.automatic_policy())
+        coordinator = FakeCoordinator()
+        coordinator.started = threading.Event()
+        coordinator.release = threading.Event()
+        supervisor = Supervisor(
+            self.database,
+            coordinator,
+            FakeEscalationTransport(),
+            supervisor_id="supervisor-bounded-shutdown",
+            shutdown_timeout=0.05,
+        )
+        self.addCleanup(coordinator.release.set)
+        self.addCleanup(supervisor.close, wait=False)
+        supervisor.tick()
+        self.assertTrue(coordinator.started.wait(timeout=1))
+
+        started = time.monotonic()
+        self.assertFalse(supervisor.close())
+        self.assertLess(time.monotonic() - started, 0.5)
+
+        coordinator.release.set()
+        self.assertTrue(supervisor.drain(timeout=1))
+
+    def test_active_supervisor_worker_renews_its_durable_claim(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        coordinator = FakeCoordinator()
+        coordinator.started = threading.Event()
+        coordinator.release = threading.Event()
+        supervisor = Supervisor(
+            self.database,
+            coordinator,
+            FakeEscalationTransport(),
+            supervisor_id="supervisor-heartbeat",
+            max_workers=1,
+            action_lease_seconds=10,
+        )
+        self.addCleanup(coordinator.release.set)
+        self.addCleanup(supervisor.close, wait=False)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            self.create_run(self.automatic_policy())
+            supervisor.tick()
+        self.assertTrue(coordinator.started.wait(timeout=1))
+
+        heartbeat = start + timedelta(seconds=9)
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=heartbeat.isoformat(timespec="microseconds"),
+        ):
+            supervisor.tick()
+            action = self.database.list_supervisor_actions()[0]
+
+        self.assertEqual(
+            action["lease_expires_at"],
+            (heartbeat + timedelta(seconds=10)).isoformat(timespec="microseconds"),
+        )
+        coordinator.release.set()
+        self.assertTrue(supervisor.drain(timeout=1))
 
     def test_answered_work_and_expired_ownership_advance_automatically(self) -> None:
         from magic_glass_box.supervision import Supervisor
@@ -828,6 +1098,74 @@ class SupervisionDatabaseTests(unittest.TestCase):
             [item["state"] for item in self.database.list_supervisor_escalations()],
             ["delivered", "delivered"],
         )
+
+    def test_stalled_reminder_does_not_block_the_supervisor_tick(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            run = self.create_run(self.automatic_policy(), with_session=True)
+            attempt = self.database.begin_run_attempt(
+                run["id"],
+                runtime_adapter="command",
+                owner_id="live-owner",
+                expected_run_version=run["version"],
+                lease_seconds=3600,
+            )
+            running = self.database.start_run_attempt(
+                attempt["id"],
+                expected_attempt_version=attempt["version"],
+                expected_run_version=attempt["run_version"],
+                source_revision="a" * 40,
+                container_id="b" * 64,
+                container_name="magic-glass-box-nonblocking-reminder",
+                image_id="sha256:" + "c" * 64,
+            )
+            self.database.open_interaction(
+                run["id"],
+                kind=InteractionKind.QUESTION,
+                recipient_krab_identity_id=self.identity_id(),
+                request_item_id="itm_" + "a" * 32,
+                expected_run_version=running["run_version"],
+            )
+
+        transport = BlockingEscalationTransport()
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            transport,
+            supervisor_id="supervisor-nonblocking-reminder",
+            action_lease_seconds=60,
+            escalation_timeout=5,
+        )
+        self.addCleanup(transport.release.set)
+        self.addCleanup(supervisor.close, wait=False)
+        tick_finished = threading.Event()
+
+        def tick() -> None:
+            with mock.patch.object(
+                self.database,
+                "now",
+                return_value=(start + timedelta(seconds=60)).isoformat(
+                    timespec="microseconds"
+                ),
+            ):
+                supervisor.tick()
+            tick_finished.set()
+
+        runner = threading.Thread(target=tick)
+        runner.start()
+        try:
+            self.assertTrue(transport.started.wait(timeout=1))
+            self.assertTrue(tick_finished.wait(timeout=0.2))
+        finally:
+            transport.release.set()
+            runner.join(timeout=1)
+        self.assertFalse(runner.is_alive())
+        self.assertTrue(supervisor.drain(timeout=1))
+        self.assertEqual(transport.timeouts, [5.0])
 
     def test_supervisor_dismisses_a_reminder_answered_before_delivery(self) -> None:
         from magic_glass_box.supervision import Supervisor

@@ -872,7 +872,8 @@ def _required(fields: Mapping[str, str], name: str, maximum: int) -> str:
 
 
 class ControlRoomHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
     allow_reuse_address = False
 
     def __init__(

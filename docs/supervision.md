@@ -14,8 +14,11 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
 
 The process initializes or migrates the database, prints its bounded service
 configuration, and then performs reconciliation, escalation, and dispatch
-passes until stopped. `--run-timeout` controls the agent wall-clock limit;
-`--action-lease-seconds` controls only claims on durable dispatcher work.
+passes until stopped. `SIGTERM` and `Ctrl-C` both enter the same graceful
+shutdown path. That path stops discovery, waits up to 30 seconds for in-flight
+dispatcher work, and then leaves any remaining claims for lease-based recovery.
+`--run-timeout` controls the agent wall-clock limit; `--action-lease-seconds`
+controls only claims on durable dispatcher work.
 
 ## Explicit run policy
 
@@ -69,12 +72,16 @@ This gives two independent safety layers:
 2. the coordinator must still atomically claim the queued run or expired
    attempt under the existing lifecycle rules.
 
-If a long action outlives its dispatcher lease, another supervisor may inspect
-it, but the underlying run or attempt claim prevents a second worker or
-premature recovery. An obsolete action settles without repeating the effect.
-Operational failures retain only a safe exception class, wait for the pinned
-finite backoff, and become `exhausted` after the final attempt. There is no
-unbounded retry loop.
+While an action is running, its dispatcher renews the claim without changing
+the claim's optimistic-lock version. Polling and shutdown waits are capped by
+the renewal cadence, so a healthy owner does not silently lose a long-running
+claim. If the process dies or a bounded shutdown expires, renewal stops and a
+replacement may reclaim the action after lease expiry. The underlying run or
+attempt transition remains the final defense against duplicate worker launch
+or premature recovery. An obsolete action settles without repeating the
+effect. Operational failures retain only a safe exception class, wait for the
+pinned finite backoff, and become `exhausted` after the final attempt. There is
+no unbounded retry loop.
 
 Answered interactions queue their run only when the previous attempt is gone.
 An opted-in queued run is then discovered by the same normal action path; no
@@ -87,7 +94,9 @@ Local conditions become delivered control-room records immediately. Open
 interactions use Imitation Krab's item-reminder endpoint with an empty JSON
 object and a durable idempotency key. Before delivery, Magic Glass Box verifies
 that the interaction is still open; an answer that wins the race causes the
-reminder to be dismissed.
+reminder to be dismissed. Reminder delivery runs in a separate bounded worker
+pool, carries an explicit HTTP timeout shorter than its renewable claim lease,
+and therefore cannot stall the supervisor's action-discovery loop.
 
 The escalation ledger contains IDs, kinds, thresholds, state, retry metadata,
 and optional Krab event sequence only. It contains no question, answer, prompt,

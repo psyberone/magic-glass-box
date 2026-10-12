@@ -153,8 +153,11 @@ A long-lived supervisor periodically materializes queued execution, expired
 ownership recovery, and orphan reconciliation as durable actions. Multiple
 processes may run: SQLite action leases select one dispatcher, while the
 existing run and attempt transitions remain the final authority. The same pass
-records due aging thresholds and delivers open-interaction reminders through
-Krab. See [supervision.md](supervision.md).
+records due aging thresholds and dispatches open-interaction reminders through
+a separate bounded pool. Active claims are heartbeated without version drift,
+reminder I/O has a timeout shorter than its claim lease, and process shutdown
+drains for a finite interval before durable lease recovery takes over. See
+[supervision.md](supervision.md).
 
 For an execution request, Magic Glass Box:
 

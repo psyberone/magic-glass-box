@@ -4,19 +4,23 @@ import argparse
 import io
 import json
 import os
+import signal
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from magic_glass_box.cli import (
     InputError,
     _build_run_coordinator,
     _emit,
+    _handle_sigterm,
     _json_file,
     _serve_control_room,
     _serve_supervisor,
+    _TerminationRequested,
     build_parser,
     main,
 )
@@ -165,8 +169,9 @@ class FakeSupervisor:
         self.run_calls += 1
         raise KeyboardInterrupt
 
-    def close(self, *, wait: bool = False) -> None:
+    def close(self, *, wait: bool = True) -> bool:
         self.close_calls.append(wait)
+        return True
 
 
 class FakeResultStore:
@@ -1417,7 +1422,7 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertEqual(supervisor.run_calls, 1)
-        self.assertEqual(supervisor.close_calls, [False])
+        self.assertEqual(supervisor.close_calls, [True])
         self.assertEqual(
             json.loads(stdout.getvalue()),
             {
@@ -1436,6 +1441,27 @@ class CLITests(unittest.TestCase):
             max_workers=3,
             action_lease_seconds=45,
         )
+
+    def test_sigterm_unwinds_a_service_and_restores_the_previous_handler(self) -> None:
+        previous = mock.sentinel.previous_handler
+        installed: list[Any] = []
+
+        def install(_signal: int, handler: object) -> None:
+            installed.append(handler)
+
+        with (
+            mock.patch(
+                "magic_glass_box.cli.signal.getsignal", return_value=previous
+            ) as get_handler,
+            mock.patch("magic_glass_box.cli.signal.signal", side_effect=install),
+            self.assertRaises(_TerminationRequested),
+            _handle_sigterm(),
+        ):
+            installed[0](signal.SIGTERM, None)
+
+        get_handler.assert_called_once_with(signal.SIGTERM)
+        self.assertEqual(len(installed), 2)
+        self.assertIs(installed[1], previous)
 
     def test_supervisor_main_route_builds_one_coordinator(self) -> None:
         control = FakeControlPlane()

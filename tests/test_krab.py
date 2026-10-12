@@ -814,6 +814,23 @@ class KrabClientTests(unittest.TestCase):
             ):
                 KrabClient("http://localhost", token)  # type: ignore[arg-type]
 
+    def test_request_timeout_is_positive_finite_and_bounded(self) -> None:
+        for timeout in (0, -1, float("nan"), float("inf"), True, 61):
+            with (
+                self.subTest(timeout=timeout),
+                self.assertRaisesRegex(KrabError, "timeout"),
+            ):
+                KrabClient("http://localhost", "secret-token", timeout=timeout)
+
+        self.assertEqual(
+            KrabClient("http://localhost", "secret-token", timeout=0.05).timeout,
+            0.05,
+        )
+        self.assertEqual(
+            KrabClient("http://localhost", "secret-token", timeout=60).timeout,
+            60.0,
+        )
+
     def test_rejects_invalid_content_length_and_actual_oversize(self) -> None:
         client, _ = client_for(FakeResponse(200, {}, content_length="many"))
         with self.assertRaisesRegex(KrabError, "Content-Length"):

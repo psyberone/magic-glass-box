@@ -39,7 +39,7 @@ from .provider import (
     ProviderUpstreamError,
 )
 
-ClientFactory = Callable[[str, str], KrabClient]
+ClientFactory = Callable[..., KrabClient]
 
 
 @dataclass(frozen=True)
@@ -667,7 +667,13 @@ class ControlPlane:
             expected_run_version=expected_run_version,
         )
 
-    def remind_interaction(self, interaction_id: str, *, idempotency_key: str) -> int:
+    def remind_interaction(
+        self,
+        interaction_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float = 40.0,
+    ) -> int:
         """Send one idempotent bodyless Krab reminder for an open interaction."""
 
         interaction = self.database.get_interaction(interaction_id)
@@ -677,7 +683,9 @@ class ControlPlane:
         if route["krab_session_id"] is None:
             raise ConflictError("run has no Krab session")
         _, _, client = self._authenticated_client(
-            route["krab_instance_name"], route["agent_krab_handle"]
+            route["krab_instance_name"],
+            route["agent_krab_handle"],
+            timeout=timeout,
         )
         reminder = client.remind_session_item(
             route["project_key"],
@@ -819,12 +827,19 @@ class ControlPlane:
         return client.activity(project_key, after=after, limit=limit, wait=wait)
 
     def _authenticated_client(
-        self, instance_name: str, krab_handle: str
+        self,
+        instance_name: str,
+        krab_handle: str,
+        *,
+        timeout: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], KrabClient]:
         instance = self.database.get_krab_instance(instance_name)
         stored = self.database.get_krab_identity(instance["id"], krab_handle)
         token = self.credential_resolver.resolve(stored["credential_ref"])
-        client = self.client_factory(instance["base_url"], token)
+        if timeout is None:
+            client = self.client_factory(instance["base_url"], token)
+        else:
+            client = self.client_factory(instance["base_url"], token, timeout=timeout)
         actual = client.whoami()
         if actual.user_id != stored["krab_user_id"]:
             raise KrabError("credential now belongs to a different Krab identity")

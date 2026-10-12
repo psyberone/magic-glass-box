@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from .control_room_web import build_control_room_server
@@ -38,6 +41,24 @@ from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
 class InputError(ValueError):
     pass
+
+
+class _TerminationRequested(BaseException):
+    """Unwind a foreground service cleanly when its process receives SIGTERM."""
+
+
+@contextmanager
+def _handle_sigterm() -> Iterator[None]:
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def terminate(_signum: int, _frame: FrameType | None) -> None:
+        raise _TerminationRequested
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _positive_seconds(value: str) -> float:
@@ -467,8 +488,9 @@ def _serve_control_room(
     )
     sys.stdout.flush()
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
+        with _handle_sigterm():
+            server.serve_forever()
+    except (KeyboardInterrupt, _TerminationRequested):
         pass
     finally:
         server.server_close()
@@ -500,11 +522,12 @@ def _serve_supervisor(
     )
     sys.stdout.flush()
     try:
-        supervisor.run_forever()
-    except KeyboardInterrupt:
+        with _handle_sigterm():
+            supervisor.run_forever()
+    except (KeyboardInterrupt, _TerminationRequested):
         pass
     finally:
-        supervisor.close(wait=False)
+        supervisor.close()
     return 0
 
 

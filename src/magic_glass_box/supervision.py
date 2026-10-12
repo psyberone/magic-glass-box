@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -31,8 +32,19 @@ class RunAdvancer(Protocol):
 
 class EscalationTransport(Protocol):
     def remind_interaction(
-        self, interaction_id: str, *, idempotency_key: str
+        self,
+        interaction_id: str,
+        *,
+        idempotency_key: str,
+        timeout: float,
     ) -> int: ...
+
+
+@dataclass(frozen=True)
+class _ClaimWorker:
+    thread: threading.Thread
+    claim_id: str
+    version: int
 
 
 class Supervisor:
@@ -49,6 +61,8 @@ class Supervisor:
         max_workers: int = 4,
         action_lease_seconds: int = 60,
         max_escalations_per_tick: int = 32,
+        escalation_timeout: float | None = None,
+        shutdown_timeout: float = 30.0,
     ) -> None:
         if (
             isinstance(poll_interval, bool)
@@ -75,6 +89,28 @@ class Supervisor:
             or not 1 <= max_escalations_per_tick <= 256
         ):
             raise SupervisorError("max_escalations_per_tick must be between 1 and 256")
+        if escalation_timeout is None:
+            escalation_timeout = min(30.0, action_lease_seconds / 2)
+        if (
+            isinstance(escalation_timeout, bool)
+            or not isinstance(escalation_timeout, (int, float))
+            or not math.isfinite(escalation_timeout)
+            or not 0.05 <= escalation_timeout <= 60.0
+            or escalation_timeout >= action_lease_seconds
+        ):
+            raise SupervisorError(
+                "escalation_timeout must be between 0.05 and 60 seconds and "
+                "shorter than action_lease_seconds"
+            )
+        if (
+            isinstance(shutdown_timeout, bool)
+            or not isinstance(shutdown_timeout, (int, float))
+            or not math.isfinite(shutdown_timeout)
+            or not 0.05 <= shutdown_timeout <= 300.0
+        ):
+            raise SupervisorError(
+                "shutdown_timeout must be between 0.05 and 300 seconds"
+            )
         if supervisor_id is None:
             supervisor_id = "supervisor-" + secrets.token_hex(16)
         if (
@@ -92,8 +128,14 @@ class Supervisor:
         self.max_workers = max_workers
         self.action_lease_seconds = action_lease_seconds
         self.max_escalations_per_tick = max_escalations_per_tick
+        self.escalation_timeout = float(escalation_timeout)
+        self.shutdown_timeout = float(shutdown_timeout)
+        self._lease_refresh_interval = min(
+            self.poll_interval, self.action_lease_seconds / 3
+        )
         self._stop = threading.Event()
-        self._threads: dict[str, threading.Thread] = {}
+        self._action_workers: dict[str, _ClaimWorker] = {}
+        self._escalation_workers: dict[str, _ClaimWorker] = {}
         self._threads_lock = threading.Lock()
         self.last_loop_error: str | None = None
 
@@ -101,9 +143,10 @@ class Supervisor:
         """Discover, claim, and start one bounded batch of durable work."""
 
         completed = self._reap()
+        self._renew_active_leases()
         actions_created = len(self.database.enqueue_supervisor_actions())
         escalations_created = len(self.database.create_due_supervisor_escalations())
-        escalations_processed = self._deliver_escalations()
+        escalations_processed = self._start_escalations()
         actions_started = 0
         while self._worker_count() < self.max_workers:
             action = self.database.claim_supervisor_action(
@@ -129,55 +172,72 @@ class Supervisor:
         """Continue advancing work until stop is requested."""
 
         failure_streak = 0
-        while not self._stop.is_set():
-            try:
-                self.tick()
-            except Exception as exc:
-                failure_streak = min(failure_streak + 1, 6)
-                self.last_loop_error = type(exc).__name__
-                delay = min(self.poll_interval * (2**failure_streak), 60.0)
-            else:
-                failure_streak = 0
-                self.last_loop_error = None
-                delay = self.poll_interval
-            self._stop.wait(delay)
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.tick()
+                except Exception as exc:
+                    failure_streak = min(failure_streak + 1, 6)
+                    self.last_loop_error = type(exc).__name__
+                    delay = min(self.poll_interval * (2**failure_streak), 60.0)
+                else:
+                    failure_streak = 0
+                    self.last_loop_error = None
+                    delay = self.poll_interval
+                self._stop.wait(min(delay, self._lease_refresh_interval))
+        finally:
+            self.stop()
 
     def stop(self) -> None:
         self._stop.set()
 
-    def close(self, *, wait: bool = False) -> None:
+    def close(self, *, wait: bool = True, timeout: float | None = None) -> bool:
         self.stop()
         if wait:
-            self.drain()
+            return self.drain(timeout=timeout)
         self._reap()
+        return self._total_worker_count() == 0
 
     def drain(self, timeout: float | None = None) -> bool:
-        if timeout is not None and (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(timeout)
-            or timeout < 0
+        effective_timeout = self.shutdown_timeout if timeout is None else timeout
+        if (
+            isinstance(effective_timeout, bool)
+            or not isinstance(effective_timeout, (int, float))
+            or not math.isfinite(effective_timeout)
+            or effective_timeout < 0
         ):
             raise SupervisorError("timeout must be a non-negative finite number")
-        deadline = None if timeout is None else time.monotonic() + timeout
+        deadline = time.monotonic() + effective_timeout
         while True:
-            with self._threads_lock:
-                threads = tuple(self._threads.values())
-            if not threads:
+            workers = self._workers()
+            if not workers:
                 return True
-            for thread in threads:
-                remaining = (
-                    None if deadline is None else max(0.0, deadline - time.monotonic())
-                )
-                thread.join(timeout=remaining)
-                if deadline is not None and time.monotonic() >= deadline:
+            for worker in workers:
+                remaining = max(0.0, deadline - time.monotonic())
+                worker.thread.join(timeout=min(remaining, self._lease_refresh_interval))
+                if time.monotonic() >= deadline:
                     self._reap()
-                    return self._worker_count() == 0
+                    return self._total_worker_count() == 0
             self._reap()
+            self._renew_active_leases()
 
     def _worker_count(self) -> int:
         with self._threads_lock:
-            return len(self._threads)
+            return len(self._action_workers)
+
+    def _escalation_worker_count(self) -> int:
+        with self._threads_lock:
+            return len(self._escalation_workers)
+
+    def _total_worker_count(self) -> int:
+        with self._threads_lock:
+            return len(self._action_workers) + len(self._escalation_workers)
+
+    def _workers(self) -> tuple[_ClaimWorker, ...]:
+        with self._threads_lock:
+            return tuple(self._action_workers.values()) + tuple(
+                self._escalation_workers.values()
+            )
 
     def _start_action(self, action: Mapping[str, Any]) -> None:
         action_id = str(action["id"])
@@ -188,19 +248,71 @@ class Supervisor:
             daemon=True,
         )
         with self._threads_lock:
-            self._threads[action_id] = thread
-        thread.start()
+            self._action_workers[action_id] = _ClaimWorker(
+                thread=thread,
+                claim_id=action_id,
+                version=int(action["version"]),
+            )
+            thread.start()
+
+    def _start_escalation(self, escalation: Mapping[str, Any]) -> None:
+        escalation_id = str(escalation["id"])
+        thread = threading.Thread(
+            target=self._run_escalation,
+            args=(dict(escalation),),
+            name="mgb-escalation-" + escalation_id,
+            daemon=True,
+        )
+        with self._threads_lock:
+            self._escalation_workers[escalation_id] = _ClaimWorker(
+                thread=thread,
+                claim_id=escalation_id,
+                version=int(escalation["version"]),
+            )
+            thread.start()
 
     def _reap(self) -> int:
         with self._threads_lock:
-            finished = [
+            finished_actions = [
                 action_id
-                for action_id, thread in self._threads.items()
-                if not thread.is_alive()
+                for action_id, worker in self._action_workers.items()
+                if not worker.thread.is_alive()
             ]
-            for action_id in finished:
-                self._threads.pop(action_id, None)
-        return len(finished)
+            finished_escalations = [
+                escalation_id
+                for escalation_id, worker in self._escalation_workers.items()
+                if not worker.thread.is_alive()
+            ]
+            for action_id in finished_actions:
+                self._action_workers.pop(action_id, None)
+            for escalation_id in finished_escalations:
+                self._escalation_workers.pop(escalation_id, None)
+        return len(finished_actions)
+
+    def _renew_active_leases(self) -> None:
+        with self._threads_lock:
+            action_workers = tuple(self._action_workers.values())
+            escalation_workers = tuple(self._escalation_workers.values())
+        for worker in action_workers:
+            if not worker.thread.is_alive():
+                continue
+            with suppress(ConcurrentUpdateError, ConflictError, NotFoundError):
+                self.database.renew_supervisor_action_lease(
+                    worker.claim_id,
+                    owner_id=self.supervisor_id,
+                    expected_version=worker.version,
+                    lease_seconds=self.action_lease_seconds,
+                )
+        for worker in escalation_workers:
+            if not worker.thread.is_alive():
+                continue
+            with suppress(ConcurrentUpdateError, ConflictError, NotFoundError):
+                self.database.renew_supervisor_escalation_lease(
+                    worker.claim_id,
+                    owner_id=self.supervisor_id,
+                    expected_version=worker.version,
+                    lease_seconds=self.action_lease_seconds,
+                )
 
     def _run_action(self, action: dict[str, Any]) -> None:
         try:
@@ -301,61 +413,68 @@ class Supervisor:
         except (NotFoundError, StorageError):
             return False
 
-    def _deliver_escalations(self) -> int:
-        processed = 0
-        for _ in range(self.max_escalations_per_tick):
+    def _start_escalations(self) -> int:
+        started = 0
+        while (
+            started < self.max_escalations_per_tick
+            and self._escalation_worker_count() < self.max_workers
+        ):
             escalation = self.database.claim_supervisor_escalation(
                 owner_id=self.supervisor_id,
                 lease_seconds=self.action_lease_seconds,
             )
             if escalation is None:
                 break
-            processed += 1
-            try:
-                interaction = self.database.get_interaction(escalation["subject_id"])
-                if interaction["state"] != "open":
-                    self.database.dismiss_supervisor_escalation(
-                        escalation["id"],
-                        owner_id=self.supervisor_id,
-                        expected_version=escalation["version"],
-                    )
-                    continue
-                event_seq = self.escalation_transport.remind_interaction(
-                    escalation["subject_id"],
-                    idempotency_key=escalation["idempotency_key"],
-                )
-                self.database.complete_supervisor_escalation(
+            self._start_escalation(escalation)
+            started += 1
+        return started
+
+    def _run_escalation(self, escalation: dict[str, Any]) -> None:
+        try:
+            interaction = self.database.get_interaction(escalation["subject_id"])
+            if interaction["state"] != "open":
+                self.database.dismiss_supervisor_escalation(
                     escalation["id"],
                     owner_id=self.supervisor_id,
                     expected_version=escalation["version"],
-                    krab_event_seq=event_seq,
                 )
-            except (ConcurrentUpdateError, ConflictError, NotFoundError):
-                with suppress(
-                    ConcurrentUpdateError,
-                    ConflictError,
-                    NotFoundError,
-                    StorageError,
-                ):
-                    self.database.dismiss_supervisor_escalation(
-                        escalation["id"],
-                        owner_id=self.supervisor_id,
-                        expected_version=escalation["version"],
-                    )
-            except Exception as exc:
-                with suppress(
-                    ConcurrentUpdateError,
-                    ConflictError,
-                    NotFoundError,
-                    StorageError,
-                ):
-                    self.database.fail_supervisor_escalation(
-                        escalation["id"],
-                        owner_id=self.supervisor_id,
-                        expected_version=escalation["version"],
-                        error_code=self._exception_code(exc),
-                    )
-        return processed
+                return
+            event_seq = self.escalation_transport.remind_interaction(
+                escalation["subject_id"],
+                idempotency_key=escalation["idempotency_key"],
+                timeout=self.escalation_timeout,
+            )
+            self.database.complete_supervisor_escalation(
+                escalation["id"],
+                owner_id=self.supervisor_id,
+                expected_version=escalation["version"],
+                krab_event_seq=event_seq,
+            )
+        except (ConcurrentUpdateError, ConflictError, NotFoundError):
+            with suppress(
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                self.database.dismiss_supervisor_escalation(
+                    escalation["id"],
+                    owner_id=self.supervisor_id,
+                    expected_version=escalation["version"],
+                )
+        except Exception as exc:
+            with suppress(
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                self.database.fail_supervisor_escalation(
+                    escalation["id"],
+                    owner_id=self.supervisor_id,
+                    expected_version=escalation["version"],
+                    error_code=self._exception_code(exc),
+                )
 
     @staticmethod
     def _exception_code(exc: Exception) -> str:
