@@ -15,6 +15,7 @@ from .domain import (
     AgentProfileSpec,
     ProjectContext,
     ProviderGrantSpec,
+    SupervisionPolicy,
     ValidationError,
     WorkItemEnvelope,
 )
@@ -31,6 +32,7 @@ from .provider import ProviderError
 from .results import ResultError, WorkspaceResultStore, default_result_root
 from .runtime import RuntimeAdapterError
 from .service import ControlPlane, activity_to_dict
+from .supervision import Supervisor, SupervisorError
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
 
@@ -70,6 +72,28 @@ def _port(value: str) -> int:
     if not 0 <= parsed <= 65535:
         raise argparse.ArgumentTypeError("must be an integer between 0 and 65535")
     return parsed
+
+
+def _bounded_integer(value: str, *, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"must be an integer between {minimum} and {maximum}"
+        ) from exc
+    if not minimum <= parsed <= maximum:
+        raise argparse.ArgumentTypeError(
+            f"must be an integer between {minimum} and {maximum}"
+        )
+    return parsed
+
+
+def _worker_count(value: str) -> int:
+    return _bounded_integer(value, minimum=1, maximum=32)
+
+
+def _action_lease_seconds(value: str) -> int:
+    return _bounded_integer(value, minimum=10, maximum=3600)
 
 
 def _json_file(path: Path) -> dict[str, Any]:
@@ -299,6 +323,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_create.add_argument("--source-revision")
     run_create.add_argument("--krab-session")
     run_create.add_argument("--krab-claim")
+    run_create.add_argument(
+        "--supervision-policy",
+        type=Path,
+        help="opt in with a versioned autonomous-supervision policy",
+    )
     run_cancel = run_commands.add_parser(
         "cancel", help="request stop for a queued or active run"
     )
@@ -337,6 +366,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_commands.add_parser(
         "reconcile", help="clean and fail runs interrupted by an orchestrator restart"
+    )
+
+    supervisor = commands.add_parser(
+        "supervisor", help="run the autonomous control loop"
+    )
+    supervisor_commands = supervisor.add_subparsers(
+        dest="supervisor_command", required=True
+    )
+    supervisor_run = supervisor_commands.add_parser(
+        "run", help="advance opted-in work until stopped"
+    )
+    supervisor_run.add_argument(
+        "--poll-interval",
+        type=_positive_seconds,
+        default=2.0,
+        help="seconds between reconciliation passes (default: %(default)s)",
+    )
+    supervisor_run.add_argument(
+        "--max-workers",
+        type=_worker_count,
+        default=4,
+        help="maximum concurrent run actions (default: %(default)s)",
+    )
+    supervisor_run.add_argument(
+        "--action-lease-seconds",
+        type=_action_lease_seconds,
+        default=60,
+        help="durable action claim lifetime (default: %(default)s)",
+    )
+    supervisor_run.add_argument(
+        "--run-timeout",
+        type=_positive_seconds,
+        default=DEFAULT_RUN_TIMEOUT_SECONDS,
+        help="maximum agent runtime in seconds (default: %(default)s)",
     )
 
     result = commands.add_parser("result", help="inspect and apply retained work")
@@ -409,6 +472,39 @@ def _serve_control_room(
         pass
     finally:
         server.server_close()
+    return 0
+
+
+def _serve_supervisor(
+    args: argparse.Namespace,
+    control: ControlPlane,
+    coordinator: RunCoordinator,
+) -> int:
+    control.initialize()
+    supervisor = Supervisor(
+        control.database,
+        coordinator,
+        control,
+        poll_interval=args.poll_interval,
+        max_workers=args.max_workers,
+        action_lease_seconds=args.action_lease_seconds,
+    )
+    _emit(
+        {
+            "supervisor_id": supervisor.supervisor_id,
+            "poll_interval_seconds": args.poll_interval,
+            "max_workers": args.max_workers,
+            "action_lease_seconds": args.action_lease_seconds,
+            "authority": "explicit_run_policy",
+        }
+    )
+    sys.stdout.flush()
+    try:
+        supervisor.run_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        supervisor.close(wait=False)
     return 0
 
 
@@ -528,6 +624,11 @@ def _dispatch(
                 source_revision=args.source_revision,
                 krab_session_id=args.krab_session,
                 krab_claim_id=args.krab_claim,
+                supervision_policy=(
+                    SupervisionPolicy.from_mapping(_json_file(args.supervision_policy))
+                    if args.supervision_policy is not None
+                    else None
+                ),
             )
         if args.run_command == "cancel":
             requested = control.request_run_cancellation(
@@ -604,6 +705,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 control,
                 result_store=result_store,
             )
+        elif args.command == "supervisor" and args.supervisor_command == "run":
+            result_store = _build_result_store(control)
+            coordinator = _build_run_coordinator(
+                control,
+                run_timeout=args.run_timeout,
+                result_store=result_store,
+            )
         elif args.command == "result":
             result_store = _build_result_store(control)
         if (
@@ -612,6 +720,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             and coordinator is not None
         ):
             return _serve_control_room(args, control, coordinator)
+        if (
+            args.command == "supervisor"
+            and args.supervisor_command == "run"
+            and coordinator is not None
+        ):
+            return _serve_supervisor(args, control, coordinator)
         result = _dispatch(args, control, coordinator, result_store)
     except (
         CredentialError,
@@ -622,6 +736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ResultError,
         RuntimeAdapterError,
         RunOrchestrationError,
+        SupervisorError,
         StorageError,
         ValidationError,
         WorkspaceError,

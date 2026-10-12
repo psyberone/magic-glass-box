@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "auto_execute": true,
+  "retry_backoff_seconds": [5, 30, 300],
+  "interaction_escalation_seconds": [1800, 7200],
+  "attempt_idle_escalation_seconds": [3600, 14400],
+  "attempt_lease_expired_escalation_seconds": [0, 900],
+  "other_attention_escalation_seconds": [1800, 7200]
+}

@@ -204,7 +204,7 @@ Closing a gateway detaches from an in-flight provider handler immediately;
 cleanup does not wait for a blocked upstream operation, and the handler cannot
 publish into the removed mailbox.
 
-## Resume and recovery
+## Replacement and recovery
 
 When the human response is accepted, the interaction becomes `answered`. If
 the original attempt is still live, the run remains `waiting_for_input` until
@@ -213,7 +213,13 @@ replacement worker receives a fresh mailbox and a clean workspace reconstructed
 from the already pinned commit. It calls `run.describe` to discover the prior
 handoff and answered interaction, then calls `interaction.read`. The original
 worker is not kept alive while a person is thinking, and its mutable filesystem
-is not inherited automatically.
+is not inherited automatically. An explicitly automatic run is launched again
+by the durable supervisor; a manual run remains queued for the operator.
+
+Configured interaction-age thresholds produce a bodyless, idempotent reminder
+for the existing Krab item. The worker gateway is not involved, no second
+message body is created, and Magic Glass Box retains only threshold and event
+metadata. See [supervision.md](supervision.md).
 
 If the orchestrator restarts, reconciliation waits for the attempt owner lease
 to expire before removing containers, snapshots, and mailbox files. It captures

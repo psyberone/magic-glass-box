@@ -359,6 +359,10 @@ def _render_control_room(
         lineage = run.get("replacement_kind") or "original"
         if run.get("predecessor_run_id"):
             lineage = f"{lineage} of {run['predecessor_run_id']}"
+        supervision_policy = run.get("supervision_policy")
+        supervision_policy = (
+            supervision_policy if isinstance(supervision_policy, Mapping) else {}
+        )
         run_rows.append(
             (
                 run.get("id"),
@@ -368,6 +372,7 @@ def _render_control_room(
                 run.get("project_key"),
                 run.get("untrusted_work_item_title"),
                 lineage,
+                "automatic" if supervision_policy.get("auto_execute") else "manual",
                 _markup("".join(controls)) if controls else "—",
             )
         )
@@ -418,8 +423,38 @@ def _render_control_room(
             row.get("kind"),
             row.get("subject_id"),
             row.get("run_id"),
+            row.get("age_seconds"),
         )
         for row in snapshot.get("attention", [])
+        if isinstance(row, Mapping)
+    ]
+    supervisor_action_rows = [
+        (
+            row.get("id"),
+            row.get("run_id"),
+            row.get("kind"),
+            row.get("state"),
+            f"{row.get('attempt_count')} / {row.get('max_attempts')}",
+            row.get("owner_id"),
+            row.get("available_at"),
+            row.get("last_error_code"),
+        )
+        for row in snapshot.get("supervisor_actions", [])
+        if isinstance(row, Mapping)
+    ]
+    escalation_rows = [
+        (
+            row.get("id"),
+            row.get("run_id"),
+            row.get("kind"),
+            row.get("threshold_seconds"),
+            row.get("channel"),
+            row.get("state"),
+            f"{row.get('attempt_count')} / {row.get('max_attempts')}",
+            row.get("delivered_at"),
+            row.get("last_error_code"),
+        )
+        for row in snapshot.get("escalations", [])
         if isinstance(row, Mapping)
     ]
     user_rows = [
@@ -605,7 +640,43 @@ def _render_control_room(
         f"<section><h2>Recovery</h2>{reconcile_form}</section>",
         _section(
             "Attention",
-            _table(("Severity", "Condition", "Subject", "Run"), attention_rows),
+            _table(
+                ("Severity", "Condition", "Subject", "Run", "Age (seconds)"),
+                attention_rows,
+            ),
+        ),
+        _section(
+            "Supervisor actions",
+            _table(
+                (
+                    "ID",
+                    "Run",
+                    "Kind",
+                    "State",
+                    "Attempts",
+                    "Owner",
+                    "Available",
+                    "Error",
+                ),
+                supervisor_action_rows,
+            ),
+        ),
+        _section(
+            "Escalations",
+            _table(
+                (
+                    "ID",
+                    "Run",
+                    "Kind",
+                    "Threshold",
+                    "Channel",
+                    "State",
+                    "Attempts",
+                    "Delivered",
+                    "Error",
+                ),
+                escalation_rows,
+            ),
         ),
         _section(
             "Runs",
@@ -618,6 +689,7 @@ def _render_control_room(
                     "Project",
                     "Untrusted work title",
                     "Lineage",
+                    "Autonomy",
                     "Actions",
                 ),
                 run_rows,

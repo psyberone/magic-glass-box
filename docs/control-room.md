@@ -36,16 +36,19 @@ contains:
 - local profile-pinned assignments and their visible, untrusted titles;
 - all active runs plus a bounded number of recent terminal runs;
 - attempts, owners, leases, cancellation signals, interactions, retained
-  result summaries, and run-bound provider authorities; and
+  result summaries, run-bound provider authorities, pinned supervision
+  policies, durable supervisor actions, and threshold escalation records; and
 - an attention queue for pending interactions, open or expired assignments,
   blocker evidence, expired attempt leases, cancellation requests, inconsistent
-  active runs, and unavailable authorities.
+  active runs, unavailable authorities, and exhausted supervisor work. Every
+  current attention entry includes its age in seconds at the snapshot's
+  consistency timestamp.
 
 `--history-limit` accepts 0 through 500 and limits only terminal runs. It never
 hides an active run. The same bound selects the attempts, interactions,
 results, and authority bindings attached to the visible run set. Aggregate
-counts still describe all local state and the snapshot reports whether terminal
-history was truncated.
+counts—including action and escalation lifecycle states—still describe all
+local state and the snapshot reports whether terminal history was truncated.
 
 The optional Krab overlay contains only the roles of identities already
 configured in Magic Glass Box. It is not a duplicate project-membership
@@ -66,7 +69,8 @@ The projection intentionally excludes:
 - handoff summaries and agent transcripts;
 - retained result manifests, file paths, and file content;
 - agent command arguments;
-- transient runtime stdout and vendor result envelopes; and
+- transient runtime stdout and vendor result envelopes;
+- supervisor exception messages or upstream response bodies; and
 - provider credential prefixes and static-header values.
 
 Provider destinations are displayed without query strings. Static-header names
@@ -126,6 +130,12 @@ control-plane action from becoming an implicit Krab administration write.
 Retained-result application stays in the CLI because it requires an explicit
 absolute checkout path and performs host filesystem writes. The browser shows
 only result IDs, counts, byte totals, and digests.
+
+The browser shows supervision state but does not start or stop the supervisor
+process. Run the explicit local service command described in
+[supervision.md](supervision.md). A run labeled `manual` will not launch merely
+because the service is present; `automatic` means its immutable run policy
+opted in.
 
 Equivalent successor commands are available without the browser:
 

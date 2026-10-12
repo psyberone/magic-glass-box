@@ -19,6 +19,7 @@ from .db import SCHEMA_VERSION, Database, StorageError
 from .domain import (
     AgentProfileSpec,
     ProviderGrantSpec,
+    SupervisionPolicy,
     ValidationError,
     WorkAssignmentSpec,
     WorkItemEnvelope,
@@ -147,6 +148,8 @@ class ControlRoom:
         interactions = self._interactions(connection, run_ids)
         retained_results = self._results(connection, run_ids)
         authorities = self._run_authorities(connection, run_ids, generated_at)
+        supervisor_actions = self._supervisor_actions(connection, run_ids)
+        escalations = self._escalations(connection, run_ids)
         self._attach_run_counts(
             runs, attempts, interactions, retained_results, authorities
         )
@@ -158,6 +161,9 @@ class ControlRoom:
             attempts,
             interactions,
             authorities,
+            supervisor_actions,
+            escalations,
+            generated_at=generated_at,
         )
         return (
             {
@@ -183,6 +189,8 @@ class ControlRoom:
                 "interactions": interactions,
                 "retained_results": retained_results,
                 "run_authorities": authorities,
+                "supervisor_actions": supervisor_actions,
+                "escalations": escalations,
             },
             routes,
         )
@@ -528,7 +536,8 @@ class ControlRoom:
             "SELECT id, 1 AS group_order FROM terminal"
             ") SELECT r.id, r.state, r.version, r.source_revision, "
             "r.predecessor_run_id, r.replacement_kind, "
-            "r.krab_session_id, r.krab_claim_id, r.created_at, r.updated_at, "
+            "r.krab_session_id, r.krab_claim_id, r.supervision_policy_json, "
+            "r.created_at, r.updated_at, "
             "r.started_at, r.finished_at, visible.group_order, "
             "p.krab_project_key AS project_key, c.id AS context_version_id, "
             "c.version AS context_version, ap.name AS profile_name, "
@@ -556,6 +565,12 @@ class ControlRoom:
             if row["pinned_content_json"] is not None:
                 envelope = _work_item(row, prefix="pinned_")
                 title = envelope.title
+            try:
+                supervision_policy = SupervisionPolicy.from_mapping(
+                    json.loads(row["supervision_policy_json"])
+                )
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError("stored supervision policy is invalid") from exc
             runs.append(
                 {
                     "id": row["id"],
@@ -582,9 +597,42 @@ class ControlRoom:
                     "updated_at": row["updated_at"],
                     "started_at": row["started_at"],
                     "finished_at": row["finished_at"],
+                    "supervision_policy": supervision_policy.to_dict(),
                 }
             )
         return runs, terminal_total
+
+    @classmethod
+    def _supervisor_actions(
+        cls, connection: sqlite3.Connection, run_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        rows = cls._for_runs(
+            connection,
+            run_ids,
+            "SELECT id, kind, subject_id, subject_version, run_id, state, "
+            "version, attempt_count, max_attempts, available_at, owner_id, "
+            "lease_expires_at, last_error_code, created_at, updated_at, "
+            "finished_at FROM supervisor_actions WHERE run_id IN ({run_ids}) "
+            "ORDER BY created_at DESC, id",
+        )
+        return [dict(row) for row in rows]
+
+    @classmethod
+    def _escalations(
+        cls, connection: sqlite3.Connection, run_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        rows = cls._for_runs(
+            connection,
+            run_ids,
+            "SELECT id, run_id, kind, subject_type, subject_id, "
+            "threshold_seconds, age_started_at, channel, state, version, "
+            "attempt_count, max_attempts, available_at, owner_id, "
+            "lease_expires_at, last_error_code, krab_event_seq, created_at, "
+            "updated_at, delivered_at FROM supervisor_escalations "
+            "WHERE run_id IN ({run_ids}) "
+            "ORDER BY created_at DESC, threshold_seconds DESC, id",
+        )
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _for_runs(
@@ -765,6 +813,12 @@ class ControlRoom:
         assignment_states = states(
             "SELECT state, COUNT(*) AS count FROM work_assignments GROUP BY state"
         )
+        action_states = states(
+            "SELECT state, COUNT(*) AS count FROM supervisor_actions GROUP BY state"
+        )
+        escalation_states = states(
+            "SELECT state, COUNT(*) AS count FROM supervisor_escalations GROUP BY state"
+        )
         run_total = sum(run_states.values())
         attempt_total = sum(attempt_states.values())
         return {
@@ -819,6 +873,26 @@ class ControlRoom:
                     for state in ("open", "claimed", "completed", "cancelled")
                 },
             },
+            "supervisor_actions": {
+                "total": sum(action_states.values()),
+                **{
+                    state: action_states.get(state, 0)
+                    for state in ("pending", "claimed", "succeeded", "exhausted")
+                },
+            },
+            "escalations": {
+                "total": sum(escalation_states.values()),
+                **{
+                    state: escalation_states.get(state, 0)
+                    for state in (
+                        "pending",
+                        "claimed",
+                        "delivered",
+                        "dismissed",
+                        "exhausted",
+                    )
+                },
+            },
             "retained_results": connection.execute(
                 "SELECT COUNT(*) FROM attempt_results"
             ).fetchone()[0],
@@ -832,8 +906,24 @@ class ControlRoom:
         attempts: list[dict[str, Any]],
         interactions: list[dict[str, Any]],
         authorities: list[dict[str, Any]],
+        supervisor_actions: list[dict[str, Any]] | None = None,
+        escalations: list[dict[str, Any]] | None = None,
+        *,
+        generated_at: str | None = None,
     ) -> list[dict[str, Any]]:
         attention: list[dict[str, Any]] = []
+        now = (
+            _timestamp(generated_at, label="snapshot")
+            if generated_at is not None
+            else None
+        )
+
+        def add(entry: dict[str, Any], age_started_at: object) -> None:
+            if now is not None:
+                started = _timestamp(age_started_at, label="attention age")
+                entry["age_seconds"] = max(0, int((now - started).total_seconds()))
+            attention.append(entry)
+
         active_runs = {
             run["id"]: run for run in runs if run["state"] in ACTIVE_RUN_STATES
         }
@@ -849,7 +939,7 @@ class ControlRoom:
         }
         for interaction in interactions:
             if interaction["state"] == "open":
-                attention.append(
+                add(
                     {
                         "kind": "interaction.pending",
                         "severity": "action",
@@ -859,13 +949,14 @@ class ControlRoom:
                         "interaction_kind": interaction["kind"],
                         "recipient_krab_handle": interaction["recipient_krab_handle"],
                         "created_at": interaction["created_at"],
-                    }
+                    },
+                    interaction["created_at"],
                 )
         for assignment in assignments:
             if assignment["thread_state"] != "active":
                 continue
             if assignment["state"] == "open":
-                attention.append(
+                add(
                     {
                         "kind": "assignment.open",
                         "severity": "action",
@@ -874,10 +965,11 @@ class ControlRoom:
                         "work_item_id": assignment["work_item_id"],
                         "target_profile_name": assignment["target_profile_name"],
                         "created_at": assignment["created_at"],
-                    }
+                    },
+                    assignment["created_at"],
                 )
             elif assignment["state"] == "claimed" and assignment["lease_expired"]:
-                attention.append(
+                add(
                     {
                         "kind": "assignment.lease_expired",
                         "severity": "warning",
@@ -886,11 +978,12 @@ class ControlRoom:
                         "work_item_id": assignment["work_item_id"],
                         "claimed_by_run_id": assignment["claimed_by_run_id"],
                         "lease_expires_at": assignment["lease_expires_at"],
-                    }
+                    },
+                    assignment["lease_expires_at"],
                 )
         for item in work_items:
             if item["state"] == "active" and item["blocker_entries"]:
-                attention.append(
+                add(
                     {
                         "kind": "work.blocker",
                         "severity": "warning",
@@ -898,11 +991,12 @@ class ControlRoom:
                         "subject_id": item["id"],
                         "blocker_entries": item["blocker_entries"],
                         "last_blocker_at": item["last_blocker_at"],
-                    }
+                    },
+                    item["last_blocker_at"],
                 )
         for attempt in attempts:
             if attempt["cancel_requested_at"] is not None:
-                attention.append(
+                add(
                     {
                         "kind": "run.cancellation_requested",
                         "severity": "action",
@@ -911,10 +1005,11 @@ class ControlRoom:
                         "run_id": attempt["run_id"],
                         "owner_id": attempt["owner_id"],
                         "requested_at": attempt["cancel_requested_at"],
-                    }
+                    },
+                    attempt["cancel_requested_at"],
                 )
             if attempt["lease_expired"]:
-                attention.append(
+                add(
                     {
                         "kind": "attempt.lease_expired",
                         "severity": "warning",
@@ -923,14 +1018,15 @@ class ControlRoom:
                         "run_id": attempt["run_id"],
                         "owner_id": attempt["owner_id"],
                         "lease_expires_at": attempt["lease_expires_at"],
-                    }
+                    },
+                    attempt["lease_expires_at"],
                 )
         for run_id, run in active_runs.items():
             if (
                 run["state"] in {"preparing", "running"}
                 and run_id not in active_attempt_runs
             ):
-                attention.append(
+                add(
                     {
                         "kind": "run.missing_active_attempt",
                         "severity": "warning",
@@ -938,25 +1034,32 @@ class ControlRoom:
                         "subject_id": run_id,
                         "state": run["state"],
                         "updated_at": run["updated_at"],
-                    }
+                    },
+                    run["updated_at"],
                 )
             if (
                 run["state"] == "waiting_for_input"
                 and run_id not in open_interaction_runs
                 and run_id not in active_attempt_runs
             ):
-                attention.append(
+                add(
                     {
                         "kind": "run.waiting_without_interaction",
                         "severity": "warning",
                         "subject_type": "run",
                         "subject_id": run_id,
                         "updated_at": run["updated_at"],
-                    }
+                    },
+                    run["updated_at"],
                 )
         for authority in authorities:
             if authority["run_id"] in active_runs and not authority["available"]:
-                attention.append(
+                age_started_at = authority.get("revoked_at") or authority.get(
+                    "expires_at"
+                )
+                if age_started_at is None:
+                    age_started_at = generated_at
+                add(
                     {
                         "kind": "authority.unavailable",
                         "severity": "warning",
@@ -966,7 +1069,38 @@ class ControlRoom:
                         "authority_name": authority["authority_name"],
                         "state": authority["state"],
                         "expires_at": authority["expires_at"],
-                    }
+                    },
+                    age_started_at,
+                )
+        for action in supervisor_actions or []:
+            if action["state"] == "exhausted":
+                add(
+                    {
+                        "kind": "supervisor.action_exhausted",
+                        "severity": "warning",
+                        "subject_type": "supervisor_action",
+                        "subject_id": action["id"],
+                        "run_id": action["run_id"],
+                        "action_kind": action["kind"],
+                        "last_error_code": action["last_error_code"],
+                        "updated_at": action["updated_at"],
+                    },
+                    action["updated_at"],
+                )
+        for escalation in escalations or []:
+            if escalation["state"] == "exhausted":
+                add(
+                    {
+                        "kind": "supervisor.escalation_exhausted",
+                        "severity": "warning",
+                        "subject_type": "supervisor_escalation",
+                        "subject_id": escalation["id"],
+                        "run_id": escalation["run_id"],
+                        "escalation_kind": escalation["kind"],
+                        "last_error_code": escalation["last_error_code"],
+                        "updated_at": escalation["updated_at"],
+                    },
+                    escalation["updated_at"],
                 )
         attention.sort(
             key=lambda item: (

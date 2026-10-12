@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -970,6 +970,145 @@ BEGIN
 END;
 """
 
+SUPERVISION_SCHEMA = """
+ALTER TABLE runs ADD COLUMN supervision_policy_json TEXT NOT NULL DEFAULT
+    '{"attempt_idle_escalation_seconds":[],"attempt_lease_expired_escalation_seconds":[],"auto_execute":false,"interaction_escalation_seconds":[],"other_attention_escalation_seconds":[],"retry_backoff_seconds":[5,30,300],"schema_version":1}';
+
+CREATE TABLE supervisor_actions (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (
+        kind IN ('run.execute', 'attempt.reconcile', 'run.reconcile')
+    ),
+    subject_id TEXT NOT NULL,
+    subject_version INTEGER NOT NULL CHECK (subject_version >= 1),
+    run_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'claimed', 'succeeded', 'exhausted')
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 9),
+    retry_backoff_json TEXT NOT NULL,
+    available_at TEXT NOT NULL,
+    owner_id TEXT,
+    lease_expires_at TEXT,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (kind, subject_id, subject_version),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    CHECK (
+        (
+            state = 'pending' AND owner_id IS NULL
+            AND lease_expires_at IS NULL AND finished_at IS NULL
+        ) OR (
+            state = 'claimed' AND owner_id IS NOT NULL
+            AND lease_expires_at IS NOT NULL AND finished_at IS NULL
+        ) OR (
+            state IN ('succeeded', 'exhausted') AND owner_id IS NULL
+            AND lease_expires_at IS NULL AND finished_at IS NOT NULL
+        )
+    )
+) STRICT;
+
+CREATE TABLE supervisor_escalations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'interaction.pending', 'attempt.idle',
+            'attempt.lease_expired', 'run.missing_active_attempt',
+            'run.waiting_without_interaction', 'authority.unavailable'
+        )
+    ),
+    subject_type TEXT NOT NULL CHECK (
+        subject_type IN ('interaction', 'attempt', 'run', 'provider_grant')
+    ),
+    subject_id TEXT NOT NULL,
+    threshold_seconds INTEGER NOT NULL CHECK (
+        threshold_seconds BETWEEN 0 AND 2592000
+    ),
+    age_started_at TEXT NOT NULL,
+    channel TEXT NOT NULL CHECK (channel IN ('control_room', 'krab_reminder')),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'claimed', 'delivered', 'dismissed', 'exhausted')
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 9),
+    retry_backoff_json TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    available_at TEXT NOT NULL,
+    owner_id TEXT,
+    lease_expires_at TEXT,
+    last_error_code TEXT,
+    krab_event_seq INTEGER CHECK (krab_event_seq IS NULL OR krab_event_seq >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    delivered_at TEXT,
+    UNIQUE (kind, subject_id, threshold_seconds),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    CHECK (
+        (
+            state = 'pending' AND owner_id IS NULL
+            AND lease_expires_at IS NULL AND delivered_at IS NULL
+        ) OR (
+            state = 'claimed' AND owner_id IS NOT NULL
+            AND lease_expires_at IS NOT NULL AND delivered_at IS NULL
+        ) OR (
+            state IN ('delivered', 'dismissed', 'exhausted')
+            AND owner_id IS NULL AND lease_expires_at IS NULL
+            AND delivered_at IS NOT NULL
+        )
+    ),
+    CHECK (channel != 'control_room' OR state = 'delivered')
+) STRICT;
+
+CREATE INDEX supervisor_action_due
+    ON supervisor_actions(state, available_at, lease_expires_at);
+CREATE INDEX supervisor_action_run
+    ON supervisor_actions(run_id, created_at DESC);
+CREATE INDEX supervisor_escalation_due
+    ON supervisor_escalations(state, available_at, lease_expires_at);
+CREATE INDEX supervisor_escalation_run
+    ON supervisor_escalations(run_id, created_at DESC);
+
+CREATE TRIGGER run_supervision_policy_immutable
+BEFORE UPDATE OF supervision_policy_json ON runs
+WHEN NEW.supervision_policy_json IS NOT OLD.supervision_policy_json
+BEGIN
+    SELECT RAISE(ABORT, 'run supervision policy is immutable');
+END;
+CREATE TRIGGER supervisor_action_identity_immutable
+BEFORE UPDATE OF
+    id, kind, subject_id, subject_version, run_id, max_attempts,
+    retry_backoff_json, created_at
+ON supervisor_actions
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor action identity is immutable');
+END;
+CREATE TRIGGER supervisor_action_immutable_delete
+BEFORE DELETE ON supervisor_actions
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor actions cannot be deleted');
+END;
+CREATE TRIGGER supervisor_escalation_identity_immutable
+BEFORE UPDATE OF
+    id, run_id, kind, subject_type, subject_id, threshold_seconds,
+    age_started_at, channel, max_attempts, retry_backoff_json,
+    idempotency_key, created_at
+ON supervisor_escalations
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor escalation identity is immutable');
+END;
+CREATE TRIGGER supervisor_escalation_immutable_delete
+BEFORE DELETE ON supervisor_escalations
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor escalations cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -980,6 +1119,7 @@ SCHEMA = (
     + WORK_THREAD_LIFECYCLE_SCHEMA
     + EXECUTION_INTEGRITY_SCHEMA
     + RUN_REPLACEMENT_SCHEMA
+    + SUPERVISION_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -990,4 +1130,5 @@ MIGRATIONS = {
     6: WORK_THREAD_LIFECYCLE_SCHEMA,
     7: EXECUTION_INTEGRITY_SCHEMA,
     8: RUN_REPLACEMENT_SCHEMA,
+    9: SUPERVISION_SCHEMA,
 }

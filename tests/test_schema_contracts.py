@@ -12,6 +12,7 @@ from jsonschema.exceptions import ValidationError as SchemaValidationError
 
 from magic_glass_box.domain import (
     HandoffEnvelope,
+    SupervisionPolicy,
     ValidationError,
     WorkAssignmentSpec,
     WorkItemEnvelope,
@@ -28,6 +29,7 @@ class PublishedSchemaParityTests(unittest.TestCase):
         ("work-log-entry", WorkLogEntry.from_mapping),
         ("work-memory-checkpoint", WorkMemoryCheckpoint.from_mapping),
         ("work-assignment", WorkAssignmentSpec.from_mapping),
+        ("supervision-policy", SupervisionPolicy.from_mapping),
     )
 
     def load(
@@ -85,12 +87,15 @@ class PublishedSchemaParityTests(unittest.TestCase):
             validator, example, factory = self.load(name)
             missing = copy.deepcopy(example)
             missing.pop("schema_version")
-            candidates = (
+            candidates = [
                 missing,
                 {**copy.deepcopy(example), "unexpected": True},
                 {**copy.deepcopy(example), "schema_version": True},
-                {**copy.deepcopy(example), text_field[name]: " \n\t "},
-            )
+            ]
+            if name in text_field:
+                candidates.append(
+                    {**copy.deepcopy(example), text_field[name]: " \n\t "}
+                )
             for candidate in candidates:
                 with self.subTest(name=name, candidate=candidate):
                     self.assert_rejected_by_both(validator, factory, candidate)

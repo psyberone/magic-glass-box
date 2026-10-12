@@ -16,6 +16,7 @@ from magic_glass_box.krab import (
     KrabUserRef,
     SessionItem,
     SessionItemHistoryEvent,
+    SessionItemReminder,
     WorkClaim,
     WorkClaimPage,
     WorkClaimRef,
@@ -211,6 +212,19 @@ def session_item_response(
     return result
 
 
+def reminder_response() -> dict[str, Any]:
+    return {
+        "trusted_metadata": {
+            "event_seq": 9,
+            "kind": "item.reminded",
+            "project_key": "box-project",
+            "session_id": SESSION_ID,
+            "item_id": ITEM_ID,
+            "recipient_id": OTHER_USER_ID,
+        }
+    }
+
+
 class KrabClientTests(unittest.TestCase):
     def test_whoami_is_typed_and_authenticated(self) -> None:
         client, connection = client_for(
@@ -296,6 +310,52 @@ class KrabClientTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers["Content-Length"], str(len(body or b"")))
         self.assertEqual(headers["Idempotency-Key"], "mgb.request:1234")
+
+    def test_reminder_is_bodyless_typed_and_scope_checked(self) -> None:
+        client, connection = client_for(FakeResponse(202, reminder_response()))
+
+        reminder = client.remind_session_item(
+            "box-project",
+            SESSION_ID,
+            ITEM_ID,
+            idempotency_key="mgb.escalation:1234",
+        )
+
+        self.assertEqual(
+            reminder,
+            SessionItemReminder(
+                event_seq=9,
+                project_key="box-project",
+                session_id=SESSION_ID,
+                item_id=ITEM_ID,
+                recipient_id=OTHER_USER_ID,
+            ),
+        )
+        method, target, body, headers = connection.requests[0]
+        self.assertEqual(
+            (method, target),
+            (
+                "POST",
+                "/v1/projects/box-project/sessions/"
+                + SESSION_ID
+                + "/items/"
+                + ITEM_ID
+                + "/notify",
+            ),
+        )
+        self.assertEqual(json.loads((body or b"").decode("utf-8")), {})
+        self.assertEqual(headers["Idempotency-Key"], "mgb.escalation:1234")
+
+        wrong = reminder_response()
+        wrong["trusted_metadata"]["item_id"] = "itm_" + "9" * 32
+        invalid, _ = client_for(FakeResponse(202, wrong))
+        with self.assertRaisesRegex(KrabError, "item does not match"):
+            invalid.remind_session_item(
+                "box-project",
+                SESSION_ID,
+                ITEM_ID,
+                idempotency_key="mgb.escalation:5678",
+            )
 
     def test_get_session_item_validates_history_and_private_content(self) -> None:
         client, connection = client_for(

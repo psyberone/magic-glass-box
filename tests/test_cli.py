@@ -16,6 +16,7 @@ from magic_glass_box.cli import (
     _emit,
     _json_file,
     _serve_control_room,
+    _serve_supervisor,
     build_parser,
     main,
 )
@@ -23,6 +24,7 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
     ProviderGrantSpec,
+    SupervisionPolicy,
     WorkItemEnvelope,
 )
 from magic_glass_box.krab import ActivityPage
@@ -153,6 +155,20 @@ class FakeRunCoordinator:
         return [{"operation": "run.reconcile"}]
 
 
+class FakeSupervisor:
+    def __init__(self) -> None:
+        self.supervisor_id = "supervisor-test"
+        self.run_calls = 0
+        self.close_calls: list[bool] = []
+
+    def run_forever(self) -> None:
+        self.run_calls += 1
+        raise KeyboardInterrupt
+
+    def close(self, *, wait: bool = False) -> None:
+        self.close_calls.append(wait)
+
+
 class FakeResultStore:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -219,6 +235,7 @@ class CLITests(unittest.TestCase):
                     ("provider", "manage scoped provider grants"),
                     ("work-item", "manage durable work items"),
                     ("run", "manage agent runs"),
+                    ("supervisor", "run the autonomous control loop"),
                     ("result", "inspect and apply retained work"),
                 ),
             ),
@@ -309,6 +326,11 @@ class CLITests(unittest.TestCase):
                         "clean and fail runs interrupted by an orchestrator restart",
                     ),
                 ),
+            ),
+            ("supervisor",): (
+                "supervisor_command",
+                True,
+                (("run", "advance opted-in work until stopped"),),
             ),
             ("result",): (
                 "result_command",
@@ -436,7 +458,7 @@ class CLITests(unittest.TestCase):
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 9)
+        self.assertEqual(initialized["schema_version"], 10)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -501,6 +523,24 @@ class CLITests(unittest.TestCase):
         )
         parsed_provider_policy = ProviderGrantSpec.from_mapping(
             json.loads(provider_policy.read_text(encoding="utf-8"))
+        )
+        supervision_policy = Path(self.temporary.name) / "supervision.json"
+        supervision_policy.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "auto_execute": True,
+                    "retry_backoff_seconds": [5, 30, 300],
+                    "interaction_escalation_seconds": [1800, 7200],
+                    "attempt_idle_escalation_seconds": [1800],
+                    "attempt_lease_expired_escalation_seconds": [0],
+                    "other_attention_escalation_seconds": [3600],
+                }
+            ),
+            encoding="utf-8",
+        )
+        parsed_supervision_policy = SupervisionPolicy.from_mapping(
+            json.loads(supervision_policy.read_text(encoding="utf-8"))
         )
         fake = FakeControlPlane()
         cases: tuple[
@@ -855,6 +895,8 @@ class CLITests(unittest.TestCase):
                     "ses_" + "4" * 32,
                     "--krab-claim",
                     "clm_" + "5" * 32,
+                    "--supervision-policy",
+                    str(supervision_policy),
                 ],
                 (
                     "run.create",
@@ -866,6 +908,7 @@ class CLITests(unittest.TestCase):
                         "source_revision": "abc123",
                         "krab_session_id": "ses_" + "4" * 32,
                         "krab_claim_id": "clm_" + "5" * 32,
+                        "supervision_policy": parsed_supervision_policy,
                     },
                 ),
                 {"operation": "run.create"},
@@ -997,6 +1040,11 @@ class CLITests(unittest.TestCase):
         self.assertEqual(served.host, "127.0.0.1")
         self.assertEqual(served.port, 8766)
         self.assertEqual(served.history_limit, 25)
+        supervised = parser.parse_args(["supervisor", "run"])
+        self.assertEqual(supervised.poll_interval, 2.0)
+        self.assertEqual(supervised.max_workers, 4)
+        self.assertEqual(supervised.action_lease_seconds, 60)
+        self.assertEqual(supervised.run_timeout, 21_600.0)
         for invalid_limit in ("-1", "501", "1.5"):
             with (
                 self.subTest(invalid_limit=invalid_limit),
@@ -1031,6 +1079,18 @@ class CLITests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(invalid.exception.code, 2)
+        for option, invalid_values in (
+            ("--max-workers", ("0", "33", "1.5")),
+            ("--action-lease-seconds", ("9", "3601", "1.5")),
+        ):
+            for invalid_value in invalid_values:
+                with (
+                    self.subTest(option=option, invalid_value=invalid_value),
+                    redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit) as invalid,
+                ):
+                    parser.parse_args(["supervisor", "run", option, invalid_value])
+                self.assertEqual(invalid.exception.code, 2)
 
         root = Path(self.temporary.name)
         home = root / "home"
@@ -1112,6 +1172,7 @@ class CLITests(unittest.TestCase):
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "run": "manage agent runs",
+                "supervisor": "run the autonomous control loop",
                 "result": "inspect and apply retained work",
             },
         )
@@ -1156,6 +1217,7 @@ class CLITests(unittest.TestCase):
                     "clean and fail runs interrupted by an orchestrator restart"
                 ),
             },
+            "supervisor": {"run": "advance opted-in work until stopped"},
             "result": {
                 "show": "verify and show one retained attempt result",
                 "apply": "apply one retained result after conflict preflight",
@@ -1335,6 +1397,85 @@ class CLITests(unittest.TestCase):
         served_args = serve.call_args.args[0]
         self.assertEqual(served_args.port, 0)
         self.assertEqual(served_args.history_limit, 3)
+
+    def test_supervisor_service_announces_policy_and_closes_cleanly(self) -> None:
+        supervisor = FakeSupervisor()
+        args = argparse.Namespace(
+            poll_interval=1.5,
+            max_workers=3,
+            action_lease_seconds=45,
+        )
+        control = FakeControlPlane()
+        stdout = io.StringIO()
+        with (
+            mock.patch(
+                "magic_glass_box.cli.Supervisor", return_value=supervisor
+            ) as supervisor_type,
+            redirect_stdout(stdout),
+        ):
+            status = _serve_supervisor(args, control, FakeRunCoordinator())
+
+        self.assertEqual(status, 0)
+        self.assertEqual(supervisor.run_calls, 1)
+        self.assertEqual(supervisor.close_calls, [False])
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "action_lease_seconds": 45,
+                "authority": "explicit_run_policy",
+                "max_workers": 3,
+                "poll_interval_seconds": 1.5,
+                "supervisor_id": "supervisor-test",
+            },
+        )
+        supervisor_type.assert_called_once_with(
+            control.database,
+            mock.ANY,
+            control,
+            poll_interval=1.5,
+            max_workers=3,
+            action_lease_seconds=45,
+        )
+
+    def test_supervisor_main_route_builds_one_coordinator(self) -> None:
+        control = FakeControlPlane()
+        coordinator = FakeRunCoordinator()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch(
+                "magic_glass_box.cli._build_run_coordinator",
+                return_value=coordinator,
+            ) as build,
+            mock.patch("magic_glass_box.cli._build_result_store") as result_store,
+            mock.patch(
+                "magic_glass_box.cli._serve_supervisor", return_value=0
+            ) as serve,
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "supervisor",
+                    "run",
+                    "--poll-interval",
+                    "0.5",
+                    "--max-workers",
+                    "2",
+                    "--action-lease-seconds",
+                    "30",
+                    "--run-timeout",
+                    "90",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        result_store.assert_called_once_with(control)
+        build.assert_called_once_with(
+            control,
+            run_timeout=90.0,
+            result_store=result_store.return_value,
+        )
+        serve.assert_called_once_with(mock.ANY, control, coordinator)
 
     def test_result_routes_verify_database_binding_before_show_or_apply(self) -> None:
         control = FakeControlPlane()

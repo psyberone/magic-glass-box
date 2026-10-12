@@ -217,7 +217,7 @@ class DatabaseTests(unittest.TestCase):
     def test_database_is_private_and_reports_counts(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 9)
+        self.assertEqual(status["schema_version"], 10)
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
 

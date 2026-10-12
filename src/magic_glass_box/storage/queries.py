@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from ..domain import (
+    SupervisionPolicy,
     ValidationError,
     WorkItemEnvelope,
 )
@@ -31,6 +32,7 @@ class QueryStorage:
             row = connection.execute(
                 "SELECT r.id, r.state, r.version, r.source_revision, "
                 "r.work_thread_id, r.predecessor_run_id, r.replacement_kind, "
+                "r.supervision_policy_json, "
                 "p.krab_project_key AS project_key, c.context_json, "
                 "av.spec_json, ki.credential_ref, wi.id AS work_item_id, "
                 "wi.source AS work_item_source, "
@@ -70,6 +72,9 @@ class QueryStorage:
         try:
             result["context"] = json.loads(result.pop("context_json"))
             result["profile"] = json.loads(result.pop("spec_json"))
+            result["supervision_policy"] = SupervisionPolicy.from_mapping(
+                json.loads(result.pop("supervision_policy_json"))
+            ).to_dict()
             work_item_json = result.pop("work_item_json")
             if work_item_json is None:
                 result["work_item"] = None
@@ -153,6 +158,7 @@ class QueryStorage:
             row = connection.execute(
                 "SELECT r.id, r.state, r.version, r.source_revision, "
                 "r.work_thread_id, r.predecessor_run_id, r.replacement_kind, "
+                "r.supervision_policy_json, "
                 "r.krab_session_id, r.krab_claim_id, r.created_at, r.updated_at, "
                 "r.started_at, r.finished_at, p.krab_project_key AS project_key, "
                 "c.id AS context_version_id, c.version AS context_version, "
@@ -181,6 +187,9 @@ class QueryStorage:
             ).fetchall()
         result = dict(row)
         try:
+            result["supervision_policy"] = SupervisionPolicy.from_mapping(
+                json.loads(result.pop("supervision_policy_json"))
+            ).to_dict()
             work_item_json = result.pop("work_item_json")
             result["work_item_title"] = (
                 None if work_item_json is None else json.loads(work_item_json)["title"]

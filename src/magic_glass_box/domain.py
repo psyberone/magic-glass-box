@@ -31,6 +31,9 @@ MAX_WORK_LOG_CONTENT_BYTES = 24 * 1024
 MAX_WORK_CHECKPOINT_CONTENT_BYTES = 24 * 1024
 MAX_WORK_ASSIGNMENT_CONTENT_BYTES = 16 * 1024
 INTERACTION_ID_RE = re.compile(r"^int_[0-9a-f]{32}$")
+SUPERVISION_POLICY_SCHEMA_VERSION = 1
+MAX_SUPERVISION_SCHEDULE_ENTRIES = 8
+MAX_SUPERVISION_DELAY_SECONDS = 30 * 24 * 60 * 60
 
 
 def require_string(
@@ -1367,6 +1370,153 @@ class AgentProfileSpec:
                 capability.value for capability in self.gateway_capabilities
             ]
         return result
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
+def _seconds_schedule(
+    value: object,
+    *,
+    field: str,
+    minimum: int,
+) -> tuple[int, ...]:
+    if not isinstance(value, list) or len(value) > MAX_SUPERVISION_SCHEDULE_ENTRIES:
+        raise ValidationError(
+            f"{field} must be a list of at most "
+            f"{MAX_SUPERVISION_SCHEDULE_ENTRIES} entries"
+        )
+    schedule: list[int] = []
+    for entry in value:
+        if (
+            isinstance(entry, bool)
+            or not isinstance(entry, int)
+            or not minimum <= entry <= MAX_SUPERVISION_DELAY_SECONDS
+        ):
+            raise ValidationError(
+                f"{field} entries must be between {minimum} and "
+                f"{MAX_SUPERVISION_DELAY_SECONDS} seconds"
+            )
+        schedule.append(entry)
+    if any(
+        current <= previous
+        for previous, current in zip(schedule, schedule[1:], strict=False)
+    ):
+        raise ValidationError(f"{field} entries must be strictly increasing")
+    return tuple(schedule)
+
+
+@dataclass(frozen=True)
+class SupervisionPolicy:
+    """Immutable run policy for automatic advancement and aged attention."""
+
+    schema_version: int
+    auto_execute: bool
+    retry_backoff_seconds: tuple[int, ...]
+    interaction_escalation_seconds: tuple[int, ...]
+    attempt_idle_escalation_seconds: tuple[int, ...]
+    attempt_lease_expired_escalation_seconds: tuple[int, ...]
+    other_attention_escalation_seconds: tuple[int, ...]
+
+    @classmethod
+    def disabled(cls) -> SupervisionPolicy:
+        return cls(
+            schema_version=SUPERVISION_POLICY_SCHEMA_VERSION,
+            auto_execute=False,
+            retry_backoff_seconds=(5, 30, 300),
+            interaction_escalation_seconds=(),
+            attempt_idle_escalation_seconds=(),
+            attempt_lease_expired_escalation_seconds=(),
+            other_attention_escalation_seconds=(),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> SupervisionPolicy:
+        if not isinstance(value, dict):
+            raise ValidationError("supervision policy must be an object")
+        fields = {
+            "schema_version",
+            "auto_execute",
+            "retry_backoff_seconds",
+            "interaction_escalation_seconds",
+            "attempt_idle_escalation_seconds",
+            "attempt_lease_expired_escalation_seconds",
+            "other_attention_escalation_seconds",
+        }
+        unknown = set(value) - fields
+        if unknown:
+            raise ValidationError(
+                "supervision policy contains unknown fields: "
+                + ", ".join(sorted(unknown))
+            )
+        missing = fields - set(value)
+        if missing:
+            raise ValidationError(
+                "supervision policy requires fields: " + ", ".join(sorted(missing))
+            )
+        schema_version = value["schema_version"]
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != SUPERVISION_POLICY_SCHEMA_VERSION
+        ):
+            raise ValidationError(
+                "supervision policy schema_version must be "
+                f"{SUPERVISION_POLICY_SCHEMA_VERSION}"
+            )
+        auto_execute = value["auto_execute"]
+        if not isinstance(auto_execute, bool):
+            raise ValidationError("auto_execute must be boolean")
+        return cls(
+            schema_version=schema_version,
+            auto_execute=auto_execute,
+            retry_backoff_seconds=_seconds_schedule(
+                value["retry_backoff_seconds"],
+                field="retry_backoff_seconds",
+                minimum=1,
+            ),
+            interaction_escalation_seconds=_seconds_schedule(
+                value["interaction_escalation_seconds"],
+                field="interaction_escalation_seconds",
+                minimum=0,
+            ),
+            attempt_idle_escalation_seconds=_seconds_schedule(
+                value["attempt_idle_escalation_seconds"],
+                field="attempt_idle_escalation_seconds",
+                minimum=0,
+            ),
+            attempt_lease_expired_escalation_seconds=_seconds_schedule(
+                value["attempt_lease_expired_escalation_seconds"],
+                field="attempt_lease_expired_escalation_seconds",
+                minimum=0,
+            ),
+            other_attention_escalation_seconds=_seconds_schedule(
+                value["other_attention_escalation_seconds"],
+                field="other_attention_escalation_seconds",
+                minimum=0,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "auto_execute": self.auto_execute,
+            "retry_backoff_seconds": list(self.retry_backoff_seconds),
+            "interaction_escalation_seconds": list(self.interaction_escalation_seconds),
+            "attempt_idle_escalation_seconds": list(
+                self.attempt_idle_escalation_seconds
+            ),
+            "attempt_lease_expired_escalation_seconds": list(
+                self.attempt_lease_expired_escalation_seconds
+            ),
+            "other_attention_escalation_seconds": list(
+                self.other_attention_escalation_seconds
+            ),
+        }
 
     @property
     def canonical(self) -> str:

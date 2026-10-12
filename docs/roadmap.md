@@ -271,7 +271,7 @@ interaction/handoff/replacement cycle, under the end-of-phase review gate in
 
 ## Milestone 6: autonomous supervision and escalation
 
-**Status: planned**
+**Status: complete**
 
 - Run reconciliation, queued execution, answered-work resumption, and bounded
   retry/backoff from one long-lived supervisor loop.
@@ -288,6 +288,15 @@ interaction/handoff/replacement cycle, under the end-of-phase review gate in
 resumes automatically, an expired attempt is recovered without touching a live
 lease, and an intentionally stalled question produces one bounded escalation
 at each configured threshold.
+
+The schema-v10 implementation pins an immutable policy to every run, defaults
+to manual launch, persists version-bound actions and threshold-bound
+escalations, and exposes both through the redacted control room. Action and
+reminder failures use finite policy-owned backoff before becoming exhausted
+attention. Krab reminders carry an empty body and a stable idempotency key.
+The repeatable proof runs two competing supervisor identities against the real
+durable state machine and satisfies every exit condition. See
+[supervision.md](supervision.md).
 
 ## Milestone 7: integration state and forge sidecars
 

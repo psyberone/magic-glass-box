@@ -54,7 +54,10 @@ This repository currently contains the first executable vertical slice:
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues;
 - a loopback-only, capability-addressed browser control room with explicit
-  cancel, retry, reassign, revoke, and reconcile forms; and
+  cancel, retry, reassign, revoke, and reconcile forms;
+- a leader-safe long-lived supervisor with per-run opt-in, finite durable
+  retries, automatic answered-work replacement, lease-safe recovery, and
+  bodyless threshold reminders through Krab; and
 - an administrative CLI that can execute, cancel, retry, or reassign runs,
   reconcile interrupted ones, and inspect or apply retained results.
 
@@ -64,9 +67,10 @@ the source checkout remains untouched, bounded edits are retained in a trusted
 result bundle, and the container and snapshot are removed afterward. The
 interaction transport has also been exercised over HTTP
 against a real local `imitation-krab`: idempotent question delivery,
-reverse-route response verification, and metadata-only local persistence all
-pass. The same proof verifies the control room's live role and claim-queue
-overlay without surfacing private interaction content. The gateway carrier has
+bodyless reminder replay, reverse-route response verification, and
+metadata-only local persistence all pass. The same proof verifies the control
+room's live role and claim-queue overlay without surfacing private interaction
+content. The gateway carrier has
 been exercised through the real Docker executor:
 the worker has `--network none`, direct egress fails, and a typed request still
 reaches the orchestrator. A second live proof reaches one policy-pinned local
@@ -105,7 +109,10 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   --project box-project --imported-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run create --project box-project --profile Worker \
-  --work-item wki_<id> --requested-by operator
+  --work-item wki_<id> --requested-by operator \
+  --supervision-policy examples/supervision-policy.json
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  supervisor run
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run execute run_<id> --runtime-adapter codex
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
@@ -121,6 +128,13 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
 Agent execution has a six-hour wall-clock ceiling by default. Pass
 `--run-timeout SECONDS` to choose another positive bound for an individual
 attempt.
+
+The supervision policy is optional. Omitting it keeps the run manual even when
+the supervisor service is running. Opted-in queued work, answered replacement
+work, expired ownership, and configured attention thresholds advance from
+durable state without an external cron. See
+[docs/supervision.md](docs/supervision.md) for policy, privacy, retry, and
+leader-safety semantics.
 
 `control-room serve` prints a per-process private URL and binds only to
 `127.0.0.1` by default. The browser can refresh live Krab role/claim metadata
@@ -200,6 +214,7 @@ mutation kill-rate floor. The repeatable gates are:
 ```console
 make quality
 make mutation
+make live-supervisor
 ```
 
 With the sister repository checked out beside this one, the repeatable live

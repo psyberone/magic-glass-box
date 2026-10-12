@@ -13,6 +13,7 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
     RunState,
+    SupervisionPolicy,
     WorkItemEnvelope,
 )
 from magic_glass_box.krab import ActivityPage, KrabError, KrabIdentity, KrabProject
@@ -212,8 +213,20 @@ class ControlPlaneTests(unittest.TestCase):
             work_item_id=work_item["id"],
             requested_by_handle="operator",
             source_revision="abc123",
+            supervision_policy=SupervisionPolicy.from_mapping(
+                {
+                    "schema_version": 1,
+                    "auto_execute": True,
+                    "retry_backoff_seconds": [5, 30],
+                    "interaction_escalation_seconds": [1800],
+                    "attempt_idle_escalation_seconds": [],
+                    "attempt_lease_expired_escalation_seconds": [0],
+                    "other_attention_escalation_seconds": [],
+                }
+            ),
         )
         self.assertEqual(run["work_item_version"], 1)
+        self.assertTrue(run["supervision_policy"]["auto_execute"])
         transitioned = self.control.transition_run(
             run["id"], target=RunState.PREPARING, expected_version=1
         )

@@ -23,6 +23,7 @@ from .domain import (
     ProjectContext,
     ProviderGrantSpec,
     RunState,
+    SupervisionPolicy,
     ValidationError,
     WorkAssignmentSpec,
     WorkItemEnvelope,
@@ -422,6 +423,7 @@ class ControlPlane:
         source_revision: str | None = None,
         krab_session_id: str | None = None,
         krab_claim_id: str | None = None,
+        supervision_policy: SupervisionPolicy | None = None,
     ) -> dict[str, Any]:
         requester = self.database.get_user(requested_by_handle)
         return self.database.create_run(
@@ -432,6 +434,7 @@ class ControlPlane:
             source_revision=source_revision,
             krab_session_id=krab_session_id,
             krab_claim_id=krab_claim_id,
+            supervision_policy=supervision_policy,
         )
 
     def transition_run(
@@ -663,6 +666,34 @@ class ControlPlane:
             request_item_id=item.item_id,
             expected_run_version=expected_run_version,
         )
+
+    def remind_interaction(self, interaction_id: str, *, idempotency_key: str) -> int:
+        """Send one idempotent bodyless Krab reminder for an open interaction."""
+
+        interaction = self.database.get_interaction(interaction_id)
+        if interaction["state"] != "open":
+            raise ConflictError(f"interaction is not open: {interaction['state']}")
+        route = self.database.get_run_transport(interaction["run_id"])
+        if route["krab_session_id"] is None:
+            raise ConflictError("run has no Krab session")
+        _, _, client = self._authenticated_client(
+            route["krab_instance_name"], route["agent_krab_handle"]
+        )
+        reminder = client.remind_session_item(
+            route["project_key"],
+            route["krab_session_id"],
+            interaction["request_item_id"],
+            idempotency_key=idempotency_key,
+        )
+        if reminder.project_key != route["project_key"]:
+            raise KrabError("interaction reminder belongs to another project")
+        if reminder.session_id != route["krab_session_id"]:
+            raise KrabError("interaction reminder belongs to another session")
+        if reminder.item_id != interaction["request_item_id"]:
+            raise KrabError("interaction reminder belongs to another item")
+        if reminder.recipient_id != interaction["recipient"]["krab_user_id"]:
+            raise KrabError("interaction reminder has an unexpected recipient")
+        return reminder.event_seq
 
     def accept_interaction_response(
         self,

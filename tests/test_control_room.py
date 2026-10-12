@@ -17,6 +17,7 @@ from magic_glass_box.domain import (
     InteractionKind,
     ProjectContext,
     ProviderGrantSpec,
+    SupervisionPolicy,
     WorkAssignmentSpec,
     WorkItemEnvelope,
     WorkLogEntry,
@@ -153,7 +154,12 @@ class ControlRoomTests(unittest.TestCase):
             imported_by=self.user["id"],
         )
 
-    def create_run(self, *, claim: bool = False) -> dict[str, Any]:
+    def create_run(
+        self,
+        *,
+        claim: bool = False,
+        supervision_policy: SupervisionPolicy | None = None,
+    ) -> dict[str, Any]:
         return self.database.create_run(
             project_key="box-project",
             profile_name="Codex Worker",
@@ -161,6 +167,7 @@ class ControlRoomTests(unittest.TestCase):
             requested_by=self.user["id"],
             krab_session_id="ses_" + "3" * 32 if claim else None,
             krab_claim_id="clm_" + "4" * 32 if claim else None,
+            supervision_policy=supervision_policy,
         )
 
     def start_run(self) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -234,7 +241,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 9)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], 10)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",
@@ -301,6 +308,8 @@ class ControlRoomTests(unittest.TestCase):
                 "interactions",
                 "retained_results",
                 "run_authorities",
+                "supervisor_actions",
+                "escalations",
                 "krab",
             },
         )
@@ -329,6 +338,8 @@ class ControlRoomTests(unittest.TestCase):
                 "interactions",
                 "assignments",
                 "retained_results",
+                "supervisor_actions",
+                "escalations",
                 "attention",
             },
         )
@@ -351,6 +362,27 @@ class ControlRoomTests(unittest.TestCase):
         self.assertEqual(
             snapshot["summary"]["assignments"],
             {"total": 1, "open": 1, "claimed": 0, "completed": 0, "cancelled": 0},
+        )
+        self.assertEqual(
+            snapshot["summary"]["supervisor_actions"],
+            {
+                "total": 0,
+                "pending": 0,
+                "claimed": 0,
+                "succeeded": 0,
+                "exhausted": 0,
+            },
+        )
+        self.assertEqual(
+            snapshot["summary"]["escalations"],
+            {
+                "total": 0,
+                "pending": 0,
+                "claimed": 0,
+                "delivered": 0,
+                "dismissed": 0,
+                "exhausted": 0,
+            },
         )
         self.assertEqual(
             set(snapshot["users"][0]),
@@ -558,6 +590,7 @@ class ControlRoomTests(unittest.TestCase):
                 "updated_at",
                 "started_at",
                 "finished_at",
+                "supervision_policy",
                 "attempt_count",
                 "interaction_count",
                 "retained_result_count",
@@ -568,6 +601,14 @@ class ControlRoomTests(unittest.TestCase):
         self.assertEqual(snapshot["runs"][0]["interaction_count"], 1)
         self.assertEqual(snapshot["runs"][0]["retained_result_count"], 1)
         self.assertEqual(snapshot["runs"][0]["authority_count"], 1)
+        self.assertFalse(snapshot["runs"][0]["supervision_policy"]["auto_execute"])
+        self.assertEqual(snapshot["supervisor_actions"], [])
+        self.assertEqual(snapshot["escalations"], [])
+        self.assertTrue(
+            all(
+                isinstance(entry["age_seconds"], int) for entry in snapshot["attention"]
+            )
+        )
         self.assertEqual(
             set(snapshot["attempts"][0]),
             {
@@ -1468,8 +1509,38 @@ class ControlRoomTests(unittest.TestCase):
             "interactions",
             "retained_results",
             "run_authorities",
+            "supervisor_actions",
+            "escalations",
         ):
             self.assertEqual(snapshot[collection], [])
+
+    def test_snapshot_surfaces_durable_supervisor_work_without_private_content(
+        self,
+    ) -> None:
+        policy = SupervisionPolicy.from_mapping(
+            {
+                "schema_version": 1,
+                "auto_execute": True,
+                "retry_backoff_seconds": [5],
+                "interaction_escalation_seconds": [],
+                "attempt_idle_escalation_seconds": [],
+                "attempt_lease_expired_escalation_seconds": [],
+                "other_attention_escalation_seconds": [],
+            }
+        )
+        run = self.create_run(supervision_policy=policy)
+        action = self.database.enqueue_supervisor_actions()[0]
+
+        snapshot = ControlRoom(self.database).snapshot()
+
+        self.assertEqual(snapshot["runs"][0]["id"], run["id"])
+        self.assertTrue(snapshot["runs"][0]["supervision_policy"]["auto_execute"])
+        self.assertEqual(snapshot["supervisor_actions"][0]["id"], action["id"])
+        self.assertEqual(snapshot["supervisor_actions"][0]["state"], "pending")
+        self.assertNotIn("retry_backoff_json", snapshot["supervisor_actions"][0])
+        encoded = json.dumps(snapshot, sort_keys=True).lower()
+        for forbidden in ("question_body", "answer_body", "transcript", "prompt"):
+            self.assertNotIn(forbidden, encoded)
 
 
 if __name__ == "__main__":

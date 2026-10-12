@@ -8,6 +8,7 @@ from typing import Any
 from ..domain import (
     AgentProfileSpec,
     RunState,
+    SupervisionPolicy,
     ValidationError,
     canonical_json,
     require_string,
@@ -35,6 +36,7 @@ class RunStorage:
         source_revision: str | None = None,
         krab_session_id: str | None = None,
         krab_claim_id: str | None = None,
+        supervision_policy: SupervisionPolicy | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
@@ -47,6 +49,10 @@ class RunStorage:
             krab_session_id = validate_krab_id(krab_session_id, "ses")
         if krab_claim_id is not None:
             krab_claim_id = validate_krab_id(krab_claim_id, "clm")
+        if supervision_policy is None:
+            supervision_policy = SupervisionPolicy.disabled()
+        elif not isinstance(supervision_policy, SupervisionPolicy):
+            raise ValidationError("supervision_policy must be a SupervisionPolicy")
         run_id = self.new_id("run")
         now = self.now()
         with self._connection() as connection:
@@ -119,10 +125,10 @@ class RunStorage:
                     "INSERT INTO runs "
                     "(id, project_id, context_version_id, profile_version_id, "
                     "work_item_version_id, work_thread_id, requested_by, "
-                    "state, version, "
+                    "state, version, supervision_policy_json, "
                     "source_revision, krab_session_id, krab_claim_id, created_at, "
                     "updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?)",
                     (
                         run_id,
                         project["id"],
@@ -131,6 +137,7 @@ class RunStorage:
                         work_item_version_id,
                         work_thread_id,
                         requested_by,
+                        supervision_policy.canonical,
                         source_revision,
                         krab_session_id,
                         krab_claim_id,
@@ -141,8 +148,18 @@ class RunStorage:
                 connection.execute(
                     "INSERT INTO run_events "
                     "(run_id, sequence, kind, from_state, to_state, metadata_json, "
-                    "created_at) VALUES (?, 1, 'run.created', NULL, 'queued', '{}', ?)",
-                    (run_id, now),
+                    "created_at) VALUES (?, 1, 'run.created', NULL, 'queued', ?, ?)",
+                    (
+                        run_id,
+                        canonical_json(
+                            {}
+                            if supervision_policy == SupervisionPolicy.disabled()
+                            else {
+                                "supervision_policy_sha256": supervision_policy.digest
+                            }
+                        ),
+                        now,
+                    ),
                 )
                 for grant in provider_grants:
                     connection.execute(
@@ -231,7 +248,8 @@ class RunStorage:
                     "SELECT r.project_id, r.context_version_id, "
                     "r.profile_version_id, r.work_item_version_id, "
                     "r.work_thread_id, r.state, r.version, r.source_revision, "
-                    "r.krab_session_id, r.krab_claim_id, p.active AS project_active, "
+                    "r.krab_session_id, r.krab_claim_id, "
+                    "r.supervision_policy_json, p.active AS project_active, "
                     "p.krab_instance_id, wt.state AS thread_state, "
                     "ap.active AS profile_active, ap.name AS profile_name "
                     "FROM runs r JOIN projects p ON p.id = r.project_id "
@@ -336,8 +354,9 @@ class RunStorage:
                     "(id, project_id, context_version_id, profile_version_id, "
                     "work_item_version_id, work_thread_id, requested_by, state, "
                     "version, source_revision, krab_session_id, krab_claim_id, "
-                    "created_at, updated_at, predecessor_run_id, replacement_kind) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?, ?)",
+                    "supervision_policy_json, created_at, updated_at, "
+                    "predecessor_run_id, replacement_kind) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         replacement_run_id,
                         source["project_id"],
@@ -349,18 +368,26 @@ class RunStorage:
                         source["source_revision"],
                         source["krab_session_id"],
                         source["krab_claim_id"],
+                        source["supervision_policy_json"],
                         now,
                         now,
                         run_id,
                         replacement_kind,
                     ),
                 )
-                created_metadata = canonical_json(
-                    {
-                        "predecessor_run_id": run_id,
-                        "replacement_kind": replacement_kind,
-                    }
-                )
+                try:
+                    source_policy = SupervisionPolicy.from_mapping(
+                        json.loads(source["supervision_policy_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError("stored supervision policy is invalid") from exc
+                created_event = {
+                    "predecessor_run_id": run_id,
+                    "replacement_kind": replacement_kind,
+                }
+                if source_policy != SupervisionPolicy.disabled():
+                    created_event["supervision_policy_sha256"] = source_policy.digest
+                created_metadata = canonical_json(created_event)
                 connection.execute(
                     "INSERT INTO run_events "
                     "(run_id, sequence, kind, from_state, to_state, "

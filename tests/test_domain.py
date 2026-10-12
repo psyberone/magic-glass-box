@@ -13,6 +13,7 @@ from magic_glass_box.domain import (
     NetworkMode,
     ProjectContext,
     RunState,
+    SupervisionPolicy,
     ValidationError,
     WorkspaceMode,
     canonical_json,
@@ -577,6 +578,69 @@ class RunStateTests(unittest.TestCase):
     def test_terminal_state_cannot_transition(self) -> None:
         with self.assertRaisesRegex(ValidationError, "invalid run transition"):
             validate_transition(RunState.SUCCEEDED, RunState.RUNNING)
+
+
+class SupervisionPolicyTests(unittest.TestCase):
+    def test_policy_is_explicit_bounded_and_canonical(self) -> None:
+        policy = SupervisionPolicy.from_mapping(
+            {
+                "schema_version": 1,
+                "auto_execute": True,
+                "retry_backoff_seconds": [5, 30, 300],
+                "interaction_escalation_seconds": [1800, 7200],
+                "attempt_idle_escalation_seconds": [3600],
+                "attempt_lease_expired_escalation_seconds": [0, 900],
+                "other_attention_escalation_seconds": [1800],
+            }
+        )
+
+        self.assertTrue(policy.auto_execute)
+        self.assertEqual(policy.retry_backoff_seconds, (5, 30, 300))
+        self.assertEqual(policy.attempt_lease_expired_escalation_seconds, (0, 900))
+        self.assertEqual(policy.to_dict()["schema_version"], 1)
+        self.assertEqual(
+            SupervisionPolicy.from_mapping(policy.to_dict()).digest,
+            policy.digest,
+        )
+
+    def test_disabled_policy_is_safe_and_invalid_bounds_fail_closed(self) -> None:
+        self.assertEqual(
+            SupervisionPolicy.disabled().to_dict(),
+            {
+                "schema_version": 1,
+                "auto_execute": False,
+                "retry_backoff_seconds": [5, 30, 300],
+                "interaction_escalation_seconds": [],
+                "attempt_idle_escalation_seconds": [],
+                "attempt_lease_expired_escalation_seconds": [],
+                "other_attention_escalation_seconds": [],
+            },
+        )
+        valid = SupervisionPolicy.disabled().to_dict()
+        cases = (
+            ({**valid, "unexpected": True}, "unknown fields"),
+            ({**valid, "schema_version": True}, "schema_version"),
+            ({**valid, "auto_execute": 1}, "auto_execute"),
+            ({**valid, "retry_backoff_seconds": [30, 5]}, "strictly increasing"),
+            (
+                {**valid, "interaction_escalation_seconds": [60, 60]},
+                "strictly increasing",
+            ),
+            (
+                {**valid, "attempt_idle_escalation_seconds": [-1]},
+                "between 0 and",
+            ),
+            (
+                {**valid, "other_attention_escalation_seconds": [1] * 9},
+                "at most 8",
+            ),
+        )
+        for candidate, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValidationError, message),
+            ):
+                SupervisionPolicy.from_mapping(candidate)
 
 
 if __name__ == "__main__":

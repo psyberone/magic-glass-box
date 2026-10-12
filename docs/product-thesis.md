@@ -25,7 +25,7 @@ Magic Glass Box should preserve five guarantees:
    scoped, revocable, and never inferred from message text.
 3. **Human interaction is asynchronous.** A question belongs to the work item,
    not a terminal prompt. A person can answer later and a different compatible
-   worker can continue.
+   worker can continue without an operator acting as a cron job.
 4. **Visibility does not require surveillance.** Operators can see ownership,
    state, blockers, grants, and results without Magic Glass Box retaining
    private message bodies or agent transcripts.
@@ -69,10 +69,12 @@ The product thesis is proven when one local demonstration can:
    private Krab delivery;
 4. terminate the original worker without losing the interaction;
 5. accept a human response later;
-6. resume the work with a different compatible worker;
+6. automatically advance the answered work with a different compatible worker;
 7. collect independently authored results from parallel profile-pinned
    assignments after replacing the original coordinator; and
-8. show the exact context, authority, transitions, and outcome without showing
+8. escalate a deliberately stalled interaction once at each pinned threshold;
+   and
+9. show the exact context, authority, transitions, and outcome without showing
    either private message body.
 
 ## Non-goals

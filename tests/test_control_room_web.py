@@ -219,6 +219,7 @@ def snapshot_fixture() -> dict[str, Any]:
                 "severity": "action",
                 "subject_id": "int_pending",
                 "run_id": "run_active",
+                "age_seconds": 7200,
             }
         ],
         "users": [
@@ -318,6 +319,7 @@ def snapshot_fixture() -> dict[str, Any]:
                 "retained_result_count": 0,
                 "predecessor_run_id": None,
                 "replacement_kind": None,
+                "supervision_policy": {"auto_execute": True},
             },
             {
                 "id": "run_terminal",
@@ -333,6 +335,7 @@ def snapshot_fixture() -> dict[str, Any]:
                 "retained_result_count": 1,
                 "predecessor_run_id": None,
                 "replacement_kind": None,
+                "supervision_policy": {"auto_execute": False},
             },
         ],
         "attempts": [
@@ -373,6 +376,33 @@ def snapshot_fixture() -> dict[str, Any]:
                 "available": True,
                 "expired": False,
                 "expires_at": None,
+            }
+        ],
+        "supervisor_actions": [
+            {
+                "id": "act_execute",
+                "run_id": "run_active",
+                "kind": "run.execute",
+                "state": "claimed",
+                "attempt_count": 1,
+                "max_attempts": 4,
+                "owner_id": "supervisor-one",
+                "available_at": "2026-10-10T10:00:00+00:00",
+                "last_error_code": None,
+            }
+        ],
+        "escalations": [
+            {
+                "id": "esc_question",
+                "run_id": "run_active",
+                "kind": "interaction.pending",
+                "threshold_seconds": 7200,
+                "channel": "krab_reminder",
+                "state": "delivered",
+                "attempt_count": 1,
+                "max_attempts": 4,
+                "delivered_at": "2026-10-10T12:00:00+00:00",
+                "last_error_code": None,
             }
         ],
         "krab": {
@@ -543,6 +573,8 @@ class ControlRoomWebTests(unittest.TestCase):
                 ("h1", "Magic Glass Box control room"),
                 ("h2", "Recovery"),
                 ("h2", "Attention"),
+                ("h2", "Supervisor actions"),
+                ("h2", "Escalations"),
                 ("h2", "Runs"),
                 ("h2", "Attempts"),
                 ("h2", "Interactions"),
@@ -596,12 +628,12 @@ class ControlRoomWebTests(unittest.TestCase):
                 "main": 1,
                 "header": 1,
                 "h1": 1,
-                "h2": 16,
-                "section": 16,
-                "table": 15,
-                "tr": 32,
-                "th": 90,
-                "td": 105,
+                "h2": 18,
+                "section": 18,
+                "table": 17,
+                "tr": 36,
+                "th": 109,
+                "td": 125,
                 "form": 5,
                 "input": 15,
                 "select": 5,
@@ -614,8 +646,60 @@ class ControlRoomWebTests(unittest.TestCase):
             parser.tables,
             {
                 "Attention": [
-                    ["Severity", "Condition", "Subject", "Run"],
-                    ["action", "interaction.pending", "int_pending", "run_active"],
+                    ["Severity", "Condition", "Subject", "Run", "Age (seconds)"],
+                    [
+                        "action",
+                        "interaction.pending",
+                        "int_pending",
+                        "run_active",
+                        "7200",
+                    ],
+                ],
+                "Supervisor actions": [
+                    [
+                        "ID",
+                        "Run",
+                        "Kind",
+                        "State",
+                        "Attempts",
+                        "Owner",
+                        "Available",
+                        "Error",
+                    ],
+                    [
+                        "act_execute",
+                        "run_active",
+                        "run.execute",
+                        "claimed",
+                        "1 / 4",
+                        "supervisor-one",
+                        "2026-10-10T10:00:00+00:00",
+                        "—",
+                    ],
+                ],
+                "Escalations": [
+                    [
+                        "ID",
+                        "Run",
+                        "Kind",
+                        "Threshold",
+                        "Channel",
+                        "State",
+                        "Attempts",
+                        "Delivered",
+                        "Error",
+                    ],
+                    [
+                        "esc_question",
+                        "run_active",
+                        "interaction.pending",
+                        "7200",
+                        "krab_reminder",
+                        "delivered",
+                        "1 / 4",
+                        "2026-10-10T12:00:00+00:00",
+                        "—",
+                    ],
                 ],
                 "Runs": [
                     [
@@ -626,6 +710,7 @@ class ControlRoomWebTests(unittest.TestCase):
                         "Project",
                         "Untrusted work title",
                         "Lineage",
+                        "Autonomy",
                         "Actions",
                     ],
                     [
@@ -636,6 +721,7 @@ class ControlRoomWebTests(unittest.TestCase):
                         "box-project",
                         "<script>alert('title')</script>",
                         "original",
+                        "automatic",
                         "operator Cancel",
                     ],
                     [
@@ -646,6 +732,7 @@ class ControlRoomWebTests(unittest.TestCase):
                         "box-project",
                         "Fix the control room",
                         "original",
+                        "manual",
                         "operator Retry operator Worker Reviewer Reassign",
                     ],
                 ],

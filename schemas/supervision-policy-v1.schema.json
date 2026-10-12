@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://magic-glass-box.local/schemas/supervision-policy-v1.schema.json",
+  "title": "Magic Glass Box supervision policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "auto_execute",
+    "retry_backoff_seconds",
+    "interaction_escalation_seconds",
+    "attempt_idle_escalation_seconds",
+    "attempt_lease_expired_escalation_seconds",
+    "other_attention_escalation_seconds"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "auto_execute": {"type": "boolean"},
+    "retry_backoff_seconds": {
+      "$ref": "#/$defs/retrySchedule"
+    },
+    "interaction_escalation_seconds": {
+      "$ref": "#/$defs/escalationSchedule"
+    },
+    "attempt_idle_escalation_seconds": {
+      "$ref": "#/$defs/escalationSchedule"
+    },
+    "attempt_lease_expired_escalation_seconds": {
+      "$ref": "#/$defs/escalationSchedule"
+    },
+    "other_attention_escalation_seconds": {
+      "$ref": "#/$defs/escalationSchedule"
+    }
+  },
+  "$defs": {
+    "retrySchedule": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2592000
+      }
+    },
+    "escalationSchedule": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2592000
+      }
+    }
+  }
+}

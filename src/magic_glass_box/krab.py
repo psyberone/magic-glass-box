@@ -163,6 +163,15 @@ class SessionItem:
     history: tuple[SessionItemHistoryEvent, ...]
 
 
+@dataclass(frozen=True)
+class SessionItemReminder:
+    event_seq: int
+    project_key: str
+    session_id: str
+    item_id: str
+    recipient_id: str
+
+
 ConnectionFactory = Callable[[str, int, float], http.client.HTTPConnection]
 
 
@@ -841,6 +850,76 @@ class KrabClient:
             session_id=session,
             item_id=item,
             created=False,
+        )
+
+    def remind_session_item(
+        self,
+        project_key: str,
+        session_id: str,
+        item_id: str,
+        *,
+        idempotency_key: str,
+    ) -> SessionItemReminder:
+        try:
+            key = validate_project_key(project_key)
+            session = validate_krab_id(session_id, "ses")
+            item = validate_krab_id(item_id, "itm")
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        if (
+            not isinstance(idempotency_key, str)
+            or IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None
+        ):
+            raise KrabError("invalid idempotency key")
+        response = _exact_object(
+            self._request(
+                "/v1/projects/"
+                + quote(key, safe="")
+                + "/sessions/"
+                + quote(session, safe="")
+                + "/items/"
+                + quote(item, safe="")
+                + "/notify",
+                method="POST",
+                payload={},
+                idempotency_key=idempotency_key,
+                expected_status=202,
+            ),
+            fields={"trusted_metadata"},
+            label="session-item reminder response",
+        )
+        metadata = _exact_object(
+            response["trusted_metadata"],
+            fields={
+                "event_seq",
+                "kind",
+                "project_key",
+                "session_id",
+                "item_id",
+                "recipient_id",
+            },
+            label="session-item reminder metadata",
+        )
+        if metadata["kind"] != "item.reminded":
+            raise KrabError("invalid session-item reminder kind")
+        if metadata["project_key"] != key:
+            raise KrabError("session-item reminder project does not match the request")
+        if metadata["session_id"] != session:
+            raise KrabError("session-item reminder session does not match the request")
+        if metadata["item_id"] != item:
+            raise KrabError("session-item reminder item does not match the request")
+        try:
+            recipient_id = validate_krab_id(metadata["recipient_id"], "usr")
+        except ValueError as exc:
+            raise KrabError("invalid session-item reminder recipient") from exc
+        return SessionItemReminder(
+            event_seq=_integer(
+                metadata["event_seq"], minimum=1, label="reminder event sequence"
+            ),
+            project_key=key,
+            session_id=session,
+            item_id=item,
+            recipient_id=recipient_id,
         )
 
     def activity(

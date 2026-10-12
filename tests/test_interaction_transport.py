@@ -28,6 +28,7 @@ from magic_glass_box.krab import (
     KrabIdentity,
     KrabUserRef,
     SessionItem,
+    SessionItemReminder,
     WorkClaimRef,
 )
 from magic_glass_box.service import AcceptedInteractionResponse, ControlPlane
@@ -89,6 +90,14 @@ class FakeInteractionClient:
         )
         self.create_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.get_calls: list[tuple[str, str, str]] = []
+        self.reminder_calls: list[tuple[str, str, str, str]] = []
+        self.reminder = SessionItemReminder(
+            event_seq=9,
+            project_key="box-project",
+            session_id=SESSION_ID,
+            item_id=REQUEST_ITEM_ID,
+            recipient_id=REVIEWER_USER_ID,
+        )
 
     def whoami(self) -> KrabIdentity:
         return self.identity
@@ -104,6 +113,17 @@ class FakeInteractionClient:
     ) -> SessionItem:
         self.get_calls.append((project_key, session_id, item_id))
         return self.response_item
+
+    def remind_session_item(
+        self,
+        project_key: str,
+        session_id: str,
+        item_id: str,
+        *,
+        idempotency_key: str,
+    ) -> SessionItemReminder:
+        self.reminder_calls.append((project_key, session_id, item_id, idempotency_key))
+        return self.reminder
 
 
 class InteractionTransportTests(unittest.TestCase):
@@ -291,6 +311,33 @@ class InteractionTransportTests(unittest.TestCase):
         )
         self.assertNotIn(b"SECRET QUESTION BODY", database_bytes)
         self.assertNotIn(b"SECRET HUMAN RESPONSE", database_bytes)
+
+    def test_bodyless_reminder_is_bound_to_the_open_interaction(self) -> None:
+        run = self.running_run()
+        opened = self.open_interaction(run)
+
+        event_sequence = self.control.remind_interaction(
+            opened["id"], idempotency_key="mgb.escalation:1234"
+        )
+
+        self.assertEqual(event_sequence, 9)
+        self.assertEqual(
+            self.client.reminder_calls,
+            [
+                (
+                    "box-project",
+                    SESSION_ID,
+                    REQUEST_ITEM_ID,
+                    "mgb.escalation:1234",
+                )
+            ],
+        )
+
+        self.client.reminder = replace(self.client.reminder, recipient_id=AGENT_USER_ID)
+        with self.assertRaisesRegex(KrabError, "recipient"):
+            self.control.remind_interaction(
+                opened["id"], idempotency_key="mgb.escalation:5678"
+            )
 
     def test_response_read_is_bound_to_an_answered_interaction_and_run(self) -> None:
         run = self.running_run()

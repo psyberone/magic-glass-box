@@ -196,6 +196,16 @@ def main() -> int:
             if replayed.item_id != interaction["request_item_id"]:
                 raise RuntimeError("Krab idempotency replay returned another item")
 
+            reminder_key = "mgb.live.reminder:0001"
+            reminder_event = control.remind_interaction(
+                interaction["id"], idempotency_key=reminder_key
+            )
+            replayed_reminder_event = control.remind_interaction(
+                interaction["id"], idempotency_key=reminder_key
+            )
+            if replayed_reminder_event != reminder_event:
+                raise RuntimeError("Krab reminder idempotency replay changed event")
+
             response_body = "LIVE PRIVATE HUMAN RESPONSE"
             response = KrabClient(base_url, reviewer_token).create_session_item(
                 "box-project",
@@ -257,6 +267,7 @@ def main() -> int:
                         "interaction_state": accepted.interaction_state,
                         "run_state": accepted.run_state,
                         "idempotency_replay": "same_item",
+                        "reminder_idempotency_replay": "same_event",
                         "private_content_persisted_by_mgb": False,
                         "control_room_role": "coordinator",
                         "control_room_claim_id": claim["claim_id"],

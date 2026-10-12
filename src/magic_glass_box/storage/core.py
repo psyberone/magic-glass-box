@@ -231,6 +231,11 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM work_memory_checkpoints",
                 ),
                 ("work_assignments", "SELECT COUNT(*) FROM work_assignments"),
+                ("supervisor_actions", "SELECT COUNT(*) FROM supervisor_actions"),
+                (
+                    "supervisor_escalations",
+                    "SELECT COUNT(*) FROM supervisor_escalations",
+                ),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]

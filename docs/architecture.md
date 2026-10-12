@@ -69,6 +69,8 @@ project-activity projection.
   compatibility `command` adapter without changing their content digest.
 - A run pins exact context, profile, and work-item revisions. Later imports or
   edits cannot change an in-flight or historical run.
+- A run also pins one immutable supervision policy. The default is manual;
+  automatic launch and each finite aging schedule require explicit opt-in.
 - A work item owns a durable coordination thread shared by all of its runs.
   Append-only work-log entries retain orchestrator-supplied run, attempt,
   profile, and runtime provenance; they are bounded evidence, not authority.
@@ -95,6 +97,11 @@ project-activity projection.
   evidence until an operator explicitly applies them to a checkout.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
+- Supervisor actions bind an operation to one subject version and use their own
+  expiring claim lease. They do not replace run or attempt authority: launching
+  still requires the queued-run claim and recovery still requires an expired
+  attempt lease. Escalations bind one condition and threshold, retain no
+  private content, and use finite policy-owned retries.
 - Retrying or reassigning terminal work creates a new queued successor and an
   event on its predecessor. Retry preserves the exact context, profile,
   work-item, source, provider-authority, and communication pins. Reassignment
@@ -130,8 +137,8 @@ duplicate private request.
 split beneath `magic_glass_box.storage` into schema and migration ownership,
 SQLite connection ownership, and stores for the catalog, work-item lifecycle,
 work memory, runs, attempts, interactions and provider activity, retained
-artifacts, and composite query projections. Schema v9 was preserved during the
-split.
+artifacts, supervision, and composite query projections. The storage split
+preserved schema v9; autonomous supervision advances it to schema v10.
 
 Each mutation continues to own its complete SQLite transaction. Composite read
 projections open one explicit read transaction and pass that connection to
@@ -141,6 +148,13 @@ including its base run, events, attempts, interactions, provider authority, and
 work memory.
 
 ## Execution lifecycle
+
+A long-lived supervisor periodically materializes queued execution, expired
+ownership recovery, and orphan reconciliation as durable actions. Multiple
+processes may run: SQLite action leases select one dispatcher, while the
+existing run and attempt transitions remain the final authority. The same pass
+records due aging thresholds and delivers open-interaction reminders through
+Krab. See [supervision.md](supervision.md).
 
 For an execution request, Magic Glass Box:
 
@@ -238,7 +252,9 @@ independent subsystems. See [roadmap.md](roadmap.md) for the current sequence an
 exit proofs. The durable interaction path, run-scoped gateway, scoped provider
 broker, structured worker replacement, multi-agent work memory, work-item
 completion, execution integrity, the redacted interactive control room, and the
-storage-boundary refactor, runtime adapter contract, and live dual-runtime proof
-are complete. Autonomous supervision and aging escalation are next. See
+storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
+autonomous supervision, and aging escalation are complete. Integration gate
+state and provider-neutral sidecars are next. See
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
-[runtime-adapters.md](runtime-adapters.md), and [work-memory.md](work-memory.md).
+[runtime-adapters.md](runtime-adapters.md), [supervision.md](supervision.md),
+and [work-memory.md](work-memory.md).

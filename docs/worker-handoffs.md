@@ -77,7 +77,9 @@ this sequence:
 6. A replacement attempt reconstructs a clean workspace from the run's pinned
    commit. `run.describe` includes the latest handoff and answered interaction
    metadata; `interaction.read` transiently retrieves only the correlated
-   response from Krab.
+   response from Krab. When the run's pinned supervision policy enables
+   automatic execution, the long-lived supervisor launches this replacement;
+   otherwise an operator launches it explicitly.
 
 The clean-workspace rule is deliberate: mutable state from a compromised or
 failed worker is not silently promoted into the next worker's authority. The
