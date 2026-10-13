@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -87,6 +88,25 @@ class FakeControlPlane:
     def project_activity(self, **kwargs: object) -> ActivityPage:
         self.calls.append(("krab.activity", kwargs))
         return ActivityPage("box-project", 0, 0, ())
+
+    def accept_interaction_response(
+        self, interaction_id: str, **kwargs: object
+    ) -> SimpleNamespace:
+        self.calls.append(
+            ("interaction.answer", {"interaction_id": interaction_id, **kwargs})
+        )
+        return SimpleNamespace(
+            interaction_id=interaction_id,
+            run_id="run_" + "2" * 32,
+            response_item_id=kwargs["response_item_id"],
+            interaction_state="answered",
+            interaction_version=2,
+            run_state="queued",
+            run_version=5,
+            untrusted_title="PRIVATE RESPONSE TITLE",
+            untrusted_body="PRIVATE RESPONSE BODY",
+            content_risk_flags=("untrusted",),
+        )
 
     def register_project(self, **kwargs: object) -> dict[str, object]:
         return self._called("project.add", **kwargs)
@@ -239,6 +259,7 @@ class CLITests(unittest.TestCase):
                     ("profile", "manage agent profiles"),
                     ("provider", "manage scoped provider grants"),
                     ("work-item", "manage durable work items"),
+                    ("interaction", "resolve durable agent interactions"),
                     ("run", "manage agent runs"),
                     ("supervisor", "run the autonomous control loop"),
                     ("result", "inspect and apply retained work"),
@@ -306,6 +327,11 @@ class CLITests(unittest.TestCase):
                     ("complete", "seal completed work memory"),
                     ("reopen", "start a fresh work-memory generation"),
                 ),
+            ),
+            ("interaction",): (
+                "interaction_command",
+                True,
+                (("answer", "bind one explicit Krab response item"),),
             ),
             ("run",): (
                 "run_command",
@@ -438,6 +464,10 @@ class CLITests(unittest.TestCase):
                     "--expected-thread-version",
                     "--reopened-by",
                 ),
+                ("interaction", "answer"): (
+                    "--response-item",
+                    "--expected-version",
+                ),
                 ("run", "create"): (
                     "--project",
                     "--profile",
@@ -458,7 +488,18 @@ class CLITests(unittest.TestCase):
                 ("result", "apply"): ("--repository",),
             },
         )
-        self.assertEqual(choices, {})
+        self.assertEqual(
+            choices,
+            {
+                (("supervisor", "run"), "log_level"): (
+                    "DEBUG",
+                    "INFO",
+                    "WARNING",
+                    "ERROR",
+                    "CRITICAL",
+                )
+            },
+        )
 
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
@@ -1051,6 +1092,11 @@ class CLITests(unittest.TestCase):
         self.assertEqual(supervised.action_lease_seconds, 60)
         self.assertEqual(supervised.run_timeout, 21_600.0)
         self.assertIsNone(supervised.action_timeout)
+        self.assertEqual(supervised.log_level, "WARNING")
+        verbose_supervisor = parser.parse_args(
+            ["supervisor", "run", "--log-level", "debug"]
+        )
+        self.assertEqual(verbose_supervisor.log_level, "DEBUG")
         for invalid_limit in ("-1", "501", "1.5"):
             with (
                 self.subTest(invalid_limit=invalid_limit),
@@ -1143,6 +1189,56 @@ class CLITests(unittest.TestCase):
                 parsed = build_parser().parse_args(["status"])
             self.assertEqual(parsed.db, expected)
 
+    def test_interaction_answer_dispatches_only_redacted_confirmation(self) -> None:
+        interaction_id = "int_" + "1" * 32
+        response_item_id = "itm_" + "2" * 32
+        fake = FakeControlPlane()
+        stdout = io.StringIO()
+
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=fake),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "interaction",
+                    "answer",
+                    interaction_id,
+                    "--response-item",
+                    response_item_id,
+                    "--expected-version",
+                    "1",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            fake.calls[-1],
+            (
+                "interaction.answer",
+                {
+                    "interaction_id": interaction_id,
+                    "response_item_id": response_item_id,
+                    "expected_version": 1,
+                },
+            ),
+        )
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "interaction_id": interaction_id,
+                "interaction_state": "answered",
+                "interaction_version": 2,
+                "response_item_id": response_item_id,
+                "run_id": "run_" + "2" * 32,
+                "run_state": "queued",
+                "run_version": 5,
+            },
+        )
+        self.assertNotIn("PRIVATE RESPONSE", stdout.getvalue())
+
     def test_complete_parser_surface_is_an_explicit_contract(self) -> None:
         parser = build_parser()
 
@@ -1177,6 +1273,7 @@ class CLITests(unittest.TestCase):
                 "profile": "manage agent profiles",
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
+                "interaction": "resolve durable agent interactions",
                 "run": "manage agent runs",
                 "supervisor": "run the autonomous control loop",
                 "result": "inspect and apply retained work",
@@ -1211,6 +1308,9 @@ class CLITests(unittest.TestCase):
                 "show": "show work-item lifecycle metadata",
                 "complete": "seal completed work memory",
                 "reopen": "start a fresh work-memory generation",
+            },
+            "interaction": {
+                "answer": "bind one explicit Krab response item",
             },
             "run": {
                 "create": "create a pinned run record",
@@ -1412,6 +1512,7 @@ class CLITests(unittest.TestCase):
             action_lease_seconds=45,
             run_timeout=90.0,
             action_timeout=None,
+            log_level="INFO",
         )
         control = FakeControlPlane()
         stdout = io.StringIO()
@@ -1419,6 +1520,7 @@ class CLITests(unittest.TestCase):
             mock.patch(
                 "magic_glass_box.cli.Supervisor", return_value=supervisor
             ) as supervisor_type,
+            mock.patch("magic_glass_box.cli.logging.basicConfig") as configure_logs,
             redirect_stdout(stdout),
         ):
             status = _serve_supervisor(args, control, FakeRunCoordinator())
@@ -1433,9 +1535,14 @@ class CLITests(unittest.TestCase):
                 "action_timeout_seconds": 390.0,
                 "authority": "explicit_run_policy",
                 "max_workers": 3,
+                "log_level": "INFO",
                 "poll_interval_seconds": 1.5,
                 "supervisor_id": "supervisor-test",
             },
+        )
+        configure_logs.assert_called_once_with(
+            level=mock.ANY,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
         supervisor_type.assert_called_once_with(
             control.database,
@@ -1518,6 +1625,7 @@ class CLITests(unittest.TestCase):
             action_lease_seconds=45,
             run_timeout=90.0,
             action_timeout=90.0,
+            log_level="WARNING",
         )
 
         with self.assertRaisesRegex(InputError, "must exceed --run-timeout"):

@@ -22,7 +22,11 @@ SHA-256-addressed blobs, so identical content is retained once. Unchanged files
 and empty directories are not copied. `.git` paths and their case-insensitive,
 HFS-ignorable, NTFS short-name, trailing-dot/space, and alternate-stream aliases
 fail closed. Absolute or escaping symlinks, sockets, devices, FIFOs, and other
-special files fail closed as well.
+special files fail closed as well. Symlink containment is evaluated as a
+graph: sibling links are recursively expanded before `..` is interpreted, so
+two individually plausible links cannot compose into an escape. The same
+graph check runs again before applying a retained bundle, including bundles
+captured by an older build and chains that cross unchanged checkout links.
 
 Untracked files ignored by the pinned rules are excluded before the workspace
 path ceiling is counted. Matching uses Git's `check-ignore` semantics with
@@ -70,7 +74,8 @@ database-bound digest before returning metadata. `apply` performs the same
 verification, then inspects every affected destination path. If any path no
 longer matches the captured baseline, no path is changed. After a successful
 preflight it reconstructs deletions, files, modes, and safe symlinks using
-atomic replacement for written paths.
+atomic replacement for written paths. Symlink-graph validation completes
+before the first deletion or write.
 
 The operation is intentionally explicit. Results are never applied to the
 source checkout automatically and never become authority for a replacement

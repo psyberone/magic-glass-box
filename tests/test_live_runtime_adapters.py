@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import json
 import unittest
+from pathlib import Path
 
 from magic_glass_box.executor import SandboxPlan
 from scripts.check_live_runtime_adapters import (
@@ -35,6 +37,23 @@ def _events(raw: bytes) -> list[tuple[str | None, object]]:
 
 
 class LiveRuntimeProofContractTests(unittest.TestCase):
+    def test_live_proofs_do_not_shortcut_the_operator_answer_surface(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        for relative in (
+            "scripts/check_live_krab_transport.py",
+            "scripts/check_live_runtime_adapters.py",
+        ):
+            with self.subTest(script=relative):
+                tree = ast.parse((repository / relative).read_text(encoding="utf-8"))
+                direct_calls = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "accept_interaction_response"
+                ]
+                self.assertEqual(direct_calls, [])
+
     def test_openai_fixture_is_a_complete_stream_for_the_pinned_model(self) -> None:
         events = _events(_openai_sse(CODEX_MODEL))
 

@@ -11,7 +11,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from magic_glass_box.db import SCHEMA, SUPERVISION_SCHEMA, ConflictError, Database
+from magic_glass_box.db import (
+    SCHEMA,
+    SUPERVISION_SCHEMA,
+    ConflictError,
+    Database,
+    StorageError,
+)
 from magic_glass_box.domain import (
     AgentProfileSpec,
     InteractionKind,
@@ -434,16 +440,23 @@ class SupervisionDatabaseTests(unittest.TestCase):
         )
         self.addCleanup(supervisor.close)
 
-        for seconds, expected_calls in ((0, 1), (4, 1), (5, 2), (34, 2), (35, 3)):
-            with mock.patch.object(
-                self.database,
-                "now",
-                return_value=(start + timedelta(seconds=seconds)).isoformat(
-                    timespec="microseconds"
-                ),
+        with self.assertLogs("magic_glass_box.supervision", level="WARNING") as logs:
+            for seconds, expected_calls in (
+                (0, 1),
+                (4, 1),
+                (5, 2),
+                (34, 2),
+                (35, 3),
             ):
-                supervisor.tick(wait=True)
-            self.assertEqual(len(coordinator.execute_calls), expected_calls)
+                with mock.patch.object(
+                    self.database,
+                    "now",
+                    return_value=(start + timedelta(seconds=seconds)).isoformat(
+                        timespec="microseconds"
+                    ),
+                ):
+                    supervisor.tick(wait=True)
+                self.assertEqual(len(coordinator.execute_calls), expected_calls)
 
         action = self.database.list_supervisor_actions()[0]
         self.assertEqual(action["run_id"], run["id"])
@@ -451,6 +464,9 @@ class SupervisionDatabaseTests(unittest.TestCase):
         self.assertEqual(action["attempt_count"], 3)
         self.assertEqual(action["last_error_code"], "RuntimeError")
         self.assertNotIn("private upstream failure detail", str(action))
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn("RuntimeError", rendered_logs)
+        self.assertNotIn("private upstream failure detail", rendered_logs)
 
     def test_escalations_are_threshold_deduplicated_and_bodyless(self) -> None:
         start = datetime(2027, 1, 1, tzinfo=UTC)
@@ -1042,6 +1058,110 @@ class SupervisionDatabaseTests(unittest.TestCase):
 
         self.assertTrue(supervisor.close())
 
+    def test_run_forever_honors_backoff_and_heartbeats_between_retries(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            FakeEscalationTransport(),
+            poll_interval=1,
+            action_lease_seconds=10,
+        )
+        events: list[object] = []
+        clock = [100.0]
+
+        def tick() -> None:
+            number = sum(event == "tick" for event in events) + 1
+            events.append("tick")
+            if number == 1:
+                raise RuntimeError("PRIVATE LOOP FAILURE")
+            supervisor.stop()
+
+        def wait(timeout: float) -> bool:
+            events.append(("wait", timeout))
+            if supervisor._stop.is_set():
+                return True
+            clock[0] += timeout
+            return False
+
+        def heartbeat() -> None:
+            events.append("heartbeat")
+
+        with (
+            mock.patch.object(supervisor, "tick", side_effect=tick),
+            mock.patch.object(
+                supervisor, "_renew_active_leases", side_effect=heartbeat
+            ),
+            mock.patch.object(supervisor._stop, "wait", side_effect=wait),
+            mock.patch(
+                "magic_glass_box.supervision.time.monotonic",
+                side_effect=lambda: clock[0],
+            ),
+            self.assertLogs("magic_glass_box.supervision", level="ERROR") as logs,
+        ):
+            supervisor.run_forever()
+
+        self.assertEqual(
+            events,
+            ["tick", ("wait", 1.0), "heartbeat", ("wait", 1.0), "tick"],
+        )
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn("RuntimeError", rendered_logs)
+        self.assertNotIn("PRIVATE LOOP FAILURE", rendered_logs)
+
+    def test_background_failures_log_only_sanitized_operational_metadata(
+        self,
+    ) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        coordinator = FakeCoordinator()
+        transport = FakeEscalationTransport()
+        transport.error = RuntimeError("PRIVATE ESCALATION DETAIL")
+        supervisor = Supervisor(self.database, coordinator, transport)
+        action = {
+            "id": "act_" + "1" * 32,
+            "kind": "run.execute",
+            "run_id": "run_" + "2" * 32,
+            "version": 1,
+        }
+        escalation = {
+            "id": "esc_" + "3" * 32,
+            "kind": "interaction.pending",
+            "subject_id": "int_" + "4" * 32,
+            "idempotency_key": "mgb.supervisor:test",
+            "version": 1,
+        }
+
+        with (
+            mock.patch.object(
+                supervisor,
+                "_complete_action",
+                side_effect=StorageError("PRIVATE STORAGE DETAIL"),
+            ),
+            mock.patch.object(
+                self.database, "get_interaction", return_value={"state": "open"}
+            ),
+            mock.patch.object(
+                self.database, "fail_supervisor_escalation"
+            ) as fail_escalation,
+            self.assertLogs("magic_glass_box.supervision", level="WARNING") as logs,
+        ):
+            supervisor._run_action(action)
+            supervisor._run_escalation(escalation)
+
+        fail_escalation.assert_called_once_with(
+            escalation["id"],
+            owner_id=supervisor.supervisor_id,
+            expected_version=1,
+            error_code="RuntimeError",
+        )
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn("StorageError", rendered_logs)
+        self.assertIn("RuntimeError", rendered_logs)
+        self.assertNotIn("PRIVATE STORAGE DETAIL", rendered_logs)
+        self.assertNotIn("PRIVATE ESCALATION DETAIL", rendered_logs)
+
     def test_answered_work_and_expired_ownership_advance_automatically(self) -> None:
         from magic_glass_box.supervision import Supervisor
 
@@ -1110,12 +1230,17 @@ class SupervisionDatabaseTests(unittest.TestCase):
             max_workers=3,
         )
         self.addCleanup(supervisor.close)
-        with mock.patch.object(
-            self.database,
-            "now",
-            return_value=(start + timedelta(seconds=10)).isoformat(
-                timespec="microseconds"
+        with (
+            mock.patch.object(
+                self.database,
+                "now",
+                return_value=(start + timedelta(seconds=10)).isoformat(
+                    timespec="microseconds"
+                ),
             ),
+            self.assertLogs(
+                "magic_glass_box.supervision", level="WARNING"
+            ) as recovery_logs,
         ):
             supervisor.tick(wait=True)
 
@@ -1128,6 +1253,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             if item["kind"] == "attempt.reconcile"
         )
         self.assertEqual(action["subject_id"], expired_attempt["id"])
+        self.assertIn("SupervisorError", "\n".join(recovery_logs.output))
 
     def test_supervisor_delivers_each_stalled_question_threshold_once(self) -> None:
         from magic_glass_box.supervision import Supervisor

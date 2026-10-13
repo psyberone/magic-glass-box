@@ -141,8 +141,21 @@ leader-safety semantics.
 
 `control-room serve` prints a per-process private URL and binds only to
 `127.0.0.1` by default. The browser can refresh live Krab role/claim metadata
-and perform lifecycle actions, but it never displays private interaction
+and perform lifecycle actions, including binding an explicit Krab response
+item to a pending interaction, but it never displays private interaction
 bodies, work-log text, handoffs, result paths, or credential references.
+
+The same answer boundary is available from the CLI:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  interaction answer int_<id> --response-item itm_<id> \
+  --expected-version <version>
+```
+
+The operator selects the response item deliberately. Automatic Krab activity
+polling is deferred until the messaging protocol exposes a trusted reply-to
+item ID; a same-session message is not strong enough correlation.
 
 After an attempt exits, verify or explicitly apply its retained changes:
 

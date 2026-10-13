@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
 import tempfile
 import threading
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -35,6 +37,7 @@ def main() -> int:
     from imitation_krab.http_api import make_server
     from imitation_krab.service import Service as KrabService
 
+    from magic_glass_box.cli import main as cli_main
     from magic_glass_box.credentials import PrivateFileCredentialResolver
     from magic_glass_box.db import Database
     from magic_glass_box.domain import (
@@ -105,7 +108,8 @@ def main() -> int:
             reviewer_token_path.write_text(reviewer_token + "\n", encoding="ascii")
             os.chmod(reviewer_token_path, 0o600)
 
-            database = Database(root / "control-plane.db")
+            control_database_path = root / "control-plane.db"
+            database = Database(control_database_path)
             database.initialize()
             operator = database.create_user("operator", "Local Operator")
             reviewer = database.create_user("reviewer", "Human Reviewer")
@@ -215,13 +219,39 @@ def main() -> int:
                 body=response_body,
                 idempotency_key="mgb.live.response:0001",
             )
-            accepted = control.accept_interaction_response(
-                interaction["id"],
-                response_item_id=response.item_id,
-                expected_version=interaction["version"],
-            )
+            cli_stdout = io.StringIO()
+            with redirect_stdout(cli_stdout):
+                cli_status = cli_main(
+                    [
+                        "--db",
+                        str(control_database_path),
+                        "interaction",
+                        "answer",
+                        interaction["id"],
+                        "--response-item",
+                        response.item_id,
+                        "--expected-version",
+                        str(interaction["version"]),
+                    ]
+                )
+            if cli_status != 0:
+                raise RuntimeError("interaction answer CLI failed")
+            answer_receipt = json.loads(cli_stdout.getvalue())
+            if response_body in cli_stdout.getvalue():
+                raise RuntimeError("private interaction content entered CLI output")
+            accepted = control.read_interaction_response(run["id"], interaction["id"])
             if accepted.untrusted_body != response_body:
                 raise RuntimeError("accepted response body did not round-trip")
+            if answer_receipt != {
+                "interaction_id": accepted.interaction_id,
+                "interaction_state": accepted.interaction_state,
+                "interaction_version": accepted.interaction_version,
+                "response_item_id": accepted.response_item_id,
+                "run_id": accepted.run_id,
+                "run_state": accepted.run_state,
+                "run_version": accepted.run_version,
+            }:
+                raise RuntimeError("interaction answer CLI returned an invalid receipt")
 
             control_plane_bytes = b"".join(
                 artifact.read_bytes()
@@ -262,6 +292,7 @@ def main() -> int:
                 json.dumps(
                     {
                         "interaction_id": accepted.interaction_id,
+                        "answer_surface": "cli",
                         "request_item_id": interaction["request_item_id"],
                         "response_item_id": accepted.response_item_id,
                         "interaction_state": accepted.interaction_state,

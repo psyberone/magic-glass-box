@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 import secrets
@@ -18,6 +19,8 @@ from .db import (
     NotFoundError,
     StorageError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SupervisorError(RuntimeError):
@@ -197,15 +200,43 @@ class Supervisor:
                     raise
                 except Exception as exc:
                     failure_streak = min(failure_streak + 1, 6)
-                    self.last_loop_error = type(exc).__name__
+                    error_code = self._exception_code(exc)
+                    self.last_loop_error = error_code
                     delay = min(self.poll_interval * (2**failure_streak), 60.0)
+                    logger.error(
+                        "supervisor loop failed error_code=%s retry_delay_seconds=%g",
+                        error_code,
+                        delay,
+                    )
                 else:
                     failure_streak = 0
                     self.last_loop_error = None
                     delay = self.poll_interval
-                self._stop.wait(min(delay, self._lease_refresh_interval))
+                self._wait_with_lease_renewal(delay)
         finally:
             self.stop()
+
+    def _wait_with_lease_renewal(self, delay: float) -> None:
+        deadline = time.monotonic() + delay
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if self._stop.wait(min(remaining, self._lease_refresh_interval)):
+                return
+            if time.monotonic() >= deadline:
+                return
+            self._reap()
+            self._raise_if_action_overdue()
+            try:
+                self._renew_active_leases()
+            except Exception as exc:
+                error_code = self._exception_code(exc)
+                self.last_loop_error = error_code
+                logger.error(
+                    "supervisor lease heartbeat failed error_code=%s",
+                    error_code,
+                )
 
     def stop(self) -> None:
         self._stop.set()
@@ -386,6 +417,13 @@ class Supervisor:
             else:
                 raise SupervisorError("stored supervisor action kind is invalid")
         except Exception as exc:
+            error_code = self._exception_code(exc)
+            logger.warning(
+                "supervisor action failed action_id=%s kind=%s error_code=%s",
+                action["id"],
+                action["kind"],
+                error_code,
+            )
             try:
                 if self._action_is_obsolete(action):
                     self._complete_action(action)
@@ -394,20 +432,29 @@ class Supervisor:
                         action["id"],
                         owner_id=self.supervisor_id,
                         expected_version=action["version"],
-                        error_code=self._exception_code(exc),
+                        error_code=error_code,
                     )
-            except (
-                ConcurrentUpdateError,
-                ConflictError,
-                NotFoundError,
-                StorageError,
-            ):
+            except (ConcurrentUpdateError, ConflictError, NotFoundError):
                 pass
+            except StorageError as persistence_error:
+                logger.error(
+                    "supervisor action outcome was not persisted action_id=%s "
+                    "error_code=%s",
+                    action["id"],
+                    self._exception_code(persistence_error),
+                )
         else:
-            with suppress(
-                ConcurrentUpdateError, ConflictError, NotFoundError, StorageError
-            ):
+            try:
                 self._complete_action(action)
+            except (ConcurrentUpdateError, ConflictError, NotFoundError):
+                pass
+            except StorageError as persistence_error:
+                logger.error(
+                    "supervisor action completion was not persisted action_id=%s "
+                    "error_code=%s",
+                    action["id"],
+                    self._exception_code(persistence_error),
+                )
 
     def _complete_action(self, action: Mapping[str, Any]) -> None:
         self.database.complete_supervisor_action(
@@ -510,29 +557,44 @@ class Supervisor:
                 krab_event_seq=event_seq,
             )
         except (ConcurrentUpdateError, ConflictError, NotFoundError):
-            with suppress(
-                ConcurrentUpdateError,
-                ConflictError,
-                NotFoundError,
-                StorageError,
-            ):
+            try:
                 self.database.dismiss_supervisor_escalation(
                     escalation["id"],
                     owner_id=self.supervisor_id,
                     expected_version=escalation["version"],
                 )
+            except (ConcurrentUpdateError, ConflictError, NotFoundError):
+                pass
+            except StorageError as persistence_error:
+                logger.error(
+                    "supervisor escalation dismissal was not persisted "
+                    "escalation_id=%s error_code=%s",
+                    escalation["id"],
+                    self._exception_code(persistence_error),
+                )
         except Exception as exc:
-            with suppress(
-                ConcurrentUpdateError,
-                ConflictError,
-                NotFoundError,
-                StorageError,
-            ):
+            error_code = self._exception_code(exc)
+            logger.warning(
+                "supervisor escalation failed escalation_id=%s kind=%s error_code=%s",
+                escalation["id"],
+                escalation["kind"],
+                error_code,
+            )
+            try:
                 self.database.fail_supervisor_escalation(
                     escalation["id"],
                     owner_id=self.supervisor_id,
                     expected_version=escalation["version"],
-                    error_code=self._exception_code(exc),
+                    error_code=error_code,
+                )
+            except (ConcurrentUpdateError, ConflictError, NotFoundError):
+                pass
+            except StorageError as persistence_error:
+                logger.error(
+                    "supervisor escalation outcome was not persisted "
+                    "escalation_id=%s error_code=%s",
+                    escalation["id"],
+                    self._exception_code(persistence_error),
                 )
 
     @staticmethod

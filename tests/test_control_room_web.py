@@ -189,6 +189,12 @@ class FakeControlPlane:
         self.calls.append(("revoke", {"name": name, **kwargs}))
         return {"name": name, "state": "revoked", "version": 2}
 
+    def accept_interaction_response(
+        self, interaction_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        self.calls.append(("answer", {"interaction_id": interaction_id, **kwargs}))
+        return {"id": interaction_id, "state": "answered", "version": 2}
+
 
 class FakeCoordinator:
     def __init__(self) -> None:
@@ -356,6 +362,7 @@ def snapshot_fixture() -> dict[str, Any]:
                 "run_id": "run_active",
                 "kind": "question",
                 "state": "open",
+                "version": 1,
                 "recipient_krab_handle": "operator",
             }
         ],
@@ -519,7 +526,14 @@ class ControlRoomWebTests(unittest.TestCase):
         self.assertIn("worker_one", body)
         self.assertNotIn("<script>alert('title')</script>", body)
         self.assertNotIn("NEVER_RENDER_PRIVATE_BRIEF", body)
-        for label in ("Cancel", "Retry", "Reassign", "Revoke", "Reconcile"):
+        for label in (
+            "Answer",
+            "Cancel",
+            "Retry",
+            "Reassign",
+            "Revoke",
+            "Reconcile",
+        ):
             self.assertIn(label, body)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
@@ -633,13 +647,13 @@ class ControlRoomWebTests(unittest.TestCase):
                 "section": 18,
                 "table": 17,
                 "tr": 36,
-                "th": 109,
-                "td": 125,
-                "form": 5,
-                "input": 15,
+                "th": 110,
+                "td": 126,
+                "form": 6,
+                "input": 19,
                 "select": 5,
                 "option": 6,
-                "button": 5,
+                "button": 6,
                 "a": 1,
             },
         )
@@ -758,8 +772,15 @@ class ControlRoomWebTests(unittest.TestCase):
                     ],
                 ],
                 "Interactions": [
-                    ["ID", "Run", "Kind", "State", "Recipient"],
-                    ["int_pending", "run_active", "question", "open", "operator"],
+                    ["ID", "Run", "Kind", "State", "Recipient", "Action"],
+                    [
+                        "int_pending",
+                        "run_active",
+                        "question",
+                        "open",
+                        "operator",
+                        "Answer",
+                    ],
                 ],
                 "Retained results": [
                     [
@@ -1062,6 +1083,50 @@ class ControlRoomWebTests(unittest.TestCase):
                 {
                     "attributes": {
                         "method": "post",
+                        "action": "/private/actions/answer",
+                    },
+                    "controls": [
+                        (
+                            "input",
+                            {
+                                "type": "hidden",
+                                "name": "csrf_token",
+                                "value": CSRF_TOKEN,
+                            },
+                        ),
+                        (
+                            "input",
+                            {
+                                "type": "hidden",
+                                "name": "interaction_id",
+                                "value": "int_pending",
+                            },
+                        ),
+                        (
+                            "input",
+                            {
+                                "type": "hidden",
+                                "name": "expected_version",
+                                "value": "1",
+                            },
+                        ),
+                        (
+                            "input",
+                            {
+                                "name": "response_item_id",
+                                "required": None,
+                                "maxlength": "36",
+                                "aria-label": "Krab response item ID",
+                                "placeholder": "Krab response item ID",
+                            },
+                        ),
+                        ("button", {"type": "submit"}),
+                    ],
+                    "text": ["Answer"],
+                },
+                {
+                    "attributes": {
+                        "method": "post",
                         "action": "/private/actions/revoke",
                     },
                     "controls": [
@@ -1135,6 +1200,37 @@ class ControlRoomWebTests(unittest.TestCase):
                     "run_id": "run_terminal",
                     "expected_run_version": 5,
                     "requested_by_handle": "operator",
+                },
+            ),
+        )
+
+    def test_answer_post_binds_an_explicit_krab_item_without_private_content(
+        self,
+    ) -> None:
+        response_item_id = "itm_" + "2" * 32
+        status, headers, body = self.request(
+            "POST",
+            self.path + "actions/answer",
+            fields={
+                "csrf_token": CSRF_TOKEN,
+                "interaction_id": "int_pending",
+                "response_item_id": response_item_id,
+                "expected_version": "1",
+            },
+            origin=self.origin,
+        )
+
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], self.path + "?receipt=answer")
+        self.assertEqual(body, "")
+        self.assertEqual(
+            self.control.calls[-1],
+            (
+                "answer",
+                {
+                    "interaction_id": "int_pending",
+                    "response_item_id": response_item_id,
+                    "expected_version": 1,
                 },
             ),
         )

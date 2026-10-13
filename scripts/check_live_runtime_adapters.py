@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from magic_glass_box.control_room_web import OperatorActions
 from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import Database
 from magic_glass_box.domain import (
@@ -958,7 +959,7 @@ def main(argv: list[str] | None = None) -> int:
                 interactions = handed_off["interactions"]
                 if len(interactions) != 1 or interactions[0]["state"] != "open":
                     raise RuntimeError("Codex did not leave one durable interaction")
-                accepted = control.accept_interaction_response(
+                accepted = OperatorActions(control, coordinator).answer(
                     interactions[0]["id"],
                     response_item_id=RESPONSE_ITEM_ID,
                     expected_version=interactions[0]["version"],

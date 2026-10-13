@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .domain import canonical_json
+from .path_safety import UnsafeSymlinkError, validate_symlink_graph
 
 RESULT_SCHEMA_VERSION = 1
 BASELINE_SCHEMA_VERSION = 2
@@ -637,6 +638,16 @@ class WorkspaceResultStore:
             raise
         except OSError as exc:
             raise ResultError("cannot enumerate result workspace") from exc
+        try:
+            validate_symlink_graph(
+                {
+                    PurePosixPath(path): state.target
+                    for path, state in states.items()
+                    if state.kind == "symlink" and state.target is not None
+                }
+            )
+        except UnsafeSymlinkError as exc:
+            raise ResultError("result contains an unsafe symlink") from exc
         return dict(sorted(states.items()))
 
     @staticmethod
@@ -1058,6 +1069,54 @@ class WorkspaceResultStore:
             temporary.unlink(missing_ok=True)
             raise ResultError("cannot apply result symlink") from exc
 
+    @staticmethod
+    def _validate_applied_symlinks(root: Path, changes: Sequence[ResultChange]) -> None:
+        final_states = {change.path: change.after for change in changes}
+        links = {
+            PurePosixPath(path): state.target
+            for path, state in final_states.items()
+            if state is not None
+            and state.kind == "symlink"
+            and state.target is not None
+        }
+        if not links:
+            return
+
+        for path, state in final_states.items():
+            if state is None:
+                continue
+            candidate = PurePosixPath(path)
+            if any(parent in links for parent in candidate.parents):
+                raise ResultError("result contains a path beneath a symlink")
+
+        def existing_link(path: PurePosixPath) -> str | None:
+            relative = path.as_posix()
+            if relative in final_states or any(
+                parent.as_posix() in final_states for parent in path.parents
+            ):
+                # Validation models the graph after every change.  A changed
+                # path (or ancestor) therefore masks its pre-apply checkout
+                # entry; changed symlinks are already served from ``links``.
+                return None
+            target = root.joinpath(*path.parts)
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise ResultError("cannot inspect result symlink graph") from exc
+            if not stat.S_ISLNK(info.st_mode):
+                return None
+            try:
+                return os.readlink(target)
+            except OSError as exc:
+                raise ResultError("cannot inspect result symlink graph") from exc
+
+        try:
+            validate_symlink_graph(links, lookup=existing_link)
+        except UnsafeSymlinkError as exc:
+            raise ResultError("result contains an unsafe symlink") from exc
+
     def apply(
         self,
         attempt_id: str,
@@ -1071,6 +1130,7 @@ class WorkspaceResultStore:
             current = self._current_state(root, change.path)
             if current != change.before:
                 raise ResultError(f"result target changed: {change.path}")
+        self._validate_applied_symlinks(root, manifest.changes)
 
         deleted = [change for change in manifest.changes if change.after is None]
         for change in sorted(

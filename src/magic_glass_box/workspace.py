@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from .path_safety import UnsafeSymlinkError, validate_symlink_graph
+
 RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -182,6 +184,14 @@ class GitSnapshotter:
                         raise WorkspaceError(
                             "Git archive places content beneath a symlink"
                         )
+                try:
+                    validate_symlink_graph(
+                        {path: paths[path].linkname for path in symlinks}
+                    )
+                except UnsafeSymlinkError as exc:
+                    raise WorkspaceError(
+                        "Git archive contains an unsafe symlink"
+                    ) from exc
 
                 for path, member in paths.items():
                     target = destination.joinpath(*path.parts)

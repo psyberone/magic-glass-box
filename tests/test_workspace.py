@@ -227,6 +227,24 @@ class GitSnapshotterTests(unittest.TestCase):
         self.assertIn("main^{commit}", calls[0])
         self.assertIn(COMMIT, calls[1])
 
+    def test_rejects_a_relative_symlink_chain_that_escapes(self) -> None:
+        archive = tar_bytes(
+            [
+                ("evil/x", b"", ".."),
+                ("evil/y", b"", "x/.."),
+            ]
+        )
+        _, runner = self.runner(
+            [
+                subprocess.CompletedProcess([], 0, (COMMIT + "\n").encode(), b""),
+                subprocess.CompletedProcess([], 0, archive, b""),
+            ]
+        )
+        snapshotter = GitSnapshotter(binary=Path("/usr/bin/git"), runner=runner)
+
+        with self.assertRaisesRegex(WorkspaceError, "unsafe symlink"):
+            snapshotter.snapshot(self.repository, "main", self.destination)
+
     def test_rejects_git_failures_and_unsafe_archives(self) -> None:
         cases = (
             (

@@ -43,6 +43,7 @@ class LiveKrabTransportProofTests(unittest.TestCase):
         self.assertEqual(evidence["reminder_idempotency_replay"], "same_event")
         self.assertFalse(evidence["private_content_persisted_by_mgb"])
         self.assertEqual(evidence["control_room_role"], "coordinator")
+        self.assertEqual(evidence["answer_surface"], "cli")
         self.assertEqual(evidence["interaction_state"], "answered")
         self.assertEqual(evidence["run_state"], "queued")
 

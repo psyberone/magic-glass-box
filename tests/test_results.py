@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 from magic_glass_box.results import (
+    FileState,
+    ResultChange,
     ResultError,
     WorkspaceResultStore,
     _PinnedIgnoreRules,
@@ -108,6 +110,118 @@ class WorkspaceResultStoreTests(unittest.TestCase):
         self.assertTrue((target / "delete.txt").exists())
         self.assertEqual((target / "modify.txt").read_text(), "local edit\n")
 
+    def test_apply_revalidates_legacy_symlink_graph_before_any_change(self) -> None:
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        directory = self.workspace / "evil"
+        directory.mkdir()
+        (directory / "x").symlink_to("..")
+        (directory / "y").symlink_to("x/..")
+        with mock.patch("magic_glass_box.results.validate_symlink_graph"):
+            self.results.capture(ATTEMPT_ID, self.workspace)
+
+        target = self.root / "target"
+        target.mkdir(mode=0o700)
+        (target / "delete.txt").write_text("delete me\n", encoding="utf-8")
+        (target / "modify.txt").write_text("before\n", encoding="utf-8")
+        (target / "script.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (target / "script.sh").chmod(0o755)
+
+        with self.assertRaisesRegex(ResultError, "unsafe symlink"):
+            self.results.apply(ATTEMPT_ID, target)
+
+        self.assertFalse((target / "evil").exists())
+        self.assertEqual((target / "modify.txt").read_text(), "before\n")
+
+    def test_apply_rejects_escape_through_unchanged_checkout_symlink(self) -> None:
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        (self.workspace / "new-link").symlink_to("existing/..")
+        self.results.capture(ATTEMPT_ID, self.workspace)
+
+        target = self.root / "target"
+        target.mkdir(mode=0o700)
+        (target / "delete.txt").write_text("delete me\n", encoding="utf-8")
+        (target / "modify.txt").write_text("before\n", encoding="utf-8")
+        (target / "script.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (target / "script.sh").chmod(0o755)
+        (target / "existing").symlink_to("..")
+
+        with self.assertRaisesRegex(
+            ResultError, r"^result contains an unsafe symlink$"
+        ):
+            self.results.apply(ATTEMPT_ID, target)
+
+        self.assertFalse((target / "new-link").exists())
+        self.assertEqual((target / "modify.txt").read_text(), "before\n")
+
+    def test_apply_uses_final_file_before_existing_checkout_symlink(self) -> None:
+        inside = self.workspace / "inside"
+        inside.mkdir()
+        pivot = inside / "pivot"
+        pivot.symlink_to("..")
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        pivot.unlink()
+        pivot.write_text("replacement\n", encoding="utf-8")
+        (self.workspace / "new-link").symlink_to("inside/pivot/escape/../..")
+        self.results.capture(ATTEMPT_ID, self.workspace)
+
+        target = self.root / "target"
+        target.mkdir(mode=0o700)
+        (target / "delete.txt").write_text("delete me\n", encoding="utf-8")
+        (target / "modify.txt").write_text("before\n", encoding="utf-8")
+        (target / "script.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (target / "script.sh").chmod(0o755)
+        target_inside = target / "inside"
+        target_inside.mkdir()
+        (target_inside / "pivot").symlink_to("..")
+        (target / "escape").symlink_to("..")
+
+        self.results.apply(ATTEMPT_ID, target)
+
+        self.assertEqual((target_inside / "pivot").read_text(), "replacement\n")
+        self.assertEqual(os.readlink(target / "new-link"), "inside/pivot/escape/../..")
+
+    def test_apply_preflight_rejects_path_beneath_new_symlink(self) -> None:
+        regular = FileState(kind="file", mode=0o644, size=0, sha256="0" * 64)
+        changes = (
+            ResultChange("removed", "deleted", regular, None),
+            ResultChange(
+                "link", "added", None, FileState(kind="symlink", target="safe")
+            ),
+            ResultChange("link/file", "added", None, regular),
+        )
+
+        with self.assertRaisesRegex(
+            ResultError, r"^result contains a path beneath a symlink$"
+        ):
+            self.results._validate_applied_symlinks(self.root, changes)
+
+    def test_capture_and_apply_allow_a_chained_symlink_that_stays_inside(self) -> None:
+        shared = self.workspace / "shared"
+        shared.mkdir()
+        (shared / "file.txt").write_text("safe\n", encoding="utf-8")
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        links = self.workspace / "links"
+        links.mkdir()
+        (links / "inner").symlink_to("../shared")
+        (links / "outer").symlink_to("inner/file.txt")
+        self.results.capture(ATTEMPT_ID, self.workspace)
+
+        target = self.root / "target"
+        target.mkdir(mode=0o700)
+        (target / "delete.txt").write_text("delete me\n", encoding="utf-8")
+        (target / "modify.txt").write_text("before\n", encoding="utf-8")
+        (target / "script.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (target / "script.sh").chmod(0o755)
+        target_shared = target / "shared"
+        target_shared.mkdir()
+        (target_shared / "file.txt").write_text("safe\n", encoding="utf-8")
+
+        self.results.apply(ATTEMPT_ID, target)
+
+        self.assertEqual(os.readlink(target / "links" / "inner"), "../shared")
+        self.assertEqual(os.readlink(target / "links" / "outer"), "inner/file.txt")
+        self.assertEqual((target / "links" / "outer").read_text(), "safe\n")
+
     def test_capture_rejects_unsafe_or_unbounded_worker_output(self) -> None:
         cases = ("absolute symlink", "special file", "byte limit", "path limit")
         for index, case in enumerate(cases):
@@ -137,6 +251,16 @@ class WorkspaceResultStoreTests(unittest.TestCase):
                     message = "too many paths"
                 with self.assertRaisesRegex(ResultError, message):
                     store.capture(attempt_id, workspace)
+
+    def test_capture_rejects_a_relative_symlink_chain_that_escapes(self) -> None:
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        directory = self.workspace / "evil"
+        directory.mkdir()
+        (directory / "x").symlink_to("..")
+        (directory / "y").symlink_to("x/..")
+
+        with self.assertRaisesRegex(ResultError, "unsafe symlink"):
+            self.results.capture(ATTEMPT_ID, self.workspace)
 
     def test_capture_uses_pinned_gitignore_without_hiding_tracked_work(self) -> None:
         workspace = self.root / "ignored-workspace"

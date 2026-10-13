@@ -110,6 +110,7 @@ the URL.
 
 | Action | Contract |
 | --- | --- |
+| Answer | Binds one operator-selected Krab response item to an open interaction under optimistic concurrency. The item is re-fetched and verified against the pinned project, session, human sender, and agent recipient; its title and body are neither rendered nor retained. |
 | Cancel | Records an optimistic cancellation request. A queued or waiting run becomes terminal immediately; an owned attempt stops through its coordinator heartbeat path. |
 | Retry | Creates one queued successor to a terminal run with the same immutable context, profile, work-item version, work thread, source revision, Krab route, and exact provider grants. Unavailable pinned authority fails closed. |
 | Reassign | Creates a queued successor to a terminal run with the same work identity and source but an explicitly selected profile's latest revision and current provider grants. |
@@ -137,12 +138,20 @@ process. Run the explicit local service command described in
 because the service is present; `automatic` means its immutable run policy
 opted in.
 
-Equivalent successor commands are available without the browser:
+Equivalent answer and successor commands are available without the browser:
 
 ```console
+PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+  interaction answer int_<id> --response-item itm_<id> \
+  --expected-version <version>
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run retry run_<id> --expected-version <version> --requested-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
   run reassign run_<id> --profile Reviewer --expected-version <version> \
   --requested-by operator
 ```
+
+The response item is an explicit operator choice. Magic Glass Box does not
+currently infer an answer from arbitrary session activity: Imitation Krab does
+not yet expose a trusted reply-to relationship, so automatic selection could
+mistake an unrelated human-to-agent message for the answer.

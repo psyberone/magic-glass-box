@@ -300,6 +300,16 @@ durable state machine and satisfies every exit condition. See
 proved SIGTERM-aware bounded draining, renewable action and reminder claims,
 and isolation of reminder I/O from the main supervision loop.
 
+The manual whole-tree checkpoint review found that the proofs had bypassed the
+missing operator half of the interaction loop. The product now exposes
+versioned answer actions in both the CLI and loopback control room; live Krab
+evidence crosses that public boundary and confirms its receipt is metadata
+only. Automatic response polling remains deliberately out of scope until Krab
+can bind a response to its request with trusted reply metadata. The same
+remediation added recursive symlink-graph containment at capture, archive, and
+pre-apply boundaries, full supervisor retry spacing with independent lease
+heartbeats, and privacy-safe daemon diagnostics.
+
 ## Milestone 7: integration state and forge sidecars
 
 **Status: planned**

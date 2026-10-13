@@ -125,6 +125,11 @@ project-activity projection.
   its route reverses the request route from the authorized human to the pinned
   agent identity. Its title, body, and risk flags exist in memory only for the
   caller to deliver onward; Magic Glass Box does not write them to SQLite.
+- An operator binds that response through the versioned `interaction answer`
+  CLI command or the loopback control room. The receipt contains only IDs,
+  states, and versions. Automatic activity polling is intentionally absent
+  until Krab supplies a trusted reply-to item ID; same-session routing alone
+  is insufficient to distinguish an answer from unrelated conversation.
 
 The Krab POST and the local SQLite transition cannot be one transaction. The
 caller must retain and reuse its stable idempotency key until local correlation

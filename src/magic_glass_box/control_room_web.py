@@ -76,6 +76,9 @@ button { border-color: var(--accent); cursor: pointer; }
 a { color: var(--accent); }
 """
 ACTION_FIELDS = {
+    "answer": frozenset(
+        {"csrf_token", "interaction_id", "response_item_id", "expected_version"}
+    ),
     "cancel": frozenset(
         {"csrf_token", "run_id", "expected_version", "requested_by", "reason"}
     ),
@@ -137,6 +140,14 @@ class ControlPlaneLike(Protocol):
         revoked_by_handle: str,
     ) -> dict[str, Any]: ...
 
+    def accept_interaction_response(
+        self,
+        interaction_id: str,
+        *,
+        response_item_id: str,
+        expected_version: int,
+    ) -> Any: ...
+
 
 class CoordinatorLike(Protocol):
     def reconcile(self, run_id: str | None = None) -> list[dict[str, Any]]: ...
@@ -165,6 +176,19 @@ class OperatorActions:
         )
         self.coordinator.reconcile(run_id)
         return self.control.database.get_run(run_id)
+
+    def answer(
+        self,
+        interaction_id: str,
+        *,
+        response_item_id: str,
+        expected_version: int,
+    ) -> Any:
+        return self.control.accept_interaction_response(
+            interaction_id,
+            response_item_id=response_item_id,
+            expected_version=expected_version,
+        )
 
     def retry(
         self,
@@ -529,17 +553,37 @@ def _render_control_room(
         for row in snapshot.get("attempts", [])
         if isinstance(row, Mapping)
     ]
-    interaction_rows = [
-        (
-            row.get("id"),
-            row.get("run_id"),
-            row.get("kind"),
-            row.get("state"),
-            row.get("recipient_krab_handle"),
+    interaction_rows: list[tuple[object, ...]] = []
+    for row in snapshot.get("interactions", []):
+        if not isinstance(row, Mapping):
+            continue
+        action: object = "—"
+        if row.get("state") == "open":
+            action = _action_form(
+                root,
+                "answer",
+                csrf_token,
+                {
+                    "interaction_id": row.get("id", ""),
+                    "expected_version": row.get("version", ""),
+                },
+                (
+                    '<input name="response_item_id" required maxlength="36" '
+                    'aria-label="Krab response item ID" '
+                    'placeholder="Krab response item ID">'
+                ),
+                "Answer",
+            )
+        interaction_rows.append(
+            (
+                row.get("id"),
+                row.get("run_id"),
+                row.get("kind"),
+                row.get("state"),
+                row.get("recipient_krab_handle"),
+                action,
+            )
         )
-        for row in snapshot.get("interactions", [])
-        if isinstance(row, Mapping)
-    ]
     result_rows = [
         (
             row.get("id"),
@@ -712,7 +756,10 @@ def _render_control_room(
         ),
         _section(
             "Interactions",
-            _table(("ID", "Run", "Kind", "State", "Recipient"), interaction_rows),
+            _table(
+                ("ID", "Run", "Kind", "State", "Recipient", "Action"),
+                interaction_rows,
+            ),
         ),
         _section(
             "Retained results",
@@ -1099,6 +1146,13 @@ class _ControlRoomHandler(BaseHTTPRequestHandler):
             self.server.actions.reconcile(run_id)
             return
         expected_version = _positive_version(fields["expected_version"])
+        if action == "answer":
+            self.server.actions.answer(
+                _required(fields, "interaction_id", 64),
+                response_item_id=_required(fields, "response_item_id", 36),
+                expected_version=expected_version,
+            )
+            return
         requested_by = _required(fields, "requested_by", 128)
         if action == "cancel":
             self.server.actions.cancel(

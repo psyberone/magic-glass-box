@@ -21,6 +21,14 @@ dispatcher work, and then leaves any remaining claims for lease-based recovery.
 controls only claims on durable dispatcher work. `--action-timeout` bounds the
 entire coordinator call and must exceed the agent limit. When omitted, it is
 the run timeout plus five minutes for setup, result capture, and cleanup.
+`--log-level` selects stderr diagnostic verbosity and defaults to `WARNING`.
+
+Transient discovery failures use exponential backoff capped at 60 seconds.
+The supervisor does not shorten that delay into another discovery pass merely
+to maintain ownership; it renews live action and escalation claims separately
+at the lease-heartbeat cadence. Operational diagnostics contain generated
+object IDs and sanitized exception class names, never exception messages,
+private interaction content, provider output, or credentials.
 
 ## Explicit run policy
 
@@ -91,6 +99,12 @@ a safe exception class, wait for the pinned finite backoff, and become
 Answered interactions queue their run only when the previous attempt is gone.
 An opted-in queued run is then discovered by the same normal action path; no
 special in-memory resume signal is required.
+
+The supervisor advances an interaction only after durable state says it is
+answered. It sends age-based reminders but does not scan Krab activity and
+guess which message is a response. Until the transport exposes trusted
+reply-to correlation, an operator explicitly binds the response item through
+the CLI or loopback control room.
 
 ## Escalation and privacy
 

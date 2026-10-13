@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import signal
 import sys
@@ -334,6 +335,21 @@ def build_parser() -> argparse.ArgumentParser:
     work_item_reopen.add_argument("--expected-thread-version", required=True, type=int)
     work_item_reopen.add_argument("--reopened-by", required=True)
 
+    interaction = commands.add_parser(
+        "interaction", help="resolve durable agent interactions"
+    )
+    interaction_commands = interaction.add_subparsers(
+        dest="interaction_command", required=True
+    )
+    interaction_answer = interaction_commands.add_parser(
+        "answer", help="bind one explicit Krab response item"
+    )
+    interaction_answer.add_argument("interaction_id")
+    interaction_answer.add_argument(
+        "--response-item", required=True, dest="response_item_id"
+    )
+    interaction_answer.add_argument("--expected-version", required=True, type=int)
+
     run = commands.add_parser("run", help="manage agent runs")
     run_commands = run.add_subparsers(dest="run_command", required=True)
     run_create = run_commands.add_parser("create", help="create a pinned run record")
@@ -431,6 +447,13 @@ def build_parser() -> argparse.ArgumentParser:
             "300 seconds"
         ),
     )
+    supervisor_run.add_argument(
+        "--log-level",
+        type=str.upper,
+        choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
+        default="WARNING",
+        help="stderr diagnostic level (default: %(default)s)",
+    )
 
     result = commands.add_parser("result", help="inspect and apply retained work")
     result_commands = result.add_subparsers(dest="result_command", required=True)
@@ -516,6 +539,10 @@ def _serve_supervisor(
     )
     if action_timeout <= args.run_timeout:
         raise InputError("--action-timeout must exceed --run-timeout")
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     control.initialize()
     supervisor = Supervisor(
         control.database,
@@ -531,6 +558,7 @@ def _serve_supervisor(
             "supervisor_id": supervisor.supervisor_id,
             "poll_interval_seconds": args.poll_interval,
             "max_workers": args.max_workers,
+            "log_level": args.log_level,
             "action_lease_seconds": args.action_lease_seconds,
             "action_timeout_seconds": action_timeout,
             "authority": "explicit_run_policy",
@@ -653,6 +681,23 @@ def _dispatch(
                 reopened_by_handle=args.reopened_by,
                 expected_thread_version=args.expected_thread_version,
             )
+    if args.command == "interaction" and args.interaction_command == "answer":
+        accepted = control.accept_interaction_response(
+            args.interaction_id,
+            response_item_id=args.response_item_id,
+            expected_version=args.expected_version,
+        )
+        # The response title and body are intentionally transient.  Operator
+        # surfaces confirm only the binding and resulting lifecycle states.
+        return {
+            "interaction_id": accepted.interaction_id,
+            "interaction_state": accepted.interaction_state,
+            "interaction_version": accepted.interaction_version,
+            "response_item_id": accepted.response_item_id,
+            "run_id": accepted.run_id,
+            "run_state": accepted.run_state,
+            "run_version": accepted.run_version,
+        }
     if args.command == "run":
         if args.run_command == "create":
             return control.create_run(
