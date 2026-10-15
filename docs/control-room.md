@@ -31,7 +31,9 @@ contains:
 - projects and current context-version metadata;
 - profiles, runtime adapters, explicit provider routes, and current
   execution-policy metadata;
-- provider grants with lifecycle state and redacted policy metadata;
+- direct and connector-bound provider grants with lifecycle state, grant kind,
+  redacted policy metadata, and redacted connector identity/state; M7D.1
+  connector grants remain visibly unavailable until the D.2 dispatch cutover;
 - current work-item generations and visible, explicitly untrusted titles;
 - local profile-pinned assignments and their visible, untrusted titles;
 - all active runs plus a bounded number of recent terminal runs;

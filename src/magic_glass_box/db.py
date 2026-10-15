@@ -12,6 +12,7 @@ from .storage.errors import (
     StorageError,
 )
 from .storage.gates import GateStorage
+from .storage.inference import InferenceStorage
 from .storage.integration import (
     MAX_INTEGRATION_LEASE_SECONDS,
     MIN_INTEGRATION_LEASE_SECONDS,
@@ -26,6 +27,7 @@ from .storage.schema import (
     DATABASE_FILENAME,
     EXECUTION_INTEGRITY_SCHEMA,
     GATE_SCHEMA,
+    INFERENCE_CONNECTOR_SCHEMA,
     INTEGRATION_SCHEMA,
     INTERACTION_SCHEMA,
     LEGACY_DATABASE_FILENAME,
@@ -60,6 +62,7 @@ __all__ = [
     "Database",
     "EXECUTION_INTEGRITY_SCHEMA",
     "GATE_SCHEMA",
+    "INFERENCE_CONNECTOR_SCHEMA",
     "INTERACTION_SCHEMA",
     "INTEGRATION_SCHEMA",
     "LEGACY_DATABASE_FILENAME",
@@ -92,6 +95,7 @@ class Database(
     SupervisionStorage,
     QueryStorage,
     IntegrationStorage,
+    InferenceStorage,
     GateStorage,
     CandidateStorage,
     ArtifactStorage,

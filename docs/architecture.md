@@ -35,17 +35,19 @@ hooks, fsmonitor, replacements, prompting, lazy fetching, and transports, and
 bound output, tree entries, total blob bytes, and command execution time.
 
 Planned optional service sidecars are trusted credential actuators, not
-workers; no sidecar protocol or connector is implemented today. The design
-places provider-specific GitHub, GitLab, Jira, or other service mechanics
-behind a small versioned semantic-capability protocol. A user could explicitly
-expose a local configuration directory such as `GH_CONFIG_DIR` to the selected
-sidecar only; it would never be mounted into an agent container or copied into
-control-plane state. Magic Glass Box would remain responsible for deciding
-whether a specific operation, mapping, account, scope, and exact revision are
-authorized.
+workers; no provider-neutral service-sidecar protocol is implemented today.
+The design places provider-specific GitHub, GitLab, Jira, or other service
+mechanics behind a small versioned semantic-capability protocol. A user could
+explicitly expose a local configuration directory such as `GH_CONFIG_DIR` to
+the selected sidecar only; it would never be mounted into an agent container
+or copied into control-plane state. Magic Glass Box would remain responsible
+for deciding whether a specific operation, mapping, account, scope, and exact
+revision are authorized.
 
 Milestone 7D separately extracts AI-provider authentication and transport from
 the current in-process broker into a credential-isolated inference connector.
+M7D.1 implements the durable authority, strict envelopes, and local Unix
+carrier without switching production dispatch; M7D.2 performs that cutover.
 The core continues to authorize the exact run, grant, semantic protocol, model,
 limits, concurrency, and later budget; a local sidecar or operator-managed
 external integration owns API keys or OAuth tokens, refresh, and upstream
@@ -173,6 +175,11 @@ project-activity projection.
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks
   every remaining sibling `refold_required`; its origin candidate is unchanged.
+- Schema v15 adds immutable inference-connector registrations and lifecycle
+  events plus exact connector-bound provider grants. Registrations contain a
+  transport location and non-secret scope fingerprint, never an upstream
+  credential or provider-native configuration path. A scope fingerprint is
+  not a digest of bearer material.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -226,6 +233,7 @@ schema v10, and trusted candidates plus their query-backed indexes introduced
 schema v11. Cross-process provider dispatch reservations advanced it to schema
 v12; exact-input gate policy and evidence state advanced it to schema v13; the
 integration queue and manual landing ledger advanced it to schema v14.
+Inference-connector registrations and grant bindings advance it to schema v15.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -360,8 +368,10 @@ completion, execution integrity, the redacted interactive control room, and the
 storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
 autonomous supervision, and aging escalation are complete. Trusted candidate
 materialization, exact-input gates, dependency/refold queue, and manual landing
-flow are implemented. The credential-isolated inference connector is the next
-Milestone 7 slice before the real-account proof. Optional provider-neutral
+flow are implemented. The credential-isolated inference connector's D.1
+authority and carrier checkpoint is implemented; exclusive dispatch and
+containment are the next Milestone 7 slice before the real-account proof.
+Optional provider-neutral
 service sidecars follow the budget and destructive-continuity phases. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),

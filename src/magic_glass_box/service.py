@@ -56,6 +56,7 @@ from .gates import (
     ValidationEvidence,
     resolve_gate_policy_request,
 )
+from .inference import InferenceConnectorSpec, InferenceGrantSpec
 from .integration import FoldManifest, LandingReceiptRequest
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
 from .provider import (
@@ -840,6 +841,50 @@ class ControlPlane:
             credential_ref=reference,
             expires_at=expires_at,
             created_by=creator["id"],
+        )
+
+    def register_inference_connector(
+        self,
+        *,
+        name: str,
+        spec: InferenceConnectorSpec,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.register_inference_connector(
+            name=name,
+            spec=spec,
+            created_by=creator["id"],
+        )
+
+    def add_connector_provider_grant(
+        self,
+        *,
+        name: str,
+        spec: InferenceGrantSpec,
+        expires_at: str | None,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.create_connector_provider_grant(
+            name=name,
+            spec=spec,
+            expires_at=expires_at,
+            created_by=creator["id"],
+        )
+
+    def revoke_inference_connector(
+        self,
+        name: str,
+        *,
+        expected_version: int,
+        revoked_by_handle: str,
+    ) -> dict[str, Any]:
+        revoker = self.database.get_user(revoked_by_handle)
+        return self.database.revoke_inference_connector(
+            name,
+            expected_version=expected_version,
+            revoked_by=revoker["id"],
         )
 
     def revoke_provider_grant(

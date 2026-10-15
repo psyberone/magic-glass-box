@@ -283,6 +283,7 @@ def snapshot_fixture() -> dict[str, Any]:
                 "name": "openai-main",
                 "state": "active",
                 "version": 1,
+                "grant_kind": "direct",
                 "available": True,
                 "expired": False,
                 "policy": {"provider": "openai", "model": "gpt-test"},
@@ -689,8 +690,8 @@ class ControlRoomWebTests(unittest.TestCase):
                 "section": 22,
                 "table": 19,
                 "tr": 40,
-                "th": 127,
-                "td": 143,
+                "th": 129,
+                "td": 145,
                 "form": 6,
                 "input": 19,
                 "select": 5,
@@ -924,6 +925,8 @@ class ControlRoomWebTests(unittest.TestCase):
                 "Provider authority": [
                     [
                         "Name",
+                        "Kind",
+                        "Connector",
                         "State",
                         "Version",
                         "Available",
@@ -933,6 +936,8 @@ class ControlRoomWebTests(unittest.TestCase):
                     ],
                     [
                         "openai-main",
+                        "direct",
+                        "—",
                         "active",
                         "1",
                         "yes",

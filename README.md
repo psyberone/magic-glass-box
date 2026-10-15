@@ -36,6 +36,10 @@ This repository currently contains the first executable vertical slice:
 - immutable, revocable, and expiring provider grants that pin destination,
   method, model, request/response limits, timeout, and concurrency while
   resolving provider secrets only inside the trusted orchestrator;
+- schema-v15 credential-isolated inference-connector registrations,
+  connector-bound grants, strict request/response envelopes, and a bounded
+  Unix-socket carrier; normal provider dispatch remains on the direct broker
+  until the M7D.2 cutover;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;
@@ -128,10 +132,23 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --credential-file ./private-credentials/openai.key --created-by operator
 ```
 
-That is the current Milestone 2 transport. Milestone 7D will preserve the
-grant and worker-gateway contract while moving AI-provider credentials and
-network transport into a local sidecar or operator-managed external inference
-connector. The target boundary is documented in
+That is the current production transport. M7D.1 also permits an operator to
+register credential-free connector authority and a connector-bound grant:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  inference-connector register openai-personal \
+  --spec examples/inference-connector.json --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  provider connector-add openai-main-sidecar \
+  --policy examples/inference-grant.json --created-by operator
+```
+
+Those connector grants are intentionally not dispatchable until M7D.2 moves
+normal provider execution out of MGB. The grant and worker-gateway contract is
+preserved while AI-provider credentials and network transport move into a
+local sidecar or operator-managed external inference connector. The boundary
+and current checkpoint are documented in
 [docs/inference-connectors.md](docs/inference-connectors.md).
 
 Once a project, gateway-only profile, and run have been registered, execute or
@@ -289,9 +306,9 @@ state; bounded workspace file changes are retained separately as inert result
 artifacts. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability
 and carrier contracts and [docs/provider-broker.md](docs/provider-broker.md)
 for the current provider policy, plus
-[docs/inference-connectors.md](docs/inference-connectors.md) for the planned
-credential-isolated transport boundary. The replacement contract and handoff
-schema are documented in
+[docs/inference-connectors.md](docs/inference-connectors.md) for the implemented
+connector authority/carrier and planned dispatch cutover. The replacement
+contract and handoff schema are documented in
 [docs/worker-handoffs.md](docs/worker-handoffs.md). Multi-agent coordination and
 replacement-coordinator recovery are documented in
 [docs/work-memory.md](docs/work-memory.md). Runtime launch and completion

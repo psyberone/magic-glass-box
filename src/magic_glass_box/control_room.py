@@ -25,6 +25,7 @@ from .domain import (
     WorkItemEnvelope,
 )
 from .gates import GateError, GatePolicyManifest
+from .inference import InferenceGrantSpec
 from .krab import KrabClient, KrabError, WorkClaim
 from .results import ResultError, ResultManifest
 
@@ -344,63 +345,92 @@ class ControlRoom:
     ) -> list[dict[str, Any]]:
         now = _timestamp(generated_at, label="snapshot")
         rows = connection.execute(
-            "SELECT pg.id, pg.name, pg.state, pg.version, pg.policy_json, "
+            "SELECT pg.id, pg.name, pg.state, pg.version, pg.grant_kind, "
+            "pg.policy_json, "
             "pg.content_sha256, pg.expires_at, pg.revoked_at, "
             "creator.handle AS created_by, revoker.handle AS revoked_by, "
-            "pg.created_at, pg.updated_at FROM provider_grants pg "
+            "pg.created_at, pg.updated_at, c.id AS connector_id, "
+            "c.name AS connector_name, c.state AS connector_state, "
+            "c.version AS connector_version FROM provider_grants pg "
             "JOIN users creator ON creator.id = pg.created_by "
             "LEFT JOIN users revoker ON revoker.id = pg.revoked_by "
+            "LEFT JOIN provider_connector_bindings pcb "
+            "ON pcb.provider_grant_id = pg.id "
+            "LEFT JOIN inference_connectors c "
+            "ON c.id = pcb.inference_connector_id "
             "ORDER BY pg.name"
         ).fetchall()
         grants: list[dict[str, Any]] = []
         for row in rows:
             try:
-                spec = ProviderGrantSpec.from_mapping(json.loads(row["policy_json"]))
+                raw_policy = json.loads(row["policy_json"])
+                spec = (
+                    ProviderGrantSpec.from_mapping(raw_policy)
+                    if row["grant_kind"] == "direct"
+                    else InferenceGrantSpec.from_mapping(raw_policy)
+                )
             except (json.JSONDecodeError, TypeError, ValidationError) as exc:
                 raise StorageError("stored provider grant policy is invalid") from exc
             if spec.digest != row["content_sha256"]:
                 raise StorageError("stored provider grant policy digest does not match")
+            if row["grant_kind"] == "connector" and row["connector_id"] is None:
+                raise StorageError("stored connector provider grant has no binding")
             expired = (
                 row["expires_at"] is not None
                 and _timestamp(row["expires_at"], label="provider expiry") <= now
             )
-            grants.append(
-                {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "state": row["state"],
-                    "version": row["version"],
-                    "available": row["state"] == "active" and not expired,
-                    "expired": expired,
-                    "expires_at": row["expires_at"],
-                    "revoked_at": row["revoked_at"],
-                    "revoked_by": row["revoked_by"],
-                    "created_by": row["created_by"],
-                    "created_at": row["created_at"],
-                    "updated_at": row["updated_at"],
-                    "content_sha256": row["content_sha256"],
-                    "policy": {
-                        "provider": spec.provider,
-                        "adapter": spec.adapter,
-                        "destination": urlunsplit(
-                            (*urlsplit(spec.destination)[:3], "", "")
-                        ),
-                        "destination_query_redacted": bool(
-                            urlsplit(spec.destination).query
-                        ),
-                        "method": spec.method,
-                        "model": spec.model,
-                        "credential_header": spec.credential_header,
-                        "static_header_names": sorted(
-                            name for name, _value in spec.static_headers
-                        ),
-                        "request_bytes": spec.request_bytes,
-                        "response_bytes": spec.response_bytes,
-                        "timeout_ms": spec.timeout_ms,
-                        "max_concurrency": spec.max_concurrency,
-                    },
+            dispatch_enabled = row["grant_kind"] == "direct"
+            available = row["state"] == "active" and not expired and dispatch_enabled
+            if row["grant_kind"] == "direct":
+                assert isinstance(spec, ProviderGrantSpec)
+                policy = {
+                    "provider": spec.provider,
+                    "adapter": spec.adapter,
+                    "destination": urlunsplit(
+                        (*urlsplit(spec.destination)[:3], "", "")
+                    ),
+                    "destination_query_redacted": bool(
+                        urlsplit(spec.destination).query
+                    ),
+                    "method": spec.method,
+                    "model": spec.model,
+                    "credential_header": spec.credential_header,
+                    "static_header_names": sorted(
+                        name for name, _value in spec.static_headers
+                    ),
+                    "request_bytes": spec.request_bytes,
+                    "response_bytes": spec.response_bytes,
+                    "timeout_ms": spec.timeout_ms,
+                    "max_concurrency": spec.max_concurrency,
                 }
-            )
+            else:
+                assert isinstance(spec, InferenceGrantSpec)
+                policy = spec.to_dict()
+            grant = {
+                "id": row["id"],
+                "name": row["name"],
+                "state": row["state"],
+                "version": row["version"],
+                "grant_kind": row["grant_kind"],
+                "available": available,
+                "expired": expired,
+                "expires_at": row["expires_at"],
+                "revoked_at": row["revoked_at"],
+                "revoked_by": row["revoked_by"],
+                "created_by": row["created_by"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "content_sha256": row["content_sha256"],
+                "policy": policy,
+            }
+            if row["grant_kind"] == "connector":
+                grant["connector"] = {
+                    "id": row["connector_id"],
+                    "name": row["connector_name"],
+                    "state": row["connector_state"],
+                    "version": row["connector_version"],
+                }
+            grants.append(grant)
         return grants
 
     @staticmethod

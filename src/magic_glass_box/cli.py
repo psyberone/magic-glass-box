@@ -37,6 +37,7 @@ from .executor import (
 )
 from .gates import GateError
 from .gateway import FileGatewayManager, default_gateway_root
+from .inference import InferenceConnectorSpec, InferenceGrantSpec
 from .integration import IntegrationError
 from .krab import KrabError
 from .orchestration import (
@@ -320,6 +321,33 @@ def build_parser() -> argparse.ArgumentParser:
         profile_action.add_argument("--spec", required=True, type=Path)
         profile_action.add_argument("--created-by", required=True)
 
+    inference_connector = commands.add_parser(
+        "inference-connector",
+        help="manage credential-isolated inference connectors",
+    )
+    inference_connector_commands = inference_connector.add_subparsers(
+        dest="inference_connector_command", required=True
+    )
+    connector_register = inference_connector_commands.add_parser(
+        "register", help="register immutable connector authority"
+    )
+    connector_register.add_argument("name")
+    connector_register.add_argument("--spec", required=True, type=Path)
+    connector_register.add_argument("--created-by", required=True)
+    connector_show = inference_connector_commands.add_parser(
+        "show", help="show connector authority and lifecycle metadata"
+    )
+    connector_show.add_argument("name")
+    inference_connector_commands.add_parser(
+        "list", help="list connector authority and lifecycle metadata"
+    )
+    connector_revoke = inference_connector_commands.add_parser(
+        "revoke", help="revoke an inference connector"
+    )
+    connector_revoke.add_argument("name")
+    connector_revoke.add_argument("--expected-version", required=True, type=int)
+    connector_revoke.add_argument("--revoked-by", required=True)
+
     provider = commands.add_parser("provider", help="manage scoped provider grants")
     provider_commands = provider.add_subparsers(dest="provider_command", required=True)
     provider_add = provider_commands.add_parser(
@@ -330,6 +358,13 @@ def build_parser() -> argparse.ArgumentParser:
     provider_add.add_argument("--credential-file", required=True, type=Path)
     provider_add.add_argument("--expires-at")
     provider_add.add_argument("--created-by", required=True)
+    provider_connector_add = provider_commands.add_parser(
+        "connector-add", help="add a connector-bound provider grant"
+    )
+    provider_connector_add.add_argument("name")
+    provider_connector_add.add_argument("--policy", required=True, type=Path)
+    provider_connector_add.add_argument("--expires-at")
+    provider_connector_add.add_argument("--created-by", required=True)
     provider_show = provider_commands.add_parser(
         "show", help="show provider policy and lifecycle metadata"
     )
@@ -925,12 +960,36 @@ def _dispatch(
             return control.create_agent_profile(**kwargs)
         if args.profile_command == "revise":
             return control.revise_agent_profile(**kwargs)
+    if args.command == "inference-connector":
+        if args.inference_connector_command == "register":
+            return control.register_inference_connector(
+                name=args.name,
+                spec=InferenceConnectorSpec.from_mapping(_json_file(args.spec)),
+                created_by_handle=args.created_by,
+            )
+        if args.inference_connector_command == "show":
+            return control.database.get_inference_connector(args.name)
+        if args.inference_connector_command == "list":
+            return control.database.list_inference_connectors()
+        if args.inference_connector_command == "revoke":
+            return control.revoke_inference_connector(
+                args.name,
+                expected_version=args.expected_version,
+                revoked_by_handle=args.revoked_by,
+            )
     if args.command == "provider":
         if args.provider_command == "add":
             return control.add_provider_grant(
                 name=args.name,
                 spec=ProviderGrantSpec.from_mapping(_json_file(args.policy)),
                 credential_path=args.credential_file,
+                expires_at=args.expires_at,
+                created_by_handle=args.created_by,
+            )
+        if args.provider_command == "connector-add":
+            return control.add_connector_provider_grant(
+                name=args.name,
+                spec=InferenceGrantSpec.from_mapping(_json_file(args.policy)),
                 expires_at=args.expires_at,
                 created_by_handle=args.created_by,
             )

@@ -1,0 +1,14 @@
+{
+  "connector_name": "openai-personal",
+  "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "max_concurrency": 1,
+  "model": "gpt-test",
+  "protocol": "openai-responses",
+  "provider": "openai",
+  "request_bytes": 16384,
+  "response_bytes": 32768,
+  "route": "chatgpt-main",
+  "schema_version": 1,
+  "timeout_ms": 10000
+}

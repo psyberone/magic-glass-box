@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:inference-invocation-response:v1",
+  "title": "Magic Glass Box Inference Invocation Response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector_id",
+    "connector_protocol_version",
+    "credential_scope_sha256",
+    "deadline",
+    "deployment_sha256",
+    "error_code",
+    "grant_id",
+    "invocation_id",
+    "model",
+    "outcome",
+    "policy_sha256",
+    "protocol",
+    "provider",
+    "provider_status",
+    "request_bytes",
+    "request_limit_bytes",
+    "response",
+    "response_bytes",
+    "response_limit_bytes",
+    "route",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "connector_protocol_version": { "const": 1 },
+    "invocation_id": { "type": "string", "pattern": "^pinv_[0-9a-f]{32}$" },
+    "connector_id": { "type": "string", "pattern": "^ifc_[0-9a-f]{32}$" },
+    "deployment_sha256": { "$ref": "#/$defs/sha256" },
+    "route": { "$ref": "#/$defs/name" },
+    "grant_id": { "type": "string", "pattern": "^pgr_[0-9a-f]{32}$" },
+    "policy_sha256": { "$ref": "#/$defs/sha256" },
+    "credential_scope_sha256": { "$ref": "#/$defs/sha256" },
+    "provider": { "$ref": "#/$defs/name" },
+    "protocol": { "$ref": "#/$defs/name" },
+    "model": { "$ref": "#/$defs/model" },
+    "deadline": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "request_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2097152
+    },
+    "response_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4194304
+    },
+    "outcome": { "enum": ["succeeded", "failed", "ambiguous"] },
+    "provider_status": {
+      "type": ["integer", "null"],
+      "minimum": 100,
+      "maximum": 599
+    },
+    "request_bytes": { "type": "integer", "minimum": 0, "maximum": 2097152 },
+    "response_bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 },
+    "error_code": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "response": { "type": ["object", "null"] }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "succeeded" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "provider_status": { "type": "integer", "minimum": 200, "maximum": 299 },
+          "error_code": { "type": "null" },
+          "response": { "type": "object" }
+        }
+      },
+      "else": {
+        "properties": {
+          "error_code": { "$ref": "#/$defs/name" },
+          "response": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": ".*\\S.*"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

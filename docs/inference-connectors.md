@@ -1,14 +1,59 @@
 # Credential-isolated inference connectors
 
-> **DESIGN ONLY — PLANNED FOR MILESTONE 7D:** The current scoped provider
-> broker keeps credentials out of workers but resolves them inside the MGB
-> process. Before the first real-account golden proof, credential-bearing AI
-> transport moves behind the connector boundary described here.
+> **M7D.1 IMPLEMENTED; DISPATCH CUTOVER PLANNED FOR M7D.2:** Schema v15 now
+> records immutable connector authority and connector-bound grants, publishes
+> strict v1 envelopes, and carries bounded calls over a local Unix socket.
+> Connector grants are intentionally unavailable to normal runs at this
+> checkpoint. The direct broker remains the production path until M7D.2 moves
+> dispatch across this boundary and removes direct credential resolution from
+> normal execution.
 
 An inference connector is a narrow API server that performs an already
 authorized model invocation. It may run as a local sidecar or as an
 operator-managed external integration. It is not a raw HTTP proxy, provider
 CLI, model router, or general network escape hatch.
+
+## Current operator surface
+
+An operator registers a credential-free connector description, then binds a
+provider grant to one exact connector deployment, route, scope fingerprint,
+semantic protocol, model, and set of limits:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  inference-connector register openai-personal \
+  --spec examples/inference-connector.json --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  provider connector-add openai-main \
+  --policy examples/inference-grant.json --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  inference-connector list
+```
+
+There is no credential-file argument on either authority path. Connector
+rotation creates a new logical registration and grant; it never silently
+rebinds an existing grant. Multiple connector instances may use the same
+pinned deployment digest while retaining distinct socket paths, route sets,
+and credential-scope fingerprints.
+
+The scope fingerprint identifies an operator-defined non-secret account and
+permission scope. It must be derived from canonical non-secret metadata or an
+opaque random scope ID, never by hashing an API key, access token, refresh
+token, or other bearer material.
+
+The four public Draft 2020-12 contracts live in `schemas/` and have matching
+examples in `examples/`: connector registration, connector-bound grant,
+invocation request, and invocation response. The carrier uses one four-byte
+big-endian length followed by strict finite UTF-8 JSON. Every response repeats
+the complete correlation tuple. A failure before connection is unavailable;
+any malformed, late, mismatched, or lost reply after dispatch is ambiguous and
+is never retried automatically.
+
+The ordinary test suite launches `scripts/fake_inference_connector.py` as a
+separate process and completes a deterministic bounded invocation over a real
+Unix socket. This proves the D.1 carrier without a credential or provider
+network call. Networkless-worker dispatch, canary containment, durable
+ambiguous outcomes, and removal of the direct path are D.2 proofs.
 
 ## Ownership boundary
 
@@ -65,14 +110,15 @@ operation containing:
 - a unique invocation ID and immutable grant/policy digest;
 - the selected semantic protocol and exact configured model;
 - the request byte stream, deadline, and response ceiling; and
-- correlation needed for bounded usage and outcome metadata.
+- correlation needed for bounded byte and outcome metadata.
 
 The worker cannot supply a connector endpoint, upstream destination, account,
 credential, or model override. The connector does not expose arbitrary URLs,
 headers, commands, filesystem paths, or a pass-through vendor client. Its
 response is limited to the provider stream plus normalized status, byte counts,
-usage metadata when available, and the identities needed to bind the result to
-the invocation. Request and response content remains transient.
+and the identities needed to bind the result to the invocation. Request and
+response content remains transient. Normalized usage metadata is added under
+Milestone 8's accounting authority rather than being implied by v1.
 
 Local deployments should prefer an operator-owned Unix socket. Authenticated
 loopback or external transports may be supported, but their endpoint and
@@ -119,18 +165,21 @@ credential record.
 ## Failure and retry semantics
 
 An invocation whose response is lost may already have consumed quota. The core
-therefore records an ambiguous outcome and does not automatically replay it.
-Connector operation IDs provide correlation, not a false promise that every
-provider deduplicates inference. Milestone 8 adds normalized usage accounting,
-budget authority, and quota-aware recovery on top of this boundary.
+must therefore record an ambiguous outcome and must not automatically replay
+it. D.1's client already returns a distinct ambiguous result; D.2 makes that
+classification durable when dispatch crosses the connector. Connector
+operation IDs provide correlation, not a false promise that every provider
+deduplicates inference. Milestone 8 adds normalized usage accounting, budget
+authority, and quota-aware recovery on top of this boundary.
 
 ## Migration and proof
 
-Milestone 7D replaces provider-grant credential references with connector
-bindings while preserving the existing worker-facing capability and the
-run/model/limit/concurrency checks already proven by Milestone 2. Krab and
-other non-inference credential paths are not silently migrated into this
-contract.
+M7D.1 adds connector bindings beside historical direct grants while preserving
+the existing worker-facing capability contract. It does not infer a connector
+from a legacy credential reference and does not yet permit connector grants to
+be pinned to new runs. M7D.2 makes connector dispatch exclusive while leaving
+historical direct records readable and revocable. Krab and other non-inference
+credential paths are not silently migrated into this contract.
 
 The deterministic exit proof uses a fake connector with a canary credential
 and verifies that wrong connector identities, protocols, models, grant digests,

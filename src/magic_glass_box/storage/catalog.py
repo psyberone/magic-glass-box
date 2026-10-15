@@ -18,6 +18,7 @@ from ..domain import (
     validate_project_key,
     validate_provider_name,
 )
+from ..inference import InferenceGrantSpec
 from ..krab import KrabIdentity, validate_base_url
 from .errors import (
     ConcurrentUpdateError,
@@ -84,7 +85,7 @@ class CatalogStorage:
             raise TypeError("select a provider grant by exactly one identifier")
         row = connection.execute(
             "SELECT pg.id, pg.name, pg.state, pg.version, pg.policy_json, "
-            "pg.content_sha256, pg.credential_ref, pg.expires_at, "
+            "pg.content_sha256, pg.credential_ref, pg.grant_kind, pg.expires_at, "
             "pg.revoked_at, creator.handle AS created_by, "
             "revoker.handle AS revoked_by, pg.created_at, pg.updated_at "
             "FROM provider_grants pg "
@@ -99,13 +100,32 @@ class CatalogStorage:
             raise NotFoundError(f"provider grant not found: {identifier}")
         result = dict(row)
         try:
-            spec = ProviderGrantSpec.from_mapping(json.loads(result.pop("policy_json")))
+            raw_policy = json.loads(result.pop("policy_json"))
+            spec = (
+                ProviderGrantSpec.from_mapping(raw_policy)
+                if result["grant_kind"] == "direct"
+                else InferenceGrantSpec.from_mapping(raw_policy)
+            )
         except (json.JSONDecodeError, TypeError, ValidationError) as exc:
             raise StorageError("stored provider grant policy is invalid") from exc
         if spec.digest != result["content_sha256"]:
             raise StorageError("stored provider grant policy digest does not match")
         result["policy"] = spec.to_dict()
-        if not include_reference:
+        if result["grant_kind"] == "connector":
+            result.pop("credential_ref")
+            binding = connection.execute(
+                "SELECT c.id, c.name, c.state, c.version, "
+                "b.deployment_sha256, b.route, b.credential_scope_sha256, "
+                "b.provider, b.protocol, b.model "
+                "FROM provider_connector_bindings b "
+                "JOIN inference_connectors c ON c.id = b.inference_connector_id "
+                "WHERE b.provider_grant_id = ?",
+                (result["id"],),
+            ).fetchone()
+            if binding is None:
+                raise StorageError("connector provider grant has no binding")
+            result["connector"] = dict(binding)
+        elif not include_reference:
             result.pop("credential_ref")
         events = connection.execute(
             "SELECT e.sequence, e.kind, u.handle AS actor, e.created_at "
@@ -488,13 +508,15 @@ class CatalogStorage:
             if name == "krab":
                 continue
             row = connection.execute(
-                "SELECT id, name, state, expires_at FROM provider_grants "
+                "SELECT id, name, state, grant_kind, expires_at "
+                "FROM provider_grants "
                 "WHERE name = ?",
                 (name,),
             ).fetchone()
             if (
                 row is None
                 or row["state"] != "active"
+                or row["grant_kind"] != "direct"
                 or (row["expires_at"] is not None and row["expires_at"] <= now)
             ):
                 raise ConflictError(f"provider grant is unavailable: {name}")

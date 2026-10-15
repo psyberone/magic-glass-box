@@ -340,8 +340,8 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 14)
-        self.assertEqual(status["schema_version"], 14)
+        self.assertEqual(SCHEMA_VERSION, 15)
+        self.assertEqual(status["schema_version"], 15)
         with closing(database.connect()) as connection:
             objects = {
                 (row["type"], row["name"])
@@ -374,7 +374,7 @@ class IntegrationMigrationTests(unittest.TestCase):
             self.assertIn(("index", index), objects)
 
     def test_schema_thirteen_migrates_once_to_integration_queue(self) -> None:
-        schema_thirteen = SCHEMA[: -len(INTEGRATION_SCHEMA)]
+        schema_thirteen = SCHEMA[: SCHEMA.index(INTEGRATION_SCHEMA)]
         with closing(sqlite3.connect(self.path)) as connection:
             connection.executescript(schema_thirteen)
             connection.execute("PRAGMA user_version = 13")
@@ -385,8 +385,8 @@ class IntegrationMigrationTests(unittest.TestCase):
         first = database.initialize()
         second = database.initialize()
 
-        self.assertEqual(first["schema_version"], 14)
-        self.assertEqual(second["schema_version"], 14)
+        self.assertEqual(first["schema_version"], 15)
+        self.assertEqual(second["schema_version"], 15)
         with closing(database.connect()) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_schema "

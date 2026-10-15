@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1723,6 +1723,138 @@ BEGIN
 END;
 """
 
+INFERENCE_CONNECTOR_SCHEMA = """
+ALTER TABLE provider_grants ADD COLUMN grant_kind TEXT NOT NULL DEFAULT 'direct'
+    CHECK (grant_kind IN ('direct', 'connector'));
+
+CREATE TABLE inference_connectors (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    connector_protocol_version INTEGER NOT NULL
+        CHECK (connector_protocol_version = 1),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    transport_kind TEXT NOT NULL CHECK (transport_kind = 'unix'),
+    socket_path TEXT NOT NULL,
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 1),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 1),
+    timeout_ms INTEGER NOT NULL CHECK (timeout_ms >= 100),
+    max_concurrency INTEGER NOT NULL CHECK (max_concurrency >= 1),
+    revoked_at TEXT,
+    revoked_by TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (revoked_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND revoked_at IS NULL AND revoked_by IS NULL)
+        OR (state = 'revoked' AND revoked_at IS NOT NULL AND revoked_by IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE inference_connector_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inference_connector_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('inference_connector.created', 'inference_connector.revoked')
+    ),
+    actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (inference_connector_id, sequence),
+    FOREIGN KEY (inference_connector_id)
+        REFERENCES inference_connectors(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE provider_connector_bindings (
+    provider_grant_id TEXT PRIMARY KEY,
+    inference_connector_id TEXT NOT NULL,
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    route TEXT NOT NULL,
+    credential_scope_sha256 TEXT NOT NULL
+        CHECK (length(credential_scope_sha256) = 64),
+    provider TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (inference_connector_id)
+        REFERENCES inference_connectors(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX inference_connector_state
+    ON inference_connectors(state, created_at, id);
+CREATE INDEX inference_connector_event_stream
+    ON inference_connector_events(inference_connector_id, sequence);
+CREATE INDEX provider_connector_connector
+    ON provider_connector_bindings(inference_connector_id, provider_grant_id);
+
+CREATE TRIGGER inference_connector_identity_immutable
+BEFORE UPDATE OF
+    id, name, schema_version, connector_protocol_version, spec_json,
+    content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency,
+    created_by, created_at
+ON inference_connectors
+BEGIN
+    SELECT RAISE(ABORT, 'inference connector identity is immutable');
+END;
+CREATE TRIGGER inference_connector_immutable_delete
+BEFORE DELETE ON inference_connectors
+BEGIN
+    SELECT RAISE(ABORT, 'inference connectors cannot be deleted');
+END;
+CREATE TRIGGER inference_connector_event_immutable_update
+BEFORE UPDATE ON inference_connector_events
+BEGIN
+    SELECT RAISE(ABORT, 'inference connector events are immutable');
+END;
+CREATE TRIGGER inference_connector_event_immutable_delete
+BEFORE DELETE ON inference_connector_events
+BEGIN
+    SELECT RAISE(ABORT, 'inference connector events cannot be deleted');
+END;
+CREATE TRIGGER provider_connector_binding_requires_connector_grant
+BEFORE INSERT ON provider_connector_bindings
+WHEN COALESCE(
+    (SELECT grant_kind FROM provider_grants WHERE id = NEW.provider_grant_id),
+    ''
+) <> 'connector'
+BEGIN
+    SELECT RAISE(ABORT, 'connector binding requires a connector grant');
+END;
+CREATE TRIGGER provider_connector_binding_immutable_update
+BEFORE UPDATE ON provider_connector_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'provider connector bindings are immutable');
+END;
+CREATE TRIGGER provider_connector_binding_immutable_delete
+BEFORE DELETE ON provider_connector_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'provider connector bindings cannot be deleted');
+END;
+CREATE TRIGGER provider_grant_kind_shape_insert
+BEFORE INSERT ON provider_grants
+WHEN
+    (NEW.grant_kind = 'direct' AND length(NEW.credential_ref) = 0)
+    OR (NEW.grant_kind = 'connector' AND length(NEW.credential_ref) <> 0)
+BEGIN
+    SELECT RAISE(ABORT, 'provider grant kind and credential reference disagree');
+END;
+CREATE TRIGGER provider_grant_kind_immutable
+BEFORE UPDATE OF grant_kind ON provider_grants
+BEGIN
+    SELECT RAISE(ABORT, 'provider grant kind is immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -1738,6 +1870,7 @@ SCHEMA = (
     + PROVIDER_DISPATCH_SCHEMA
     + GATE_SCHEMA
     + INTEGRATION_SCHEMA
+    + INFERENCE_CONNECTOR_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -1753,4 +1886,5 @@ MIGRATIONS = {
     11: PROVIDER_DISPATCH_SCHEMA,
     12: GATE_SCHEMA,
     13: INTEGRATION_SCHEMA,
+    14: INFERENCE_CONNECTOR_SCHEMA,
 }

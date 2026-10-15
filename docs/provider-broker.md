@@ -2,10 +2,11 @@
 
 > **CURRENT IMPLEMENTATION AND MIGRATION NOTE:** This broker already keeps
 > reusable credentials out of workers, but the MGB process currently resolves
-> the credential and performs provider HTTP transport. Milestone 7D will keep
-> its authorization, grant, reservation, and audit semantics while moving
-> upstream authentication and transport into a credential-isolated inference
-> connector. See [inference-connectors.md](inference-connectors.md).
+> the credential and performs provider HTTP transport. M7D.1 now provides
+> schema-v15 connector authority and a strict Unix-socket carrier; those new
+> grants remain non-dispatchable until M7D.2 moves normal execution across the
+> boundary and retires direct credential resolution. See
+> [inference-connectors.md](inference-connectors.md).
 
 The provider broker lets a networkless worker call one administrator-defined
 AI endpoint without receiving a reusable credential or choosing where the

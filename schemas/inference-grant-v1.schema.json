@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:inference-grant:v1",
+  "title": "Magic Glass Box Connector-Bound Inference Grant v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector_name",
+    "credential_scope_sha256",
+    "deployment_sha256",
+    "max_concurrency",
+    "model",
+    "protocol",
+    "provider",
+    "request_bytes",
+    "response_bytes",
+    "route",
+    "schema_version",
+    "timeout_ms"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "connector_name": { "$ref": "#/$defs/name" },
+    "deployment_sha256": { "$ref": "#/$defs/sha256" },
+    "route": { "$ref": "#/$defs/name" },
+    "credential_scope_sha256": { "$ref": "#/$defs/sha256" },
+    "provider": { "$ref": "#/$defs/name" },
+    "protocol": { "$ref": "#/$defs/name" },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": ".*\\S.*"
+    },
+    "request_bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 },
+    "response_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+    "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 120000 },
+    "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 16 }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

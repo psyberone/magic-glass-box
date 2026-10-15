@@ -420,9 +420,13 @@ def _render_control_room(
             )
         policy = grant.get("policy")
         policy = policy if isinstance(policy, Mapping) else {}
+        connector = grant.get("connector")
+        connector = connector if isinstance(connector, Mapping) else {}
         grant_rows.append(
             (
                 grant.get("name"),
+                grant.get("grant_kind", "direct"),
+                connector.get("name"),
                 grant.get("state"),
                 grant.get("version"),
                 grant.get("available"),
@@ -931,6 +935,8 @@ def _render_control_room(
             _table(
                 (
                     "Name",
+                    "Kind",
+                    "Connector",
                     "State",
                     "Version",
                     "Available",

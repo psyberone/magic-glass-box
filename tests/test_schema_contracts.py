@@ -27,6 +27,12 @@ from magic_glass_box.gates import (
     parse_gate_evidence,
     resolve_gate_policy_request,
 )
+from magic_glass_box.inference import (
+    InferenceConnectorSpec,
+    InferenceGrantSpec,
+    InferenceInvocationRequest,
+    InferenceInvocationResponse,
+)
 from magic_glass_box.integration import (
     FoldManifest,
     IntegrationError,
@@ -379,6 +385,50 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             validator.validate(wrong_format)
         with self.assertRaises(IntegrationError):
             FoldManifest.from_mapping(wrong_format)
+
+    def test_inference_connector_examples_match_runtime_contracts(self) -> None:
+        factories = {
+            "inference-connector": InferenceConnectorSpec.from_mapping,
+            "inference-grant": InferenceGrantSpec.from_mapping,
+            "inference-invocation-request": InferenceInvocationRequest.from_mapping,
+            "inference-invocation-response": InferenceInvocationResponse.from_mapping,
+        }
+        for name, factory in factories.items():
+            with self.subTest(name=name):
+                validator, example = self.load(name)
+                validator.validate(example)
+                parsed = factory(example)
+                self.assertEqual(parsed.to_dict(), example)
+
+    def test_inference_connector_schemas_and_runtime_reject_unsafe_authority(
+        self,
+    ) -> None:
+        connector_validator, connector = self.load("inference-connector")
+        relative = copy.deepcopy(connector)
+        relative["transport"]["socket_path"] = "relative.sock"
+        duplicate_route = copy.deepcopy(connector)
+        duplicate_route["routes"].append(copy.deepcopy(connector["routes"][0]))
+        for candidate in (relative, duplicate_route):
+            with self.assertRaises(SchemaValidationError):
+                connector_validator.validate(candidate)
+            with self.assertRaises(ValidationError):
+                InferenceConnectorSpec.from_mapping(candidate)
+
+        request_validator, request = self.load("inference-invocation-request")
+        oversized = copy.deepcopy(request)
+        oversized["request_limit_bytes"] = 0
+        with self.assertRaises(SchemaValidationError):
+            request_validator.validate(oversized)
+        with self.assertRaises(ValidationError):
+            InferenceInvocationRequest.from_mapping(oversized)
+
+        response_validator, response = self.load("inference-invocation-response")
+        inconsistent = copy.deepcopy(response)
+        inconsistent["outcome"] = "failed"
+        with self.assertRaises(SchemaValidationError):
+            response_validator.validate(inconsistent)
+        with self.assertRaises(ValidationError):
+            InferenceInvocationResponse.from_mapping(inconsistent)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from magic_glass_box.domain import (
     WorkLogEntry,
 )
 from magic_glass_box.gates import GatePolicyManifest, GatePolicySpec
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import (
     KrabError,
     KrabIdentity,
@@ -243,7 +244,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 14)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], 15)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",
@@ -485,6 +486,7 @@ class ControlRoomTests(unittest.TestCase):
                 "name",
                 "state",
                 "version",
+                "grant_kind",
                 "available",
                 "expired",
                 "expires_at",
@@ -497,6 +499,7 @@ class ControlRoomTests(unittest.TestCase):
                 "policy",
             },
         )
+        self.assertEqual(snapshot["provider_grants"][0]["grant_kind"], "direct")
         self.assertEqual(
             snapshot["provider_grants"][0]["policy"],
             {
@@ -1388,6 +1391,80 @@ class ControlRoomTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(StorageError, "stored provider grant policy"):
             ControlRoom(database).snapshot()
+
+    def test_snapshot_surfaces_connector_grant_without_private_transport(self) -> None:
+        socket_path = Path(self.temporary.name) / "private" / "inference.sock"
+        connector_spec = InferenceConnectorSpec.from_mapping(
+            {
+                "schema_version": 1,
+                "connector_protocol_version": 1,
+                "deployment_sha256": "a" * 64,
+                "transport": {"kind": "unix", "socket_path": str(socket_path)},
+                "routes": [
+                    {
+                        "name": "chatgpt-main",
+                        "provider": "openai",
+                        "protocol": "openai-responses",
+                        "models": ["gpt-test"],
+                        "credential_scope_sha256": "b" * 64,
+                    }
+                ],
+                "request_bytes": 32768,
+                "response_bytes": 65536,
+                "timeout_ms": 30000,
+                "max_concurrency": 2,
+            }
+        )
+        connector = self.database.register_inference_connector(
+            name="openai-sidecar",
+            spec=connector_spec,
+            created_by=self.user["id"],
+        )
+        grant_spec = InferenceGrantSpec.from_mapping(
+            {
+                "schema_version": 1,
+                "connector_name": "openai-sidecar",
+                "deployment_sha256": "a" * 64,
+                "route": "chatgpt-main",
+                "credential_scope_sha256": "b" * 64,
+                "provider": "openai",
+                "protocol": "openai-responses",
+                "model": "gpt-test",
+                "request_bytes": 16384,
+                "response_bytes": 32768,
+                "timeout_ms": 10000,
+                "max_concurrency": 1,
+            }
+        )
+        self.database.create_connector_provider_grant(
+            name="openai-sidecar-main",
+            spec=grant_spec,
+            expires_at=None,
+            created_by=self.user["id"],
+        )
+
+        snapshot = ControlRoom(self.database).snapshot()
+        grant = next(
+            item
+            for item in snapshot["provider_grants"]
+            if item["name"] == "openai-sidecar-main"
+        )
+
+        self.assertEqual(grant["grant_kind"], "connector")
+        self.assertFalse(grant["available"])
+        self.assertEqual(
+            grant["connector"],
+            {
+                "id": connector["id"],
+                "name": "openai-sidecar",
+                "state": "active",
+                "version": 1,
+            },
+        )
+        self.assertEqual(grant["policy"], grant_spec.to_dict())
+        encoded = json.dumps(grant, sort_keys=True)
+        self.assertNotIn(str(socket_path), encoded)
+        self.assertNotIn("credential_ref", encoded)
 
     def test_snapshot_rejects_corrupt_assignment_and_result(self) -> None:
         run, _attempt = self.start_run()

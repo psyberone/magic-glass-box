@@ -379,6 +379,10 @@ class CLITests(unittest.TestCase):
                     ("krab", "manage and query Krab connections"),
                     ("project", "manage project context"),
                     ("profile", "manage agent profiles"),
+                    (
+                        "inference-connector",
+                        "manage credential-isolated inference connectors",
+                    ),
                     ("provider", "manage scoped provider grants"),
                     ("work-item", "manage durable work items"),
                     ("interaction", "resolve durable agent interactions"),
@@ -442,8 +446,22 @@ class CLITests(unittest.TestCase):
                         "add",
                         "add an immutable provider policy and credential reference",
                     ),
+                    ("connector-add", "add a connector-bound provider grant"),
                     ("show", "show provider policy and lifecycle metadata"),
                     ("revoke", "revoke a provider grant"),
+                ),
+            ),
+            ("inference-connector",): (
+                "inference_connector_command",
+                True,
+                (
+                    ("register", "register immutable connector authority"),
+                    (
+                        "show",
+                        "show connector authority and lifecycle metadata",
+                    ),
+                    ("list", "list connector authority and lifecycle metadata"),
+                    ("revoke", "revoke an inference connector"),
                 ),
             ),
             ("work-item",): (
@@ -653,9 +671,21 @@ class CLITests(unittest.TestCase):
                     "--spec",
                     "--created-by",
                 ),
+                ("inference-connector", "register"): (
+                    "--spec",
+                    "--created-by",
+                ),
+                ("inference-connector", "revoke"): (
+                    "--expected-version",
+                    "--revoked-by",
+                ),
                 ("provider", "add"): (
                     "--policy",
                     "--credential-file",
+                    "--created-by",
+                ),
+                ("provider", "connector-add"): (
+                    "--policy",
                     "--created-by",
                 ),
                 ("provider", "revoke"): (
@@ -1561,6 +1591,9 @@ class CLITests(unittest.TestCase):
                 "krab": "manage and query Krab connections",
                 "project": "manage project context",
                 "profile": "manage agent profiles",
+                "inference-connector": (
+                    "manage credential-isolated inference connectors"
+                ),
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "interaction": "resolve durable agent interactions",
@@ -1593,8 +1626,15 @@ class CLITests(unittest.TestCase):
             },
             "provider": {
                 "add": "add an immutable provider policy and credential reference",
+                "connector-add": "add a connector-bound provider grant",
                 "show": "show provider policy and lifecycle metadata",
                 "revoke": "revoke a provider grant",
+            },
+            "inference-connector": {
+                "register": "register immutable connector authority",
+                "show": "show connector authority and lifecycle metadata",
+                "list": "list connector authority and lifecycle metadata",
+                "revoke": "revoke an inference connector",
             },
             "work-item": {
                 "import": "create or update a normalized work item",
@@ -2825,6 +2865,106 @@ class CLITests(unittest.TestCase):
         oversized.write_bytes(b" " * (1024 * 1024 + 1))
         with self.assertRaisesRegex(InputError, "1 MiB"):
             _json_file(oversized)
+
+    def test_inference_connector_commands_create_credentialless_authority(self) -> None:
+        connector_path = Path(self.temporary.name) / "connector.json"
+        connector_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "connector_protocol_version": 1,
+                    "deployment_sha256": "a" * 64,
+                    "transport": {
+                        "kind": "unix",
+                        "socket_path": str(
+                            Path(self.temporary.name) / "openai-sidecar.sock"
+                        ),
+                    },
+                    "routes": [
+                        {
+                            "name": "chatgpt-main",
+                            "provider": "openai",
+                            "protocol": "openai-responses",
+                            "models": ["gpt-test"],
+                            "credential_scope_sha256": "b" * 64,
+                        }
+                    ],
+                    "request_bytes": 32768,
+                    "response_bytes": 65536,
+                    "timeout_ms": 30000,
+                    "max_concurrency": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+        grant_path = Path(self.temporary.name) / "connector-grant.json"
+        grant_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "connector_name": "openai-personal",
+                    "deployment_sha256": "a" * 64,
+                    "route": "chatgpt-main",
+                    "credential_scope_sha256": "b" * 64,
+                    "provider": "openai",
+                    "protocol": "openai-responses",
+                    "model": "gpt-test",
+                    "request_bytes": 16384,
+                    "response_bytes": 32768,
+                    "timeout_ms": 10000,
+                    "max_concurrency": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(self.invoke("init")[0], 0)
+        self.assertEqual(
+            self.invoke("user", "add", "operator", "--display-name", "Local Operator")[
+                0
+            ],
+            0,
+        )
+
+        status, connector, error = self.invoke(
+            "inference-connector",
+            "register",
+            "openai-personal",
+            "--spec",
+            str(connector_path),
+            "--created-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(connector["state"], "active")
+
+        status, grant, error = self.invoke(
+            "provider",
+            "connector-add",
+            "openai-main",
+            "--policy",
+            str(grant_path),
+            "--created-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(grant["grant_kind"], "connector")
+        self.assertNotIn("credential_ref", grant)
+
+        status, connectors, error = self.invoke("inference-connector", "list")
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual([item["name"] for item in connectors], ["openai-personal"])
+
+        status, revoked, error = self.invoke(
+            "inference-connector",
+            "revoke",
+            "openai-personal",
+            "--expected-version",
+            "1",
+            "--revoked-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(revoked["state"], "revoked")
 
 
 if __name__ == "__main__":

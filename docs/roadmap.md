@@ -429,7 +429,7 @@ its macOS watchdog thread failed to remain live.
 
 ## Milestone 7D: credential-isolated inference connectors
 
-**Status: planned**
+**Status: in progress — M7D.1 complete**
 
 M7D uses three honest internal checkpoints rather than one large cutover:
 **M7D.1** establishes durable connector authority and the strict local carrier,
@@ -464,6 +464,16 @@ invocation while wrong connector, grant, protocol, model, and limit tuples fail
 closed. A canary upstream credential remains absent from the worker container,
 MGB state directory and SQLite database, retained results, runtime output, and
 logs. See [inference-connectors.md](inference-connectors.md).
+
+The 2026-10-15 M7D.1 checkpoint adds schema-v15 connector registration and
+lifecycle state, immutable connector-bound grants without credential
+references, four public strict contracts, absolute-deadline Unix transport,
+and a separately launched deterministic fake connector. Connector grants are
+visible but cannot enter run authority yet, so this checkpoint does not claim
+the milestone exit proof. The normal quality gate passes with 638 tests and
+86% total branch coverage. M7D.2 owns exclusive dispatch, durable ambiguous
+outcomes, networkless-worker canary containment, and retirement of the direct
+credential path; the clean mutation gate remains due at completed M7D.
 
 ## End-of-Milestone 7 operator golden proof
 

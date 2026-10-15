@@ -254,7 +254,15 @@ class DatabaseCore:
                 ("krab_identities", "SELECT COUNT(*) FROM krab_identities"),
                 ("projects", "SELECT COUNT(*) FROM projects"),
                 ("agent_profiles", "SELECT COUNT(*) FROM agent_profiles"),
+                (
+                    "inference_connectors",
+                    "SELECT COUNT(*) FROM inference_connectors",
+                ),
                 ("provider_grants", "SELECT COUNT(*) FROM provider_grants"),
+                (
+                    "provider_connector_bindings",
+                    "SELECT COUNT(*) FROM provider_connector_bindings",
+                ),
                 ("runs", "SELECT COUNT(*) FROM runs"),
                 ("run_attempts", "SELECT COUNT(*) FROM run_attempts"),
                 ("attempt_handoffs", "SELECT COUNT(*) FROM attempt_handoffs"),
