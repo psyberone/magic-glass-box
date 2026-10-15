@@ -187,8 +187,11 @@ requires a live `running` attempt and permits the enclosing run to be either
 `running` or `waiting_for_input`. The latter keeps a worker alive just long
 enough to submit its handoff after opening a question; a parked run with no
 live attempt has no provider authority. The orchestrator then checks grant
-revocation/expiry, resolves the external credential reference, injects the
-pinned model, and applies the grant's byte, timeout, and concurrency limits.
+authority, resolves the external credential reference, and atomically rechecks
+revocation/expiry and reserves a cross-process concurrency slot immediately
+before dispatch. It injects the pinned model and applies the grant's byte and
+timeout limits. The reservation is released after dispatch and expires if its
+owning process dies.
 The JSON object response is transient and explicitly untrusted. Only status,
 byte counts, outcome, error category, timestamps, and grant/run IDs are
 durable. See [provider-broker.md](provider-broker.md).

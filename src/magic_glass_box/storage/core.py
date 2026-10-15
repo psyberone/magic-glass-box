@@ -242,6 +242,8 @@ class DatabaseCore:
         result = connection.execute("PRAGMA quick_check").fetchone()[0]
         if result != "ok":
             raise StorageError(f"database integrity check failed: {result}")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise StorageError("database foreign key check failed")
 
     def status(self) -> dict[str, Any]:
         with self._connection() as connection:
@@ -257,6 +259,10 @@ class DatabaseCore:
                 ("run_attempts", "SELECT COUNT(*) FROM run_attempts"),
                 ("attempt_handoffs", "SELECT COUNT(*) FROM attempt_handoffs"),
                 ("attempt_results", "SELECT COUNT(*) FROM attempt_results"),
+                (
+                    "integration_candidates",
+                    "SELECT COUNT(*) FROM integration_candidates",
+                ),
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
                 ("work_items", "SELECT COUNT(*) FROM work_items"),
                 ("work_threads", "SELECT COUNT(*) FROM work_threads"),

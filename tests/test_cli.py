@@ -156,6 +156,15 @@ class FakeControlPlane:
     def reassign_run(self, run_id: str, **kwargs: object) -> dict[str, object]:
         return self._called("run.reassign", run_id=run_id, **kwargs)
 
+    def create_candidate(self, attempt_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("candidate.create", attempt_id=attempt_id, **kwargs)
+
+    def get_candidate(self, candidate_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("candidate.show", candidate_id=candidate_id, **kwargs)
+
+    def list_candidates(self, **kwargs: object) -> dict[str, object]:
+        return self._called("candidate.list", **kwargs)
+
 
 class FakeRunCoordinator:
     def __init__(self) -> None:
@@ -214,6 +223,10 @@ class FakeResultStore:
         return {"operation": "result.apply", "attempt_id": attempt_id}
 
 
+class FakeCandidateStore:
+    pass
+
+
 class CLITests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -263,6 +276,7 @@ class CLITests(unittest.TestCase):
                     ("run", "manage agent runs"),
                     ("supervisor", "run the autonomous control loop"),
                     ("result", "inspect and apply retained work"),
+                    ("candidate", "materialize and inspect trusted candidates"),
                 ),
             ),
             ("user",): (
@@ -371,6 +385,18 @@ class CLITests(unittest.TestCase):
                     (
                         "apply",
                         "apply one retained result after conflict preflight",
+                    ),
+                ),
+            ),
+            ("candidate",): (
+                "candidate_command",
+                True,
+                (
+                    ("create", "materialize one retained result as a candidate"),
+                    ("show", "verify and show one trusted candidate"),
+                    (
+                        "list",
+                        "list recent durable candidates without reading Git objects",
                     ),
                 ),
             ),
@@ -486,6 +512,7 @@ class CLITests(unittest.TestCase):
                     "--requested-by",
                 ),
                 ("result", "apply"): ("--repository",),
+                ("candidate", "create"): ("--created-by",),
             },
         )
         self.assertEqual(
@@ -504,7 +531,7 @@ class CLITests(unittest.TestCase):
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 10)
+        self.assertEqual(initialized["schema_version"], 12)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -1071,6 +1098,20 @@ class CLITests(unittest.TestCase):
         self.assertEqual(timed.run_timeout, 12.5)
         default_timed = parser.parse_args(["run", "execute", "run_" + "1" * 32])
         self.assertEqual(default_timed.run_timeout, 21_600.0)
+        candidate_timed = parser.parse_args(
+            [
+                "candidate",
+                "create",
+                "att_" + "1" * 32,
+                "--created-by",
+                "operator",
+                "--operation-timeout",
+                "12.5",
+            ]
+        )
+        self.assertEqual(candidate_timed.candidate_timeout, 12.5)
+        candidate_default = parser.parse_args(["candidate", "show", "cnd_" + "2" * 32])
+        self.assertEqual(candidate_default.candidate_timeout, 60.0)
         help_output = io.StringIO()
         with redirect_stdout(help_output), self.assertRaises(SystemExit) as help_exit:
             parser.parse_args(["run", "execute", "run_" + "1" * 32, "--help"])
@@ -1131,6 +1172,21 @@ class CLITests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(invalid.exception.code, 2)
+            with (
+                self.subTest(candidate_timeout=invalid_timeout),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as invalid_candidate,
+            ):
+                parser.parse_args(
+                    [
+                        "candidate",
+                        "show",
+                        "cnd_" + "2" * 32,
+                        "--operation-timeout",
+                        invalid_timeout,
+                    ]
+                )
+            self.assertEqual(invalid_candidate.exception.code, 2)
         for option, invalid_values in (
             ("--max-workers", ("0", "33", "1.5")),
             ("--action-lease-seconds", ("9", "3601", "1.5")),
@@ -1239,7 +1295,9 @@ class CLITests(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE RESPONSE", stdout.getvalue())
 
-    def test_complete_parser_surface_is_an_explicit_contract(self) -> None:
+    def test_command_tree_help_and_root_db_option_are_an_explicit_contract(
+        self,
+    ) -> None:
         parser = build_parser()
 
         def command_help(
@@ -1277,6 +1335,7 @@ class CLITests(unittest.TestCase):
                 "run": "manage agent runs",
                 "supervisor": "run the autonomous control loop",
                 "result": "inspect and apply retained work",
+                "candidate": "materialize and inspect trusted candidates",
             },
         )
         expected_nested = {
@@ -1327,6 +1386,11 @@ class CLITests(unittest.TestCase):
             "result": {
                 "show": "verify and show one retained attempt result",
                 "apply": "apply one retained result after conflict preflight",
+            },
+            "candidate": {
+                "create": "materialize one retained result as a candidate",
+                "show": "verify and show one trusted candidate",
+                "list": "list recent durable candidates without reading Git objects",
             },
         }
         for command, expected_help in expected_nested.items():
@@ -1689,11 +1753,120 @@ class CLITests(unittest.TestCase):
                     ("result.show", {"attempt_id": attempt_id}),
                 )
 
+    def test_candidate_routes_use_both_verified_object_stores(self) -> None:
+        control = FakeControlPlane()
+        result_store = FakeResultStore()
+        candidate_store = FakeCandidateStore()
+        attempt_id = "att_" + "3" * 32
+        candidate_id = "cnd_" + "4" * 32
+        cases = (
+            (
+                [
+                    "candidate",
+                    "create",
+                    attempt_id,
+                    "--created-by",
+                    "operator",
+                    "--operation-timeout",
+                    "12.5",
+                ],
+                (
+                    "candidate.create",
+                    {
+                        "attempt_id": attempt_id,
+                        "created_by_handle": "operator",
+                        "result_store": result_store,
+                        "candidate_store": candidate_store,
+                    },
+                ),
+            ),
+            (
+                ["candidate", "show", candidate_id],
+                (
+                    "candidate.show",
+                    {
+                        "candidate_id": candidate_id,
+                        "result_store": result_store,
+                        "candidate_store": candidate_store,
+                    },
+                ),
+            ),
+        )
+        for arguments, expected_call in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch(
+                        "magic_glass_box.cli.ControlPlane", return_value=control
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_result_store",
+                        return_value=result_store,
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_candidate_store",
+                        return_value=candidate_store,
+                    ) as build_candidate_store,
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                expected_timeout = 12.5 if arguments[1] == "create" else 60.0
+                build_candidate_store.assert_called_once_with(
+                    control, timeout=expected_timeout
+                )
+                self.assertEqual(control.calls[-1], expected_call)
+                self.assertEqual(
+                    json.loads(stdout.getvalue())["operation"], expected_call[0]
+                )
+
+    def test_candidate_list_reads_only_the_durable_ledger(self) -> None:
+        control = FakeControlPlane()
+        stdout = io.StringIO()
+        run_id = "run_" + "5" * 32
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch(
+                "magic_glass_box.cli._build_result_store",
+                side_effect=AssertionError("result store should stay cold"),
+            ),
+            mock.patch(
+                "magic_glass_box.cli._build_candidate_store",
+                side_effect=AssertionError("candidate cache should stay cold"),
+            ),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "candidate",
+                    "list",
+                    "--run",
+                    run_id,
+                    "--limit",
+                    "12",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "candidate.list",
+                {
+                    "project_key": None,
+                    "producer_run_id": run_id,
+                    "work_thread_id": None,
+                    "limit": 12,
+                },
+            ),
+        )
+        self.assertEqual(json.loads(stdout.getvalue())["operation"], "candidate.list")
+
     def test_run_coordinator_builder_wires_the_run_scoped_gateway(self) -> None:
         control = mock.Mock()
         control.database.path = self.database
-        credential_resolver = object()
-        control.credential_resolver = credential_resolver
         workspace = object()
         executor = object()
         gateway = object()
@@ -1738,7 +1911,6 @@ class CLITests(unittest.TestCase):
             control.database,
             executor,
             workspace,
-            credential_resolver,
             gateway,
             result_store,
         )

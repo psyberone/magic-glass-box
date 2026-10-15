@@ -48,8 +48,10 @@ reassignment successors inherit their predecessor's exact policy.
 
 The published contract is
 [`schemas/supervision-policy-v1.schema.json`](../schemas/supervision-policy-v1.schema.json).
-Every schedule is strictly increasing, contains at most eight entries, and is
-bounded to 30 days. Its fields are:
+The portable schema checks each schedule's shape and entries; the runtime
+semantic validator additionally requires strict increasing order. See
+[schema-contracts.md](schema-contracts.md). Every schedule contains at most
+eight entries and is bounded to 30 days. Its fields are:
 
 | Field | Meaning |
 | --- | --- |
@@ -138,11 +140,12 @@ Run the repeatable supervisor proof with:
 make live-supervisor
 ```
 
-It uses the real schema-v10 database, action and escalation ledgers, supervisor
-threads, lifecycle transitions, attempt leases, and two competing supervisor
-identities. A deterministic actuator stands at the already-tested coordinator
-interface, so this proof needs neither Docker nor a model provider. The
-separate runtime-adapter proof exercises the real coordinator and Docker path.
+It uses the real database and schema-v10 supervision tables, action and
+escalation ledgers, supervisor threads, lifecycle transitions, attempt leases,
+and two competing supervisor identities. A deterministic actuator stands at
+the already-tested coordinator interface, so this proof needs neither Docker
+nor a model provider. The separate runtime-adapter proof exercises the real
+coordinator and Docker path.
 
 The proof demonstrates an explicitly automatic queued run, an answered run, a
 manual queued run, one expired attempt, one still-live attempt, and a stalled

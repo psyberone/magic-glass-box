@@ -147,11 +147,12 @@ class ControlRoom:
         attempts = self._attempts(connection, run_ids, generated_at)
         interactions = self._interactions(connection, run_ids)
         retained_results = self._results(connection, run_ids)
+        candidates = self._candidates(connection, run_ids)
         authorities = self._run_authorities(connection, run_ids, generated_at)
         supervisor_actions = self._supervisor_actions(connection, run_ids)
         escalations = self._escalations(connection, run_ids)
         self._attach_run_counts(
-            runs, attempts, interactions, retained_results, authorities
+            runs, attempts, interactions, retained_results, candidates, authorities
         )
         summary = self._summary(connection, provider_grants, attempts)
         attention = self._attention(
@@ -188,6 +189,7 @@ class ControlRoom:
                 "attempts": attempts,
                 "interactions": interactions,
                 "retained_results": retained_results,
+                "candidates": candidates,
                 "run_authorities": authorities,
                 "supervisor_actions": supervisor_actions,
                 "escalations": escalations,
@@ -735,6 +737,26 @@ class ControlRoom:
         return results
 
     @classmethod
+    def _candidates(
+        cls, connection: sqlite3.Connection, run_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        rows = cls._for_runs(
+            connection,
+            run_ids,
+            "SELECT ic.id, ic.attempt_result_id, ic.schema_version, "
+            "ic.project_id, ic.context_version_id, ic.work_thread_id, "
+            "ic.producer_run_id, ic.producer_attempt_id, ic.base_revision, "
+            "ic.head_revision, ic.tree_revision, ic.object_format, "
+            "ic.result_content_sha256, ic.content_sha256, "
+            "u.handle AS created_by_handle, ic.created_at "
+            "FROM integration_candidates ic JOIN users u "
+            "ON u.id = ic.created_by "
+            "WHERE ic.producer_run_id IN ({run_ids}) "
+            "ORDER BY ic.created_at DESC, ic.id",
+        )
+        return [dict(row) for row in rows]
+
+    @classmethod
     def _run_authorities(
         cls,
         connection: sqlite3.Connection,
@@ -773,22 +795,24 @@ class ControlRoom:
         attempts: list[dict[str, Any]],
         interactions: list[dict[str, Any]],
         results: list[dict[str, Any]],
+        candidates: list[dict[str, Any]],
         authorities: list[dict[str, Any]],
     ) -> None:
-        indexes: tuple[tuple[str, list[dict[str, Any]]], ...] = (
-            ("attempt_count", attempts),
-            ("interaction_count", interactions),
-            ("retained_result_count", results),
-            ("authority_count", authorities),
+        indexes: tuple[tuple[str, list[dict[str, Any]], str], ...] = (
+            ("attempt_count", attempts, "run_id"),
+            ("interaction_count", interactions, "run_id"),
+            ("retained_result_count", results, "run_id"),
+            ("candidate_count", candidates, "producer_run_id"),
+            ("authority_count", authorities, "run_id"),
         )
         counts: dict[str, dict[str, int]] = {}
-        for label, records in indexes:
+        for label, records, run_key in indexes:
             current: dict[str, int] = defaultdict(int)
             for record in records:
-                current[record["run_id"]] += 1
+                current[record[run_key]] += 1
             counts[label] = current
         for run in runs:
-            for label, _ in indexes:
+            for label, _, _ in indexes:
                 run[label] = counts[label].get(run["id"], 0)
 
     @staticmethod
@@ -895,6 +919,9 @@ class ControlRoom:
             },
             "retained_results": connection.execute(
                 "SELECT COUNT(*) FROM attempt_results"
+            ).fetchone()[0],
+            "candidates": connection.execute(
+                "SELECT COUNT(*) FROM integration_candidates"
             ).fetchone()[0],
         }
 

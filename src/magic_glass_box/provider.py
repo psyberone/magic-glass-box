@@ -354,7 +354,7 @@ class BufferedHTTPProviderAdapter:
 
 
 class ProviderBroker:
-    """Apply per-grant concurrency and dispatch only registered adapters."""
+    """Apply process-local concurrency defense and dispatch registered adapters."""
 
     def __init__(self, adapters: Mapping[str, ProviderAdapter] | None = None):
         self.adapters = dict(

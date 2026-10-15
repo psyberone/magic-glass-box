@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from magic_glass_box.db import (
+    PROVIDER_DISPATCH_SCHEMA,
     SCHEMA,
     ConcurrentUpdateError,
     ConflictError,
@@ -101,7 +102,7 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
             spec=AgentProfileSpec.create(
                 image="agent@sha256:abc",
                 command=["codex", "exec"],
-                credential_names=["krab", "openai-main"],
+                credential_names=["openai-main"],
                 gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
             ),
             krab_identity_id=self.identity["id"],
@@ -222,7 +223,7 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
                 spec=AgentProfileSpec.create(
                     image="agent@sha256:abc",
                     command=["codex", "exec"],
-                    credential_names=["krab", future_name],
+                    credential_names=[future_name],
                     gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
                 ),
                 krab_identity_id=self.identity["id"],
@@ -275,7 +276,7 @@ class ProviderGrantMigrationTests(unittest.TestCase):
             database = Database(path)
             first = database.initialize()
             second = database.initialize()
-            self.assertEqual(first["schema_version"], 10)
+            self.assertEqual(first["schema_version"], 12)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["provider_grants"], 0)
@@ -289,6 +290,34 @@ class ProviderGrantMigrationTests(unittest.TestCase):
             self.assertIn("provider_grants", tables)
             self.assertIn("run_provider_grants", tables)
             self.assertIn("provider_invocations", tables)
+
+    def test_schema_twelve_adds_provider_dispatch_reservations_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "schema-eleven.db"
+            connection = sqlite3.connect(path)
+            connection.executescript(SCHEMA.removesuffix(PROVIDER_DISPATCH_SCHEMA))
+            connection.execute("PRAGMA user_version = 11")
+            connection.commit()
+            connection.close()
+            os.chmod(path, 0o600)
+
+            database = Database(path)
+            first = database.initialize()
+            second = database.initialize()
+
+            self.assertEqual(first["schema_version"], 12)
+            self.assertEqual(second, first)
+            with closing(database.connect()) as migrated:
+                table = migrated.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table' "
+                    "AND name = 'provider_dispatch_reservations'"
+                ).fetchone()
+                index = migrated.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'index' "
+                    "AND name = 'provider_dispatch_grant_expiry'"
+                ).fetchone()
+            self.assertIsNotNone(table)
+            self.assertIsNotNone(index)
 
 
 if __name__ == "__main__":

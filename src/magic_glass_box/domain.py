@@ -49,7 +49,11 @@ def require_string(
         raise ValidationError(f"{field} must not be empty")
     if "\x00" in value:
         raise ValidationError(f"{field} must not contain NUL")
-    if len(value.encode("utf-8")) > max_bytes:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValidationError(f"{field} must be valid UTF-8 text") from exc
+    if len(encoded) > max_bytes:
         raise ValidationError(f"{field} exceeds {max_bytes} UTF-8 bytes")
     return value
 
@@ -1311,6 +1315,8 @@ class AgentProfileSpec:
             raise ValidationError(
                 "gateway capabilities require gateway_only networking"
             )
+        if credential_tuple and network is not NetworkMode.GATEWAY_ONLY:
+            raise ValidationError("named authorities require gateway_only networking")
         interaction_capabilities = {
             GatewayCapability.INTERACTION_OPEN,
             GatewayCapability.INTERACTION_READ,
@@ -1321,6 +1327,16 @@ class AgentProfileSpec:
             raise ValidationError(
                 "interaction gateway capabilities require the krab credential"
             )
+        if "krab" in credential_tuple and not interaction_capabilities.intersection(
+            capability_tuple
+        ):
+            raise ValidationError(
+                "the krab authority requires an interaction gateway capability"
+            )
+        if set(credential_tuple).difference({"krab"}) and (
+            GatewayCapability.PROVIDER_INVOKE not in capability_tuple
+        ):
+            raise ValidationError("named provider authorities require provider.invoke")
         if GatewayCapability.PROVIDER_INVOKE in capability_tuple and not set(
             credential_tuple
         ).difference({"krab"}):

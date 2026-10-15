@@ -10,6 +10,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 
+from magic_glass_box.candidates import CandidateError, CandidateManifest
 from magic_glass_box.domain import (
     HandoffEnvelope,
     SupervisionPolicy,
@@ -19,9 +20,10 @@ from magic_glass_box.domain import (
     WorkLogEntry,
     WorkMemoryCheckpoint,
 )
+from magic_glass_box.results import ResultError, ResultManifest
 
 
-class PublishedSchemaParityTests(unittest.TestCase):
+class PublishedSchemaContractTests(unittest.TestCase):
     repository = Path(__file__).resolve().parents[1]
     contracts: tuple[tuple[str, Callable[[dict[str, Any]], object]], ...] = (
         ("handoff", HandoffEnvelope.from_mapping),
@@ -100,7 +102,7 @@ class PublishedSchemaParityTests(unittest.TestCase):
                 with self.subTest(name=name, candidate=candidate):
                     self.assert_rejected_by_both(validator, factory, candidate)
 
-    def test_path_list_and_timestamp_guards_match_runtime_validation(self) -> None:
+    def test_selected_structural_guards_are_shared_with_runtime(self) -> None:
         for name, field in (
             ("handoff", "artifacts"),
             ("work-log-entry", "artifacts"),
@@ -129,6 +131,110 @@ class PublishedSchemaParityTests(unittest.TestCase):
         duplicate_labels["labels"] = ["same", "same"]
         for candidate in (unsafe_item, invalid_timestamp, duplicate_labels):
             self.assert_rejected_by_both(validator, factory, candidate)
+
+    def test_runtime_semantic_guards_extend_portable_json_schema(self) -> None:
+        validator, example, factory = self.load("handoff")
+        duplicate_path = copy.deepcopy(example)
+        duplicate_path["artifacts"].append(
+            {
+                "path": duplicate_path["artifacts"][0]["path"],
+                "description": "A second description for the same path.",
+            }
+        )
+        multibyte_summary = copy.deepcopy(example)
+        multibyte_summary["summary"] = "é" * 3000
+        for candidate in (duplicate_path, multibyte_summary):
+            with self.subTest(case="handoff-runtime-only", candidate=candidate):
+                validator.validate(candidate)
+                with self.assertRaises(ValidationError):
+                    factory(candidate)
+
+        validator, example, factory = self.load("supervision-policy")
+        descending_schedule = copy.deepcopy(example)
+        descending_schedule["retry_backoff_seconds"] = [30, 5]
+        validator.validate(descending_schedule)
+        with self.assertRaises(ValidationError):
+            factory(descending_schedule)
+
+
+class ArtifactSchemaContractTests(unittest.TestCase):
+    repository = Path(__file__).resolve().parents[1]
+
+    def load(self, name: str) -> tuple[Draft202012Validator, dict[str, Any]]:
+        schema = json.loads(
+            (self.repository / "schemas" / f"{name}-v1.schema.json").read_text()
+        )
+        example = json.loads(
+            (self.repository / "examples" / f"{name}.json").read_text()
+        )
+        Draft202012Validator.check_schema(schema)
+        return Draft202012Validator(schema), example
+
+    def test_result_and_candidate_examples_match_runtime_contracts(self) -> None:
+        result_validator, result = self.load("result")
+        result_validator.validate(result)
+        parsed_result = ResultManifest.from_mapping(result)
+        self.assertEqual(parsed_result.to_dict(), result)
+
+        candidate_validator, candidate = self.load("candidate")
+        candidate_validator.validate(candidate)
+        parsed_candidate = CandidateManifest.from_mapping(candidate)
+        self.assertEqual(parsed_candidate.to_dict(), candidate)
+
+        runtime_candidate = CandidateManifest(
+            schema_version=1,
+            attempt_id="att_" + "1" * 32,
+            attempt_result_id="rsl_" + "2" * 32,
+            producer_run_id="run_" + "3" * 32,
+            project_id="boxp_" + "4" * 32,
+            context_version_id="ctx_" + "5" * 32,
+            work_thread_id="wth_" + "6" * 32,
+            base_revision="a" * 40,
+            result_content_sha256="b" * 64,
+            head_revision="c" * 40,
+            tree_revision="d" * 40,
+            object_format="sha1",
+        )
+        candidate_validator.validate(runtime_candidate.to_dict())
+
+    def test_artifact_schemas_and_runtime_reject_invalid_identity(self) -> None:
+        result_validator, result = self.load("result")
+        invalid_results = []
+        for path in ("../outside", "nested//file.txt", ".GIT/config"):
+            unsafe_result = copy.deepcopy(result)
+            unsafe_result["changes"][0]["path"] = path
+            invalid_results.append(unsafe_result)
+        inconsistent_add = copy.deepcopy(result)
+        inconsistent_add["changes"][0]["before"] = copy.deepcopy(
+            inconsistent_add["changes"][0]["after"]
+        )
+        invalid_results.append(inconsistent_add)
+        for invalid_result in invalid_results:
+            with self.subTest(invalid_result=invalid_result):
+                with self.assertRaises(SchemaValidationError):
+                    result_validator.validate(invalid_result)
+                with self.assertRaises(ResultError):
+                    ResultManifest.from_mapping(invalid_result)
+
+        candidate_validator, candidate = self.load("candidate")
+        wrong_format = copy.deepcopy(candidate)
+        wrong_format["base_revision"] = "f" * 64
+        with self.assertRaises(SchemaValidationError):
+            candidate_validator.validate(wrong_format)
+        with self.assertRaises(CandidateError):
+            CandidateManifest.from_mapping(wrong_format)
+
+    def test_result_symlink_containment_is_a_runtime_semantic_guard(self) -> None:
+        validator, result = self.load("result")
+        escaping_symlink = copy.deepcopy(result)
+        escaping_symlink["changes"][0]["after"] = {
+            "kind": "symlink",
+            "target": "../../outside",
+        }
+
+        validator.validate(escaping_symlink)
+        with self.assertRaises(ResultError):
+            ResultManifest.from_mapping(escaping_symlink)
 
 
 if __name__ == "__main__":

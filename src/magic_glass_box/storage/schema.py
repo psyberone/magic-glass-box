@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1109,6 +1109,88 @@ BEGIN
 END;
 """
 
+CANDIDATE_SCHEMA = """
+CREATE TABLE integration_candidates (
+    id TEXT PRIMARY KEY,
+    attempt_result_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    manifest_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    context_version_id TEXT NOT NULL,
+    work_thread_id TEXT NOT NULL,
+    producer_run_id TEXT NOT NULL,
+    producer_attempt_id TEXT NOT NULL,
+    base_revision TEXT NOT NULL,
+    head_revision TEXT NOT NULL,
+    tree_revision TEXT NOT NULL,
+    object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+    result_content_sha256 TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (attempt_result_id)
+        REFERENCES attempt_results(id) ON DELETE RESTRICT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (context_version_id)
+        REFERENCES project_context_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (producer_run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (producer_attempt_id)
+        REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (object_format = 'sha1'
+            AND length(base_revision) = 40
+            AND length(head_revision) = 40
+            AND length(tree_revision) = 40)
+        OR
+        (object_format = 'sha256'
+            AND length(base_revision) = 64
+            AND length(head_revision) = 64
+            AND length(tree_revision) = 64)
+    )
+) STRICT;
+
+CREATE INDEX integration_candidate_thread_created
+    ON integration_candidates(work_thread_id, created_at DESC, id DESC);
+CREATE INDEX integration_candidate_project_created
+    ON integration_candidates(project_id, created_at DESC, id DESC);
+CREATE INDEX integration_candidate_run_created
+    ON integration_candidates(producer_run_id, created_at DESC, id DESC);
+CREATE INDEX integration_candidate_created
+    ON integration_candidates(created_at DESC, id DESC);
+
+CREATE TRIGGER integration_candidate_immutable_update
+BEFORE UPDATE ON integration_candidates
+BEGIN
+    SELECT RAISE(ABORT, 'integration candidates are immutable');
+END;
+CREATE TRIGGER integration_candidate_immutable_delete
+BEFORE DELETE ON integration_candidates
+BEGIN
+    SELECT RAISE(ABORT, 'integration candidates cannot be deleted');
+END;
+"""
+
+PROVIDER_DISPATCH_SCHEMA = """
+CREATE TABLE provider_dispatch_reservations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    provider_grant_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    CHECK (expires_at > reserved_at)
+) STRICT;
+
+CREATE INDEX provider_dispatch_grant_expiry
+    ON provider_dispatch_reservations(provider_grant_id, expires_at);
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -1120,6 +1202,8 @@ SCHEMA = (
     + EXECUTION_INTEGRITY_SCHEMA
     + RUN_REPLACEMENT_SCHEMA
     + SUPERVISION_SCHEMA
+    + CANDIDATE_SCHEMA
+    + PROVIDER_DISPATCH_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -1131,4 +1215,6 @@ MIGRATIONS = {
     7: EXECUTION_INTEGRITY_SCHEMA,
     8: RUN_REPLACEMENT_SCHEMA,
     9: SUPERVISION_SCHEMA,
+    10: CANDIDATE_SCHEMA,
+    11: PROVIDER_DISPATCH_SCHEMA,
 }

@@ -42,6 +42,7 @@ class ScalarValidationTests(unittest.TestCase):
             (7, "must be text"),
             ("", "must not be empty"),
             ("a\x00b", "must not contain NUL"),
+            ("\ud800", "valid UTF-8"),
             ("é", "exceeds 1 UTF-8 bytes"),
         ):
             with (
@@ -240,16 +241,15 @@ class AgentProfileTests(unittest.TestCase):
         self.assertEqual(profile.credential_names, ("krab", "openai-main"))
         self.assertEqual(profile.gateway_capabilities, tuple(GatewayCapability))
 
-    def test_profile_uses_argv_and_named_credentials(self) -> None:
+    def test_profile_uses_argv_without_implicit_authority(self) -> None:
         profile = AgentProfileSpec.from_mapping(
             {
                 "image": "agent@sha256:abc",
                 "command": ["codex", "exec"],
-                "credential_names": ["gh", "krab"],
             }
         )
         self.assertEqual(profile.command, ("codex", "exec"))
-        self.assertEqual(profile.credential_names, ("gh", "krab"))
+        self.assertEqual(profile.credential_names, ())
         self.assertEqual(profile.workspace_mode, WorkspaceMode.COPY_ON_WRITE)
         self.assertEqual(profile.network_mode, NetworkMode.GATEWAY_ONLY)
         self.assertEqual(profile.gateway_capabilities, ())
@@ -258,12 +258,47 @@ class AgentProfileTests(unittest.TestCase):
             profile.to_dict(),
             {
                 "command": ["codex", "exec"],
-                "credential_names": ["gh", "krab"],
+                "credential_names": [],
                 "image": "agent@sha256:abc",
                 "network_mode": "gateway_only",
                 "workspace_mode": "copy_on_write",
             },
         )
+
+    def test_named_authority_requires_a_matching_gateway_capability(self) -> None:
+        cases = (
+            (
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "network_mode": "none",
+                    "credential_names": ["krab"],
+                },
+                "gateway_only",
+            ),
+            (
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "credential_names": ["provider-main"],
+                },
+                "provider.invoke",
+            ),
+            (
+                {
+                    "image": "agent",
+                    "command": ["run"],
+                    "credential_names": ["krab"],
+                },
+                "interaction gateway",
+            ),
+        )
+        for value, message in cases:
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValidationError, message),
+            ):
+                AgentProfileSpec.from_mapping(value)
 
     def test_profile_pins_a_runtime_adapter_without_changing_legacy_digests(
         self,
@@ -300,7 +335,7 @@ class AgentProfileTests(unittest.TestCase):
             {
                 "image": "agent@sha256:abc",
                 "command": ["agent"],
-                "credential_names": ["krab", "openai-main"],
+                "credential_names": ["openai-main"],
                 "gateway_capabilities": ["provider.invoke"],
             }
         )
@@ -313,7 +348,6 @@ class AgentProfileTests(unittest.TestCase):
                 {
                     "image": "agent",
                     "command": ["run"],
-                    "credential_names": ["krab"],
                     "gateway_capabilities": ["provider.invoke"],
                 }
             )
@@ -324,7 +358,7 @@ class AgentProfileTests(unittest.TestCase):
             "command": ["codex"],
             "runtime_adapter": "codex",
             "runtime_provider_grant": "openai-main",
-            "credential_names": ["krab", "openai-main"],
+            "credential_names": ["openai-main"],
             "gateway_capabilities": ["run.describe", "provider.invoke"],
         }
         profile = AgentProfileSpec.from_mapping(valid)

@@ -135,12 +135,19 @@ class FakeResultStore:
         self.root = root
         self.stage_error: Exception | None = None
         self.capture_error: Exception | None = None
-        self.stage_calls: list[tuple[str, Path, str]] = []
+        self.stage_calls: list[tuple[str, Path, str, tuple[str, ...]]] = []
         self.capture_calls: list[tuple[str, Path]] = []
         self.discard_calls: list[str] = []
 
-    def stage(self, attempt_id: str, workspace: Path, revision: str) -> None:
-        self.stage_calls.append((attempt_id, workspace, revision))
+    def stage(
+        self,
+        attempt_id: str,
+        workspace: Path,
+        revision: str,
+        *,
+        gitlinks: tuple[str, ...] = (),
+    ) -> None:
+        self.stage_calls.append((attempt_id, workspace, revision, gitlinks))
         if self.stage_error is not None:
             raise self.stage_error
 
@@ -291,7 +298,6 @@ class RunCoordinatorTests(unittest.TestCase):
             self.database,
             self.executor,
             self.workspaces,
-            PrivateFileCredentialResolver(),
             self.gateways,
             self.results,
             orchestrator_id="orchestrator-test",
@@ -383,7 +389,7 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(attempt["result"]["manifest"]["changes"], [])
         self.assertEqual(
             self.results.stage_calls,
-            [(attempt["id"], self.workspaces.root / run["id"], COMMIT)],
+            [(attempt["id"], self.workspaces.root / run["id"], COMMIT, ())],
         )
         self.assertEqual(
             self.results.capture_calls,
@@ -482,7 +488,6 @@ class RunCoordinatorTests(unittest.TestCase):
             self.database,
             replacement_executor,
             replacement_workspaces,
-            PrivateFileCredentialResolver(),
             self.gateways,
             self.results,
             orchestrator_id="orchestrator-replacement",
@@ -733,7 +738,6 @@ class RunCoordinatorTests(unittest.TestCase):
             self.database,
             self.executor,
             self.workspaces,
-            PrivateFileCredentialResolver(),
             self.gateways,
             self.results,
             orchestrator_id="orchestrator-cancel-test",
@@ -765,7 +769,6 @@ class RunCoordinatorTests(unittest.TestCase):
             self.database,
             self.executor,
             self.workspaces,
-            PrivateFileCredentialResolver(),
             self.gateways,
             self.results,
             orchestrator_id="orchestrator-cancel-race-test",

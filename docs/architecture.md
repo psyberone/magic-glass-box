@@ -4,8 +4,8 @@
 
 Magic Glass Box is the trusted control plane. It owns local users, Krab
 identity bindings, versioned project context, versioned agent profiles, run
-lifecycle, credential policy, container lifecycle, and pending human
-interactions.
+lifecycle, credential policy, container lifecycle, pending human interactions,
+trusted candidate identity, and integration semantics.
 
 Imitation Krab is the communications authority. It owns Krab users, tokens,
 project membership and roles, sessions, items, work claims, and message
@@ -19,13 +19,50 @@ receives reusable credentials. It also never receives the Docker socket, a Krab
 admin token, the control-plane database, another run's workspace, or the source
 repository's Git metadata.
 
-Optional integration sidecars are trusted credential actuators, not workers.
-They contain provider-specific GitHub, GitLab, or other forge mechanics behind
-a small versioned operation protocol. A user may explicitly expose a local
-configuration directory such as `GH_CONFIG_DIR` to the selected sidecar only;
-it is never mounted into an agent container or copied into control-plane state.
-Magic Glass Box remains responsible for deciding whether a specific operation,
-repository, account, and exact revision are authorized.
+Workspace preparation reads one pinned commit through sanitized Git plumbing:
+one bounded tree listing and raw blob reads with verified sizes and SHA-1 or
+SHA-256 object identities. Workers receive exact committed regular-file bytes,
+executable modes, directories, and validated UTF-8 relative symlinks. Attributes
+are inert data: checkout filters, CRLF and ident conversion, and export-subst
+never run; export-ignore files remain visible and LFS pointers remain pointers.
+Git-links appear as empty directories without fetching or recursing into
+submodules. The complete path structure and symlink graph are validated before
+materialization, with ordinary files and directories created before symlinks.
+Git commands use a fresh private environment, disable global/system config,
+hooks, fsmonitor, replacements, prompting, lazy fetching, and transports, and
+bound output, tree entries, total blob bytes, and command execution time.
+
+Planned optional service sidecars are trusted credential actuators, not
+workers; no sidecar protocol or connector is implemented today. The design
+places provider-specific GitHub, GitLab, Jira, or other service mechanics
+behind a small versioned semantic-capability protocol. A user could explicitly
+expose a local configuration directory such as `GH_CONFIG_DIR` to the selected
+sidecar only; it would never be mounted into an agent container or copied into
+control-plane state. Magic Glass Box would remain responsible for deciding
+whether a specific operation, mapping, account, scope, and exact revision are
+authorized.
+
+## Threat-model rule: outside scary, inside safe
+
+MGB treats every input crossing into the control plane as adversarial until it
+has been validated and published: source repositories, worker workspaces,
+import documents, message metadata, provider responses, and sidecar responses.
+Those boundaries receive bounded parsing, path and type validation, capability
+checks, and fail-closed publication.
+
+After publication, MGB treats its private state directory, SQLite database,
+retained results, derived candidate caches, and isolated containers as trusted
+control-plane state. Inside that boundary it relies on ordinary permissions,
+transactions, immutable records, digests, atomic replacement, and file locks.
+It does not repeatedly defend against a hostile process with the operator's UID
+rewriting `.mgb` between system calls.
+
+The host, container runtime, kernel, and operator account are part of the
+trusted computing base. If they are compromised, MGB cannot restore a reliable
+security boundary by adding application-level inode races, PID leases, or
+per-read database re-verification. Panopticon is intentionally different: it
+may be dropped into a hostile repository on a hostile machine, so its own
+threat model must not be generalized to MGB.
 
 ## Trust flow
 
@@ -39,10 +76,10 @@ Magic Glass Box ------ stable IDs / metadata ----> imitation-krab
       |
       <---- structured events/questions -----+
       |
-      +---- bounded authorized operation ----> optional forge sidecar
+      +---- durable authorized action -----> optional service sidecar
                                                     |
                                                     v
-                                             GitHub / GitLab / forge
+                                          GitHub / GitLab / Jira / service
 ```
 
 Krab metadata is structurally validated. Work-item titles are retained as
@@ -82,7 +119,9 @@ project-activity projection.
   than deletes the thread. Explicit reopen creates an empty next generation;
   imports alone never reactivate work.
 - A provider-capable run also pins each exact grant ID named by its profile.
-  Revocation and expiry remain live kill switches for already-pinned runs.
+  Revocation and expiry remain live kill switches for already-pinned runs. A
+  transactional dispatch reservation is the linearization point and enforces
+  grant concurrency across control-plane processes.
 - The requested source revision is resolved to a full Git commit and persisted
   in the transition to `running`.
 - Each active attempt has one orchestrator owner, heartbeat, and expiring
@@ -95,6 +134,15 @@ project-activity projection.
 - Every started attempt binds one immutable result manifest and its
   content-addressed blobs before its workspace is removed. Results are inert
   evidence until an operator explicitly applies them to a checkout.
+- An operator may promote one strictly evidenced successful, zero-exit attempt
+  result into one immutable trusted candidate. Its record, introduced in
+  database schema v11, binds project, work thread, producing run and attempt,
+  pinned context, exact base/head/tree, Git object format, result digest, and
+  creator. Candidate construction writes one shared private bare repository
+  per project and object format, never the source checkout. The bare repository
+  is a derived cache; the immutable ledger and retained result can reconstruct
+  it exactly when the pinned base remains cached or available from the project
+  repository.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -142,8 +190,17 @@ duplicate private request.
 split beneath `magic_glass_box.storage` into schema and migration ownership,
 SQLite connection ownership, and stores for the catalog, work-item lifecycle,
 work memory, runs, attempts, interactions and provider activity, retained
-artifacts, supervision, and composite query projections. The storage split
-preserved schema v9; autonomous supervision advances it to schema v10.
+artifacts, trusted candidates, supervision, and composite query projections.
+The storage split preserved schema v9; autonomous supervision advanced it to
+schema v10, and trusted candidates plus their query-backed indexes introduced
+schema v11. Cross-process provider dispatch reservations advanced it to schema
+v12.
+
+The filesystem trust boundary ends when untrusted worker output is captured.
+Private control-plane database, result, and candidate files are then trusted
+state protected by ordinary permissions, transactions, digests, atomic writes,
+and file locks. MGB does not repeatedly model its own state directory as a
+same-user adversarial filesystem.
 
 Each mutation continues to own its complete SQLite transaction. Composite read
 projections open one explicit read transaction and pass that connection to
@@ -204,10 +261,13 @@ contains a canonical manifest plus deduplicated changed-file blobs, never a Git
 repository or an executable action. Applying a result verifies the database
 digest, checks every affected path against its captured baseline before making
 any change, and then reconstructs files, safe relative symlinks, deletions, and
-executable modes. It never commits, pushes, opens a pull request, or needs forge
-credentials. A future integration state machine may authorize those effects
-through an optional sidecar, but neither the result artifact nor a worker gains
-that authority. See [results.md](results.md).
+executable modes. Apply requires a quiescent target and is not one atomic
+whole-tree filesystem transaction; a failure after mutation begins may require
+operator recovery. It never pushes, opens a pull request, or needs service
+credentials. An operator may instead materialize a deterministic candidate
+commit in the separate private candidate store; neither the result artifact nor
+a worker gains that authority. See [results.md](results.md) and
+[candidates.md](candidates.md).
 
 The Docker boundary rejects images with Dockerfile-declared volumes, validates
 host paths before mounting them, runs as the host's non-root numeric identity,
@@ -249,12 +309,16 @@ run outside the control plane and may only submit content; project selection,
 assignment, profiles, credentials, network policy, and lifecycle remain trusted
 local decisions. Imported content is therefore never an authority channel.
 
-Provider-specific outbound effects belong to optional sidecars. A worker asks
-through a narrow `forge.*` gateway operation; the core checks durable gates and
-pinned authority, then passes one bounded request to the sidecar. The sidecar
-returns an idempotent receipt such as a remote change ID or landed revision.
-Without a configured sidecar, the same state machine stops at a human-executable
-command plan rather than silently weakening the gate.
+Provider-specific operations are planned for optional service sidecars; none of
+this integration state or connector surface is implemented today. The design
+makes integration effects durable supervisor work: a worker may provide a
+result, review, or bounded proposal, but cannot turn that proposal into landing
+authority. The core would check the exact candidate, gates, mapping, account,
+scope, and limits before passing one bounded operation to a sidecar. Separately
+authorized worker reads would remain capability-scoped and normalized. Without
+a configured sidecar, the planned integration state machine would stop at a
+structured human-executable plan and record the assurance the actuator actually
+established.
 
 ## Planned slices
 
@@ -264,8 +328,12 @@ exit proofs. The durable interaction path, run-scoped gateway, scoped provider
 broker, structured worker replacement, multi-agent work memory, work-item
 completion, execution integrity, the redacted interactive control room, and the
 storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
-autonomous supervision, and aging escalation are complete. Integration gate
-state and provider-neutral sidecars are next. See
+autonomous supervision, and aging escalation are complete. Trusted candidate
+materialization is implemented. Exact-input gates
+and the manual integration queue come next; optional provider-neutral sidecars
+follow the budget and destructive-continuity phases. See
+[integration-gates.md](integration-gates.md),
+[service-sidecars.md](service-sidecars.md),
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 [runtime-adapters.md](runtime-adapters.md), [supervision.md](supervision.md),
 and [work-memory.md](work-memory.md).

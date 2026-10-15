@@ -12,6 +12,12 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from .candidates import (
+    DEFAULT_GIT_TIMEOUT_SECONDS,
+    CandidateError,
+    GitCandidateStore,
+    default_candidate_root,
+)
 from .control_room_web import build_control_room_server
 from .credentials import CredentialError
 from .db import Database, StorageError, default_db_path
@@ -82,6 +88,10 @@ def _history_limit(value: str) -> int:
     if not 0 <= parsed <= 500:
         raise argparse.ArgumentTypeError("must be an integer between 0 and 500")
     return parsed
+
+
+def _candidate_limit(value: str) -> int:
+    return _bounded_integer(value, minimum=1, maximum=500)
 
 
 def _port(value: str) -> int:
@@ -466,11 +476,62 @@ def build_parser() -> argparse.ArgumentParser:
     )
     result_apply.add_argument("attempt_id")
     result_apply.add_argument("--repository", required=True, type=Path)
+
+    candidate = commands.add_parser(
+        "candidate", help="materialize and inspect trusted candidates"
+    )
+    candidate_commands = candidate.add_subparsers(
+        dest="candidate_command", required=True
+    )
+    candidate_create = candidate_commands.add_parser(
+        "create", help="materialize one retained result as a candidate"
+    )
+    candidate_create.add_argument("attempt_id")
+    candidate_create.add_argument("--created-by", required=True)
+    candidate_create.add_argument(
+        "--operation-timeout",
+        dest="candidate_timeout",
+        type=_positive_seconds,
+        default=DEFAULT_GIT_TIMEOUT_SECONDS,
+        help="maximum candidate operation time in seconds (default: %(default)s)",
+    )
+    candidate_show = candidate_commands.add_parser(
+        "show", help="verify and show one trusted candidate"
+    )
+    candidate_show.add_argument("candidate_id")
+    candidate_show.add_argument(
+        "--operation-timeout",
+        dest="candidate_timeout",
+        type=_positive_seconds,
+        default=DEFAULT_GIT_TIMEOUT_SECONDS,
+        help="maximum candidate operation time in seconds (default: %(default)s)",
+    )
+    candidate_list = candidate_commands.add_parser(
+        "list", help="list recent durable candidates without reading Git objects"
+    )
+    candidate_scope = candidate_list.add_mutually_exclusive_group()
+    candidate_scope.add_argument("--project", dest="candidate_project_key")
+    candidate_scope.add_argument("--run", dest="candidate_run_id")
+    candidate_scope.add_argument("--work-thread", dest="candidate_work_thread_id")
+    candidate_list.add_argument(
+        "--limit",
+        type=_candidate_limit,
+        default=100,
+        help="maximum candidates to return (1-500; default: 100)",
+    )
     return parser
 
 
 def _build_result_store(control: ControlPlane) -> WorkspaceResultStore:
     return WorkspaceResultStore(default_result_root(control.database.path))
+
+
+def _build_candidate_store(
+    control: ControlPlane, *, timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS
+) -> GitCandidateStore:
+    return GitCandidateStore(
+        default_candidate_root(control.database.path), timeout=timeout
+    )
 
 
 def _build_run_coordinator(
@@ -487,7 +548,6 @@ def _build_run_coordinator(
         control.database,
         DockerExecutor(DockerCLI(run_timeout=run_timeout)),
         workspaces,
-        control.credential_resolver,
         FileGatewayManager(
             default_gateway_root(control.database.path),
             control,
@@ -580,6 +640,7 @@ def _dispatch(
     control: ControlPlane,
     coordinator: RunCoordinator | None = None,
     result_store: WorkspaceResultStore | None = None,
+    candidate_store: GitCandidateStore | None = None,
 ) -> object:
     if args.command == "init":
         return control.initialize()
@@ -760,6 +821,31 @@ def _dispatch(
                 args.repository,
                 expected_digest=stored["content_sha256"],
             )
+    if args.command == "candidate" and args.candidate_command == "list":
+        return control.list_candidates(
+            project_key=args.candidate_project_key,
+            producer_run_id=args.candidate_run_id,
+            work_thread_id=args.candidate_work_thread_id,
+            limit=args.limit,
+        )
+    if (
+        args.command == "candidate"
+        and result_store is not None
+        and candidate_store is not None
+    ):
+        if args.candidate_command == "create":
+            return control.create_candidate(
+                args.attempt_id,
+                created_by_handle=args.created_by,
+                result_store=result_store,
+                candidate_store=candidate_store,
+            )
+        if args.candidate_command == "show":
+            return control.get_candidate(
+                args.candidate_id,
+                result_store=result_store,
+                candidate_store=candidate_store,
+            )
     raise RuntimeError("unreachable command")
 
 
@@ -770,6 +856,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         coordinator = None
         result_store = None
+        candidate_store = None
         if args.command == "run" and args.run_command in {
             "cancel",
             "execute",
@@ -798,6 +885,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "result":
             result_store = _build_result_store(control)
+        elif args.command == "candidate" and args.candidate_command != "list":
+            result_store = _build_result_store(control)
+            candidate_store = _build_candidate_store(
+                control, timeout=args.candidate_timeout
+            )
         if (
             args.command == "control-room"
             and args.control_room_command == "serve"
@@ -810,8 +902,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             and coordinator is not None
         ):
             return _serve_supervisor(args, control, coordinator)
-        result = _dispatch(args, control, coordinator, result_store)
+        result = _dispatch(
+            args,
+            control,
+            coordinator,
+            result_store,
+            candidate_store,
+        )
     except (
+        CandidateError,
         CredentialError,
         ExecutionError,
         InputError,

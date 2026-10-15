@@ -932,7 +932,6 @@ def main(argv: list[str] | None = None) -> int:
                 database,
                 DockerExecutor(docker_engine),
                 WorkspaceManager(root / "workspaces", GitSnapshotter()),
-                resolver,
                 gateways,
                 result_store,
                 lease_seconds=30,

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:result:v1",
+  "title": "Magic Glass Box Retained Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["attempt_id", "changes", "schema_version", "source_revision"],
+  "properties": {
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^att_[0-9a-f]{32}$"
+    },
+    "changes": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "#/$defs/change" }
+    },
+    "schema_version": { "const": 1 },
+    "source_revision": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "mode", "sha256", "size"],
+      "properties": {
+        "kind": { "const": "file" },
+        "mode": { "enum": [420, 493] },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "symlink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target"],
+      "properties": {
+        "kind": { "const": "symlink" },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "state": {
+      "oneOf": [
+        { "$ref": "#/$defs/file" },
+        { "$ref": "#/$defs/symlink" },
+        { "type": "null" }
+      ]
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["after", "before", "operation", "path"],
+      "properties": {
+        "after": { "$ref": "#/$defs/state" },
+        "before": { "$ref": "#/$defs/state" },
+        "operation": { "enum": ["added", "deleted", "modified"] },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*(?:^|/)\\.[gG][iI][tT](?:/|$))(?!.*\/$).+$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "operation": { "const": "added" } },
+            "required": ["operation"]
+          },
+          "then": {
+            "properties": {
+              "before": { "type": "null" },
+              "after": { "not": { "type": "null" } }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "operation": { "const": "deleted" } },
+            "required": ["operation"]
+          },
+          "then": {
+            "properties": {
+              "before": { "not": { "type": "null" } },
+              "after": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "operation": { "const": "modified" } },
+            "required": ["operation"]
+          },
+          "then": {
+            "properties": {
+              "before": { "not": { "type": "null" } },
+              "after": { "not": { "type": "null" } }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

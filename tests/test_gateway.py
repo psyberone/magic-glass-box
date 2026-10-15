@@ -1039,6 +1039,19 @@ class FileGatewayManagerTests(unittest.TestCase):
         self.assertFalse(invalid_commit["ok"])
         self.assertIn("commit", invalid_commit["error"]["message"])
 
+        self.commit(endpoint.directory, raw, sequence=1)
+        deadline = time.monotonic() + 2
+        replayed = invalid_commit
+        while time.monotonic() < deadline:
+            replayed = json.loads(
+                (endpoint.directory / GATEWAY_RESPONSE_NAME).read_bytes()
+            )
+            if replayed != invalid_commit:
+                break
+            time.sleep(0.01)
+        self.assertFalse(replayed["ok"])
+        self.assertIn("not increasing", replayed["error"]["message"])
+
         valid = self.exchange(endpoint.directory, raw)
         self.assertTrue(valid["ok"])
         self.commit(endpoint.directory, raw, sequence=1)

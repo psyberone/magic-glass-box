@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..domain import (
@@ -21,6 +23,10 @@ from .errors import (
     NotFoundError,
     StorageError,
 )
+
+RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
+PROVIDER_GRANT_ID_RE = re.compile(r"^pgr_[0-9a-f]{32}$")
+PROVIDER_DISPATCH_ID_RE = re.compile(r"^pdr_[0-9a-f]{32}$")
 
 
 class InteractionStorage:
@@ -362,6 +368,200 @@ class InteractionStorage:
             raise ConflictError(f"provider grant is unavailable: {authority_name}")
         result["authority_name"] = authority_name
         return result
+
+    def reserve_provider_dispatch(
+        self,
+        run_id: str,
+        authority_name: str,
+        *,
+        expected_grant_id: str,
+        lease_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Atomically recheck authority and claim one grant concurrency slot."""
+
+        if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:
+            raise ValidationError("invalid run identifier")
+        authority_name = validate_provider_name(
+            authority_name, field="provider authority name"
+        )
+        if (
+            not isinstance(expected_grant_id, str)
+            or PROVIDER_GRANT_ID_RE.fullmatch(expected_grant_id) is None
+        ):
+            raise ValidationError("invalid provider grant identifier")
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int)
+            or not 1 <= lease_seconds <= 300
+        ):
+            raise ValidationError(
+                "provider dispatch lease_seconds must be between 1 and 300"
+            )
+        reservation_id = self.new_id("pdr")
+        now = self.now()
+        expires_at = (
+            datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)
+        ).isoformat(timespec="microseconds")
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM provider_dispatch_reservations WHERE expires_at <= ?",
+                    (now,),
+                )
+                row = connection.execute(
+                    "SELECT r.state AS run_state, pg.id AS grant_id, "
+                    "pg.state AS grant_state, pg.expires_at AS grant_expires_at, "
+                    "pg.policy_json, pg.content_sha256, ra.id AS attempt_id, "
+                    "ra.state AS attempt_state "
+                    "FROM runs r JOIN run_provider_grants rpg "
+                    "ON rpg.run_id = r.id JOIN provider_grants pg "
+                    "ON pg.id = rpg.provider_grant_id "
+                    "LEFT JOIN run_attempts ra ON ra.run_id = r.id "
+                    "AND ra.state IN ('preparing', 'running') "
+                    "WHERE r.id = ? AND rpg.authority_name = ?",
+                    (run_id, authority_name),
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(
+                        f"provider grant is not authorized for run: {authority_name}"
+                    )
+                if row["grant_id"] != expected_grant_id:
+                    raise ConflictError(
+                        f"provider grant is unavailable: {authority_name}"
+                    )
+                if (
+                    row["run_state"]
+                    not in (RunState.RUNNING.value, RunState.WAITING_FOR_INPUT.value)
+                    or row["attempt_state"] != "running"
+                ):
+                    raise ConflictError(f"run is not running: {row['run_state']}")
+                if row["grant_state"] != "active" or (
+                    row["grant_expires_at"] is not None
+                    and row["grant_expires_at"] <= now
+                ):
+                    raise ConflictError(
+                        f"provider grant is unavailable: {authority_name}"
+                    )
+                try:
+                    spec = ProviderGrantSpec.from_mapping(
+                        json.loads(row["policy_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored provider grant policy is invalid"
+                    ) from exc
+                if spec.digest != row["content_sha256"]:
+                    raise StorageError(
+                        "stored provider grant policy digest does not match"
+                    )
+                active = connection.execute(
+                    "SELECT COUNT(*) FROM provider_dispatch_reservations "
+                    "WHERE provider_grant_id = ? AND expires_at > ?",
+                    (expected_grant_id, now),
+                ).fetchone()[0]
+                if active >= spec.max_concurrency:
+                    connection.commit()
+                    return None
+                connection.execute(
+                    "INSERT INTO provider_dispatch_reservations "
+                    "(id, run_id, provider_grant_id, attempt_id, reserved_at, "
+                    "expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        reservation_id,
+                        run_id,
+                        expected_grant_id,
+                        row["attempt_id"],
+                        now,
+                        expires_at,
+                    ),
+                )
+                connection.commit()
+            except (NotFoundError, ConflictError, StorageError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("provider dispatch could not be reserved") from exc
+        return {
+            "id": reservation_id,
+            "run_id": run_id,
+            "provider_grant_id": expected_grant_id,
+            "attempt_id": row["attempt_id"],
+            "reserved_at": now,
+            "expires_at": expires_at,
+        }
+
+    def renew_provider_dispatch(
+        self,
+        reservation_id: str,
+        *,
+        lease_seconds: int,
+    ) -> dict[str, Any]:
+        """Extend one still-live dispatch claim without resurrecting it."""
+
+        if (
+            not isinstance(reservation_id, str)
+            or PROVIDER_DISPATCH_ID_RE.fullmatch(reservation_id) is None
+        ):
+            raise ValidationError("invalid provider dispatch identifier")
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int)
+            or not 1 <= lease_seconds <= 300
+        ):
+            raise ValidationError(
+                "provider dispatch lease_seconds must be between 1 and 300"
+            )
+        now = self.now()
+        expires_at = (
+            datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)
+        ).isoformat(timespec="microseconds")
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                renewed = connection.execute(
+                    "UPDATE provider_dispatch_reservations SET expires_at = ? "
+                    "WHERE id = ? AND expires_at > ?",
+                    (expires_at, reservation_id, now),
+                ).rowcount
+                if renewed != 1:
+                    raise ConflictError("provider dispatch reservation is unavailable")
+                row = connection.execute(
+                    "SELECT id, run_id, provider_grant_id, attempt_id, "
+                    "reserved_at, expires_at FROM provider_dispatch_reservations "
+                    "WHERE id = ?",
+                    (reservation_id,),
+                ).fetchone()
+                if row is None:
+                    raise StorageError("provider dispatch renewal was not retained")
+                connection.commit()
+            except (ConflictError, StorageError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("provider dispatch could not be renewed") from exc
+        return dict(row)
+
+    def release_provider_dispatch(self, reservation_id: str) -> bool:
+        if (
+            not isinstance(reservation_id, str)
+            or PROVIDER_DISPATCH_ID_RE.fullmatch(reservation_id) is None
+        ):
+            raise ValidationError("invalid provider dispatch identifier")
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                removed = connection.execute(
+                    "DELETE FROM provider_dispatch_reservations WHERE id = ?",
+                    (reservation_id,),
+                ).rowcount
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("provider dispatch could not be released") from exc
+        return removed == 1
 
     def list_run_provider_grants(self, run_id: str) -> list[dict[str, Any]]:
         with self._read_snapshot() as connection:

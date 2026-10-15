@@ -78,7 +78,6 @@ class DatabaseTests(unittest.TestCase):
         self.spec = AgentProfileSpec.create(
             image="agent@sha256:abc",
             command=["codex", "exec"],
-            credential_names=["krab"],
         )
         self.profile = self.database.create_agent_profile(
             name="Codex Worker",
@@ -234,9 +233,25 @@ class DatabaseTests(unittest.TestCase):
     def test_database_is_private_and_reports_counts(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 10)
+        self.assertEqual(status["schema_version"], 12)
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
+
+    def test_status_rejects_broken_foreign_key_state(self) -> None:
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute(
+                "INSERT INTO user_krab_bindings "
+                "(user_id, krab_identity_id, created_at) VALUES (?, ?, ?)",
+                ("boxu_" + "f" * 32, self.identity["id"], "then"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(StorageError, "foreign key"):
+            self.database.status()
 
     def test_default_database_follows_documented_environment_precedence(self) -> None:
         home = Path(self.temporary.name) / "home"
@@ -360,7 +375,6 @@ class DatabaseTests(unittest.TestCase):
             spec=AgentProfileSpec.create(
                 image="agent@sha256:def",
                 command=["codex", "exec", "--new"],
-                credential_names=["krab"],
             ),
             krab_identity_id=self.identity["id"],
             created_by=self.user["id"],

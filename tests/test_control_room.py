@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from magic_glass_box.candidates import CandidateManifest
 from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.credentials import CredentialError
 from magic_glass_box.db import Database, StorageError
@@ -133,7 +134,7 @@ class ControlRoomTests(unittest.TestCase):
             spec=AgentProfileSpec.create(
                 image="agent@sha256:abc",
                 command=["codex", "exec", "--secret-command-arg"],
-                credential_names=["krab", "openai-main"],
+                credential_names=["openai-main"],
                 gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
             ),
             krab_identity_id=self.identity["id"],
@@ -241,7 +242,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 10)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], 12)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",
@@ -307,6 +308,7 @@ class ControlRoomTests(unittest.TestCase):
                 "attempts",
                 "interactions",
                 "retained_results",
+                "candidates",
                 "run_authorities",
                 "supervisor_actions",
                 "escalations",
@@ -338,6 +340,7 @@ class ControlRoomTests(unittest.TestCase):
                 "interactions",
                 "assignments",
                 "retained_results",
+                "candidates",
                 "supervisor_actions",
                 "escalations",
                 "attention",
@@ -461,9 +464,7 @@ class ControlRoomTests(unittest.TestCase):
         self.assertEqual(snapshot["profiles"][0]["image"], "agent@sha256:abc")
         self.assertEqual(snapshot["profiles"][0]["runtime_adapter"], "command")
         self.assertIsNone(snapshot["profiles"][0]["runtime_provider_grant"])
-        self.assertEqual(
-            snapshot["profiles"][0]["credential_names"], ["krab", "openai-main"]
-        )
+        self.assertEqual(snapshot["profiles"][0]["credential_names"], ["openai-main"])
         self.assertEqual(
             snapshot["profiles"][0]["gateway_capabilities"], ["provider.invoke"]
         )
@@ -594,12 +595,14 @@ class ControlRoomTests(unittest.TestCase):
                 "attempt_count",
                 "interaction_count",
                 "retained_result_count",
+                "candidate_count",
                 "authority_count",
             },
         )
         self.assertEqual(snapshot["runs"][0]["attempt_count"], 1)
         self.assertEqual(snapshot["runs"][0]["interaction_count"], 1)
         self.assertEqual(snapshot["runs"][0]["retained_result_count"], 1)
+        self.assertEqual(snapshot["runs"][0]["candidate_count"], 0)
         self.assertEqual(snapshot["runs"][0]["authority_count"], 1)
         self.assertFalse(snapshot["runs"][0]["supervision_policy"]["auto_execute"])
         self.assertEqual(snapshot["supervisor_actions"], [])
@@ -1508,11 +1511,74 @@ class ControlRoomTests(unittest.TestCase):
             "attempts",
             "interactions",
             "retained_results",
+            "candidates",
             "run_authorities",
             "supervisor_actions",
             "escalations",
         ):
             self.assertEqual(snapshot[collection], [])
+
+    def test_snapshot_surfaces_candidate_identity_without_manifest_content(
+        self,
+    ) -> None:
+        run, attempt = self.start_run()
+        result = self.database.record_attempt_result(
+            attempt["id"],
+            ResultManifest(1, attempt["id"], "a" * 40, ()),
+        )
+        self.database.complete_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id="sha256:" + "c" * 64,
+        )
+        source = self.database.get_candidate_source(attempt["id"])
+        candidate = self.database.create_candidate(
+            CandidateManifest(
+                schema_version=1,
+                attempt_id=attempt["id"],
+                attempt_result_id=result["id"],
+                producer_run_id=run["id"],
+                project_id=source["project_id"],
+                context_version_id=source["context_version_id"],
+                work_thread_id=source["work_thread_id"],
+                base_revision="a" * 40,
+                result_content_sha256=result["content_sha256"],
+                head_revision="b" * 40,
+                tree_revision="c" * 40,
+                object_format="sha1",
+            ),
+            created_by=self.user["id"],
+        )
+
+        snapshot = ControlRoom(self.database).snapshot()
+
+        self.assertEqual(snapshot["summary"]["candidates"], 1)
+        self.assertEqual(snapshot["runs"][0]["candidate_count"], 1)
+        self.assertEqual(
+            snapshot["candidates"],
+            [
+                {
+                    "id": candidate["id"],
+                    "attempt_result_id": result["id"],
+                    "schema_version": 1,
+                    "project_id": source["project_id"],
+                    "context_version_id": source["context_version_id"],
+                    "work_thread_id": source["work_thread_id"],
+                    "producer_run_id": run["id"],
+                    "producer_attempt_id": attempt["id"],
+                    "base_revision": "a" * 40,
+                    "head_revision": "b" * 40,
+                    "tree_revision": "c" * 40,
+                    "object_format": "sha1",
+                    "result_content_sha256": result["content_sha256"],
+                    "content_sha256": candidate["content_sha256"],
+                    "created_by_handle": "operator",
+                    "created_at": candidate["created_at"],
+                }
+            ],
+        )
+        self.assertNotIn("manifest", snapshot["candidates"][0])
 
     def test_snapshot_surfaces_durable_supervisor_work_without_private_content(
         self,

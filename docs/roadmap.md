@@ -87,6 +87,8 @@ gateway.
   worker.
 - Record grants, revocation, and expiry as metadata without storing secret
   values.
+- Atomically recheck live authority and reserve provider capacity immediately
+  before dispatch, enforcing concurrency across control-plane processes.
 
 **Exit proof:** a worker with Docker networking disabled can use one permitted
 provider/model through the gateway while undeclared providers, destinations,
@@ -266,8 +268,7 @@ content, and transient model output remain outside durable worker state.
 
 **Exit proof:** the golden-path demonstration in the product thesis succeeds
 with two interchangeable worker implementations, including a real
-interaction/handoff/replacement cycle, under the end-of-phase review gate in
-`CONTRIBUTING.md`.
+interaction/handoff/replacement cycle.
 
 ## Milestone 6: autonomous supervision and escalation
 
@@ -310,46 +311,128 @@ remediation added recursive symlink-graph containment at capture, archive, and
 pre-apply boundaries, full supervisor retry spacing with independent lease
 heartbeats, and privacy-safe daemon diagnostics.
 
-## Milestone 7: integration state and forge sidecars
+## Milestone 7A: trusted candidate kernel
+
+**Status: complete**
+
+- Materialize one immutable Git candidate from a database-bound retained result
+  and its pinned source commit.
+- Give the candidate a real parent commit and exact tree/head object IDs without
+  applying the result to the operator checkout.
+- Construct the tree through a private index and verified Git objects. Do not
+  run source-local hooks or filters, recurse into submodules, or copy untracked
+  operator files.
+- Persist the candidate's project, work thread, producing run and attempt,
+  context revision, base, head, tree, object format, result digest, and creator
+  in the immutable candidate ledger introduced by schema v11, with query-backed
+  indexes.
+- Check succeeded/zero-exit attempt and result authority at candidate creation;
+  later reads trust the immutable ledger rather than replaying completion
+  evidence on every query.
+- Share one derived cache per project and object format; make creation
+  idempotent, reconstruct a missing cache or ref from SQLite plus the retained
+  result and the pinned base (cached or read from the project repository), and
+  use targeted commit/tree inspection instead of whole-store fsck.
+- List candidates by recent activity, project, producing run, or work thread
+  without opening the result or Git stores.
+
+**Exit proof:** `candidate create` turns a retained result into a deterministic
+child of its pinned source commit; addition, modification, deletion, executable
+mode, and every file/directory/symlink transition are represented in raw Git
+objects. LFS remains a pointer and checkout presentation such as CRLF is not
+hydrated. Repeating creation returns the same record, source-local hooks and
+filters do not execute, dirty operator files do not enter the tree, and neither
+the source checkout nor a hosting service is modified. Common umasks work,
+complete cache loss is repaired deterministically while the pinned source
+commit remains available, and candidate listing reads only the durable ledger.
+See
+[candidates.md](candidates.md).
+
+The 2026-10-14 end-of-slice internal checkpoint closed M7A after the frozen
+tree passed 556 tests, 87% branch coverage, the 25-test real Git/SQLite
+candidate proof, and a clean 25,686-mutant run with 21,558 killed (83.93%).
+The review found and corrected hostile flat-directory enumeration, source
+checkout proof gaps, and cache-recovery documentation that overstated what can
+be rebuilt without the pinned base. Complete cache loss still requires that
+base to remain available from the project repository. M7B was not started as
+part of this checkpoint.
+
+## Milestone 7B: exact-input gate ledger
 
 **Status: planned**
 
-- Model candidate base/head revisions, exact-head independent review, CI and
-  approval gates, inter-work-item landing order, and durable landing receipts.
-- Invalidate head-bound gates when a candidate changes and enqueue a re-fold
-  when its pinned base is no longer current.
-- Keep provider-specific GitHub, GitLab, and future forge mechanics out of the
-  core. Optional pinned sidecars implement a small versioned operation protocol.
-- Give a sidecar—not a worker—the user's explicitly approved configuration
-  directory such as `GH_CONFIG_DIR`. The worker receives only named `forge.*`
-  capabilities through the existing run-scoped gateway.
-- Have Magic Glass Box authorize the operation, repository, account, exact
-  revision, limits, and idempotency key before the sidecar performs a push,
-  opens a change, reads checks, or merges. Record bounded receipts, never the
-  reusable credential.
-- Retain a manual actuator: when no sidecar is configured, produce the exact
-  commands and proposed change title/body while preserving the same gate state.
+> **DESIGN ONLY — NOT IMPLEMENTED:** No exact-input gate ledger, independent
+> review gate, readiness state, or validation-evidence store exists yet.
 
-**Exit proof:** one candidate cannot become ready until a separate run reviews
-its exact head and every configured gate passes; a base advance invalidates the
-candidate until re-folded; then either a human or an authorized sidecar lands it
-and records the resulting immutable revision without exposing forge credentials
-to a worker or the control-plane database.
+- Pin one versioned gate policy to the candidate's repository identity,
+  integration ref, expected base, head/tree, and policy revision.
+- Record independent-review evidence with producer and reviewer provenance and
+  an explicit separation rule; a distinct run alone is not sufficient proof of
+  independence.
+- Run configured local validation against the materialized candidate tree and
+  retain bounded evidence rather than command output or transcripts.
+- Invalidate every affected gate when its candidate or policy input changes.
+- Model provider-neutral evidence without pretending the core has queried a
+  remote CI or approval service.
 
-## Milestone 8: provider usage, budgets, and quota recovery
+**Exit proof:** a producer cannot satisfy its own configured independent-review
+gate, evidence for another head/base/policy tuple is rejected, and a candidate
+becomes ready only when every gate required by its pinned policy passes.
+
+## Milestone 7C: integration queue and manual landing
 
 **Status: planned**
 
-- Retain bounded token and usage metadata from provider responses without
-  retaining prompts, responses, or transcripts.
-- Enforce per-run, per-project, and per-grant ceilings using versioned policy.
-- Classify quota and rate-limit responses, honor bounded retry timing, and pause
-  recoverable work instead of treating every upstream refusal as terminal.
-- Surface spend estimates and remaining policy budget in the control room.
+> **DESIGN ONLY — NOT IMPLEMENTED:** No dependency/refold queue, landing lease,
+> manual actuator plan, landing receipt, push, or merge operation exists yet.
 
-**Exit proof:** a run cannot exceed its pinned budget, a simulated quota outage
-pauses and later resumes the same durable work, and usage totals reconcile with
-audited provider invocations.
+- Give work items explicit hard landing dependencies and reject dependency
+  cycles.
+- Serialize integration through a leased durable landing action.
+- Materialize and validate the combined tree that would exist after landing.
+- After every base advance, conservatively invalidate and re-fold every
+  remaining sibling before it can become ready again. Selective contended-path
+  invalidation is a later optimization, not an initial correctness mechanism.
+- Produce a structured human-executable plan and accept a nonce-bound landing
+  receipt. Record the assurance actually established; never claim an atomic
+  base-and-head guarantee when the selected actuator cannot enforce both.
+
+**Exit proof:** item B cannot land before prerequisite A; landing A advances the
+base and makes sibling B unready until its folded tree is regenerated and
+revalidated. A manual plan contains no unresolved revision, and its imported
+receipt is accepted only for the authorized operation and records the immutable
+landed revision at its truthful assurance level. See
+[integration-gates.md](integration-gates.md).
+
+## Milestone 8A: provider usage and budget authority
+
+**Status: planned**
+
+- Retain bounded normalized token and usage metadata from provider responses
+  without retaining prompts, responses, or transcripts.
+- Pin versioned per-run, per-project, and per-grant ceilings.
+- Reserve a bounded invocation allowance before dispatch so concurrent calls
+  cannot collectively overspend a ceiling that each observed independently.
+- Surface reconciled usage, spend estimates, and remaining policy budget in the
+  control room.
+
+**Exit proof:** concurrent invocations cannot exceed a pinned budget, usage
+totals reconcile with audited provider calls, and no private request or response
+content enters the accounting ledger.
+
+## Milestone 8B: quota-aware recovery
+
+**Status: planned**
+
+- Classify provider quota exhaustion and rate limits separately from permanent
+  upstream failure.
+- Honor bounded provider retry timing and move recoverable work into a durable
+  paused state rather than burning attempts.
+- Let the supervisor wake eligible work without a human acting as a timer.
+
+**Exit proof:** a simulated quota outage pauses the same durable work, consumes
+no calls while ineligible, and later resumes it under its original pinned
+authority and remaining budget.
 
 ## Milestone 9: destructive continuity proof
 
@@ -366,6 +449,55 @@ audited provider invocations.
 
 **Exit proof:** an adversarial mid-task kill followed by replacement produces
 the expected final result and audit trail with no unaccounted file loss.
+
+## Milestone 10: provider-neutral service sidecars
+
+**Status: planned**
+
+> **DESIGN ONLY — NOT IMPLEMENTED:** No sidecar protocol, registration,
+> transport, capability invocation, or reconciliation state exists yet.
+
+- Register a pinned sidecar protocol version, connector identity, operator-owned
+  service/repository mappings, and advertised semantic capability families such
+  as `work.*`, `change.*`, `checks.*`, `refs.*`, and `landing.*`.
+- Keep integration effects supervisor-driven. A worker may receive separately
+  authorized bounded service reads; it never receives a raw provider client or
+  reusable credential.
+- Bind each operation to an account and credential-scope fingerprint, exact
+  inputs, limits, and a durable operation record.
+- Reconcile uncertain outcomes after process or transport loss; a caller-side
+  idempotency key alone is not treated as proof that a provider deduplicated the
+  effect.
+- Bound transport, response size, duration, rate, concurrency, logging, and
+  typed error behavior without storing the credential or raw provider payload.
+
+**Exit proof:** a deterministic fake sidecar loses a successful response, then
+a replacement supervisor reconciles the already-created remote object rather
+than duplicating it. Wrong connector, account, scope, repository, revision, or
+capability requests fail before invocation. See
+[service-sidecars.md](service-sidecars.md).
+
+## Milestone 11: GitHub reference sidecar
+
+**Status: planned**
+
+> **DESIGN ONLY — NOT IMPLEMENTED:** No GitHub add-on or `GH_CONFIG_DIR`
+> integration exists yet.
+
+- Package GitHub mechanics outside the control-plane core and mount the user's
+  explicitly approved `GH_CONFIG_DIR` only into that add-on.
+- Implement the applicable semantic capability families for bounded work and
+  change reads, refs, checks/approvals, and landing receipts.
+- Use deterministic remote identities and read the provider's actual landed
+  revision and closed-reference set after the operation settles.
+- Report the guarantee a GitHub operation can actually enforce. Head-only merge
+  preconditions are not represented as expected-base-and-head compare-and-swap.
+
+**Exit proof:** the reference add-on advances one exact authorized candidate,
+survives a lost response without duplication, and returns provider-verified
+bounded evidence while its reusable credential remains absent from the worker,
+core database, and logs. GitLab, Jira, and other services remain independent
+add-ons that implement only the capability families they support.
 
 ## Continuous gates
 

@@ -376,6 +376,18 @@ def snapshot_fixture() -> dict[str, Any]:
                 "content_sha256": "a" * 64,
             }
         ],
+        "candidates": [
+            {
+                "id": "cnd_one",
+                "attempt_result_id": "rsl_one",
+                "producer_attempt_id": "att_terminal",
+                "producer_run_id": "run_terminal",
+                "head_revision": "b" * 40,
+                "base_revision": "a" * 40,
+                "object_format": "sha1",
+                "created_by_handle": "operator",
+            }
+        ],
         "run_authorities": [
             {
                 "run_id": "run_active",
@@ -514,6 +526,18 @@ class ControlRoomWebTests(unittest.TestCase):
         payload = response.read().decode("utf-8")
         return response.status, dict(response.getheaders()), payload
 
+    def raw_socket_request(self, request: bytes) -> bytes:
+        with socket.create_connection(self.server.server_address, timeout=1) as client:
+            client.settimeout(1)
+            client.sendall(request)
+            response = bytearray()
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                response.extend(chunk)
+        return bytes(response)
+
     def test_browser_renders_only_redacted_fields_and_escapes_untrusted_titles(
         self,
     ) -> None:
@@ -594,6 +618,7 @@ class ControlRoomWebTests(unittest.TestCase):
                 ("h2", "Attempts"),
                 ("h2", "Interactions"),
                 ("h2", "Retained results"),
+                ("h2", "Candidates"),
                 ("h2", "Work items"),
                 ("h2", "Assignments"),
                 ("h2", "Provider authority"),
@@ -643,12 +668,12 @@ class ControlRoomWebTests(unittest.TestCase):
                 "main": 1,
                 "header": 1,
                 "h1": 1,
-                "h2": 18,
-                "section": 18,
-                "table": 17,
-                "tr": 36,
-                "th": 110,
-                "td": 126,
+                "h2": 19,
+                "section": 19,
+                "table": 18,
+                "tr": 38,
+                "th": 117,
+                "td": 133,
                 "form": 6,
                 "input": 19,
                 "select": 5,
@@ -792,6 +817,26 @@ class ControlRoomWebTests(unittest.TestCase):
                         "SHA-256",
                     ],
                     ["res_one", "att_terminal", "run_terminal", "2", "120", "a" * 64],
+                ],
+                "Candidates": [
+                    [
+                        "ID",
+                        "Attempt",
+                        "Run",
+                        "Base",
+                        "Head",
+                        "Format",
+                        "Created by",
+                    ],
+                    [
+                        "cnd_one",
+                        "att_terminal",
+                        "run_terminal",
+                        "a" * 40,
+                        "b" * 40,
+                        "sha1",
+                        "operator",
+                    ],
                 ],
                 "Work items": [
                     [
@@ -1366,6 +1411,55 @@ class ControlRoomWebTests(unittest.TestCase):
             status, _headers, body = self.request("GET", self.path)
         self.assertEqual(status, 503)
         self.assertNotIn("private implementation detail", body)
+
+    def test_non_ascii_http_authority_and_paths_return_bounded_errors(self) -> None:
+        authority = self.server.authority.encode("ascii")
+        token = self.server.access_token.encode("ascii")
+        cases = (
+            (
+                b"GET /h\xc3\xa9llo/ HTTP/1.1\r\nHost: "
+                + authority
+                + b"\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 404",
+            ),
+            (
+                b"GET /"
+                + token
+                + b"/ HTTP/1.1\r\nHost: h\xc3\xa9st\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 400",
+            ),
+            (
+                b"POST /"
+                + token
+                + b"/actions/retry HTTP/1.1\r\nHost: "
+                + authority
+                + b"\r\nOrigin: \xc3\xa9\r\n"
+                b"Content-Type: application/x-www-form-urlencoded\r\n"
+                b"Content-Length: 3\r\nConnection: close\r\n\r\nx=1",
+                b"HTTP/1.1 403",
+            ),
+        )
+        for request, status_line in cases:
+            with self.subTest(status_line=status_line):
+                response = self.raw_socket_request(request)
+                self.assertTrue(response.startswith(status_line), response[:100])
+                self.assertNotIn(b"Traceback", response)
+
+        status, _headers, _body = self.request("GET", self.path)
+        self.assertEqual(status, 200)
+
+    def test_unexpected_handler_failure_is_redacted_and_server_survives(self) -> None:
+        with mock.patch.object(
+            _ControlRoomHandler,
+            "_valid_host",
+            side_effect=RuntimeError("private handler detail"),
+        ):
+            status, _headers, body = self.request("GET", self.path)
+
+        self.assertEqual(status, 500)
+        self.assertNotIn("private handler detail", body)
+        status, _headers, _body = self.request("GET", self.path)
+        self.assertEqual(status, 200)
 
     def test_malformed_http_actions_and_action_errors_are_redacted(self) -> None:
         origin_headers = {

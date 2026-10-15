@@ -1,0 +1,18 @@
+{
+  "attempt_id": "att_11111111111111111111111111111111",
+  "changes": [
+    {
+      "after": {
+        "kind": "file",
+        "mode": 420,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 14
+      },
+      "before": null,
+      "operation": "added",
+      "path": "src/example.py"
+    }
+  ],
+  "schema_version": 1,
+  "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

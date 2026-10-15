@@ -151,33 +151,6 @@ def _workspace_path(path: Path, *, writable: bool, uid: int) -> Path:
     return resolved
 
 
-def _credential_path(path: Path, *, uid: int, workspace: Path) -> Path:
-    candidate = Path(path).expanduser().absolute()
-    try:
-        info = candidate.lstat()
-        parent = candidate.parent.lstat()
-    except OSError as exc:
-        raise ExecutionError(f"credential file is unavailable: {candidate}") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise ExecutionError("credential must be a regular file, not a symlink")
-    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
-        raise ExecutionError("credential parent must be a private directory")
-    if info.st_uid != uid or parent.st_uid != uid:
-        raise ExecutionError("credential path must be owned by the run user")
-    if info.st_nlink != 1:
-        raise ExecutionError("credential file must not be hard-linked")
-    if info.st_mode & 0o777 != 0o600:
-        raise ExecutionError("credential file must use mode 0600")
-    if parent.st_mode & 0o777 != 0o700:
-        raise ExecutionError("credential parent must use mode 0700")
-    resolved = candidate.resolve(strict=True)
-    if "," in str(resolved):
-        raise ExecutionError("credential path must not contain a comma")
-    if resolved.is_relative_to(workspace):
-        raise ExecutionError("credential files must remain outside the workspace")
-    return resolved
-
-
 def _gateway_directory(path: Path, *, uid: int, workspace: Path) -> Path:
     candidate = Path(path).expanduser().absolute()
     try:
@@ -239,22 +212,17 @@ def build_sandbox_plan(
         raise ExecutionError("Docker returned an invalid immutable image ID")
     if image.declared_volumes:
         raise ExecutionError("agent image declares writable volumes")
+    if request.credential_files:
+        raise ExecutionError("workers must not receive reusable credential files")
     gateway_enabled = request.profile.network_mode is NetworkMode.GATEWAY_ONLY
     if gateway_enabled:
         if request.gateway_directory is None:
             raise ExecutionError("gateway endpoint is required for gateway_only")
-        if request.credential_files:
-            raise ExecutionError(
-                "gateway-only sandboxes must not receive credential files"
-            )
     else:
         if request.gateway_directory is not None:
             raise ExecutionError("gateway endpoint requires gateway_only networking")
-        expected_credentials = set(request.profile.credential_names)
-        if set(request.credential_files) != expected_credentials:
-            raise ExecutionError(
-                "credential set does not match the pinned agent profile"
-            )
+        if request.profile.credential_names:
+            raise ExecutionError("named authorities require the run-scoped gateway")
     runtime_environment = dict(request.launch.environment)
     reserved_environment = set(runtime_environment).intersection(
         RESERVED_RUNTIME_ENVIRONMENT
@@ -270,14 +238,6 @@ def build_sandbox_plan(
         request.workspace,
         writable=request.profile.workspace_mode is WorkspaceMode.COPY_ON_WRITE,
         uid=uid,
-    )
-    credentials = (
-        {}
-        if gateway_enabled
-        else {
-            name: _credential_path(path, uid=uid, workspace=workspace)
-            for name, path in request.credential_files.items()
-        }
     )
     gateway = (
         _gateway_directory(request.gateway_directory, uid=uid, workspace=workspace)
@@ -346,12 +306,6 @@ def build_sandbox_plan(
         args.extend(("--env", f"{name}={runtime_environment[name]}"))
     if gateway is not None:
         args.extend(("--env", f"MAGIC_GLASS_BOX_GATEWAY_DIR={CONTAINER_GATEWAY_ROOT}"))
-    elif credentials:
-        args.extend(
-            ("--env", "MAGIC_GLASS_BOX_CREDENTIAL_DIR=/run/secrets/magic-glass-box")
-        )
-    if "krab" in credentials:
-        args.extend(("--env", "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab"))
     args.extend(("--mount", workspace_mount))
     if gateway is not None:
         args.extend(
@@ -370,16 +324,6 @@ def build_sandbox_plan(
                     ),
                 )
             )
-    for name in sorted(credentials):
-        args.extend(
-            (
-                "--mount",
-                (
-                    f"type=bind,src={credentials[name]},"
-                    f"dst=/run/secrets/magic-glass-box/{name},readonly"
-                ),
-            )
-        )
     args.extend(("--entrypoint", request.launch.command[0], image.image_id))
     args.extend(request.launch.command[1:])
     return SandboxPlan(

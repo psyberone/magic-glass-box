@@ -55,7 +55,7 @@ class SandboxPlanTests(unittest.TestCase):
         *,
         workspace_mode: WorkspaceMode = WorkspaceMode.READ_ONLY,
         network_mode: NetworkMode = NetworkMode.NONE,
-        credential_names: tuple[str, ...] = ("krab",),
+        credential_names: tuple[str, ...] = (),
         credential_files: dict[str, Path] | None = None,
         gateway_capabilities: tuple[GatewayCapability, ...] = (),
         gateway_directory: Path | None = None,
@@ -76,9 +76,7 @@ class SandboxPlanTests(unittest.TestCase):
                 ("runtime-agent", "--headless"),
                 (("RUNTIME_MODE", "strict"),),
             ),
-            credential_files=(
-                {"krab": self.token} if credential_files is None else credential_files
-            ),
+            credential_files={} if credential_files is None else credential_files,
             gateway_directory=gateway_directory,
         )
 
@@ -162,17 +160,8 @@ class SandboxPlanTests(unittest.TestCase):
                 f"MAGIC_GLASS_BOX_RUN_ID={RUN_ID}",
                 "--env",
                 "RUNTIME_MODE=strict",
-                "--env",
-                "MAGIC_GLASS_BOX_CREDENTIAL_DIR=/run/secrets/magic-glass-box",
-                "--env",
-                "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab",
                 "--mount",
                 (f"type=bind,src={self.workspace.resolve()},dst=/workspace,readonly"),
-                "--mount",
-                (
-                    f"type=bind,src={self.token.resolve()},"
-                    "dst=/run/secrets/magic-glass-box/krab,readonly"
-                ),
                 "--entrypoint",
                 "runtime-agent",
                 IMAGE_ID,
@@ -260,7 +249,7 @@ class SandboxPlanTests(unittest.TestCase):
         gateway_profile = {
             "network_mode": NetworkMode.GATEWAY_ONLY,
             "credential_names": ("krab",),
-            "gateway_capabilities": (GatewayCapability.RUN_DESCRIBE,),
+            "gateway_capabilities": (GatewayCapability.INTERACTION_READ,),
         }
         cases = (
             (
@@ -273,9 +262,10 @@ class SandboxPlanTests(unittest.TestCase):
             (
                 self.request(
                     **gateway_profile,
+                    credential_files={"krab": self.token},
                     gateway_directory=gateway_directory,
                 ),
-                "must not receive credential files",
+                "must not receive reusable credential files",
             ),
             (
                 self.request(
@@ -303,6 +293,32 @@ class SandboxPlanTests(unittest.TestCase):
                     gid=os.getgid(),
                 )
 
+    def test_executor_rejects_reusable_credentials_even_for_legacy_profiles(
+        self,
+    ) -> None:
+        legacy = AgentProfileSpec(
+            image="agent:local",
+            command=("agent", "--run"),
+            workspace_mode=WorkspaceMode.READ_ONLY,
+            network_mode=NetworkMode.NONE,
+            credential_names=("krab",),
+        )
+        request = SandboxRequest(
+            run_id=RUN_ID,
+            profile=legacy,
+            workspace=self.workspace,
+            launch=RuntimeLaunch(("runtime-agent", "--headless")),
+            credential_files={"krab": self.token},
+        )
+
+        with self.assertRaisesRegex(ExecutionError, "reusable credential"):
+            build_sandbox_plan(
+                request,
+                DockerImage(IMAGE_ID, ()),
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+
     def test_runtime_environment_cannot_override_sandbox_policy(self) -> None:
         request = self.request(credential_names=(), credential_files={})
         request = SandboxRequest(
@@ -327,7 +343,7 @@ class SandboxPlanTests(unittest.TestCase):
                 network_mode=NetworkMode.GATEWAY_ONLY,
                 credential_names=("krab",),
                 credential_files={},
-                gateway_capabilities=(GatewayCapability.RUN_DESCRIBE,),
+                gateway_capabilities=(GatewayCapability.INTERACTION_READ,),
                 gateway_directory=path,
             )
 
@@ -431,7 +447,7 @@ class SandboxPlanTests(unittest.TestCase):
                 )
             self.assertEqual(str(caught.exception), message)
 
-    def test_plan_rejects_bad_run_workspace_and_credential_shapes(self) -> None:
+    def test_plan_rejects_bad_run_and_workspace_shapes(self) -> None:
         missing_workspace = self.root / "missing"
         workspace_link = self.root / "workspace-link"
         workspace_link.symlink_to(self.workspace, target_is_directory=True)
@@ -439,9 +455,6 @@ class SandboxPlanTests(unittest.TestCase):
         workspace_file.write_text("not a directory", encoding="utf-8")
         comma_workspace = self.root / "work,space"
         comma_workspace.mkdir()
-        insecure = self.root / "insecure.token"
-        insecure.write_text("secret", encoding="ascii")
-        os.chmod(insecure, 0o644)
         cases = (
             (
                 SandboxRequest(
@@ -449,7 +462,7 @@ class SandboxPlanTests(unittest.TestCase):
                     self.request().profile,
                     self.workspace,
                     self.request().launch,
-                    {"krab": self.token},
+                    {},
                 ),
                 "invalid run identifier",
             ),
@@ -459,7 +472,7 @@ class SandboxPlanTests(unittest.TestCase):
                     self.request().profile,
                     missing_workspace,
                     self.request().launch,
-                    {"krab": self.token},
+                    {},
                 ),
                 f"workspace is unavailable: {missing_workspace.absolute()}",
             ),
@@ -469,7 +482,7 @@ class SandboxPlanTests(unittest.TestCase):
                     self.request().profile,
                     workspace_link,
                     self.request().launch,
-                    {"krab": self.token},
+                    {},
                 ),
                 "workspace must not be a symlink",
             ),
@@ -479,7 +492,7 @@ class SandboxPlanTests(unittest.TestCase):
                     self.request().profile,
                     workspace_file,
                     self.request().launch,
-                    {"krab": self.token},
+                    {},
                 ),
                 "workspace must be a directory",
             ),
@@ -503,20 +516,6 @@ class SandboxPlanTests(unittest.TestCase):
                 ),
                 "workspace path must not contain a comma",
             ),
-            (
-                self.request(credential_files={}),
-                "credential set does not match the pinned agent profile",
-            ),
-            (
-                self.request(
-                    credential_files={"krab": self.token, "extra": self.token}
-                ),
-                "credential set does not match the pinned agent profile",
-            ),
-            (
-                self.request(credential_files={"krab": insecure}),
-                "credential file must use mode 0600",
-            ),
         )
         for request, message in cases:
             with (
@@ -530,74 +529,6 @@ class SandboxPlanTests(unittest.TestCase):
                     gid=os.getgid(),
                 )
             self.assertEqual(str(caught.exception), message)
-
-    def test_plan_rejects_unsafe_credential_files(self) -> None:
-        missing = self.root / "missing.token"
-        symlink = self.root / "symlink.token"
-        symlink.symlink_to(self.token)
-        directory = self.root / "directory.token"
-        directory.mkdir(mode=0o600)
-        hard_link = self.root / "hard-link.token"
-        os.link(self.token, hard_link)
-        comma = self.root / "comma,token"
-        comma.write_text("secret", encoding="ascii")
-        os.chmod(comma, 0o600)
-        inside_workspace = self.workspace / "token"
-        inside_workspace.write_text("secret", encoding="ascii")
-        os.chmod(inside_workspace, 0o600)
-        linked_parent = self.root / "linked-parent"
-        private_parent = self.root / "private-parent"
-        private_parent.mkdir(mode=0o700)
-        linked_token = private_parent / "token"
-        linked_token.write_text("secret", encoding="ascii")
-        os.chmod(linked_token, 0o600)
-        linked_parent.symlink_to(private_parent, target_is_directory=True)
-
-        cases = (
-            (
-                missing,
-                f"credential file is unavailable: {missing.absolute()}",
-            ),
-            (symlink, "credential must be a regular file, not a symlink"),
-            (directory, "credential must be a regular file, not a symlink"),
-            (hard_link, "credential file must not be hard-linked"),
-            (comma, "credential path must not contain a comma"),
-            (inside_workspace, "credential files must remain outside the workspace"),
-            (
-                linked_parent / "token",
-                "credential parent must be a private directory",
-            ),
-        )
-        for path, message in cases:
-            with self.subTest(path=path), self.assertRaises(ExecutionError) as caught:
-                build_sandbox_plan(
-                    self.request(credential_files={"krab": path}),
-                    DockerImage(IMAGE_ID, ()),
-                    uid=os.getuid(),
-                    gid=os.getgid(),
-                )
-            self.assertEqual(str(caught.exception), message)
-
-    def test_plan_rejects_wrong_ownership_and_parent_mode(self) -> None:
-        with self.assertRaises(ExecutionError) as caught:
-            build_sandbox_plan(
-                self.request(),
-                DockerImage(IMAGE_ID, ()),
-                uid=os.getuid() + 1,
-                gid=os.getgid(),
-            )
-        self.assertEqual(
-            str(caught.exception), "credential path must be owned by the run user"
-        )
-        os.chmod(self.root, 0o755)  # noqa: S103 - deliberately insecure fixture
-        with self.assertRaises(ExecutionError) as caught:
-            build_sandbox_plan(
-                self.request(),
-                DockerImage(IMAGE_ID, ()),
-                uid=os.getuid(),
-                gid=os.getgid(),
-            )
-        self.assertEqual(str(caught.exception), "credential parent must use mode 0700")
 
     def test_copy_on_write_workspace_must_be_owned_and_writable(self) -> None:
         with self.assertRaises(ExecutionError) as caught:

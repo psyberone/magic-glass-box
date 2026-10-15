@@ -37,7 +37,9 @@ their conformance boundary are documented in
 
 The published contract is
 [`schemas/handoff-v1.schema.json`](../schemas/handoff-v1.schema.json), with an
-example in [`examples/handoff.json`](../examples/handoff.json). It contains only:
+example in [`examples/handoff.json`](../examples/handoff.json). The schema is
+portable structural preflight; runtime-only semantic and UTF-8 byte guards are
+described in [schema-contracts.md](schema-contracts.md). It contains only:
 
 - a work-state enum and short summary;
 - bounded decision and next-step lists;

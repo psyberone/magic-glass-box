@@ -20,10 +20,11 @@ This repository currently contains the first executable vertical slice:
   activity, and idempotent session-item write/read operations;
 - verified human-interaction routing that correlates Krab item IDs while
   keeping private question and response content out of control-plane storage;
-- a private-file credential resolver that never copies token values into the
-  database;
+- a private-file credential resolver that validates host-side credential files
+  and never copies token values into the database or a worker;
 - a Docker execution adapter that resolves images to immutable digests,
-  validates workspaces and credential files, applies resource and privilege
+  validates workspaces, rejects every credential-file payload, applies resource
+  ceilings for memory, CPU, PIDs, temporary storage, and logs, applies privilege
   ceilings, and always attempts container cleanup;
 - a runtime-adapter boundary with a compatibility command dialect plus Codex
   JSONL and Claude Code JSON launch/completion contracts, explicit
@@ -35,7 +36,11 @@ This repository currently contains the first executable vertical slice:
 - immutable, revocable, and expiring provider grants that pin destination,
   method, model, request/response limits, timeout, and concurrency while
   resolving provider secrets only inside the trusted orchestrator;
-- tracked-files-only Git snapshots that resolve each run to an immutable commit;
+- raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
+  committed blob bytes and executable modes preserved; attributes are inert,
+  including CRLF/ident/export-subst conversion, filters, and export-ignore;
+  LFS pointers stay pointers and Git-links become empty directories without
+  submodule recursion;
 - a run coordinator that records preparation, container identity, resolved
   source revision, exit status, and terminal state;
 - owner-leased attempts with heartbeats, audited cancellation requests, real
@@ -43,6 +48,11 @@ This repository currently contains the first executable vertical slice:
 - immutable host-captured workspace results that retain bounded file changes
   before disposable snapshots are removed, with explicit conflict-checked
   application and no Git hosting credentials;
+- immutable trusted candidates that turn one strictly evidenced successful
+  attempt result into a deterministic child commit of its pinned source
+  revision inside one shared private Git store per project and object format,
+  without touching the operator checkout or inheriting repository hooks and
+  filters;
 - a durable attempt ledger and bounded structured handoff that let a clean
   replacement worker resume the same run from its pinned commit without a
   transcript or inherited mutable sandbox;
@@ -60,7 +70,8 @@ This repository currently contains the first executable vertical slice:
   answered-work replacement, lease-safe recovery, and nonblocking bodyless
   threshold reminders through Krab; and
 - an administrative CLI that can execute, cancel, retry, or reassign runs,
-  reconcile interrupted ones, and inspect or apply retained results.
+  reconcile interrupted ones, inspect or apply retained results, and materialize,
+  reconstruct, list, or verify trusted candidates.
 
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
@@ -86,17 +97,22 @@ newer. Executing agents also requires the Git and Docker CLIs plus a reachable
 Docker engine.
 
 ```console
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db init
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db user add operator \
+PYTHONPATH=src python3.11 -m magic_glass_box init
+PYTHONPATH=src python3.11 -m magic_glass_box user add operator \
   --display-name "Local Operator"
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db status
+PYTHONPATH=src python3.11 -m magic_glass_box status
 ```
+
+These commands use the platform state directory. Passing `--db` is supported,
+but the retained-result and candidate stores are created beside that database;
+do not point it into a source checkout unless the whole state location is
+ignored and treated as disposable local control-plane data.
 
 Register an externally stored provider credential and immutable policy before
 creating a profile that names the grant:
 
 ```console
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   provider add openai-main --policy examples/provider-policy.json \
   --credential-file ./private-credentials/openai.key --created-by operator
 ```
@@ -105,24 +121,24 @@ Once a project, gateway-only profile, and run have been registered, execute or
 recover its lifecycle with:
 
 ```console
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   work-item import examples/work-item.json \
   --project box-project --imported-by operator
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   run create --project box-project --profile Worker \
   --work-item wki_<id> --requested-by operator \
   --supervision-policy examples/supervision-policy.json
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   supervisor run
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   run execute run_<id> --runtime-adapter codex
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   run cancel run_<id> --expected-version <version> \
   --requested-by operator --reason "Stop requested"
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db run reconcile
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box run reconcile
+PYTHONPATH=src python3.11 -m magic_glass_box \
   control-room show --refresh-krab
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   control-room serve
 ```
 
@@ -148,7 +164,7 @@ bodies, work-log text, handoffs, result paths, or credential references.
 The same answer boundary is available from the CLI:
 
 ```console
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   interaction answer int_<id> --response-item itm_<id> \
   --expected-version <version>
 ```
@@ -160,24 +176,40 @@ item ID; a same-session message is not strong enough correlation.
 After an attempt exits, verify or explicitly apply its retained changes:
 
 ```console
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   result show att_<id>
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   result apply att_<id> --repository /absolute/path/to/checkout
 ```
 
-Application performs a complete conflict preflight. Magic Glass Box does not
-commit, push, open a pull request, or hold GitHub/GitLab credentials. See
-[docs/results.md](docs/results.md) for the retention and application contract.
+Application performs a complete conflict preflight, but the target must remain
+quiescent while files are changed and the filesystem update is not one atomic
+whole-tree transaction. A failure after mutation begins can therefore require
+operator recovery. To create an isolated Git candidate instead of modifying
+the checkout:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  candidate create att_<id> --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  candidate show cnd_<id>
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  candidate list --project project-key --limit 25
+```
+
+Candidate materialization creates a local child commit but does not push, open a
+pull request, contact a hosting service, or hold GitHub/GitLab credentials. See
+[docs/results.md](docs/results.md) for retention and application and
+[docs/candidates.md](docs/candidates.md) for the candidate boundary.
 
 After all runs and assignments are terminal and the final work-log entry is an
 `outcome`, seal or later reopen the local work cycle with:
 
 ```console
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   work-item complete wki_<id> --expected-thread-version <version> \
   --completed-by operator
-PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
+PYTHONPATH=src python3.11 -m magic_glass_box \
   work-item reopen wki_<id> --expected-thread-version <version> \
   --reopened-by operator
 ```
@@ -186,13 +218,17 @@ Work-item import is an idempotent upsert keyed by project, source, and external
 ID. Magic Glass Box does not connect to, synchronize with, or mutate a source
 forge. See [docs/work-items.md](docs/work-items.md) for the adapter contract and
 [`schemas/work-item-v1.schema.json`](schemas/work-item-v1.schema.json) for the
-published input schema.
+published structural input schema. Runtime semantic validation remains the
+acceptance authority; the boundary is documented in
+[docs/schema-contracts.md](docs/schema-contracts.md).
 
 The pinned project context must name an absolute path to a local Git repository.
 If no source revision was supplied when the run was created, Magic Glass Box
 resolves `HEAD`; either way, the full commit ID is persisted before the
 container starts. A `gateway_only` worker receives no credential files: names
-in its profile authorize specific host-side gateway operations. Agent output,
+in its profile authorize specific host-side gateway operations. Profiles with
+named authorities must use `gateway_only`; `none` means no named authority and
+no reusable secret path. Agent output,
 question and answer bodies, and transcripts are not durable control-plane
 state; bounded workspace file changes are retained separately as inert result
 artifacts. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability
@@ -207,11 +243,14 @@ contracts are documented in
 and live role/claim overlay are documented in
 [docs/control-room.md](docs/control-room.md).
 
-When running directly from a checkout, set `PYTHONPATH=src` or install the
-package into a virtual environment.
+When running directly from a checkout, install the development environment;
+the Makefile then uses `.venv/bin/python` by default while preserving explicit
+`PYTHON=` overrides.
 
 ```console
-PYTHONPATH=src python3.11 -m unittest discover -s tests -v
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e '.[development]'
+make test
 ```
 
 An installed package exposes the `magic-glass-box` control-plane command and
@@ -229,7 +268,8 @@ mutation kill-rate floor. The repeatable gates are:
 
 ```console
 make quality
-make mutation
+make mutation-clean
+make candidate-test
 make live-supervisor
 ```
 

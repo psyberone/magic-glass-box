@@ -596,6 +596,19 @@ def _render_control_room(
         for row in snapshot.get("retained_results", [])
         if isinstance(row, Mapping)
     ]
+    candidate_rows = [
+        (
+            row.get("id"),
+            row.get("producer_attempt_id"),
+            row.get("producer_run_id"),
+            row.get("base_revision"),
+            row.get("head_revision"),
+            row.get("object_format"),
+            row.get("created_by_handle"),
+        )
+        for row in snapshot.get("candidates", [])
+        if isinstance(row, Mapping)
+    ]
     role_rows = [
         (row.get("project_key"), row.get("krab_handle"), row.get("role"))
         for row in krab.get("roles", [])
@@ -769,6 +782,13 @@ def _render_control_room(
             ),
         ),
         _section(
+            "Candidates",
+            _table(
+                ("ID", "Attempt", "Run", "Base", "Head", "Format", "Created by"),
+                candidate_rows,
+            ),
+        ),
+        _section(
             "Work items",
             _table(
                 (
@@ -901,6 +921,17 @@ def _valid_token(value: object, *, label: str) -> str:
     return value
 
 
+def _ascii_equal(value: object, expected: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        left = value.encode("ascii")
+        right = expected.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return secrets.compare_digest(left, right)
+
+
 def _positive_version(value: str) -> int:
     try:
         parsed = int(value)
@@ -962,6 +993,21 @@ class _ControlRoomHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except Exception:
+            self.close_connection = True
+            try:
+                self._plain_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "The request could not be completed.",
+                )
+            except Exception:
+                # The socket or response stream may already be unusable. The
+                # original exception remains intentionally redacted.
+                return
+
     def _security_headers(self, *, nonce: str | None = None) -> dict[str, str]:
         style = "'none'" if nonce is None else f"'nonce-{nonce}'"
         return {
@@ -1005,15 +1051,13 @@ class _ControlRoomHandler(BaseHTTPRequestHandler):
         self._send(status, body, headers={"Connection": "close"})
 
     def _valid_host(self) -> bool:
-        return secrets.compare_digest(
-            self.headers.get("Host", ""), self.server.authority
-        )
+        return _ascii_equal(self.headers.get("Host", ""), self.server.authority)
 
     def _action_from_path(self, path: str) -> str | None:
         parts = path.split("/")
         if len(parts) != 4 or parts[0] or parts[2] != "actions":
             return None
-        if not secrets.compare_digest(parts[1], self.server.access_token):
+        if not _ascii_equal(parts[1], self.server.access_token):
             return None
         return parts[3] if parts[3] in ACTION_FIELDS else None
 
@@ -1022,7 +1066,7 @@ class _ControlRoomHandler(BaseHTTPRequestHandler):
             self._plain_error(HTTPStatus.BAD_REQUEST, "Invalid host header.")
             return
         parsed = urlsplit(self.path)
-        if not secrets.compare_digest(parsed.path, self.server.root_path):
+        if not _ascii_equal(parsed.path, self.server.root_path):
             self._plain_error(HTTPStatus.NOT_FOUND, "Not found.")
             return
         try:
@@ -1073,9 +1117,7 @@ class _ControlRoomHandler(BaseHTTPRequestHandler):
         if action is None or parsed.query:
             self._plain_error(HTTPStatus.NOT_FOUND, "Not found.")
             return
-        if not secrets.compare_digest(
-            self.headers.get("Origin", ""), self.server.origin
-        ):
+        if not _ascii_equal(self.headers.get("Origin", ""), self.server.origin):
             self._plain_error(HTTPStatus.FORBIDDEN, "Same-origin request required.")
             return
         media_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
@@ -1105,7 +1147,7 @@ class _ControlRoomHandler(BaseHTTPRequestHandler):
             fields = dict(pairs)
             if frozenset(fields) != ACTION_FIELDS[action]:
                 raise ValidationError("form fields do not match the action")
-            if not secrets.compare_digest(fields["csrf_token"], self.server.csrf_token):
+            if not _ascii_equal(fields["csrf_token"], self.server.csrf_token):
                 self._plain_error(HTTPStatus.FORBIDDEN, "Invalid CSRF token.")
                 return
             self._execute(action, fields)

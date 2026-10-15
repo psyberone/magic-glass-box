@@ -1467,7 +1467,7 @@ class SupervisionMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-nine.db"
             connection = sqlite3.connect(path)
-            connection.executescript(SCHEMA.removesuffix(SUPERVISION_SCHEMA))
+            connection.executescript(SCHEMA[: SCHEMA.index(SUPERVISION_SCHEMA)])
             connection.execute(
                 "INSERT INTO users "
                 "(id, handle, display_name, active, created_at, updated_at) "
@@ -1483,7 +1483,7 @@ class SupervisionMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 10)
+            self.assertEqual(first["schema_version"], 12)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["supervisor_actions"], 0)

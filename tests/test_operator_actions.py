@@ -456,7 +456,7 @@ class OperatorActionMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 10)
+            self.assertEqual(first["schema_version"], 12)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             with closing(database.connect()) as migrated:

@@ -1499,7 +1499,7 @@ class WorkMemoryMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 10)
+            self.assertEqual(first["schema_version"], 12)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["work_threads"], 1)
             self.assertEqual(first["counts"]["work_thread_events"], 1)

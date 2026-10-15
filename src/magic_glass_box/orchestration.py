@@ -49,10 +49,6 @@ class RunWorkspaceManager(Protocol):
     def locate(self, run_id: str) -> Path | None: ...
 
 
-class CredentialPathResolver(Protocol):
-    def resolve_path(self, reference: str) -> Path: ...
-
-
 class RunGatewayManager(Protocol):
     def open(
         self,
@@ -66,7 +62,14 @@ class RunGatewayManager(Protocol):
 
 
 class RunResultStore(Protocol):
-    def stage(self, attempt_id: str, workspace: Path, source_revision: str) -> None: ...
+    def stage(
+        self,
+        attempt_id: str,
+        workspace: Path,
+        source_revision: str,
+        *,
+        gitlinks: Sequence[str] = (),
+    ) -> None: ...
 
     def capture(self, attempt_id: str, workspace: Path) -> CapturedResult: ...
 
@@ -170,7 +173,6 @@ class RunCoordinator:
         database: Database,
         executor: SandboxExecutor,
         workspaces: RunWorkspaceManager,
-        credential_resolver: CredentialPathResolver,
         gateway_manager: RunGatewayManager | None,
         result_store: RunResultStore,
         *,
@@ -197,7 +199,6 @@ class RunCoordinator:
         self.database = database
         self.executor = executor
         self.workspaces = workspaces
-        self.credential_resolver = credential_resolver
         self.gateway_manager = gateway_manager
         self.result_store = result_store
         self.orchestrator_id = orchestrator_id or (
@@ -279,7 +280,12 @@ class RunCoordinator:
                     Path(context.repository_path),
                     inputs["source_revision"],
                 )
-                self.result_store.stage(attempt["id"], prepared.path, prepared.revision)
+                self.result_store.stage(
+                    attempt["id"],
+                    prepared.path,
+                    prepared.revision,
+                    gitlinks=prepared.gitlinks,
+                )
                 gateway_directory = None
                 if profile.network_mode is NetworkMode.GATEWAY_ONLY:
                     credential_names = self._gateway_credential_names(
@@ -295,17 +301,17 @@ class RunCoordinator:
                         credential_names=credential_names,
                     )
                     gateway_directory = endpoint.directory
-                    credentials = {}
                 else:
-                    credentials = self._credential_files(
-                        profile, inputs["credential_references"]
-                    )
+                    if profile.credential_names:
+                        raise RunOrchestrationError(
+                            "named authorities require the run-scoped gateway"
+                        )
                 request = SandboxRequest(
                     run_id=run_id,
                     profile=profile,
                     workspace=prepared.path,
                     launch=launch,
-                    credential_files=credentials,
+                    credential_files={},
                     gateway_directory=gateway_directory,
                 )
 
@@ -435,23 +441,6 @@ class RunCoordinator:
             return self.database.get_run(run_id)
         finally:
             monitor.close()
-
-    def _credential_files(
-        self,
-        profile: AgentProfileSpec,
-        references: object,
-    ) -> dict[str, Path]:
-        if not isinstance(references, Mapping):
-            raise RunOrchestrationError("pinned credential references are invalid")
-        files: dict[str, Path] = {}
-        for name in profile.credential_names:
-            reference = references.get(name)
-            if not isinstance(reference, str):
-                raise RunOrchestrationError(
-                    f"pinned profile credential is unavailable: {name}"
-                )
-            files[name] = self.credential_resolver.resolve_path(reference)
-        return files
 
     @staticmethod
     def _gateway_credential_names(

@@ -922,6 +922,7 @@ class _FileGatewayChannel:
                                 "gateway request commit is invalid",
                             ),
                         )
+                        last_sequence = marker.sequence
                         last_marker = marker_raw
                     continue
                 pending_marker = b""

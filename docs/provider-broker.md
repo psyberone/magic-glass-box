@@ -45,6 +45,12 @@ Revoked and expired grants fail closed for both new runs and existing pinned
 runs. Replacing policy or credentials requires a new named grant, making the
 change explicit in later profile and run revisions.
 
+An agent profile may name an authority only with `gateway_only` networking.
+`krab` requires an interaction capability, and every other named authority
+requires `provider.invoke`. Profiles that cannot exercise a named authority are
+rejected at creation rather than failing after a worker starts. No executor mode
+mounts a reusable credential file into a worker.
+
 ## Invocation boundary
 
 The worker may submit only:
@@ -66,6 +72,18 @@ destination, method, credential, or top-level model override. The trusted
 broker injects the pinned model and credential, enforces byte and concurrency
 limits, and does not follow redirects. HTTPS is mandatory except for explicit
 loopback destinations used by local adapters and integration tests.
+
+Credential resolution happens before a short SQLite transaction atomically
+rechecks the live run attempt, grant pin, revocation, and expiry and reserves a
+grant concurrency slot. That committed reservation is the dispatch boundary:
+revocation committed first prevents the call; revocation committed afterward
+does not cancel a request already in flight. Reservations enforce the grant's
+limit across control-plane processes, are released after dispatch, and expire
+after a dead process stops renewing its short lease so crashed dispatchers
+cannot strand capacity. A live dispatcher renews the reservation for the full
+adapter call, including a slow bounded response, and fails the invocation if it
+cannot maintain that authority. The broker retains a process-local semaphore as
+defense in depth, not as the cross-process authority.
 
 Three adapters are available:
 
@@ -91,10 +109,11 @@ agent input.
 ## Durable audit boundary
 
 SQLite stores immutable grant creation/revocation events, run-to-grant pins,
-and invocation metadata: outcome, HTTP status, byte counts, error category,
-and timestamps. It does not store credential values, provider request bodies,
-provider response bodies, or conversation transcripts. The committed-file
-mailbox is ephemeral and removed during normal cleanup or reconciliation.
+short-lived dispatch reservations, and invocation metadata: outcome, HTTP
+status, byte counts, error category, and timestamps. It does not store
+credential values, provider request bodies, provider response bodies, or
+conversation transcripts. The committed-file mailbox is ephemeral and removed
+during normal cleanup or reconciliation.
 
 Run the live isolation proof with a real Docker worker and a local HTTP
 provider:

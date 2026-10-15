@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:candidate:v1",
+  "title": "Magic Glass Box Candidate Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "attempt_id",
+    "attempt_result_id",
+    "base_revision",
+    "context_version_id",
+    "head_revision",
+    "object_format",
+    "producer_run_id",
+    "project_id",
+    "result_content_sha256",
+    "schema_version",
+    "tree_revision",
+    "work_thread_id"
+  ],
+  "properties": {
+    "attempt_id": { "type": "string", "pattern": "^att_[0-9a-f]{32}$" },
+    "attempt_result_id": {
+      "type": "string",
+      "pattern": "^rsl_[0-9a-f]{32}$"
+    },
+    "base_revision": { "$ref": "#/$defs/objectId" },
+    "context_version_id": {
+      "type": "string",
+      "pattern": "^ctx_[0-9a-f]{32}$"
+    },
+    "head_revision": { "$ref": "#/$defs/objectId" },
+    "object_format": { "enum": ["sha1", "sha256"] },
+    "producer_run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^boxp_[0-9a-f]{32}$"
+    },
+    "result_content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schema_version": { "const": 1 },
+    "tree_revision": { "$ref": "#/$defs/objectId" },
+    "work_thread_id": {
+      "type": "string",
+      "pattern": "^wth_[0-9a-f]{32}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "object_format": { "const": "sha1" } },
+        "required": ["object_format"]
+      },
+      "then": {
+        "properties": {
+          "base_revision": { "pattern": "^[0-9a-f]{40}$" },
+          "head_revision": { "pattern": "^[0-9a-f]{40}$" },
+          "tree_revision": { "pattern": "^[0-9a-f]{40}$" }
+        }
+      },
+      "else": {
+        "properties": {
+          "base_revision": { "pattern": "^[0-9a-f]{64}$" },
+          "head_revision": { "pattern": "^[0-9a-f]{64}$" },
+          "tree_revision": { "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "objectId": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}

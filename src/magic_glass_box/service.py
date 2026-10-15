@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import sys
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .candidates import (
+    CANDIDATE_SCHEMA_VERSION,
+    CandidateError,
+    CandidateManifest,
+    GitCandidateStore,
+)
 from .credentials import (
     CredentialError,
     CredentialResolver,
@@ -38,8 +46,62 @@ from .provider import (
     ProviderError,
     ProviderUpstreamError,
 )
+from .results import WorkspaceResultStore
 
 ClientFactory = Callable[..., KrabClient]
+PROVIDER_DISPATCH_LEASE_SECONDS = 30
+PROVIDER_DISPATCH_RENEW_INTERVAL_SECONDS = 10.0
+
+
+class _ProviderDispatchLeaseMonitor:
+    """Keep a live cross-process provider slot; crashes still expire cleanly."""
+
+    def __init__(
+        self,
+        database: Database,
+        reservation_id: str,
+        *,
+        lease_seconds: int,
+        interval: float,
+    ):
+        self.database = database
+        self.reservation_id = reservation_id
+        self.lease_seconds = lease_seconds
+        self.interval = interval
+        self._stop = threading.Event()
+        self._error: BaseException | None = None
+        self._started = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name="mgb-provider-dispatch-lease",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+        self._started = True
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.database.renew_provider_dispatch(
+                    self.reservation_id,
+                    lease_seconds=self.lease_seconds,
+                )
+            except BaseException as exc:
+                self._error = exc
+                return
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._started:
+            self._thread.join()
+
+    def check(self) -> None:
+        if self._error is not None:
+            raise ProviderError(
+                "provider dispatch authority could not be maintained"
+            ) from self._error
 
 
 @dataclass(frozen=True)
@@ -106,6 +168,132 @@ class ControlPlane:
             credential_resolver=self.credential_resolver,
             client_factory=self.client_factory,
         ).snapshot(history_limit=history_limit, refresh_krab=refresh_krab)
+
+    def create_candidate(
+        self,
+        attempt_id: str,
+        *,
+        created_by_handle: str,
+        result_store: WorkspaceResultStore,
+        candidate_store: GitCandidateStore,
+    ) -> dict[str, Any]:
+        """Materialize one immutable candidate from a completed attempt result."""
+
+        creator = self.database.get_user(created_by_handle)
+        if creator["active"] != 1:
+            raise ConflictError("candidate creator is inactive")
+        source = self.database.get_candidate_source(attempt_id)
+        existing = self.database.find_candidate_for_result(source["attempt_result_id"])
+        if source["work_thread_id"] is None:
+            raise ConflictError("candidate result is not pinned to a work item")
+        recorded = (
+            None
+            if existing is None
+            else CandidateManifest.from_mapping(existing["manifest"])
+        )
+        if recorded is not None:
+            try:
+                candidate_store.inspect(recorded)
+            except CandidateError:
+                pass
+            else:
+                return existing
+        repository_path = source["repository_path"]
+        if repository_path is None:
+            raise ConflictError("candidate project has no repository path")
+        result, blobs = result_store.load_bundle(
+            attempt_id, expected_digest=source["result_content_sha256"]
+        )
+        if result != source["result"]:
+            raise ConflictError("candidate result does not match durable state")
+        if existing is None:
+            materialized = candidate_store.materialize(
+                source["project_id"],
+                Path(repository_path),
+                result,
+                blobs,
+            )
+        else:
+            assert recorded is not None
+            materialized = candidate_store.recover(
+                recorded,
+                Path(repository_path),
+                result,
+                blobs,
+            )
+        manifest = CandidateManifest(
+            schema_version=CANDIDATE_SCHEMA_VERSION,
+            attempt_id=attempt_id,
+            attempt_result_id=source["attempt_result_id"],
+            producer_run_id=source["producer_run_id"],
+            project_id=source["project_id"],
+            context_version_id=source["context_version_id"],
+            work_thread_id=source["work_thread_id"],
+            base_revision=materialized.base_revision,
+            result_content_sha256=source["result_content_sha256"],
+            head_revision=materialized.head_revision,
+            tree_revision=materialized.tree_revision,
+            object_format=materialized.object_format,
+        )
+        if existing is not None:
+            if recorded != manifest:
+                raise ConflictError(
+                    "candidate materialization does not match durable record"
+                )
+            return existing
+        return self.database.create_candidate(manifest, created_by=creator["id"])
+
+    def get_candidate(
+        self,
+        candidate_id: str,
+        *,
+        result_store: WorkspaceResultStore,
+        candidate_store: GitCandidateStore,
+    ) -> dict[str, Any]:
+        """Verify and return one durable candidate record."""
+
+        candidate = self.database.get_candidate(candidate_id)
+        manifest = CandidateManifest.from_mapping(candidate["manifest"])
+        try:
+            candidate_store.inspect(manifest)
+        except CandidateError:
+            pass
+        else:
+            return candidate
+        repository_path = self.database.get_candidate_repository_path(candidate_id)
+        if repository_path is None:
+            raise ConflictError("candidate project has no repository path")
+        result, blobs = result_store.load_bundle(
+            manifest.attempt_id,
+            expected_digest=manifest.result_content_sha256,
+        )
+        candidate_store.recover(
+            manifest,
+            Path(repository_path),
+            result,
+            blobs,
+        )
+        return candidate
+
+    def list_candidates(
+        self,
+        *,
+        project_key: str | None = None,
+        producer_run_id: str | None = None,
+        work_thread_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Discover recent immutable candidates without touching the Git cache."""
+
+        project_id = None
+        if project_key is not None:
+            project_id = self.database.get_project(project_key)["id"]
+        return self.database.list_candidates(
+            project_id=project_id,
+            producer_run_id=producer_run_id,
+            work_thread_id=work_thread_id,
+            limit=limit,
+        )
 
     def create_user(
         self, handle: str, display_name: str | None = None
@@ -198,12 +386,6 @@ class ControlPlane:
             credential = self.credential_resolver.resolve_secret(
                 grant["credential_ref"]
             )
-            result = self.provider_broker.invoke(
-                grant_id=grant["id"],
-                spec=spec,
-                credential=credential,
-                request=request,
-            )
         except CredentialError as exc:
             self._record_provider_failure(
                 run_id=run_id,
@@ -213,6 +395,47 @@ class ControlPlane:
                 started_at=started_at,
             )
             raise ProviderError("provider credential is unavailable") from exc
+        try:
+            reservation = self.database.reserve_provider_dispatch(
+                run_id,
+                grant_name,
+                expected_grant_id=grant["id"],
+                lease_seconds=PROVIDER_DISPATCH_LEASE_SECONDS,
+            )
+        except (ConflictError, NotFoundError):
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                outcome="denied",
+                error_code="authority_unavailable",
+                started_at=started_at,
+            )
+            raise
+        if reservation is None:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                outcome="busy",
+                error_code="concurrency_limit",
+                started_at=started_at,
+            )
+            raise ProviderBusyError("provider grant concurrency limit is reached")
+        dispatch_monitor = _ProviderDispatchLeaseMonitor(
+            self.database,
+            reservation["id"],
+            lease_seconds=PROVIDER_DISPATCH_LEASE_SECONDS,
+            interval=PROVIDER_DISPATCH_RENEW_INTERVAL_SECONDS,
+        )
+        try:
+            dispatch_monitor.start()
+            result = self.provider_broker.invoke(
+                grant_id=grant["id"],
+                spec=spec,
+                credential=credential,
+                request=request,
+            )
+            dispatch_monitor.close()
+            dispatch_monitor.check()
         except ProviderBusyError:
             self._record_provider_failure(
                 run_id=run_id,
@@ -243,6 +466,18 @@ class ControlPlane:
                 started_at=started_at,
             )
             raise
+        finally:
+            active_error = sys.exception()
+            dispatch_monitor.close()
+            try:
+                self.database.release_provider_dispatch(reservation["id"])
+            except Exception as release_error:
+                if active_error is None:
+                    raise
+                active_error.add_note(
+                    "provider dispatch reservation release also failed: "
+                    f"{type(release_error).__name__}: {release_error}"
+                )
         invocation = self.database.record_provider_invocation(
             run_id=run_id,
             provider_grant_id=grant["id"],

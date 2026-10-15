@@ -11,48 +11,38 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Iterator, Sequence
+import unicodedata
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .domain import canonical_json
-from .path_safety import UnsafeSymlinkError, validate_symlink_graph
+from .path_safety import (
+    UnsafePathError,
+    UnsafeSymlinkError,
+    reserved_git_component,
+    validate_repo_path,
+    validate_symlink_graph,
+    validate_symlink_target,
+)
+from .workspace import MAX_SNAPSHOT_BYTES
 
 RESULT_SCHEMA_VERSION = 1
-BASELINE_SCHEMA_VERSION = 2
+BASELINE_SCHEMA_VERSION = 3
 ATTEMPT_ID_RE = re.compile(r"^att_[0-9a-f]{32}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 MAX_RESULT_PATHS = 100_000
+MAX_INSPECTED_PATHS = 200_000
+MAX_SCAN_BATCH_PATHS = 1024
 MAX_CHANGED_BYTES = 64 * 1024 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
-MAX_PATH_BYTES = 1024
 READ_CHUNK_BYTES = 1024 * 1024
 MAX_PINNED_IGNORE_BYTES = 1024 * 1024
 MAX_IGNORE_BATCH_BYTES = 256 * 1024
 IGNORE_COMMAND_TIMEOUT = 10.0
-HFS_GIT_IGNORABLES = frozenset(
-    {
-        "\u200c",
-        "\u200d",
-        "\u200e",
-        "\u200f",
-        "\u202a",
-        "\u202b",
-        "\u202c",
-        "\u202d",
-        "\u202e",
-        "\u206a",
-        "\u206b",
-        "\u206c",
-        "\u206d",
-        "\u206e",
-        "\u206f",
-        "\ufeff",
-    }
-)
 
 
 class ResultError(RuntimeError):
@@ -68,6 +58,24 @@ class _PinnedIgnoreRules:
         temporary = Path(self._temporary.name)
         self.worktree = temporary / "rules"
         self.git_directory = temporary / "repository.git"
+        self.environment = {
+            "PATH": os.defpath,
+            "LC_ALL": "C",
+            "LANG": "C",
+            "HOME": str(temporary),
+            "XDG_CONFIG_HOME": str(temporary),
+            "TMPDIR": str(temporary),
+            "TEMP": str(temporary),
+            "TMP": str(temporary),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_LAZY_FETCH": "1",
+        }
         self.worktree.mkdir(mode=0o700)
         for relative, raw in rules.items():
             destination = self.worktree.joinpath(*PurePosixPath(relative).parts)
@@ -86,6 +94,7 @@ class _PinnedIgnoreRules:
                 capture_output=True,
                 timeout=IGNORE_COMMAND_TIMEOUT,
                 check=False,
+                env=self.environment,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.close()
@@ -134,6 +143,7 @@ class _PinnedIgnoreRules:
                 capture_output=True,
                 timeout=IGNORE_COMMAND_TIMEOUT,
                 check=False,
+                env=self.environment,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ResultError("cannot evaluate pinned result ignore rules") from exc
@@ -158,67 +168,20 @@ def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _reserved_git_component(value: str) -> bool:
-    # Match Git's cross-platform .git protections: HFS ignores these Unicode
-    # code points, while NTFS folds case, trims trailing dots/spaces, assigns
-    # .git the short name git~1, and exposes alternate data streams after ':'.
-    hfs_name = "".join(
-        character for character in value if character not in HFS_GIT_IGNORABLES
-    )
-    if hfs_name.casefold() == ".git":
-        return True
-
-    ntfs_name = value.casefold()
-    if ntfs_name.startswith(".git"):
-        remainder = ntfs_name[4:]
-    elif ntfs_name.startswith("git~1"):
-        remainder = ntfs_name[5:]
-    else:
-        return False
-    for character in remainder:
-        if character == ":":
-            return True
-        if character not in {".", " "}:
-            return False
-    return True
-
-
 def _safe_path(value: object) -> str:
-    if not isinstance(value, str) or not value:
-        raise ResultError("result path must be a non-empty string")
-    if len(value.encode("utf-8")) > MAX_PATH_BYTES:
-        raise ResultError("result path is too long")
-    path = PurePosixPath(value)
-    if (
-        value.startswith("/")
-        or "\\" in value
-        or value != path.as_posix()
-        or path.as_posix() == "."
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ResultError("result path must be a safe relative POSIX path")
-    if any(_reserved_git_component(part) for part in path.parts):
-        raise ResultError("result contains a reserved .git path")
-    return value
+    try:
+        return validate_repo_path(value)
+    except UnsafePathError as exc:
+        if "reserved .git" in str(exc):
+            raise ResultError("result contains a reserved .git path") from exc
+        raise ResultError("result path must be a safe relative POSIX path") from exc
 
 
 def _safe_symlink(path: str, target: object) -> str:
-    if not isinstance(target, str) or not target or "\x00" in target:
-        raise ResultError(f"result contains an unsafe symlink: {path}")
-    link = PurePosixPath(target)
-    if link.is_absolute():
-        raise ResultError(f"result contains an unsafe symlink: {path}")
-    depth = len(PurePosixPath(path).parent.parts)
-    for part in link.parts:
-        if part == "..":
-            depth -= 1
-            if depth < 0:
-                raise ResultError(f"result contains an unsafe symlink: {path}")
-        elif part not in {"", "."}:
-            depth += 1
-    if len(target.encode("utf-8")) > MAX_PATH_BYTES:
-        raise ResultError(f"result contains an unsafe symlink: {path}")
-    return target
+    try:
+        return validate_symlink_target(path, target)
+    except UnsafeSymlinkError as exc:
+        raise ResultError(f"result contains an unsafe symlink: {path}") from exc
 
 
 @dataclass(frozen=True)
@@ -349,6 +312,7 @@ class ResultChange:
                 self.before is None
                 or self.before.kind != "file"
                 or self.before.sha256 != self.after.sha256
+                or self.before.size != self.after.size
             )
         )
 
@@ -378,6 +342,37 @@ class ResultManifest:
         paths = [change.path for change in self.changes]
         if paths != sorted(paths) or len(paths) != len(set(paths)):
             raise ResultError("result changes must use unique sorted paths")
+        baseline_paths = {
+            PurePosixPath(change.path)
+            for change in self.changes
+            if change.before is not None
+        }
+        if any(
+            parent in baseline_paths
+            for path in baseline_paths
+            for parent in path.parents
+        ):
+            raise ResultError(
+                "result baseline paths contain a leaf/descendant collision"
+            )
+        final_paths = {
+            PurePosixPath(change.path)
+            for change in self.changes
+            if change.after is not None
+        }
+        if any(
+            parent in final_paths for path in final_paths for parent in path.parents
+        ):
+            raise ResultError("result final paths contain a leaf/descendant collision")
+        sizes_by_digest: dict[str, int] = {}
+        for change in self.changes:
+            for state in (change.before, change.after):
+                if state is None or state.kind != "file":
+                    continue
+                assert state.sha256 is not None and state.size is not None
+                known_size = sizes_by_digest.setdefault(state.sha256, state.size)
+                if known_size != state.size:
+                    raise ResultError("result blob digest has inconsistent sizes")
         if len(paths) > MAX_RESULT_PATHS:
             raise ResultError("result contains too many changed paths")
         if len(self.canonical.encode("utf-8")) > MAX_MANIFEST_BYTES:
@@ -435,6 +430,12 @@ class ResultManifest:
 class CapturedResult:
     manifest: ResultManifest
     directory: Path
+
+
+@dataclass(frozen=True)
+class _DirectoryReplacement:
+    path: str
+    directories: tuple[str, ...]
 
 
 class WorkspaceResultStore:
@@ -513,7 +514,12 @@ class WorkspaceResultStore:
         return candidate
 
     @staticmethod
-    def _file_state(path: Path, relative: str) -> FileState:
+    def _file_state(
+        path: Path,
+        relative: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> FileState:
         try:
             info = path.lstat()
         except OSError as exc:
@@ -533,6 +539,12 @@ class WorkspaceResultStore:
             descriptor = os.open(path, flags)
             with os.fdopen(descriptor, "rb") as source:
                 opened = os.fstat(source.fileno())
+                if not stat.S_ISREG(opened.st_mode):
+                    raise ResultError(
+                        f"result contains an unsupported file type: {relative}"
+                    )
+                if max_bytes is not None and opened.st_size > max_bytes:
+                    raise ResultError("result scan exceeds the size limit")
                 digest = hashlib.sha256()
                 size = 0
                 while chunk := source.read(READ_CHUNK_BYTES):
@@ -584,14 +596,17 @@ class WorkspaceResultStore:
         self,
         workspace: Path,
         *,
-        baseline_paths: Sequence[str] = (),
+        baseline: Mapping[str, FileState] | None = None,
         ignore_files: dict[str, bytes] | None = None,
+        max_changed_bytes: int | None = None,
     ) -> dict[str, FileState]:
         workspace = self._workspace(workspace)
         states: dict[str, FileState] = {}
         path_count = 0
+        inspected_count = 0
         pending = [PurePosixPath(".")]
-        protected = self._protected_paths(baseline_paths)
+        protected = self._protected_paths(() if baseline is None else tuple(baseline))
+        leaves: list[tuple[Path, str, os.stat_result]] = []
         try:
             with self._ignore_rules(ignore_files or {}) as matcher:
                 while pending:
@@ -601,43 +616,108 @@ class WorkspaceResultStore:
                         if relative_directory.as_posix() == "."
                         else workspace.joinpath(*relative_directory.parts)
                     )
-                    with os.scandir(directory) as iterator:
-                        entries = sorted(iterator, key=lambda item: item.name)
                     inspected: list[
-                        tuple[os.DirEntry[str], PurePosixPath, str, bool]
+                        tuple[Path, PurePosixPath, str, os.stat_result]
                     ] = []
-                    candidates: list[tuple[str, bool]] = []
-                    for entry in entries:
-                        relative_path = (
-                            PurePosixPath(entry.name)
-                            if relative_directory.as_posix() == "."
-                            else relative_directory / entry.name
+                    with os.scandir(directory) as iterator:
+                        for entry in iterator:
+                            inspected_count += 1
+                            if inspected_count > MAX_INSPECTED_PATHS:
+                                raise ResultError(
+                                    "result contains too many workspace entries"
+                                )
+                            relative_path = (
+                                PurePosixPath(entry.name)
+                                if relative_directory.as_posix() == "."
+                                else relative_directory / entry.name
+                            )
+                            relative = _safe_path(relative_path.as_posix())
+                            info = entry.stat(follow_symlinks=False)
+                            inspected.append(
+                                (Path(entry.path), relative_path, relative, info)
+                            )
+                            if len(inspected) == MAX_SCAN_BATCH_PATHS:
+                                path_count = self._collect_scan_batch(
+                                    inspected,
+                                    matcher=matcher,
+                                    protected=protected,
+                                    pending=pending,
+                                    leaves=leaves,
+                                    path_count=path_count,
+                                )
+                                inspected.clear()
+                    if inspected:
+                        path_count = self._collect_scan_batch(
+                            inspected,
+                            matcher=matcher,
+                            protected=protected,
+                            pending=pending,
+                            leaves=leaves,
+                            path_count=path_count,
                         )
-                        relative = _safe_path(relative_path.as_posix())
-                        info = entry.stat(follow_symlinks=False)
-                        is_directory = stat.S_ISDIR(info.st_mode)
-                        inspected.append((entry, relative_path, relative, is_directory))
-                        if (
-                            matcher is not None
-                            and relative not in protected
-                            and entry.name != ".gitignore"
-                        ):
-                            candidates.append((relative, is_directory))
-                    ignored = set() if matcher is None else matcher.ignored(candidates)
-                    for entry, relative_path, relative, is_directory in inspected:
-                        if relative in ignored:
-                            continue
-                        path_count += 1
-                        if path_count > self.max_paths:
-                            raise ResultError("result contains too many paths")
-                        if is_directory:
-                            pending.append(relative_path)
-                            continue
-                        states[relative] = self._file_state(Path(entry.path), relative)
         except ResultError:
             raise
         except OSError as exc:
             raise ResultError("cannot enumerate result workspace") from exc
+
+        if baseline is None:
+            scan_limit = MAX_SNAPSHOT_BYTES
+            regular_bytes = sum(
+                info.st_size for _, _, info in leaves if stat.S_ISREG(info.st_mode)
+            )
+            if regular_bytes > scan_limit:
+                raise ResultError("result baseline content exceeds the size limit")
+        else:
+            if max_changed_bytes is None:
+                raise ResultError("result changed-content limit is unavailable")
+            baseline_bytes = sum(
+                state.size or 0 for state in baseline.values() if state.kind == "file"
+            )
+            scan_limit = baseline_bytes + max_changed_bytes
+            definite_changed_bytes = 0
+            for _, relative, info in leaves:
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                previous = baseline.get(relative)
+                if (
+                    previous is None
+                    or previous.kind != "file"
+                    or previous.size != info.st_size
+                ):
+                    definite_changed_bytes += info.st_size
+                    if definite_changed_bytes > max_changed_bytes:
+                        raise ResultError(
+                            "result changed content exceeds the size limit"
+                        )
+
+        read_bytes = 0
+        changed_bytes = 0
+        for path, relative, _ in sorted(leaves, key=lambda item: item[1]):
+            state = self._file_state(
+                path,
+                relative,
+                max_bytes=max(0, scan_limit - read_bytes),
+            )
+            states[relative] = state
+            if state.kind != "file":
+                continue
+            assert state.size is not None and state.sha256 is not None
+            read_bytes += state.size
+            if read_bytes > scan_limit:
+                raise ResultError("result scan exceeds the size limit")
+            if baseline is None:
+                continue
+            previous = baseline.get(relative)
+            if (
+                previous is None
+                or previous.kind != "file"
+                or previous.size != state.size
+                or previous.sha256 != state.sha256
+            ):
+                changed_bytes += state.size
+                assert max_changed_bytes is not None
+                if changed_bytes > max_changed_bytes:
+                    raise ResultError("result changed content exceeds the size limit")
         try:
             validate_symlink_graph(
                 {
@@ -649,6 +729,40 @@ class WorkspaceResultStore:
         except UnsafeSymlinkError as exc:
             raise ResultError("result contains an unsafe symlink") from exc
         return dict(sorted(states.items()))
+
+    def _collect_scan_batch(
+        self,
+        inspected: Sequence[tuple[Path, PurePosixPath, str, os.stat_result]],
+        *,
+        matcher: _PinnedIgnoreRules | None,
+        protected: frozenset[str],
+        pending: list[PurePosixPath],
+        leaves: list[tuple[Path, str, os.stat_result]],
+        path_count: int,
+    ) -> int:
+        candidates = [
+            (relative, stat.S_ISDIR(info.st_mode))
+            for _, relative_path, relative, info in inspected
+            if matcher is not None
+            and relative not in protected
+            and relative_path.name != ".gitignore"
+        ]
+        ignored = set() if matcher is None else matcher.ignored(candidates)
+        for path, relative_path, relative, info in inspected:
+            if relative in ignored:
+                continue
+            path_count += 1
+            if path_count > self.max_paths:
+                raise ResultError("result contains too many paths")
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(relative_path)
+                continue
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                raise ResultError(
+                    f"result contains an unsupported file type: {relative}"
+                )
+            leaves.append((path, relative, info))
+        return path_count
 
     @staticmethod
     def _read_pinned_ignore(path: Path, relative: str, expected: FileState) -> bytes:
@@ -704,12 +818,55 @@ class WorkspaceResultStore:
         return self.ensure_root() / ".staging" / f"{attempt_id}.json"
 
     @staticmethod
-    def _read_json(path: Path, *, label: str) -> dict[str, Any]:
+    def _read_file(
+        path: Path,
+        *,
+        label: str,
+        max_bytes: int,
+        expected_size: int | None = None,
+        expected_sha256: str | None = None,
+        retain: bool,
+    ) -> bytes | None:
+        """Read trusted control-plane state with ordinary integrity bounds."""
+
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        size = 0
         try:
-            raw = path.read_bytes()
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+                raise ResultError(label)
+            with path.open("rb") as source:
+                while size <= max_bytes:
+                    chunk = source.read(min(READ_CHUNK_BYTES, max_bytes + 1 - size))
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+                    if retain:
+                        chunks.append(chunk)
+        except ResultError:
+            raise
         except OSError as exc:
-            raise ResultError(f"{label} is unavailable") from exc
-        if not raw or len(raw) > MAX_MANIFEST_BYTES:
+            raise ResultError(label) from exc
+        if (
+            size > max_bytes
+            or (expected_size is not None and size != expected_size)
+            or (expected_sha256 is not None and digest.hexdigest() != expected_sha256)
+        ):
+            raise ResultError(label)
+        return b"".join(chunks) if retain else None
+
+    @classmethod
+    def _read_json(cls, path: Path, *, label: str) -> dict[str, Any]:
+        raw = cls._read_file(
+            path,
+            label=f"{label} is invalid",
+            max_bytes=MAX_MANIFEST_BYTES,
+            retain=True,
+        )
+        assert raw is not None
+        if not raw:
             raise ResultError(f"{label} is invalid")
 
         def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -730,6 +887,12 @@ class WorkspaceResultStore:
             raise ResultError(f"{label} is invalid")
         return value
 
+    def _read_staged_json(self, attempt_id: str) -> dict[str, Any]:
+        return self._read_json(
+            self._stage_path(attempt_id),
+            label="result baseline",
+        )
+
     @staticmethod
     def _write_new(path: Path, raw: bytes) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -744,7 +907,49 @@ class WorkspaceResultStore:
         except OSError as exc:
             raise ResultError("cannot write result artifact") from exc
 
-    def stage(self, attempt_id: str, workspace: Path, source_revision: str) -> None:
+    @staticmethod
+    def _gitlinks(value: Sequence[str]) -> tuple[str, ...]:
+        try:
+            gitlinks = tuple(_safe_path(path) for path in value)
+        except TypeError as exc:
+            raise ResultError("result gitlink paths are invalid") from exc
+        if gitlinks != tuple(sorted(set(gitlinks))):
+            raise ResultError("result gitlink paths are invalid")
+        return gitlinks
+
+    @staticmethod
+    def _validate_gitlinks(workspace: Path, gitlinks: Sequence[str]) -> None:
+        for relative in gitlinks:
+            try:
+                parts = PurePosixPath(relative).parts
+                path = workspace
+                for part in parts[:-1]:
+                    path /= part
+                    parent = path.lstat()
+                    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+                        raise ResultError(f"worker changed gitlink path: {relative}")
+                path /= parts[-1]
+                info = path.lstat()
+                unchanged = (
+                    stat.S_ISDIR(info.st_mode)
+                    and not stat.S_ISLNK(info.st_mode)
+                    and next(path.iterdir(), None) is None
+                )
+            except ResultError:
+                raise
+            except (OSError, UnicodeError) as exc:
+                raise ResultError(f"worker changed gitlink path: {relative}") from exc
+            if not unchanged:
+                raise ResultError(f"worker changed gitlink path: {relative}")
+
+    def stage(
+        self,
+        attempt_id: str,
+        workspace: Path,
+        source_revision: str,
+        *,
+        gitlinks: Sequence[str] = (),
+    ) -> None:
         attempt_id = self._attempt_id(attempt_id)
         if (
             not isinstance(source_revision, str)
@@ -752,10 +957,13 @@ class WorkspaceResultStore:
         ):
             raise ResultError("result source revision is invalid")
         workspace = self._workspace(workspace)
+        gitlinks = self._gitlinks(gitlinks)
+        self._validate_gitlinks(workspace, gitlinks)
         states = self._scan(workspace)
         value = {
             "attempt_id": attempt_id,
             "files": {path: state.to_dict() for path, state in states.items()},
+            "gitlinks": list(gitlinks),
             "ignore_files": self._pinned_ignore_files(workspace, states),
             "schema_version": BASELINE_SCHEMA_VERSION,
             "source_revision": source_revision,
@@ -766,10 +974,11 @@ class WorkspaceResultStore:
         stage_path = self._stage_path(attempt_id)
         try:
             self._write_new(stage_path, raw)
-        except ResultError:
-            if not stage_path.exists():
-                raise
-            existing = self._read_json(stage_path, label="result baseline")
+        except ResultError as write_error:
+            try:
+                existing = self._read_staged_json(attempt_id)
+            except ResultError:
+                raise write_error from None
             if canonical_json(existing).encode("utf-8") != raw:
                 raise ResultError(
                     "result attempt already has a different baseline"
@@ -777,15 +986,17 @@ class WorkspaceResultStore:
 
     def _load_baseline(
         self, attempt_id: str
-    ) -> tuple[str, dict[str, FileState], dict[str, bytes]]:
-        value = self._read_json(self._stage_path(attempt_id), label="result baseline")
+    ) -> tuple[str, dict[str, FileState], dict[str, bytes], tuple[str, ...]]:
+        value = self._read_staged_json(attempt_id)
         version = value.get("schema_version")
         expected_fields = {"attempt_id", "files", "schema_version", "source_revision"}
-        if version == BASELINE_SCHEMA_VERSION:
+        if version in {2, BASELINE_SCHEMA_VERSION}:
             expected_fields.add("ignore_files")
+        if version == BASELINE_SCHEMA_VERSION:
+            expected_fields.add("gitlinks")
         if set(value) != expected_fields:
             raise ResultError("result baseline is invalid")
-        if version not in {1, BASELINE_SCHEMA_VERSION} or isinstance(version, bool):
+        if version not in {1, 2, BASELINE_SCHEMA_VERSION} or isinstance(version, bool):
             raise ResultError("result baseline is invalid")
         if value["attempt_id"] != attempt_id:
             raise ResultError("result baseline belongs to another attempt")
@@ -801,6 +1012,11 @@ class WorkspaceResultStore:
             states[path] = FileState.from_mapping(raw_state, path=path)
         if list(states) != sorted(states):
             raise ResultError("result baseline paths are not sorted")
+        if (
+            sum(state.size or 0 for state in states.values() if state.kind == "file")
+            > MAX_SNAPSHOT_BYTES
+        ):
+            raise ResultError("result baseline is invalid")
         ignore_files: dict[str, bytes] = {}
         encoded_rules = value.get("ignore_files", {})
         if not isinstance(encoded_rules, dict):
@@ -820,7 +1036,11 @@ class WorkspaceResultStore:
             ignore_files[path] = raw
         if list(ignore_files) != sorted(ignore_files):
             raise ResultError("result baseline is invalid")
-        return revision, states, ignore_files
+        raw_gitlinks = value.get("gitlinks", ())
+        if not isinstance(raw_gitlinks, list) and raw_gitlinks != ():
+            raise ResultError("result baseline is invalid")
+        gitlinks = self._gitlinks(raw_gitlinks)
+        return revision, states, ignore_files, gitlinks
 
     @staticmethod
     def _changes(
@@ -873,11 +1093,13 @@ class WorkspaceResultStore:
         if final.exists():
             return CapturedResult(self.inspect(attempt_id), final)
         workspace = self._workspace(workspace)
-        revision, before, ignore_files = self._load_baseline(attempt_id)
+        revision, before, ignore_files, gitlinks = self._load_baseline(attempt_id)
+        self._validate_gitlinks(workspace, gitlinks)
         after = self._scan(
             workspace,
-            baseline_paths=tuple(before),
+            baseline=before,
             ignore_files=ignore_files,
+            max_changed_bytes=self.max_changed_bytes,
         )
         manifest = ResultManifest(
             RESULT_SCHEMA_VERSION,
@@ -905,6 +1127,7 @@ class WorkspaceResultStore:
                 source = workspace.joinpath(*PurePosixPath(change.path).parts)
                 self._copy_blob(source, blobs / digest, change.after)
                 copied.add(digest)
+            self._validate_gitlinks(workspace, gitlinks)
             self._write_new(
                 temporary / "manifest.json", manifest.canonical.encode("utf-8")
             )
@@ -925,6 +1148,71 @@ class WorkspaceResultStore:
     def inspect(
         self, attempt_id: str, *, expected_digest: str | None = None
     ) -> ResultManifest:
+        manifest, _ = self._load_bundle(
+            attempt_id,
+            expected_digest=expected_digest,
+            retain=False,
+        )
+        return manifest
+
+    @staticmethod
+    def _expected_blobs(manifest: ResultManifest) -> dict[str, FileState]:
+        expected: dict[str, FileState] = {}
+        for change in manifest.changes:
+            if not change.needs_blob or change.after is None:
+                continue
+            state = change.after
+            assert state.sha256 is not None
+            expected.setdefault(state.sha256, state)
+        return expected
+
+    @classmethod
+    def _read_blob_set(
+        cls,
+        directory: Path,
+        expected: Mapping[str, FileState],
+        *,
+        retain: bool,
+    ) -> dict[str, bytes]:
+        seen: set[str] = set()
+        loaded: dict[str, bytes] = {}
+        try:
+            entries = list(directory.iterdir())
+        except OSError as exc:
+            raise ResultError("result blobs are unavailable") from exc
+        for path in entries:
+            name = path.name
+            if (
+                len(seen) >= len(expected)
+                or DIGEST_RE.fullmatch(name) is None
+                or name not in expected
+                or name in seen
+            ):
+                raise ResultError("result blob set does not match the manifest")
+            state = expected[name]
+            assert state.size is not None and state.sha256 is not None
+            content = cls._read_file(
+                path,
+                label="result blob digest does not match",
+                max_bytes=state.size,
+                expected_size=state.size,
+                expected_sha256=state.sha256,
+                retain=retain,
+            )
+            seen.add(name)
+            if content is not None:
+                loaded[name] = content
+        if seen != set(expected):
+            raise ResultError("result blob set does not match the manifest")
+        return loaded
+
+    def _load_bundle(
+        self,
+        attempt_id: str,
+        *,
+        expected_digest: str | None,
+        retain: bool,
+    ) -> tuple[ResultManifest, dict[str, bytes]]:
         attempt_id = self._attempt_id(attempt_id)
         if expected_digest is not None and (
             not isinstance(expected_digest, str)
@@ -932,48 +1220,42 @@ class WorkspaceResultStore:
         ):
             raise ResultError("expected result digest is invalid")
         directory = self.ensure_root() / attempt_id
-        try:
-            info = directory.lstat()
-        except OSError as exc:
-            raise ResultError("captured result is unavailable") from exc
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise ResultError("captured result is invalid")
-        value = self._read_json(directory / "manifest.json", label="result manifest")
-        manifest = ResultManifest.from_mapping(value)
+        manifest = ResultManifest.from_mapping(
+            self._read_json(directory / "manifest.json", label="result manifest")
+        )
         if manifest.attempt_id != attempt_id:
             raise ResultError("result manifest belongs to another attempt")
         if expected_digest is not None and manifest.digest != expected_digest:
             raise ResultError("result manifest digest does not match")
-        required = {
-            change.after.sha256
-            for change in manifest.changes
-            if change.needs_blob and change.after is not None
-        }
-        blobs = directory / "blobs"
-        try:
-            with os.scandir(blobs) as iterator:
-                entries = {entry.name: entry for entry in iterator}
-        except OSError as exc:
-            raise ResultError("result blobs are unavailable") from exc
-        if set(entries) != required or any(
-            DIGEST_RE.fullmatch(name) is None for name in entries
-        ):
-            raise ResultError("result blob set does not match the manifest")
-        expected_by_digest = {
-            change.after.sha256: change.after
-            for change in manifest.changes
-            if change.needs_blob and change.after is not None
-        }
-        for digest, entry in entries.items():
-            state = self._file_state(Path(entry.path), f"blobs/{digest}")
-            expected = expected_by_digest[digest]
-            if (
-                state.kind != "file"
-                or state.size != expected.size
-                or state.sha256 != digest
-            ):
-                raise ResultError("result blob digest does not match")
-        return manifest
+        if manifest.changed_paths > self.max_paths:
+            raise ResultError("result contains too many changed paths")
+        if manifest.changed_bytes > self.max_changed_bytes:
+            raise ResultError("result changed content exceeds the size limit")
+        blobs = self._read_blob_set(
+            directory / "blobs",
+            self._expected_blobs(manifest),
+            retain=retain,
+        )
+        return manifest, blobs
+
+    def load_bundle(
+        self, attempt_id: str, *, expected_digest: str | None = None
+    ) -> tuple[ResultManifest, dict[str, bytes]]:
+        """Load one trusted result bundle without re-reading its files."""
+
+        return self._load_bundle(
+            attempt_id,
+            expected_digest=expected_digest,
+            retain=True,
+        )
+
+    def load_blobs(
+        self, attempt_id: str, *, expected_digest: str | None = None
+    ) -> dict[str, bytes]:
+        """Return every verified changed-file body for trusted materialization."""
+
+        _, blobs = self.load_bundle(attempt_id, expected_digest=expected_digest)
+        return blobs
 
     @staticmethod
     def _target_root(path: Path) -> Path:
@@ -1004,15 +1286,203 @@ class WorkspaceResultStore:
                 raise ResultError(f"target parent is not a directory: {relative}")
         return root.joinpath(*parts)
 
-    def _current_state(self, root: Path, relative: str) -> FileState | None:
-        target = self._target_path(root, relative)
+    def _preflight_directory_replacement(
+        self,
+        root: Path,
+        change: ResultChange,
+        expected_leaves: Mapping[str, FileState],
+    ) -> _DirectoryReplacement:
+        prefix = PurePosixPath(change.path)
+        expected_directories = {change.path}
+        for relative in expected_leaves:
+            path = PurePosixPath(relative)
+            expected_directories.update(
+                parent.as_posix()
+                for parent in path.parents
+                if parent == prefix or prefix in parent.parents
+            )
+
+        # An empty directory at an added-leaf path is unknown checkout state,
+        # not evidence of the deleted tree represented by the manifest.
+        if not expected_leaves:
+            raise ResultError(f"result target changed: {change.path}")
+
+        pending = [change.path]
+        seen_directories: set[str] = set()
+        seen_leaves: set[str] = set()
+        scanned_entries = 0
+        expected_entries = len(expected_leaves) + len(expected_directories) - 1
         try:
-            target.lstat()
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise ResultError(f"cannot inspect result target: {relative}") from exc
-        return self._file_state(target, relative)
+            while pending:
+                relative_directory = pending.pop()
+                directory = root.joinpath(*PurePosixPath(relative_directory).parts)
+                info = directory.lstat()
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    raise ResultError(f"result target changed: {change.path}")
+                with os.scandir(directory) as iterator:
+                    seen_directories.add(relative_directory)
+                    for entry in iterator:
+                        scanned_entries += 1
+                        if scanned_entries > expected_entries:
+                            raise ResultError(f"result target changed: {change.path}")
+                        relative = _safe_path(
+                            (PurePosixPath(relative_directory) / entry.name).as_posix()
+                        )
+                        info = entry.stat(follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            if relative not in expected_directories:
+                                raise ResultError(
+                                    f"result target changed: {change.path}"
+                                )
+                            pending.append(relative)
+                            continue
+                        expected = expected_leaves.get(relative)
+                        if expected is None:
+                            raise ResultError(f"result target changed: {change.path}")
+                        if self._file_state(Path(entry.path), relative) != expected:
+                            raise ResultError(f"result target changed: {change.path}")
+                        seen_leaves.add(relative)
+        except ResultError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise ResultError(f"result target changed: {change.path}") from exc
+
+        if seen_directories != expected_directories or seen_leaves != set(
+            expected_leaves
+        ):
+            raise ResultError(f"result target changed: {change.path}")
+        return _DirectoryReplacement(
+            path=change.path,
+            directories=tuple(
+                sorted(
+                    expected_directories,
+                    key=lambda value: (-len(PurePosixPath(value).parts), value),
+                )
+            ),
+        )
+
+    @staticmethod
+    def _index_deleted_descendants(
+        changes: Sequence[ResultChange],
+    ) -> tuple[frozenset[PurePosixPath], dict[str, dict[str, FileState]]]:
+        deleted_leaves: set[PurePosixPath] = set()
+        descendants: dict[str, dict[str, FileState]] = {}
+        for change in changes:
+            if change.after is not None:
+                continue
+            assert change.before is not None
+            path = PurePosixPath(change.path)
+            deleted_leaves.add(path)
+            for parent in path.parents:
+                relative = parent.as_posix()
+                if relative == ".":
+                    break
+                descendants.setdefault(relative, {})[change.path] = change.before
+        return frozenset(deleted_leaves), descendants
+
+    def _preflight_apply(
+        self, root: Path, changes: Sequence[ResultChange]
+    ) -> tuple[_DirectoryReplacement, ...]:
+        replacements: list[_DirectoryReplacement] = []
+        deleted_leaves, deleted_descendants = self._index_deleted_descendants(changes)
+        for change in changes:
+            path = PurePosixPath(change.path)
+            if any(parent in deleted_leaves for parent in path.parents):
+                # An exact leaf scheduled for deletion masks descendants in
+                # the current checkout. Added descendants are preflighted as
+                # absent, then their parent directories are created only
+                # after every baseline leaf has passed verification.
+                continue
+            target = self._target_path(root, change.path)
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                current = None
+            except OSError as exc:
+                raise ResultError(
+                    f"cannot inspect result target: {change.path}"
+                ) from exc
+            else:
+                if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                    if change.before is None and change.after is not None:
+                        replacements.append(
+                            self._preflight_directory_replacement(
+                                root,
+                                change,
+                                deleted_descendants.get(change.path, {}),
+                            )
+                        )
+                        continue
+                    raise ResultError(f"result target changed: {change.path}")
+                try:
+                    current = self._file_state(target, change.path)
+                except ResultError as exc:
+                    raise ResultError(f"result target changed: {change.path}") from exc
+            if current != change.before and self._is_case_only_deleted_alias(
+                root,
+                change,
+                current,
+                changes,
+            ):
+                current = None
+            if current != change.before:
+                raise ResultError(f"result target changed: {change.path}")
+        return tuple(replacements)
+
+    @staticmethod
+    def _is_case_only_deleted_alias(
+        root: Path,
+        change: ResultChange,
+        current: FileState | None,
+        changes: Sequence[ResultChange],
+    ) -> bool:
+        if change.before is not None or current is None:
+            return False
+
+        path = PurePosixPath(change.path)
+
+        def folded_parts(candidate: PurePosixPath) -> tuple[str, ...]:
+            return tuple(
+                unicodedata.normalize("NFC", part).casefold()
+                for part in candidate.parts
+            )
+
+        folded = folded_parts(path)
+        target = root.joinpath(*path.parts)
+        try:
+            with os.scandir(target.parent) as iterator:
+                exact_names = {entry.name for entry in iterator}
+            target_info = target.lstat()
+        except OSError:
+            return False
+        if target.name in exact_names:
+            return False
+
+        aliases: list[ResultChange] = []
+        for candidate in changes:
+            candidate_path = PurePosixPath(candidate.path)
+            if (
+                candidate.after is not None
+                or candidate.before is None
+                or candidate.path == change.path
+                or folded_parts(candidate_path) != folded
+            ):
+                continue
+            alias = root.joinpath(*candidate_path.parts)
+            try:
+                alias_info = alias.lstat()
+            except OSError:
+                continue
+            if (
+                candidate_path.name in exact_names
+                and (target_info.st_dev, target_info.st_ino)
+                == (alias_info.st_dev, alias_info.st_ino)
+                and candidate.before == current
+            ):
+                aliases.append(candidate)
+        if len(aliases) > 1:
+            raise ResultError(f"result target changed: {change.path}")
+        return bool(aliases)
 
     @staticmethod
     def _ensure_parents(root: Path, target: Path) -> None:
@@ -1042,15 +1512,58 @@ class WorkspaceResultStore:
             current = current.parent
 
     @staticmethod
-    def _atomic_file(target: Path, blob: Path, mode: int) -> None:
+    def _atomic_mode_only_file(
+        target: Path,
+        relative: str,
+        expected: FileState,
+        mode: int,
+    ) -> None:
+        assert (
+            expected.kind == "file"
+            and expected.mode is not None
+            and expected.size is not None
+            and expected.sha256 is not None
+        )
+        temporary = target.parent / f".mgb-{secrets.token_hex(16)}"
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with target.open("rb") as source, temporary.open("xb") as output:
+                while size <= expected.size:
+                    chunk = source.read(min(READ_CHUNK_BYTES, expected.size + 1 - size))
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fchmod(output.fileno(), mode)
+                os.fsync(output.fileno())
+        except OSError as exc:
+            temporary.unlink(missing_ok=True)
+            raise ResultError(f"cannot apply result mode: {relative}") from exc
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        if size != expected.size or digest.hexdigest() != expected.sha256:
+            temporary.unlink(missing_ok=True)
+            raise ResultError(f"result target changed: {relative}")
+        try:
+            os.replace(temporary, target)
+        except OSError as exc:
+            temporary.unlink(missing_ok=True)
+            raise ResultError(f"cannot apply result mode: {relative}") from exc
+
+    @staticmethod
+    def _atomic_file(target: Path, content: bytes, mode: int) -> None:
         temporary = target.parent / f".mgb-{secrets.token_hex(16)}"
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             descriptor = os.open(temporary, flags, 0o600)
-            with os.fdopen(descriptor, "wb") as output, blob.open("rb") as source:
-                shutil.copyfileobj(source, output)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
             temporary.chmod(mode)
@@ -1072,48 +1585,89 @@ class WorkspaceResultStore:
     @staticmethod
     def _validate_applied_symlinks(root: Path, changes: Sequence[ResultChange]) -> None:
         final_states = {change.path: change.after for change in changes}
-        links = {
+        changed_links = {
             PurePosixPath(path): state.target
             for path, state in final_states.items()
             if state is not None
             and state.kind == "symlink"
             and state.target is not None
         }
-        if not links:
+        if not changed_links:
             return
+
+        existing_links: dict[PurePosixPath, str] = {}
+        pending = [PurePosixPath(".")]
+        inspected = 0
+        try:
+            while pending:
+                relative_directory = pending.pop()
+                directory = (
+                    root
+                    if relative_directory.as_posix() == "."
+                    else root.joinpath(*relative_directory.parts)
+                )
+                with os.scandir(directory) as iterator:
+                    entries = tuple(iterator)
+                for entry in entries:
+                    relative_path = (
+                        PurePosixPath(entry.name)
+                        if relative_directory.as_posix() == "."
+                        else relative_directory / entry.name
+                    )
+                    if any(
+                        reserved_git_component(part) for part in relative_path.parts
+                    ):
+                        continue
+                    relative = _safe_path(relative_path.as_posix())
+                    if relative in final_states or any(
+                        parent.as_posix() in final_states
+                        for parent in relative_path.parents
+                    ):
+                        continue
+                    inspected += 1
+                    if inspected > MAX_RESULT_PATHS:
+                        raise ResultError(
+                            "result target contains too many paths for "
+                            "symlink validation"
+                        )
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISLNK(info.st_mode):
+                        existing_links[relative_path] = os.readlink(entry.path)
+                    elif stat.S_ISDIR(info.st_mode):
+                        pending.append(relative_path)
+        except ResultError:
+            raise
+        except (OSError, UnsafeSymlinkError) as exc:
+            raise ResultError("cannot inspect result symlink graph") from exc
 
         for path, state in final_states.items():
             if state is None:
                 continue
             candidate = PurePosixPath(path)
-            if any(parent in links for parent in candidate.parents):
+            if any(
+                parent in changed_links or parent in existing_links
+                for parent in candidate.parents
+            ):
                 raise ResultError("result contains a path beneath a symlink")
 
-        def existing_link(path: PurePosixPath) -> str | None:
-            relative = path.as_posix()
-            if relative in final_states or any(
-                parent.as_posix() in final_states for parent in path.parents
-            ):
-                # Validation models the graph after every change.  A changed
-                # path (or ancestor) therefore masks its pre-apply checkout
-                # entry; changed symlinks are already served from ``links``.
-                return None
-            target = root.joinpath(*path.parts)
-            try:
-                info = target.lstat()
-            except FileNotFoundError:
-                return None
-            except OSError as exc:
-                raise ResultError("cannot inspect result symlink graph") from exc
-            if not stat.S_ISLNK(info.st_mode):
-                return None
-            try:
-                return os.readlink(target)
-            except OSError as exc:
-                raise ResultError("cannot inspect result symlink graph") from exc
-
         try:
-            validate_symlink_graph(links, lookup=existing_link)
+            validate_symlink_graph(changed_links, lookup=existing_links.get)
+            for source, target in existing_links.items():
+                touched_changed = False
+
+                def lookup(path: PurePosixPath) -> str | None:
+                    nonlocal touched_changed
+                    changed = changed_links.get(path)
+                    if changed is not None:
+                        touched_changed = True
+                        return changed
+                    return existing_links.get(path)
+
+                try:
+                    validate_symlink_graph({source: target}, lookup=lookup)
+                except UnsafeSymlinkError:
+                    if touched_changed:
+                        raise
         except UnsafeSymlinkError as exc:
             raise ResultError("result contains an unsafe symlink") from exc
 
@@ -1124,15 +1678,24 @@ class WorkspaceResultStore:
         *,
         expected_digest: str | None = None,
     ) -> dict[str, Any]:
-        manifest = self.inspect(attempt_id, expected_digest=expected_digest)
+        manifest, blobs = self.load_bundle(attempt_id, expected_digest=expected_digest)
         root = self._target_root(repository)
+        prepared_files: dict[str, bytes] = {}
         for change in manifest.changes:
-            current = self._current_state(root, change.path)
-            if current != change.before:
-                raise ResultError(f"result target changed: {change.path}")
+            after = change.after
+            if after is None or after.kind != "file" or not change.needs_blob:
+                continue
+            assert after.sha256 is not None
+            prepared_files[change.path] = blobs[after.sha256]
+
+        replacements = self._preflight_apply(root, manifest.changes)
         self._validate_applied_symlinks(root, manifest.changes)
 
         deleted = [change for change in manifest.changes if change.after is None]
+        replacement_roots = {
+            PurePosixPath(replacement.path) for replacement in replacements
+        }
+        ordinary_deleted_parents: set[Path] = set()
         for change in sorted(
             deleted, key=lambda item: len(PurePosixPath(item.path).parts), reverse=True
         ):
@@ -1143,9 +1706,26 @@ class WorkspaceResultStore:
                 raise ResultError(
                     f"cannot delete result target: {change.path}"
                 ) from exc
-            self._prune_empty(root, target.parent)
+            path = PurePosixPath(change.path)
+            if not any(prefix in path.parents for prefix in replacement_roots):
+                ordinary_deleted_parents.add(target.parent)
 
-        directory = self.ensure_root() / attempt_id
+        for replacement in replacements:
+            for relative in replacement.directories:
+                target = self._target_path(root, relative)
+                try:
+                    target.rmdir()
+                except OSError as exc:
+                    raise ResultError(
+                        f"cannot replace result target directory: {replacement.path}"
+                    ) from exc
+        for parent in sorted(
+            ordinary_deleted_parents,
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            self._prune_empty(root, parent)
+
         for change in (item for item in manifest.changes if item.after is not None):
             after = change.after
             assert after is not None
@@ -1154,18 +1734,17 @@ class WorkspaceResultStore:
             if after.kind == "symlink":
                 assert after.target is not None
                 self._atomic_symlink(target, after.target)
-            elif not change.needs_blob:
+            elif change.needs_blob:
                 assert after.mode is not None
-                try:
-                    target.chmod(after.mode)
-                except OSError as exc:
-                    raise ResultError(
-                        f"cannot apply result mode: {change.path}"
-                    ) from exc
+                self._atomic_file(target, prepared_files[change.path], after.mode)
             else:
-                assert after.sha256 is not None and after.mode is not None
-                self._atomic_file(
-                    target, directory / "blobs" / after.sha256, after.mode
+                assert after.mode is not None
+                assert change.before is not None and change.before.kind == "file"
+                self._atomic_mode_only_file(
+                    target,
+                    change.path,
+                    change.before,
+                    after.mode,
                 )
         return {
             "attempt_id": attempt_id,

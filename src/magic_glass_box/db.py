@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .storage.artifacts import ArtifactStorage
 from .storage.attempts import AttemptStorage
+from .storage.candidates import CandidateStorage
 from .storage.catalog import CatalogStorage
 from .storage.core import DatabaseCore, default_db_path
 from .storage.errors import (
@@ -15,6 +16,7 @@ from .storage.queries import QueryStorage
 from .storage.runs import RunStorage
 from .storage.schema import (
     ATTEMPT_SCHEMA,
+    CANDIDATE_SCHEMA,
     DATABASE_FILENAME,
     EXECUTION_INTEGRITY_SCHEMA,
     INTERACTION_SCHEMA,
@@ -25,6 +27,7 @@ from .storage.schema import (
     MAX_WORK_ASSIGNMENTS_PER_THREAD,
     MIGRATIONS,
     MIN_ATTEMPT_LEASE_SECONDS,
+    PROVIDER_DISPATCH_SCHEMA,
     PROVIDER_SCHEMA,
     RUN_REPLACEMENT_SCHEMA,
     SCHEMA,
@@ -42,6 +45,7 @@ from .storage.work_items import WorkItemStorage
 
 __all__ = [
     "ATTEMPT_SCHEMA",
+    "CANDIDATE_SCHEMA",
     "ConcurrentUpdateError",
     "ConflictError",
     "DATABASE_FILENAME",
@@ -57,6 +61,7 @@ __all__ = [
     "MIN_ATTEMPT_LEASE_SECONDS",
     "NotFoundError",
     "PROVIDER_SCHEMA",
+    "PROVIDER_DISPATCH_SCHEMA",
     "RUN_REPLACEMENT_SCHEMA",
     "SCHEMA",
     "SCHEMA_V1",
@@ -74,6 +79,7 @@ __all__ = [
 class Database(
     SupervisionStorage,
     QueryStorage,
+    CandidateStorage,
     ArtifactStorage,
     WorkStorage,
     InteractionStorage,
