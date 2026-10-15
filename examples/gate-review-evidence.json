@@ -1,0 +1,33 @@
+{
+  "inputs": {
+    "candidate_id": "cnd_11111111111111111111111111111111",
+    "expected_base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "integration_ref": "refs/heads/main",
+    "object_format": "sha1",
+    "policy_id": "gpl_55555555555555555555555555555555",
+    "policy_revision": "ab358f00297bbac9d96c9951018a5bc7d4541a632baa660140d0a93e1b67c8ff",
+    "repository_identity": "boxp_33333333333333333333333333333333",
+    "tree_revision": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "kind": "independent_review",
+  "outcome": "passed",
+  "producer": {
+    "attempt_id": "att_66666666666666666666666666666666",
+    "identity_id": "kid_77777777777777777777777777777777",
+    "profile_id": "agp_88888888888888888888888888888888",
+    "profile_version_id": "apv_99999999999999999999999999999999",
+    "requested_by": "boxu_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "run_id": "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "reviewer": {
+    "attempt_id": "att_cccccccccccccccccccccccccccccccc",
+    "identity_id": "kid_dddddddddddddddddddddddddddddddd",
+    "profile_id": "agp_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "profile_version_id": "apv_ffffffffffffffffffffffffffffffff",
+    "requested_by": "boxu_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "run_id": "run_00000000000000000000000000000000"
+  },
+  "schema_version": 1,
+  "separation": "different_profile_and_identity"
+}

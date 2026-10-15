@@ -11,6 +11,7 @@ from pathlib import Path
 from magic_glass_box.db import (
     INTERACTION_SCHEMA,
     SCHEMA_V1,
+    SCHEMA_VERSION,
     ConflictError,
     Database,
     NotFoundError,
@@ -586,7 +587,7 @@ class WorkItemMigrationTests(unittest.TestCase):
             database = Database(path)
             first = database.initialize()
             second = database.initialize()
-            self.assertEqual(first["schema_version"], 12)
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["work_items"], 0)

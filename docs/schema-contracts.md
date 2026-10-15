@@ -6,6 +6,12 @@ the path and identity constraints that standard JSON Schema can express.
 Examples in `examples/` must pass both those schemas and the corresponding
 runtime parser.
 
+Milestone 7B publishes separate contracts for the operator-authored gate-policy
+request, the resolved immutable policy manifest, and review/validation evidence:
+`gate-policy-request-v1.schema.json`, `gate-policy-v1.schema.json`, and
+`gate-evidence-v1.schema.json`. The request permits mutable image references;
+the durable policy contains only resolved immutable image IDs.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime parser is authoritative and additionally
 enforces invariants that portable JSON Schema cannot express, including:

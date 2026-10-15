@@ -263,6 +263,18 @@ class DatabaseCore:
                     "integration_candidates",
                     "SELECT COUNT(*) FROM integration_candidates",
                 ),
+                (
+                    "integration_gate_policies",
+                    "SELECT COUNT(*) FROM integration_gate_policies",
+                ),
+                (
+                    "integration_gate_review_runs",
+                    "SELECT COUNT(*) FROM integration_gate_review_runs",
+                ),
+                (
+                    "integration_gate_evidence",
+                    "SELECT COUNT(*) FROM integration_gate_evidence",
+                ),
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
                 ("work_items", "SELECT COUNT(*) FROM work_items"),
                 ("work_threads", "SELECT COUNT(*) FROM work_threads"),

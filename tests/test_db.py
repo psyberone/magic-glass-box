@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from magic_glass_box.db import (
+    SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
     Database,
@@ -233,7 +234,7 @@ class DatabaseTests(unittest.TestCase):
     def test_database_is_private_and_reports_counts(self) -> None:
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         status = self.database.status()
-        self.assertEqual(status["schema_version"], 12)
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
 

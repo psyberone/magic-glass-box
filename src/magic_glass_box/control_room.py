@@ -24,6 +24,7 @@ from .domain import (
     WorkAssignmentSpec,
     WorkItemEnvelope,
 )
+from .gates import GateError, GatePolicyManifest
 from .krab import KrabClient, KrabError, WorkClaim
 from .results import ResultError, ResultManifest
 
@@ -148,6 +149,7 @@ class ControlRoom:
         interactions = self._interactions(connection, run_ids)
         retained_results = self._results(connection, run_ids)
         candidates = self._candidates(connection, run_ids)
+        gate_policies = self._gate_policies(connection, run_ids)
         authorities = self._run_authorities(connection, run_ids, generated_at)
         supervisor_actions = self._supervisor_actions(connection, run_ids)
         escalations = self._escalations(connection, run_ids)
@@ -164,6 +166,7 @@ class ControlRoom:
             authorities,
             supervisor_actions,
             escalations,
+            gate_policies,
             generated_at=generated_at,
         )
         return (
@@ -190,6 +193,7 @@ class ControlRoom:
                 "interactions": interactions,
                 "retained_results": retained_results,
                 "candidates": candidates,
+                "gate_policies": gate_policies,
                 "run_authorities": authorities,
                 "supervisor_actions": supervisor_actions,
                 "escalations": escalations,
@@ -549,7 +553,9 @@ class ControlRoom:
             "wi.source AS pinned_source, wi.external_id AS pinned_external_id, "
             "wiv.source_updated_at AS pinned_version_source_updated_at, "
             "wiv.content_json AS pinned_content_json, "
-            "wiv.content_sha256 AS pinned_content_sha256, r.work_thread_id "
+            "wiv.content_sha256 AS pinned_content_sha256, r.work_thread_id, "
+            "grr.policy_id AS gate_policy_id, "
+            "grr.candidate_id AS review_candidate_id "
             "FROM visible JOIN runs r ON r.id = visible.id "
             "JOIN projects p ON p.id = r.project_id "
             "JOIN project_context_versions c ON c.id = r.context_version_id "
@@ -558,6 +564,7 @@ class ControlRoom:
             "JOIN users u ON u.id = r.requested_by "
             "LEFT JOIN work_item_versions wiv ON wiv.id = r.work_item_version_id "
             "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
+            "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
             "ORDER BY visible.group_order, r.updated_at DESC, r.id",
             (history_limit,),
         ).fetchall()
@@ -589,6 +596,8 @@ class ControlRoom:
                     "work_item_version_id": row["work_item_version_id"],
                     "work_item_version": row["work_item_version"],
                     "work_thread_id": row["work_thread_id"],
+                    "gate_policy_id": row["gate_policy_id"],
+                    "review_candidate_id": row["review_candidate_id"],
                     "untrusted_work_item_title": title,
                     "source_revision": row["source_revision"],
                     "predecessor_run_id": row["predecessor_run_id"],
@@ -757,6 +766,101 @@ class ControlRoom:
         return [dict(row) for row in rows]
 
     @classmethod
+    def _gate_policies(
+        cls, connection: sqlite3.Connection, run_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" for _ in run_ids)
+        query = (
+            "SELECT gp.id, gp.candidate_id, gp.manifest_json, "  # noqa: S608
+            "gp.content_sha256, gp.repository_identity, gp.project_id, "
+            "gp.work_thread_id, gp.integration_ref, "
+            "gp.expected_base_revision, gp.head_revision, gp.tree_revision, "
+            "gp.object_format, gp.policy_revision, gp.review_separation, "
+            "gp.created_at, ic.producer_run_id, u.handle AS created_by_handle "
+            "FROM integration_gate_policies gp "
+            "JOIN integration_candidates ic ON ic.id = gp.candidate_id "
+            "JOIN users u ON u.id = gp.created_by "
+            f"WHERE ic.producer_run_id IN ({placeholders}) OR EXISTS ("
+            "SELECT 1 FROM integration_gate_review_runs grr "
+            "WHERE grr.policy_id = gp.id AND grr.run_id IN ("
+            f"{placeholders})) ORDER BY gp.created_at DESC, gp.id"
+        )
+        rows = connection.execute(query, (*run_ids, *run_ids)).fetchall()
+        if not rows:
+            return []
+        manifests: dict[str, GatePolicyManifest] = {}
+        for row in rows:
+            try:
+                manifests[row["id"]] = GatePolicyManifest.from_mapping(
+                    json.loads(row["manifest_json"])
+                )
+            except (GateError, TypeError, json.JSONDecodeError) as exc:
+                raise StorageError("stored gate policy manifest is invalid") from exc
+
+        policy_ids = list(manifests)
+        placeholders = ",".join("?" for _ in policy_ids)
+        evidence_rows = connection.execute(
+            "SELECT e.policy_id, e.id, e.gate_name, e.outcome, e.sequence, "  # noqa: S608
+            "e.created_at FROM integration_gate_evidence e JOIN ("
+            "SELECT policy_id, gate_name, MAX(sequence) AS sequence "
+            "FROM integration_gate_evidence WHERE policy_id IN ("
+            + placeholders
+            + ") GROUP BY policy_id, gate_name) latest "
+            "ON latest.policy_id = e.policy_id "
+            "AND latest.gate_name = e.gate_name "
+            "AND latest.sequence = e.sequence",
+            policy_ids,
+        ).fetchall()
+        latest: dict[str, dict[str, sqlite3.Row]] = defaultdict(dict)
+        for evidence in evidence_rows:
+            latest[evidence["policy_id"]][evidence["gate_name"]] = evidence
+
+        policies: list[dict[str, Any]] = []
+        for row in rows:
+            manifest = manifests[row["id"]]
+            current = latest[row["id"]]
+            required = manifest.policy.required_gates
+            states = [
+                "pending" if name not in current else current[name]["outcome"]
+                for name in required
+            ]
+            evidence_times = [record["created_at"] for record in current.values()]
+            passed = states.count("passed")
+            failed = states.count("failed")
+            pending = states.count("pending")
+            policies.append(
+                {
+                    "id": row["id"],
+                    "candidate_id": row["candidate_id"],
+                    "project_id": row["project_id"],
+                    "work_thread_id": row["work_thread_id"],
+                    "producer_run_id": row["producer_run_id"],
+                    "repository_identity": row["repository_identity"],
+                    "integration_ref": row["integration_ref"],
+                    "expected_base_revision": row["expected_base_revision"],
+                    "head_revision": row["head_revision"],
+                    "tree_revision": row["tree_revision"],
+                    "object_format": row["object_format"],
+                    "policy_revision": row["policy_revision"],
+                    "content_sha256": row["content_sha256"],
+                    "review_separation": row["review_separation"],
+                    "required_count": len(required),
+                    "passed_count": passed,
+                    "failed_count": failed,
+                    "pending_count": pending,
+                    "ready": passed == len(required),
+                    "latest_evidence_at": (
+                        None if not evidence_times else max(evidence_times)
+                    ),
+                    "created_by_handle": row["created_by_handle"],
+                    "created_at": row["created_at"],
+                }
+            )
+        return policies
+
+    @classmethod
     def _run_authorities(
         cls,
         connection: sqlite3.Connection,
@@ -923,6 +1027,15 @@ class ControlRoom:
             "candidates": connection.execute(
                 "SELECT COUNT(*) FROM integration_candidates"
             ).fetchone()[0],
+            "integration_gate_policies": connection.execute(
+                "SELECT COUNT(*) FROM integration_gate_policies"
+            ).fetchone()[0],
+            "integration_gate_review_runs": connection.execute(
+                "SELECT COUNT(*) FROM integration_gate_review_runs"
+            ).fetchone()[0],
+            "integration_gate_evidence": connection.execute(
+                "SELECT COUNT(*) FROM integration_gate_evidence"
+            ).fetchone()[0],
         }
 
     @staticmethod
@@ -935,6 +1048,7 @@ class ControlRoom:
         authorities: list[dict[str, Any]],
         supervisor_actions: list[dict[str, Any]] | None = None,
         escalations: list[dict[str, Any]] | None = None,
+        gate_policies: list[dict[str, Any]] | None = None,
         *,
         generated_at: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -1129,6 +1243,24 @@ class ControlRoom:
                     },
                     escalation["updated_at"],
                 )
+        for policy in gate_policies or []:
+            if policy["ready"]:
+                continue
+            failed = policy["failed_count"]
+            add(
+                {
+                    "kind": "gate.failed" if failed else "gate.pending",
+                    "severity": "warning" if failed else "action",
+                    "subject_type": "gate_policy",
+                    "subject_id": policy["id"],
+                    "candidate_id": policy["candidate_id"],
+                    "passed_count": policy["passed_count"],
+                    "failed_count": failed,
+                    "pending_count": policy["pending_count"],
+                    "created_at": policy["created_at"],
+                },
+                policy["latest_evidence_at"] or policy["created_at"],
+            )
         attention.sort(
             key=lambda item: (
                 0 if item["severity"] == "action" else 1,

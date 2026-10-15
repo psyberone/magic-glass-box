@@ -23,6 +23,7 @@ from magic_glass_box.domain import (
     WorkItemEnvelope,
     WorkLogEntry,
 )
+from magic_glass_box.gates import GatePolicyManifest, GatePolicySpec
 from magic_glass_box.krab import (
     KrabError,
     KrabIdentity,
@@ -242,7 +243,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 12)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], 13)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",
@@ -309,6 +310,7 @@ class ControlRoomTests(unittest.TestCase):
                 "interactions",
                 "retained_results",
                 "candidates",
+                "gate_policies",
                 "run_authorities",
                 "supervisor_actions",
                 "escalations",
@@ -341,6 +343,9 @@ class ControlRoomTests(unittest.TestCase):
                 "assignments",
                 "retained_results",
                 "candidates",
+                "integration_gate_policies",
+                "integration_gate_review_runs",
+                "integration_gate_evidence",
                 "supervisor_actions",
                 "escalations",
                 "attention",
@@ -581,6 +586,8 @@ class ControlRoomTests(unittest.TestCase):
                 "work_item_version_id",
                 "work_item_version",
                 "work_thread_id",
+                "gate_policy_id",
+                "review_candidate_id",
                 "untrusted_work_item_title",
                 "source_revision",
                 "predecessor_run_id",
@@ -1512,6 +1519,7 @@ class ControlRoomTests(unittest.TestCase):
             "interactions",
             "retained_results",
             "candidates",
+            "gate_policies",
             "run_authorities",
             "supervisor_actions",
             "escalations",
@@ -1579,6 +1587,88 @@ class ControlRoomTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("manifest", snapshot["candidates"][0])
+
+    def test_snapshot_surfaces_redacted_exact_input_gate_readiness(self) -> None:
+        run, attempt = self.start_run()
+        result = self.database.record_attempt_result(
+            attempt["id"], ResultManifest(1, attempt["id"], "a" * 40, ())
+        )
+        self.database.complete_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id="sha256:" + "c" * 64,
+        )
+        source = self.database.get_candidate_source(attempt["id"])
+        candidate = self.database.create_candidate(
+            CandidateManifest(
+                schema_version=1,
+                attempt_id=attempt["id"],
+                attempt_result_id=result["id"],
+                producer_run_id=run["id"],
+                project_id=source["project_id"],
+                context_version_id=source["context_version_id"],
+                work_thread_id=source["work_thread_id"],
+                base_revision="a" * 40,
+                result_content_sha256=result["content_sha256"],
+                head_revision="b" * 40,
+                tree_revision="c" * 40,
+                object_format="sha1",
+            ),
+            created_by=self.user["id"],
+        )
+        policy = self.database.create_gate_policy(
+            GatePolicyManifest.bind(
+                candidate,
+                default_branch="main",
+                policy=GatePolicySpec.create(
+                    review_separation="different_profile_and_identity"
+                ),
+            ),
+            created_by=self.user["id"],
+        )
+
+        snapshot = ControlRoom(self.database).snapshot()
+
+        self.assertEqual(snapshot["summary"]["integration_gate_policies"], 1)
+        self.assertEqual(snapshot["summary"]["integration_gate_evidence"], 0)
+        self.assertEqual(
+            snapshot["gate_policies"],
+            [
+                {
+                    "id": policy["id"],
+                    "candidate_id": candidate["id"],
+                    "project_id": source["project_id"],
+                    "work_thread_id": source["work_thread_id"],
+                    "producer_run_id": run["id"],
+                    "repository_identity": source["project_id"],
+                    "integration_ref": "refs/heads/main",
+                    "expected_base_revision": "a" * 40,
+                    "head_revision": "b" * 40,
+                    "tree_revision": "c" * 40,
+                    "object_format": "sha1",
+                    "policy_revision": policy["policy_revision"],
+                    "content_sha256": policy["content_sha256"],
+                    "review_separation": "different_profile_and_identity",
+                    "required_count": 1,
+                    "passed_count": 0,
+                    "failed_count": 0,
+                    "pending_count": 1,
+                    "ready": False,
+                    "latest_evidence_at": None,
+                    "created_by_handle": "operator",
+                    "created_at": policy["created_at"],
+                }
+            ],
+        )
+        pending = [
+            entry for entry in snapshot["attention"] if entry["kind"] == "gate.pending"
+        ]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["subject_id"], policy["id"])
+        encoded = json.dumps(snapshot["gate_policies"], sort_keys=True)
+        self.assertNotIn("manifest", encoded)
+        self.assertNotIn("command", encoded)
 
     def test_snapshot_surfaces_durable_supervisor_work_without_private_content(
         self,

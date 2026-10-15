@@ -7,7 +7,13 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from magic_glass_box.db import SCHEMA, ConflictError, Database, NotFoundError
+from magic_glass_box.db import (
+    SCHEMA,
+    SCHEMA_VERSION,
+    ConflictError,
+    Database,
+    NotFoundError,
+)
 from magic_glass_box.domain import (
     AgentProfileSpec,
     HandoffEnvelope,
@@ -852,7 +858,7 @@ class AttemptMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 12)
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["run_attempts"], 0)

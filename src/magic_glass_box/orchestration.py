@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from .candidates import CandidateError, CandidateManifest, GitCandidateStore
 from .db import ConflictError, Database, NotFoundError, StorageError
 from .domain import (
     AgentProfileSpec,
@@ -17,9 +18,9 @@ from .domain import (
 )
 from .executor import SandboxPlan, SandboxRequest, SandboxResult
 from .gateway import GatewayEndpoint
-from .results import CapturedResult
+from .results import CapturedResult, WorkspaceResultStore
 from .runtime import RuntimeAdapterRegistry, default_runtime_adapters
-from .workspace import PreparedWorkspace
+from .workspace import PreparedWorkspace, WorkspaceManager
 
 
 class RunOrchestrationError(RuntimeError):
@@ -74,6 +75,57 @@ class RunResultStore(Protocol):
     def capture(self, attempt_id: str, workspace: Path) -> CapturedResult: ...
 
     def discard_stage(self, attempt_id: str) -> bool: ...
+
+
+class CandidateReviewWorkspaceProvider(Protocol):
+    def prepare(self, run_id: str, candidate_id: str) -> PreparedWorkspace: ...
+
+
+class CandidateReviewWorkspaces:
+    """Recover and materialize the exact private candidate bound to a review."""
+
+    def __init__(
+        self,
+        database: Database,
+        workspaces: WorkspaceManager,
+        result_store: WorkspaceResultStore,
+        candidate_store: GitCandidateStore,
+    ):
+        self.database = database
+        self.workspaces = workspaces
+        self.result_store = result_store
+        self.candidate_store = candidate_store
+
+    def prepare(self, run_id: str, candidate_id: str) -> PreparedWorkspace:
+        record = self.database.get_candidate(candidate_id)
+        try:
+            manifest = CandidateManifest.from_mapping(record["manifest"])
+        except (CandidateError, TypeError) as exc:
+            raise RunOrchestrationError(
+                "candidate-backed review has invalid durable identity"
+            ) from exc
+        try:
+            self.candidate_store.inspect(manifest)
+        except CandidateError:
+            repository_path = self.database.get_candidate_repository_path(candidate_id)
+            if repository_path is None:
+                raise RunOrchestrationError(
+                    "candidate-backed review has no recovery repository"
+                ) from None
+            result, blobs = self.result_store.load_bundle(
+                manifest.attempt_id,
+                expected_digest=manifest.result_content_sha256,
+            )
+            self.candidate_store.recover(
+                manifest,
+                Path(repository_path),
+                result,
+                blobs,
+            )
+        return self.workspaces.prepare_materialized(
+            run_id,
+            lambda destination: self.candidate_store.snapshot(manifest, destination),
+        )
 
 
 class _AttemptLeaseMonitor:
@@ -180,6 +232,7 @@ class RunCoordinator:
         lease_seconds: int = 60,
         heartbeat_interval: float = 15.0,
         runtime_adapters: RuntimeAdapterRegistry | None = None,
+        candidate_workspaces: CandidateReviewWorkspaceProvider | None = None,
     ):
         if (
             isinstance(lease_seconds, bool)
@@ -209,6 +262,7 @@ class RunCoordinator:
         self.runtime_adapters = runtime_adapters or RuntimeAdapterRegistry(
             default_runtime_adapters()
         )
+        self.candidate_workspaces = candidate_workspaces
 
     def execute(
         self,
@@ -271,15 +325,25 @@ class RunCoordinator:
             try:
                 context = ProjectContext.from_mapping(inputs["context"])
                 profile = AgentProfileSpec.from_mapping(inputs["profile"])
-                if context.repository_path is None:
-                    raise RunOrchestrationError(
-                        "pinned project context has no repository path"
+                review_candidate_id = inputs["review_candidate_id"]
+                if review_candidate_id is not None:
+                    if self.candidate_workspaces is None:
+                        raise RunOrchestrationError(
+                            "candidate-backed review has no workspace provider"
+                        )
+                    prepared = self.candidate_workspaces.prepare(
+                        run_id, review_candidate_id
                     )
-                prepared = self.workspaces.prepare(
-                    run_id,
-                    Path(context.repository_path),
-                    inputs["source_revision"],
-                )
+                else:
+                    if context.repository_path is None:
+                        raise RunOrchestrationError(
+                            "pinned project context has no repository path"
+                        )
+                    prepared = self.workspaces.prepare(
+                        run_id,
+                        Path(context.repository_path),
+                        inputs["source_revision"],
+                    )
                 self.result_store.stage(
                     attempt["id"],
                     prepared.path,

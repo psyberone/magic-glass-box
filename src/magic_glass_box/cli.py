@@ -35,9 +35,14 @@ from .executor import (
     DockerExecutor,
     ExecutionError,
 )
+from .gates import GateError
 from .gateway import FileGatewayManager, default_gateway_root
 from .krab import KrabError
-from .orchestration import RunCoordinator, RunOrchestrationError
+from .orchestration import (
+    CandidateReviewWorkspaces,
+    RunCoordinator,
+    RunOrchestrationError,
+)
 from .provider import ProviderError
 from .results import ResultError, WorkspaceResultStore, default_result_root
 from .runtime import RuntimeAdapterError
@@ -52,6 +57,18 @@ class InputError(ValueError):
 
 class _TerminationRequested(BaseException):
     """Unwind a foreground service cleanly when its process receives SIGTERM."""
+
+
+class _LazyDockerImageInspector:
+    """Avoid requiring Docker for policies that contain only a review gate."""
+
+    def __init__(self) -> None:
+        self._engine: DockerCLI | None = None
+
+    def inspect_image(self, reference: str) -> object:
+        if self._engine is None:
+            self._engine = DockerCLI()
+        return self._engine.inspect_image(reference)
 
 
 @contextmanager
@@ -92,6 +109,10 @@ def _history_limit(value: str) -> int:
 
 def _candidate_limit(value: str) -> int:
     return _bounded_integer(value, minimum=1, maximum=500)
+
+
+def _evidence_limit(value: str) -> int:
+    return _bounded_integer(value, minimum=1, maximum=1000)
 
 
 def _port(value: str) -> int:
@@ -519,6 +540,88 @@ def build_parser() -> argparse.ArgumentParser:
         default=100,
         help="maximum candidates to return (1-500; default: 100)",
     )
+
+    gate = commands.add_parser("gate", help="manage exact-input integration gates")
+    gate_commands = gate.add_subparsers(dest="gate_command", required=True)
+    gate_policy_create = gate_commands.add_parser(
+        "policy-create", help="pin a gate policy to one exact candidate"
+    )
+    gate_policy_create.add_argument("candidate_id")
+    gate_policy_create.add_argument("--policy", required=True, type=Path)
+    gate_policy_create.add_argument("--created-by", required=True)
+    gate_policy_show = gate_commands.add_parser(
+        "policy-show", help="show one immutable gate policy"
+    )
+    gate_policy_show.add_argument("policy_id")
+    gate_policy_list = gate_commands.add_parser(
+        "policy-list", help="list recent immutable gate policies"
+    )
+    gate_policy_scope = gate_policy_list.add_mutually_exclusive_group()
+    gate_policy_scope.add_argument("--candidate", dest="gate_candidate_id")
+    gate_policy_scope.add_argument("--project", dest="gate_project_key")
+    gate_policy_scope.add_argument("--work-thread", dest="gate_work_thread_id")
+    gate_policy_list.add_argument(
+        "--limit",
+        type=_candidate_limit,
+        default=100,
+        help="maximum policies to return (1-500; default: 100)",
+    )
+    gate_review_create = gate_commands.add_parser(
+        "review-create", help="create a candidate-backed independent review run"
+    )
+    gate_review_create.add_argument("policy_id")
+    gate_review_create.add_argument("--profile", required=True)
+    gate_review_create.add_argument("--requested-by", required=True)
+    gate_review_create.add_argument("--expected-policy-revision", required=True)
+    gate_review_create.add_argument("--krab-session")
+    gate_review_create.add_argument("--krab-claim")
+    gate_review_create.add_argument(
+        "--supervision-policy",
+        type=Path,
+        help="opt in with a versioned autonomous-supervision policy",
+    )
+    gate_review = gate_commands.add_parser(
+        "review-record", help="record independent-review evidence"
+    )
+    gate_review.add_argument("policy_id")
+    gate_review.add_argument("--reviewer-attempt", required=True)
+    gate_review.add_argument("--outcome", required=True, choices=("passed", "failed"))
+    gate_review.add_argument("--recorded-by", required=True)
+    gate_review.add_argument("--expected-policy-revision", required=True)
+    gate_validate = gate_commands.add_parser(
+        "validate", help="run one pinned local validation gate"
+    )
+    gate_validate.add_argument("policy_id")
+    gate_validate.add_argument("validation_name")
+    gate_validate.add_argument("--recorded-by", required=True)
+    gate_validate.add_argument("--expected-policy-revision", required=True)
+    gate_validate.add_argument(
+        "--run-timeout",
+        type=_positive_seconds,
+        default=DEFAULT_RUN_TIMEOUT_SECONDS,
+        help="maximum validation runtime in seconds (default: %(default)s)",
+    )
+    gate_validate.add_argument(
+        "--operation-timeout",
+        dest="candidate_timeout",
+        type=_positive_seconds,
+        default=DEFAULT_GIT_TIMEOUT_SECONDS,
+        help="maximum candidate operation time in seconds (default: %(default)s)",
+    )
+    gate_evidence = gate_commands.add_parser(
+        "evidence-list", help="list append-only gate evidence"
+    )
+    gate_evidence.add_argument("policy_id")
+    gate_evidence.add_argument(
+        "--limit",
+        type=_evidence_limit,
+        default=500,
+        help="maximum evidence records to return (1-1000; default: 500)",
+    )
+    gate_readiness = gate_commands.add_parser(
+        "readiness", help="derive current exact-input readiness"
+    )
+    gate_readiness.add_argument("policy_id")
     return parser
 
 
@@ -544,6 +647,13 @@ def _build_run_coordinator(
         control.database.path.parent / "workspaces",
         GitSnapshotter(),
     )
+    retained_results = result_store or _build_result_store(control)
+    candidate_workspaces = CandidateReviewWorkspaces(
+        control.database,
+        workspaces,
+        retained_results,
+        _build_candidate_store(control),
+    )
     return RunCoordinator(
         control.database,
         DockerExecutor(DockerCLI(run_timeout=run_timeout)),
@@ -552,7 +662,8 @@ def _build_run_coordinator(
             default_gateway_root(control.database.path),
             control,
         ),
-        result_store or _build_result_store(control),
+        retained_results,
+        candidate_workspaces=candidate_workspaces,
     )
 
 
@@ -641,6 +752,8 @@ def _dispatch(
     coordinator: RunCoordinator | None = None,
     result_store: WorkspaceResultStore | None = None,
     candidate_store: GitCandidateStore | None = None,
+    gate_engine: DockerCLI | _LazyDockerImageInspector | None = None,
+    gate_executor: DockerExecutor | None = None,
 ) -> object:
     if args.command == "init":
         return control.initialize()
@@ -846,6 +959,64 @@ def _dispatch(
                 result_store=result_store,
                 candidate_store=candidate_store,
             )
+    if args.command == "gate":
+        if args.gate_command == "policy-create" and gate_engine is not None:
+            return control.create_gate_policy(
+                args.candidate_id,
+                _json_file(args.policy),
+                created_by_handle=args.created_by,
+                image_resolver=gate_engine.inspect_image,
+            )
+        if args.gate_command == "policy-show":
+            return control.get_gate_policy(args.policy_id)
+        if args.gate_command == "policy-list":
+            return control.list_gate_policies(
+                candidate_id=args.gate_candidate_id,
+                project_key=args.gate_project_key,
+                work_thread_id=args.gate_work_thread_id,
+                limit=args.limit,
+            )
+        if args.gate_command == "review-create":
+            return control.create_review_run(
+                args.policy_id,
+                profile_name=args.profile,
+                requested_by_handle=args.requested_by,
+                expected_policy_revision=args.expected_policy_revision,
+                krab_session_id=args.krab_session,
+                krab_claim_id=args.krab_claim,
+                supervision_policy=(
+                    SupervisionPolicy.from_mapping(_json_file(args.supervision_policy))
+                    if args.supervision_policy is not None
+                    else None
+                ),
+            )
+        if args.gate_command == "review-record":
+            return control.record_review_evidence(
+                args.policy_id,
+                reviewer_attempt_id=args.reviewer_attempt,
+                outcome=args.outcome,
+                recorded_by_handle=args.recorded_by,
+                expected_policy_revision=args.expected_policy_revision,
+            )
+        if (
+            args.gate_command == "validate"
+            and result_store is not None
+            and candidate_store is not None
+            and gate_executor is not None
+        ):
+            return control.run_local_validation(
+                args.policy_id,
+                validation_name=args.validation_name,
+                recorded_by_handle=args.recorded_by,
+                expected_policy_revision=args.expected_policy_revision,
+                result_store=result_store,
+                candidate_store=candidate_store,
+                executor=gate_executor,
+            )
+        if args.gate_command == "evidence-list":
+            return control.list_gate_evidence(args.policy_id, limit=args.limit)
+        if args.gate_command == "readiness":
+            return control.gate_readiness(args.policy_id)
     raise RuntimeError("unreachable command")
 
 
@@ -857,6 +1028,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         coordinator = None
         result_store = None
         candidate_store = None
+        gate_engine = None
+        gate_executor = None
         if args.command == "run" and args.run_command in {
             "cancel",
             "execute",
@@ -890,6 +1063,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             candidate_store = _build_candidate_store(
                 control, timeout=args.candidate_timeout
             )
+        elif args.command == "gate" and args.gate_command == "policy-create":
+            gate_engine = _LazyDockerImageInspector()
+        elif args.command == "gate" and args.gate_command == "validate":
+            result_store = _build_result_store(control)
+            candidate_store = _build_candidate_store(
+                control, timeout=args.candidate_timeout
+            )
+            gate_engine = DockerCLI(run_timeout=args.run_timeout)
+            gate_executor = DockerExecutor(gate_engine)
         if (
             args.command == "control-room"
             and args.control_room_command == "serve"
@@ -908,11 +1090,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             coordinator,
             result_store,
             candidate_store,
+            gate_engine,
+            gate_executor,
         )
     except (
         CandidateError,
         CredentialError,
         ExecutionError,
+        GateError,
         InputError,
         KrabError,
         ProviderError,

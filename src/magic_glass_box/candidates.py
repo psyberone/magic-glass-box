@@ -29,6 +29,7 @@ from .path_safety import (
     validate_symlink_target,
 )
 from .results import FileState, ResultManifest
+from .workspace import GitSnapshotter, SnapshotResult, WorkspaceError
 
 CANDIDATE_SCHEMA_VERSION = 1
 OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -1482,6 +1483,47 @@ class GitCandidateStore:
                 result_content_sha256=manifest.result_content_sha256,
                 operation=operation,
             )
+
+    def snapshot(
+        self, manifest: CandidateManifest, destination: Path
+    ) -> SnapshotResult:
+        """Materialize one verified candidate tree into an empty workspace."""
+
+        if not isinstance(manifest, CandidateManifest):
+            raise CandidateError("candidate manifest is invalid")
+        operation = self._new_operation()
+        with self._lock(
+            manifest.project_id,
+            manifest.object_format,
+            operation,
+            create=False,
+        ) as directory:
+            repository = self._repository(
+                directory, manifest.object_format, operation, create=False
+            )
+            self._verify(
+                repository,
+                MaterializedCandidate(
+                    manifest.base_revision,
+                    manifest.head_revision,
+                    manifest.tree_revision,
+                    manifest.object_format,
+                ),
+                result_content_sha256=manifest.result_content_sha256,
+                operation=operation,
+            )
+            try:
+                snapshot = GitSnapshotter(
+                    binary=self.binary,
+                    timeout=max(0.001, operation.deadline - time.monotonic()),
+                ).snapshot(repository, manifest.head_revision, destination)
+            except WorkspaceError as exc:
+                raise CandidateError(
+                    "candidate validation workspace could not be materialized"
+                ) from exc
+        if snapshot.revision != manifest.head_revision:
+            raise CandidateError("candidate validation workspace identity changed")
+        return snapshot
 
 
 def default_candidate_root(database_path: Path) -> Path:

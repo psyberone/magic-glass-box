@@ -609,6 +609,22 @@ def _render_control_room(
         for row in snapshot.get("candidates", [])
         if isinstance(row, Mapping)
     ]
+    gate_policy_rows = [
+        (
+            row.get("id"),
+            row.get("candidate_id"),
+            row.get("ready"),
+            row.get("passed_count"),
+            row.get("failed_count"),
+            row.get("pending_count"),
+            row.get("integration_ref"),
+            row.get("expected_base_revision"),
+            row.get("head_revision"),
+            row.get("policy_revision"),
+        )
+        for row in snapshot.get("gate_policies", [])
+        if isinstance(row, Mapping)
+    ]
     role_rows = [
         (row.get("project_key"), row.get("krab_handle"), row.get("role"))
         for row in krab.get("roles", [])
@@ -786,6 +802,24 @@ def _render_control_room(
             _table(
                 ("ID", "Attempt", "Run", "Base", "Head", "Format", "Created by"),
                 candidate_rows,
+            ),
+        ),
+        _section(
+            "Integration gates",
+            _table(
+                (
+                    "ID",
+                    "Candidate",
+                    "Ready",
+                    "Passed",
+                    "Failed",
+                    "Pending",
+                    "Integration ref",
+                    "Expected base",
+                    "Head",
+                    "Policy revision",
+                ),
+                gate_policy_rows,
             ),
         ),
         _section(

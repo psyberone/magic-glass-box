@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import secrets
+import stat
 import sys
+import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .candidates import (
     CANDIDATE_SCHEMA_VERSION,
@@ -28,6 +34,7 @@ from .domain import (
     AgentProfileSpec,
     HandoffEnvelope,
     InteractionKind,
+    NetworkMode,
     ProjectContext,
     ProviderGrantSpec,
     RunState,
@@ -37,7 +44,17 @@ from .domain import (
     WorkItemEnvelope,
     WorkLogEntry,
     WorkMemoryCheckpoint,
+    WorkspaceMode,
     validate_krab_id,
+)
+from .gates import (
+    GATE_EVIDENCE_SCHEMA_VERSION,
+    ExactGateInputs,
+    GateOutcome,
+    GatePolicyManifest,
+    ReviewEvidence,
+    ValidationEvidence,
+    resolve_gate_policy_request,
 )
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
 from .provider import (
@@ -47,6 +64,10 @@ from .provider import (
     ProviderUpstreamError,
 )
 from .results import WorkspaceResultStore
+from .runtime import RuntimeLaunch
+
+if TYPE_CHECKING:
+    from .executor import DockerExecutor
 
 ClientFactory = Callable[..., KrabClient]
 PROVIDER_DISPATCH_LEASE_SECONDS = 30
@@ -294,6 +315,223 @@ class ControlPlane:
             work_thread_id=work_thread_id,
             limit=limit,
         )
+
+    def create_gate_policy(
+        self,
+        candidate_id: str,
+        policy_request: object,
+        *,
+        created_by_handle: str,
+        image_resolver: Callable[[str], object],
+    ) -> dict[str, Any]:
+        """Resolve mutable image references and pin one exact candidate policy."""
+
+        creator = self.database.get_user(created_by_handle)
+        if creator["active"] != 1:
+            raise ConflictError("gate policy creator is inactive")
+        candidate = self.database.get_candidate(candidate_id)
+        context = ProjectContext.from_mapping(
+            self.database.get_gate_candidate_context(candidate_id)
+        )
+        policy = resolve_gate_policy_request(
+            policy_request, image_resolver=image_resolver
+        )
+        manifest = GatePolicyManifest.bind(
+            candidate,
+            default_branch=context.default_branch,
+            policy=policy,
+        )
+        return self.database.create_gate_policy(manifest, created_by=creator["id"])
+
+    def get_gate_policy(self, policy_id: str) -> dict[str, Any]:
+        return self.database.get_gate_policy(policy_id)
+
+    def list_gate_policies(
+        self,
+        *,
+        candidate_id: str | None = None,
+        project_key: str | None = None,
+        work_thread_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        project_id = None
+        if project_key is not None:
+            project_id = self.database.get_project(project_key)["id"]
+        return self.database.list_gate_policies(
+            candidate_id=candidate_id,
+            project_id=project_id,
+            work_thread_id=work_thread_id,
+            limit=limit,
+        )
+
+    def record_review_evidence(
+        self,
+        policy_id: str,
+        *,
+        reviewer_attempt_id: str,
+        outcome: str,
+        recorded_by_handle: str,
+        expected_policy_revision: str,
+    ) -> dict[str, Any]:
+        """Record bounded review evidence using provenance read from the ledger."""
+
+        recorder = self.database.get_user(recorded_by_handle)
+        if recorder["active"] != 1:
+            raise ConflictError("gate evidence recorder is inactive")
+        provenance = self.database.get_gate_review_provenance(
+            policy_id, reviewer_attempt_id
+        )
+        policy_record = provenance["policy"]
+        if policy_record["policy_revision"] != expected_policy_revision:
+            raise ConflictError("gate policy revision changed")
+        manifest = GatePolicyManifest.from_mapping(policy_record["manifest"])
+        if manifest.policy.review_separation is None:
+            raise ConflictError("gate policy does not require independent review")
+        try:
+            gate_outcome = GateOutcome(outcome)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("review outcome must be passed or failed") from exc
+        evidence = ReviewEvidence(
+            schema_version=GATE_EVIDENCE_SCHEMA_VERSION,
+            inputs=ExactGateInputs.from_policy(policy_id, manifest),
+            outcome=gate_outcome,
+            separation=manifest.policy.review_separation,
+            producer=provenance["producer"],
+            reviewer=provenance["reviewer"],
+        )
+        return self.database.record_gate_evidence(evidence, recorded_by=recorder["id"])
+
+    def create_review_run(
+        self,
+        policy_id: str,
+        *,
+        profile_name: str,
+        requested_by_handle: str,
+        expected_policy_revision: str,
+        krab_session_id: str | None = None,
+        krab_claim_id: str | None = None,
+        supervision_policy: SupervisionPolicy | None = None,
+    ) -> dict[str, Any]:
+        """Create a run durably bound to one policy's exact candidate tree."""
+
+        requester = self.database.get_user(requested_by_handle)
+        if requester["active"] != 1:
+            raise ConflictError("review run requester is inactive")
+        target = self.database.get_gate_review_target(policy_id)
+        if target["policy_revision"] != expected_policy_revision:
+            raise ConflictError("gate policy revision changed")
+        if target["review_separation"] is None:
+            raise ConflictError("gate policy does not require independent review")
+        return self.database.create_run(
+            project_key=target["project_key"],
+            profile_name=profile_name,
+            work_item_id=target["work_item_id"],
+            requested_by=requester["id"],
+            source_revision=target["head_revision"],
+            krab_session_id=krab_session_id,
+            krab_claim_id=krab_claim_id,
+            supervision_policy=supervision_policy,
+            gate_policy_id=policy_id,
+        )
+
+    def gate_readiness(self, policy_id: str) -> dict[str, Any]:
+        return self.database.gate_readiness(policy_id)
+
+    def list_gate_evidence(
+        self, policy_id: str, *, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        return self.database.list_gate_evidence(policy_id, limit=limit)
+
+    def run_local_validation(
+        self,
+        policy_id: str,
+        *,
+        validation_name: str,
+        recorded_by_handle: str,
+        expected_policy_revision: str,
+        result_store: WorkspaceResultStore,
+        candidate_store: GitCandidateStore,
+        executor: DockerExecutor,
+    ) -> dict[str, Any]:
+        """Run one policy-pinned check in an isolated read-only candidate tree."""
+
+        from .executor import SandboxRequest
+
+        recorder = self.database.get_user(recorded_by_handle)
+        if recorder["active"] != 1:
+            raise ConflictError("gate evidence recorder is inactive")
+        policy_record = self.database.get_gate_policy(policy_id)
+        if policy_record["policy_revision"] != expected_policy_revision:
+            raise ConflictError("gate policy revision changed")
+        policy = GatePolicyManifest.from_mapping(policy_record["manifest"])
+        validation = policy.policy.validation(validation_name)
+        candidate_record = self.get_candidate(
+            policy.candidate_id,
+            result_store=result_store,
+            candidate_store=candidate_store,
+        )
+        candidate = CandidateManifest.from_mapping(candidate_record["manifest"])
+        if (
+            candidate.head_revision != policy.head_revision
+            or candidate.tree_revision != policy.tree_revision
+            or candidate.base_revision != policy.expected_base_revision
+            or candidate.object_format != policy.object_format
+        ):
+            raise ConflictError("gate policy candidate identity changed")
+
+        workspace_root = self.database.path.parent / "gate-workspaces"
+        try:
+            workspace_root.mkdir(mode=0o700, exist_ok=True)
+            info = workspace_root.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise ConflictError("gate workspace root must be a directory")
+            os.chmod(workspace_root, 0o700)
+        except ConflictError:
+            raise
+        except OSError as exc:
+            raise ConflictError("gate workspace root is unavailable") from exc
+
+        sandbox_id = "run_" + secrets.token_hex(16)
+        with tempfile.TemporaryDirectory(
+            prefix="validation-", dir=workspace_root
+        ) as raw_workspace:
+            workspace = Path(raw_workspace)
+            os.chmod(workspace, 0o700)
+            candidate_store.snapshot(candidate, workspace)
+            profile = AgentProfileSpec.create(
+                image=validation.image_id,
+                command=validation.command,
+                workspace_mode=WorkspaceMode.READ_ONLY.value,
+                network_mode=NetworkMode.NONE.value,
+            )
+            request = SandboxRequest(
+                run_id=sandbox_id,
+                profile=profile,
+                workspace=workspace,
+                launch=RuntimeLaunch(validation.command),
+            )
+            started = time.monotonic()
+            result = executor.execute(request)
+            duration_ms = int(round((time.monotonic() - started) * 1000))
+            if result.image_id != validation.image_id:
+                raise ConflictError("validation image identity changed")
+            output = result.stdout.encode("utf-8", "strict")
+            evidence = ValidationEvidence(
+                schema_version=GATE_EVIDENCE_SCHEMA_VERSION,
+                inputs=ExactGateInputs.from_policy(policy_id, policy),
+                outcome=(
+                    GateOutcome.PASSED if result.exit_code == 0 else GateOutcome.FAILED
+                ),
+                validation_name=validation.name,
+                image_id=result.image_id,
+                command_sha256=validation.command_sha256,
+                sandbox_id=sandbox_id,
+                exit_code=result.exit_code,
+                duration_ms=duration_ms,
+                output_sha256=hashlib.sha256(output).hexdigest(),
+                output_bytes=len(output),
+            )
+        return self.database.record_gate_evidence(evidence, recorded_by=recorder["id"])
 
     def create_user(
         self, handle: str, display_name: str | None = None

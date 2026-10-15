@@ -11,6 +11,7 @@ from unittest import mock
 
 from magic_glass_box.db import (
     SCHEMA_V1,
+    SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
     Database,
@@ -510,7 +511,7 @@ class InteractionMigrationTests(unittest.TestCase):
         database = Database(path)
         first = database.initialize()
         second = database.initialize()
-        self.assertEqual(first["schema_version"], 12)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(second, first)
         self.assertEqual(first["counts"]["users"], 1)
         self.assertEqual(first["counts"]["interactions"], 0)

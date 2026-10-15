@@ -682,8 +682,22 @@ class WorkspaceManager:
     def prepare(
         self, run_id: str, repository: Path, revision: str | None
     ) -> PreparedWorkspace:
-        run_id = self._validate_run_id(run_id)
         source = self._repository(repository)
+        return self.prepare_materialized(
+            run_id,
+            lambda destination: self.snapshotter.snapshot(
+                source, revision, destination
+            ),
+        )
+
+    def prepare_materialized(
+        self,
+        run_id: str,
+        materialize: Callable[[Path], SnapshotResult],
+    ) -> PreparedWorkspace:
+        """Create a run workspace from an already trusted snapshot source."""
+
+        run_id = self._validate_run_id(run_id)
         root = self.ensure_root()
         destination = root / run_id
         try:
@@ -693,10 +707,13 @@ class WorkspaceManager:
         except OSError as exc:
             raise WorkspaceError("cannot create run workspace") from exc
         try:
-            snapshot = self.snapshotter.snapshot(source, revision, destination)
+            snapshot = materialize(destination)
         except BaseException:
             shutil.rmtree(destination, ignore_errors=True)
             raise
+        if not isinstance(snapshot, SnapshotResult):
+            shutil.rmtree(destination, ignore_errors=True)
+            raise WorkspaceError("workspace materializer returned an invalid snapshot")
         return PreparedWorkspace(
             path=destination,
             revision=snapshot.revision,

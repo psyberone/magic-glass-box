@@ -37,6 +37,7 @@ class RunStorage:
         krab_session_id: str | None = None,
         krab_claim_id: str | None = None,
         supervision_policy: SupervisionPolicy | None = None,
+        gate_policy_id: str | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
@@ -44,6 +45,10 @@ class RunStorage:
         if source_revision is not None:
             source_revision = require_string(
                 source_revision, field="source_revision", max_bytes=512
+            )
+        if gate_policy_id is not None:
+            gate_policy_id = require_string(
+                gate_policy_id, field="gate_policy_id", max_bytes=64
             )
         if krab_session_id is not None:
             krab_session_id = validate_krab_id(krab_session_id, "ses")
@@ -65,11 +70,50 @@ class RunStorage:
                 ).fetchone()
                 if project is None or not project["active"]:
                     raise NotFoundError(f"active project not found: {project_key}")
-                context = connection.execute(
-                    "SELECT id FROM project_context_versions WHERE project_id = ? "
-                    "ORDER BY version DESC LIMIT 1",
-                    (project["id"],),
-                ).fetchone()
+                gate_policy = None
+                if gate_policy_id is not None:
+                    gate_policy = connection.execute(
+                        "SELECT gp.id, gp.candidate_id, gp.project_id, "
+                        "gp.context_version_id, gp.work_thread_id, "
+                        "gp.head_revision, gp.review_separation, "
+                        "producer_profile.profile_id AS producer_profile_id, "
+                        "producer_profile.krab_identity_id "
+                        "AS producer_identity_id "
+                        "FROM integration_gate_policies gp "
+                        "JOIN integration_candidates ic "
+                        "ON ic.id = gp.candidate_id "
+                        "JOIN run_attempts producer_attempt "
+                        "ON producer_attempt.id = ic.producer_attempt_id "
+                        "JOIN agent_profile_versions producer_profile "
+                        "ON producer_profile.id = producer_attempt.profile_version_id "
+                        "WHERE gp.id = ?",
+                        (gate_policy_id,),
+                    ).fetchone()
+                    if gate_policy is None:
+                        raise NotFoundError(f"gate policy not found: {gate_policy_id}")
+                    if gate_policy["project_id"] != project["id"]:
+                        raise ConflictError(
+                            "gate review policy belongs to another project"
+                        )
+                    if gate_policy["review_separation"] is None:
+                        raise ConflictError(
+                            "gate policy does not require independent review"
+                        )
+                    if (
+                        source_revision is not None
+                        and source_revision != gate_policy["head_revision"]
+                    ):
+                        raise ConflictError(
+                            "gate review source revision must match the exact head"
+                        )
+                    source_revision = gate_policy["head_revision"]
+                    context = {"id": gate_policy["context_version_id"]}
+                else:
+                    context = connection.execute(
+                        "SELECT id FROM project_context_versions "
+                        "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+                        (project["id"],),
+                    ).fetchone()
                 work_item_version = connection.execute(
                     "SELECT wiv.id, wt.id AS work_thread_id FROM work_items wi "
                     "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
@@ -93,6 +137,13 @@ class RunStorage:
                     )
                 work_item_version_id = work_item_version["id"]
                 work_thread_id = work_item_version["work_thread_id"]
+                if (
+                    gate_policy is not None
+                    and work_thread_id != gate_policy["work_thread_id"]
+                ):
+                    raise ConflictError(
+                        "gate review policy belongs to another work thread"
+                    )
                 profile = connection.execute(
                     "SELECT id, active FROM agent_profiles WHERE name = ?",
                     (profile_name,),
@@ -102,7 +153,8 @@ class RunStorage:
                         f"active agent profile not found: {profile_name}"
                     )
                 profile_version = connection.execute(
-                    "SELECT av.id, av.spec_json, ki.krab_instance_id "
+                    "SELECT av.id, av.spec_json, av.krab_identity_id, "
+                    "ki.krab_instance_id "
                     "FROM agent_profile_versions av "
                     "JOIN krab_identities ki ON ki.id = av.krab_identity_id "
                     "WHERE av.profile_id = ? ORDER BY av.version DESC LIMIT 1",
@@ -112,6 +164,29 @@ class RunStorage:
                     raise ConflictError(
                         "agent profile and project belong to different Krab instances"
                     )
+                if gate_policy is not None:
+                    separation = gate_policy["review_separation"]
+                    if (
+                        separation
+                        in {
+                            "different_profile",
+                            "different_profile_and_identity",
+                        }
+                        and profile["id"] == gate_policy["producer_profile_id"]
+                    ):
+                        raise ConflictError(
+                            "reviewer profile must differ from the producer profile"
+                        )
+                    if separation in {
+                        "different_identity",
+                        "different_profile_and_identity",
+                    } and (
+                        profile_version["krab_identity_id"]
+                        == gate_policy["producer_identity_id"]
+                    ):
+                        raise ConflictError(
+                            "reviewer identity must differ from the producer identity"
+                        )
                 try:
                     profile_spec = AgentProfileSpec.from_mapping(
                         json.loads(profile_version["spec_json"])
@@ -145,19 +220,33 @@ class RunStorage:
                         now,
                     ),
                 )
+                if gate_policy is not None:
+                    connection.execute(
+                        "INSERT INTO integration_gate_review_runs "
+                        "(run_id, policy_id, candidate_id, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            run_id,
+                            gate_policy["id"],
+                            gate_policy["candidate_id"],
+                            now,
+                        ),
+                    )
+                event_metadata: dict[str, str] = {}
+                if supervision_policy != SupervisionPolicy.disabled():
+                    event_metadata["supervision_policy_sha256"] = (
+                        supervision_policy.digest
+                    )
+                if gate_policy is not None:
+                    event_metadata["gate_policy_id"] = gate_policy["id"]
+                    event_metadata["candidate_id"] = gate_policy["candidate_id"]
                 connection.execute(
                     "INSERT INTO run_events "
                     "(run_id, sequence, kind, from_state, to_state, metadata_json, "
                     "created_at) VALUES (?, 1, 'run.created', NULL, 'queued', ?, ?)",
                     (
                         run_id,
-                        canonical_json(
-                            {}
-                            if supervision_policy == SupervisionPolicy.disabled()
-                            else {
-                                "supervision_policy_sha256": supervision_policy.digest
-                            }
-                        ),
+                        canonical_json(event_metadata),
                         now,
                     ),
                 )
@@ -251,7 +340,9 @@ class RunStorage:
                     "r.krab_session_id, r.krab_claim_id, "
                     "r.supervision_policy_json, p.active AS project_active, "
                     "p.krab_instance_id, wt.state AS thread_state, "
-                    "ap.active AS profile_active, ap.name AS profile_name "
+                    "ap.id AS profile_id, ap.active AS profile_active, "
+                    "ap.name AS profile_name, "
+                    "av.krab_identity_id AS profile_identity_id "
                     "FROM runs r JOIN projects p ON p.id = r.project_id "
                     "JOIN work_threads wt ON wt.id = r.work_thread_id "
                     "JOIN agent_profile_versions av "
@@ -281,6 +372,22 @@ class RunStorage:
                     raise ConflictError(
                         "run already has an active successor: " + active_successor["id"]
                     )
+
+                review_target = connection.execute(
+                    "SELECT grr.policy_id, grr.candidate_id, "
+                    "gp.review_separation, producer_profile.profile_id "
+                    "AS producer_profile_id, producer_profile.krab_identity_id "
+                    "AS producer_identity_id "
+                    "FROM integration_gate_review_runs grr "
+                    "JOIN integration_gate_policies gp ON gp.id = grr.policy_id "
+                    "JOIN integration_candidates ic ON ic.id = grr.candidate_id "
+                    "JOIN run_attempts producer_attempt "
+                    "ON producer_attempt.id = ic.producer_attempt_id "
+                    "JOIN agent_profile_versions producer_profile "
+                    "ON producer_profile.id = producer_attempt.profile_version_id "
+                    "WHERE grr.run_id = ?",
+                    (run_id,),
+                ).fetchone()
 
                 if replacement_kind == "retry":
                     if not source["profile_active"]:
@@ -312,14 +419,18 @@ class RunStorage:
                     authorities = [
                         (row["authority_name"], row["id"]) for row in authority_rows
                     ]
+                    profile_id = source["profile_id"]
+                    profile_identity_id = source["profile_identity_id"]
                 else:
                     if profile_name == source["profile_name"]:
                         raise ConflictError(
                             "target profile is already assigned; use retry"
                         )
                     target = connection.execute(
-                        "SELECT av.id AS profile_version_id, av.spec_json, "
-                        "av.content_sha256, ki.krab_instance_id "
+                        "SELECT ap.id AS profile_id, "
+                        "av.id AS profile_version_id, av.spec_json, "
+                        "av.content_sha256, av.krab_identity_id, "
+                        "ki.krab_instance_id "
                         "FROM agent_profiles ap JOIN agent_profile_versions av "
                         "ON av.profile_id = ap.id JOIN krab_identities ki "
                         "ON ki.id = av.krab_identity_id WHERE ap.name = ? "
@@ -344,10 +455,37 @@ class RunStorage:
                     if target_spec.digest != target["content_sha256"]:
                         raise StorageError("stored agent profile digest does not match")
                     profile_version_id = target["profile_version_id"]
+                    profile_id = target["profile_id"]
+                    profile_identity_id = target["krab_identity_id"]
                     authority_rows = self._available_provider_grants(
                         connection, target_spec
                     )
                     authorities = [(row["name"], row["id"]) for row in authority_rows]
+
+                if review_target is not None:
+                    separation = review_target["review_separation"]
+                    if (
+                        separation
+                        in {
+                            "different_profile",
+                            "different_profile_and_identity",
+                        }
+                        and profile_id == review_target["producer_profile_id"]
+                    ):
+                        raise ConflictError(
+                            "reviewer profile must differ from the producer profile"
+                        )
+                    if (
+                        separation
+                        in {
+                            "different_identity",
+                            "different_profile_and_identity",
+                        }
+                        and profile_identity_id == review_target["producer_identity_id"]
+                    ):
+                        raise ConflictError(
+                            "reviewer identity must differ from the producer identity"
+                        )
 
                 connection.execute(
                     "INSERT INTO runs "
@@ -375,6 +513,18 @@ class RunStorage:
                         replacement_kind,
                     ),
                 )
+                if review_target is not None:
+                    connection.execute(
+                        "INSERT INTO integration_gate_review_runs "
+                        "(run_id, policy_id, candidate_id, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            replacement_run_id,
+                            review_target["policy_id"],
+                            review_target["candidate_id"],
+                            now,
+                        ),
+                    )
                 try:
                     source_policy = SupervisionPolicy.from_mapping(
                         json.loads(source["supervision_policy_json"])
@@ -385,6 +535,9 @@ class RunStorage:
                     "predecessor_run_id": run_id,
                     "replacement_kind": replacement_kind,
                 }
+                if review_target is not None:
+                    created_event["gate_policy_id"] = review_target["policy_id"]
+                    created_event["candidate_id"] = review_target["candidate_id"]
                 if source_policy != SupervisionPolicy.disabled():
                     created_event["supervision_policy_sha256"] = source_policy.digest
                 created_metadata = canonical_json(created_event)

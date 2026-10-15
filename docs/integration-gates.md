@@ -1,10 +1,10 @@
 # Integration candidates and gates
 
-> **DESIGN ONLY — NOT IMPLEMENTED:** Except for the Milestone 7A candidate
-> authority summarized below, this document specifies planned Milestones 7B
-> and 7C. Magic Glass Box does not yet have a gate ledger, readiness decision,
-> dependency/refold queue, manual landing plan, landing receipt, push, review,
-> CI, approval, or merge actuator.
+> **MILESTONES 7A AND 7B IMPLEMENTED:** Trusted candidates, exact-input gate
+> policies, candidate-backed independent-review runs, local validation, bounded
+> evidence, and derived readiness are implemented. The dependency/refold queue,
+> manual landing plan, landing receipt, push, remote review/CI/approval query,
+> and merge actuator remain design-only Milestone 7C work.
 
 Magic Glass Box owns integration semantics: what exact Git tree is proposed,
 what evidence applies to it, what must land first, whether the current base is
@@ -12,9 +12,9 @@ still the one that was validated, and what bounded receipt the actuator
 returned. Provider-specific API calls and reusable credentials are outside this
 boundary.
 
-Milestone 7A implements only trusted candidate materialization. Milestones 7B
-and 7C remain planned. See [candidates.md](candidates.md) and
-[roadmap.md](roadmap.md).
+Milestone 7A implements trusted candidate materialization and Milestone 7B
+implements the exact-input gate ledger. Milestone 7C remains planned. See
+[candidates.md](candidates.md) and [roadmap.md](roadmap.md).
 
 ## Candidate authority
 
@@ -43,6 +43,15 @@ has current evidence. Evidence is append-only and records its producer, exact
 inputs, bounded outcome, and creation time—not raw command output, provider
 payloads, or agent transcripts.
 
+Database schema v13 stores an immutable policy manifest and evidence stream.
+Each policy binds the candidate, local project/repository identity, pinned
+project-context revision and work thread, normalized integration ref, expected
+base, candidate head and tree, Git object format, and policy revision. Policies
+and candidates are immutable, so any affected input change creates a new tuple
+and starts with no evidence; evidence is never carried forward by inference.
+Readiness is derived from the newest evidence for every required gate, even
+when the append-only stream is longer than an operator listing page.
+
 ### Independent review
 
 Review must come from a separate run and satisfy an explicit separation policy.
@@ -50,17 +59,68 @@ A different run ID does not by itself prove independence: it may still be the
 same producing profile or identity. The gate therefore records both producer
 and reviewer provenance and evaluates the configured rule.
 
+`gate review-create` durably binds a normal agent run to one policy and
+candidate. The run coordinator reconstructs and snapshots that candidate from
+the private candidate store rather than resolving the same object ID in the
+operator checkout. Retries preserve the binding; reassignment rechecks the
+separation rule. Review evidence is accepted only from a successful attempt of
+such a bound run. A generic run that merely reports the same source revision is
+not review authority.
+
 ### Candidate and combined-tree validation
 
 Candidate-only checks are insufficient when two individually valid changes
 compose into an invalid integration tree. The readiness decision must validate
 the tree as it would exist on the expected base.
 
+Milestone 7B local validation covers the single-candidate tree. Each configured
+command is pinned to an immutable Docker image ID and executes with a read-only
+workspace, Docker network mode `none`, no gateway, and no credentials. The
+ledger retains exit status, duration, image and command identities, and a hash
+and byte count of output; output itself is discarded. Combined-tree validation
+after dependencies and refolding belongs to Milestone 7C.
+
 Some checks described as “post-landing-only” can be reproduced against a folded
 tree before landing; those are readiness gates. A check that truly cannot run
 until after the integration ref moves is post-landing monitoring unless a
 staging branch or provider merge queue supplies equivalent pre-landing
 revalidation. It must not be represented as an already-passed readiness gate.
+
+## Operator surface
+
+Create and inspect an exact policy from the published request contract:
+
+```console
+magic-glass-box gate policy-create cnd_<id> \
+  --policy examples/gate-policy-request.json --created-by operator
+magic-glass-box gate policy-show gpl_<id>
+magic-glass-box gate policy-list --candidate cnd_<id>
+```
+
+Create a candidate-backed reviewer, execute it manually or through an opted-in
+supervision policy, and record the bounded decision:
+
+```console
+magic-glass-box gate review-create gpl_<id> --profile Reviewer \
+  --requested-by operator --expected-policy-revision <sha256>
+magic-glass-box run execute run_<id>
+magic-glass-box gate review-record gpl_<id> --reviewer-attempt att_<id> \
+  --outcome passed --recorded-by operator \
+  --expected-policy-revision <sha256>
+```
+
+Run a pinned local check and inspect current state:
+
+```console
+magic-glass-box gate validate gpl_<id> unit --recorded-by operator \
+  --expected-policy-revision <sha256>
+magic-glass-box gate evidence-list gpl_<id>
+magic-glass-box gate readiness gpl_<id>
+```
+
+The request and durable manifest/evidence shapes are published in `schemas/`.
+`make gate-test` repeats the real Git/SQLite candidate, review, recovery, and
+gate-ledger proof without requiring a live hosting service.
 
 ### Base-advance invalidation
 

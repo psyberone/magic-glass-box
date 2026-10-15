@@ -20,6 +20,13 @@ from magic_glass_box.domain import (
     WorkLogEntry,
     WorkMemoryCheckpoint,
 )
+from magic_glass_box.executor import DockerImage
+from magic_glass_box.gates import (
+    GateError,
+    GatePolicyManifest,
+    parse_gate_evidence,
+    resolve_gate_policy_request,
+)
 from magic_glass_box.results import ResultError, ResultManifest
 
 
@@ -235,6 +242,89 @@ class ArtifactSchemaContractTests(unittest.TestCase):
         validator.validate(escaping_symlink)
         with self.assertRaises(ResultError):
             ResultManifest.from_mapping(escaping_symlink)
+
+    def test_gate_policy_and_evidence_examples_match_runtime_contracts(self) -> None:
+        request_validator, request = self.load("gate-policy-request")
+        request_validator.validate(request)
+        resolved = resolve_gate_policy_request(
+            request,
+            image_resolver=lambda _reference: DockerImage("sha256:" + "c" * 64, ()),
+        )
+
+        policy_validator, policy = self.load("gate-policy")
+        policy_validator.validate(policy)
+        parsed_policy = GatePolicyManifest.from_mapping(policy)
+        self.assertEqual(parsed_policy.to_dict(), policy)
+        self.assertEqual(resolved, parsed_policy.policy)
+
+        evidence_schema = json.loads(
+            (self.repository / "schemas/gate-evidence-v1.schema.json").read_text()
+        )
+        Draft202012Validator.check_schema(evidence_schema)
+        evidence_validator = Draft202012Validator(evidence_schema)
+        for name in ("gate-review-evidence", "gate-validation-evidence"):
+            evidence = json.loads(
+                (self.repository / f"examples/{name}.json").read_text()
+            )
+            with self.subTest(name=name):
+                evidence_validator.validate(evidence)
+                self.assertEqual(parse_gate_evidence(evidence).to_dict(), evidence)
+
+    def test_gate_schemas_and_runtime_reject_mutable_or_inconsistent_inputs(
+        self,
+    ) -> None:
+        request_validator, request = self.load("gate-policy-request")
+        empty = copy.deepcopy(request)
+        empty["review_separation"] = None
+        empty["validations"] = []
+        with self.assertRaises(SchemaValidationError):
+            request_validator.validate(empty)
+        with self.assertRaises(GateError):
+            resolve_gate_policy_request(
+                empty,
+                image_resolver=lambda _reference: DockerImage("sha256:" + "c" * 64, ()),
+            )
+
+        oversized_argument = copy.deepcopy(request)
+        oversized_argument["validations"][0]["command"] = ["x" * 1025]
+        with self.assertRaises(SchemaValidationError):
+            request_validator.validate(oversized_argument)
+        with self.assertRaises(GateError):
+            resolve_gate_policy_request(
+                oversized_argument,
+                image_resolver=lambda _reference: DockerImage("sha256:" + "c" * 64, ()),
+            )
+
+        run_only_review = copy.deepcopy(request)
+        run_only_review["review_separation"] = "different_run"
+        with self.assertRaises(SchemaValidationError):
+            request_validator.validate(run_only_review)
+        with self.assertRaises(GateError):
+            resolve_gate_policy_request(
+                run_only_review,
+                image_resolver=lambda _reference: DockerImage("sha256:" + "c" * 64, ()),
+            )
+
+        policy_validator, policy = self.load("gate-policy")
+        mutable = copy.deepcopy(policy)
+        mutable["policy"]["validations"][0]["image_id"] = "python:latest"
+        with self.assertRaises(SchemaValidationError):
+            policy_validator.validate(mutable)
+        with self.assertRaises(GateError):
+            GatePolicyManifest.from_mapping(mutable)
+
+        evidence_schema = json.loads(
+            (self.repository / "schemas/gate-evidence-v1.schema.json").read_text()
+        )
+        evidence_validator = Draft202012Validator(evidence_schema)
+        validation = json.loads(
+            (self.repository / "examples/gate-validation-evidence.json").read_text()
+        )
+        validation["outcome"] = "failed"
+        with self.assertRaises(SchemaValidationError):
+            evidence_validator.validate(validation)
+        with self.assertRaises(GateError):
+            parse_gate_evidence(validation)
 
 
 if __name__ == "__main__":

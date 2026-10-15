@@ -11,6 +11,7 @@ from .storage.errors import (
     NotFoundError,
     StorageError,
 )
+from .storage.gates import GateStorage
 from .storage.interactions import InteractionStorage
 from .storage.queries import QueryStorage
 from .storage.runs import RunStorage
@@ -19,6 +20,7 @@ from .storage.schema import (
     CANDIDATE_SCHEMA,
     DATABASE_FILENAME,
     EXECUTION_INTEGRITY_SCHEMA,
+    GATE_SCHEMA,
     INTERACTION_SCHEMA,
     LEGACY_DATABASE_FILENAME,
     LEGACY_STATE_DIRECTORY_NAME,
@@ -51,6 +53,7 @@ __all__ = [
     "DATABASE_FILENAME",
     "Database",
     "EXECUTION_INTEGRITY_SCHEMA",
+    "GATE_SCHEMA",
     "INTERACTION_SCHEMA",
     "LEGACY_DATABASE_FILENAME",
     "LEGACY_STATE_DIRECTORY_NAME",
@@ -79,6 +82,7 @@ __all__ = [
 class Database(
     SupervisionStorage,
     QueryStorage,
+    GateStorage,
     CandidateStorage,
     ArtifactStorage,
     WorkStorage,

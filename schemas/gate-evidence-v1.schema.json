@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:gate-evidence:v1",
+  "title": "Magic Glass Box Exact-Input Gate Evidence v1",
+  "oneOf": [
+    { "$ref": "#/$defs/review" },
+    { "$ref": "#/$defs/validation" }
+  ],
+  "$defs": {
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "expected_base_revision",
+        "head_revision",
+        "integration_ref",
+        "object_format",
+        "policy_id",
+        "policy_revision",
+        "repository_identity",
+        "tree_revision"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^cnd_[0-9a-f]{32}$"
+        },
+        "expected_base_revision": { "$ref": "#/$defs/objectId" },
+        "head_revision": { "$ref": "#/$defs/objectId" },
+        "integration_ref": {
+          "type": "string",
+          "pattern": "^refs/heads/[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$",
+          "maxLength": 512
+        },
+        "object_format": { "enum": ["sha1", "sha256"] },
+        "policy_id": {
+          "type": "string",
+          "pattern": "^gpl_[0-9a-f]{32}$"
+        },
+        "policy_revision": { "$ref": "#/$defs/sha256" },
+        "repository_identity": {
+          "type": "string",
+          "pattern": "^boxp_[0-9a-f]{32}$"
+        },
+        "tree_revision": { "$ref": "#/$defs/objectId" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "object_format": { "const": "sha1" } },
+            "required": ["object_format"]
+          },
+          "then": {
+            "properties": {
+              "expected_base_revision": { "pattern": "^[0-9a-f]{40}$" },
+              "head_revision": { "pattern": "^[0-9a-f]{40}$" },
+              "tree_revision": { "pattern": "^[0-9a-f]{40}$" }
+            }
+          },
+          "else": {
+            "properties": {
+              "expected_base_revision": { "pattern": "^[0-9a-f]{64}$" },
+              "head_revision": { "pattern": "^[0-9a-f]{64}$" },
+              "tree_revision": { "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      ]
+    },
+    "objectId": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "identity_id",
+        "profile_id",
+        "profile_version_id",
+        "requested_by",
+        "run_id"
+      ],
+      "properties": {
+        "attempt_id": { "type": "string", "pattern": "^att_[0-9a-f]{32}$" },
+        "identity_id": { "type": "string", "pattern": "^kid_[0-9a-f]{32}$" },
+        "profile_id": { "type": "string", "pattern": "^agp_[0-9a-f]{32}$" },
+        "profile_version_id": {
+          "type": "string",
+          "pattern": "^apv_[0-9a-f]{32}$"
+        },
+        "requested_by": {
+          "type": "string",
+          "pattern": "^boxu_[0-9a-f]{32}$"
+        },
+        "run_id": { "type": "string", "pattern": "^run_[0-9a-f]{32}$" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inputs",
+        "kind",
+        "outcome",
+        "producer",
+        "reviewer",
+        "schema_version",
+        "separation"
+      ],
+      "properties": {
+        "inputs": { "$ref": "#/$defs/inputs" },
+        "kind": { "const": "independent_review" },
+        "outcome": { "enum": ["passed", "failed"] },
+        "producer": { "$ref": "#/$defs/provenance" },
+        "reviewer": { "$ref": "#/$defs/provenance" },
+        "schema_version": { "const": 1 },
+        "separation": {
+          "enum": [
+            "different_profile",
+            "different_identity",
+            "different_profile_and_identity"
+          ]
+        }
+      }
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_sha256",
+        "duration_ms",
+        "exit_code",
+        "image_id",
+        "inputs",
+        "kind",
+        "outcome",
+        "output_bytes",
+        "output_sha256",
+        "sandbox_id",
+        "schema_version",
+        "validation_name"
+      ],
+      "properties": {
+        "command_sha256": { "$ref": "#/$defs/sha256" },
+        "duration_ms": { "type": "integer", "minimum": 0, "maximum": 86400000 },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "image_id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "inputs": { "$ref": "#/$defs/inputs" },
+        "kind": { "const": "local_validation" },
+        "outcome": { "enum": ["passed", "failed"] },
+        "output_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 25165824
+        },
+        "output_sha256": { "$ref": "#/$defs/sha256" },
+        "sandbox_id": {
+          "type": "string",
+          "pattern": "^run_[0-9a-f]{32}$"
+        },
+        "schema_version": { "const": 1 },
+        "validation_name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "exit_code": { "const": 0 } },
+            "required": ["exit_code"]
+          },
+          "then": { "properties": { "outcome": { "const": "passed" } } },
+          "else": { "properties": { "outcome": { "const": "failed" } } }
+        }
+      ]
+    }
+  }
+}

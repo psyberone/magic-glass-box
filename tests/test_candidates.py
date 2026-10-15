@@ -25,6 +25,7 @@ from magic_glass_box.candidates import (
 from magic_glass_box.db import (
     CANDIDATE_SCHEMA,
     SCHEMA,
+    SCHEMA_VERSION,
     ConflictError,
     Database,
     NotFoundError,
@@ -998,7 +999,7 @@ class CandidateMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 12)
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
             self.assertEqual(second, first)
             with closing(database.connect()) as connection:
                 table = connection.execute(

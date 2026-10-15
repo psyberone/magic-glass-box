@@ -1,0 +1,25 @@
+{
+  "candidate_id": "cnd_11111111111111111111111111111111",
+  "context_version_id": "ctx_22222222222222222222222222222222",
+  "expected_base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "integration_ref": "refs/heads/main",
+  "object_format": "sha1",
+  "policy": {
+    "review_separation": "different_profile_and_identity",
+    "schema_version": 1,
+    "validations": [
+      {
+        "command": ["python", "-m", "unittest", "discover", "-s", "tests"],
+        "image_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "name": "unit"
+      }
+    ]
+  },
+  "policy_revision": "ab358f00297bbac9d96c9951018a5bc7d4541a632baa660140d0a93e1b67c8ff",
+  "project_id": "boxp_33333333333333333333333333333333",
+  "repository_identity": "boxp_33333333333333333333333333333333",
+  "schema_version": 1,
+  "tree_revision": "dddddddddddddddddddddddddddddddddddddddd",
+  "work_thread_id": "wth_44444444444444444444444444444444"
+}

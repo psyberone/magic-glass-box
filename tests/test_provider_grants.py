@@ -11,6 +11,7 @@ from pathlib import Path
 from magic_glass_box.db import (
     PROVIDER_DISPATCH_SCHEMA,
     SCHEMA,
+    SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
     Database,
@@ -276,7 +277,7 @@ class ProviderGrantMigrationTests(unittest.TestCase):
             database = Database(path)
             first = database.initialize()
             second = database.initialize()
-            self.assertEqual(first["schema_version"], 12)
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["users"], 1)
             self.assertEqual(first["counts"]["provider_grants"], 0)
@@ -295,7 +296,8 @@ class ProviderGrantMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-eleven.db"
             connection = sqlite3.connect(path)
-            connection.executescript(SCHEMA.removesuffix(PROVIDER_DISPATCH_SCHEMA))
+            dispatch_start = SCHEMA.index(PROVIDER_DISPATCH_SCHEMA)
+            connection.executescript(SCHEMA[:dispatch_start])
             connection.execute("PRAGMA user_version = 11")
             connection.commit()
             connection.close()
@@ -305,7 +307,7 @@ class ProviderGrantMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(first["schema_version"], 12)
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
             self.assertEqual(second, first)
             with closing(database.connect()) as migrated:
                 table = migrated.execute(

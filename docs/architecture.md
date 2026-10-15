@@ -143,6 +143,12 @@ project-activity projection.
   is a derived cache; the immutable ledger and retained result can reconstruct
   it exactly when the pinned base remains cached or available from the project
   repository.
+- An immutable schema-v13 gate policy binds a candidate to the repository,
+  integration ref, expected base, head/tree, object format, and policy
+  revision. Independent-review runs are durably bound to that exact candidate
+  and receive its private snapshot; local validation runs networkless and
+  credentialless against a read-only snapshot. Append-only bounded evidence
+  derives readiness without retaining review transcripts or command output.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -194,7 +200,7 @@ artifacts, trusted candidates, supervision, and composite query projections.
 The storage split preserved schema v9; autonomous supervision advanced it to
 schema v10, and trusted candidates plus their query-backed indexes introduced
 schema v11. Cross-process provider dispatch reservations advanced it to schema
-v12.
+v12; exact-input gate policy and evidence state advanced it to schema v13.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -329,8 +335,8 @@ broker, structured worker replacement, multi-agent work memory, work-item
 completion, execution integrity, the redacted interactive control room, and the
 storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
 autonomous supervision, and aging escalation are complete. Trusted candidate
-materialization is implemented. Exact-input gates
-and the manual integration queue come next; optional provider-neutral sidecars
+materialization and exact-input gates are implemented. The dependency/refold
+queue and manual landing flow come next; optional provider-neutral sidecars
 follow the budget and destructive-continuity phases. See
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),

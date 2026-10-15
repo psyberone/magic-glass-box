@@ -1,0 +1,11 @@
+{
+  "review_separation": "different_profile_and_identity",
+  "schema_version": 1,
+  "validations": [
+    {
+      "command": ["python", "-m", "unittest", "discover", "-s", "tests"],
+      "image": "python:3.12",
+      "name": "unit"
+    }
+  ]
+}

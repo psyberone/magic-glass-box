@@ -41,7 +41,9 @@ class QueryStorage:
                 "wiv.version AS work_item_version, "
                 "wiv.source_updated_at AS work_item_source_updated_at, "
                 "wiv.content_json AS work_item_json, "
-                "wiv.content_sha256 AS work_item_sha256 "
+                "wiv.content_sha256 AS work_item_sha256, "
+                "grr.policy_id AS gate_policy_id, "
+                "grr.candidate_id AS review_candidate_id "
                 "FROM runs r JOIN projects p ON p.id = r.project_id "
                 "JOIN project_context_versions c ON c.id = r.context_version_id "
                 "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
@@ -49,6 +51,7 @@ class QueryStorage:
                 "LEFT JOIN work_item_versions wiv "
                 "ON wiv.id = r.work_item_version_id "
                 "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
+                "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
@@ -161,6 +164,8 @@ class QueryStorage:
                 "r.supervision_policy_json, "
                 "r.krab_session_id, r.krab_claim_id, r.created_at, r.updated_at, "
                 "r.started_at, r.finished_at, p.krab_project_key AS project_key, "
+                "grr.policy_id AS gate_policy_id, "
+                "grr.candidate_id AS review_candidate_id, "
                 "c.id AS context_version_id, c.version AS context_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
                 "av.version AS profile_version, u.handle AS requested_by, "
@@ -175,6 +180,7 @@ class QueryStorage:
                 "LEFT JOIN work_item_versions wiv "
                 "ON wiv.id = r.work_item_version_id "
                 "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
+                "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()

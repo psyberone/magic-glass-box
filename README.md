@@ -53,6 +53,11 @@ This repository currently contains the first executable vertical slice:
   revision inside one shared private Git store per project and object format,
   without touching the operator checkout or inheriting repository hooks and
   filters;
+- immutable exact-input gate policies that bind repository/ref/base/head/tree
+  identity, candidate-backed independent-review runs with an explicit profile
+  and/or identity separation policy, networkless read-only local validation,
+  append-only bounded evidence, and derived readiness without transcripts or
+  command output;
 - a durable attempt ledger and bounded structured handoff that let a clean
   replacement worker resume the same run from its pinned commit without a
   transcript or inherited mutable sandbox;
@@ -70,8 +75,9 @@ This repository currently contains the first executable vertical slice:
   answered-work replacement, lease-safe recovery, and nonblocking bodyless
   threshold reminders through Krab; and
 - an administrative CLI that can execute, cancel, retry, or reassign runs,
-  reconcile interrupted ones, inspect or apply retained results, and materialize,
-  reconstruct, list, or verify trusted candidates.
+  reconcile interrupted ones, inspect or apply retained results, materialize,
+  reconstruct, list, or verify trusted candidates, and manage exact-input gate
+  policy, review, validation, evidence, and readiness state.
 
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
@@ -202,6 +208,26 @@ pull request, contact a hosting service, or hold GitHub/GitLab credentials. See
 [docs/results.md](docs/results.md) for retention and application and
 [docs/candidates.md](docs/candidates.md) for the candidate boundary.
 
+Pin and evaluate gates for an immutable candidate without contacting a forge:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  gate policy-create cnd_<id> --policy examples/gate-policy-request.json \
+  --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  gate review-create gpl_<id> --profile Reviewer --requested-by operator \
+  --expected-policy-revision <sha256>
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  gate validate gpl_<id> unit --recorded-by operator \
+  --expected-policy-revision <sha256>
+PYTHONPATH=src python3.11 -m magic_glass_box gate readiness gpl_<id>
+```
+
+Review runs receive the exact private candidate tree, not a same-named revision
+from the operator checkout. Local validation uses an immutable image, read-only
+workspace, no network, gateway, or credential, and retains only bounded hashed
+metadata. See [docs/integration-gates.md](docs/integration-gates.md).
+
 After all runs and assignments are terminal and the final work-log entry is an
 `outcome`, seal or later reopen the local work cycle with:
 
@@ -270,6 +296,7 @@ mutation kill-rate floor. The repeatable gates are:
 make quality
 make mutation-clean
 make candidate-test
+make gate-test
 make live-supervisor
 ```
 

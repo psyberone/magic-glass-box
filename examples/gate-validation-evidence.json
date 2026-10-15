@@ -1,0 +1,24 @@
+{
+  "command_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "duration_ms": 1234,
+  "exit_code": 0,
+  "image_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "inputs": {
+    "candidate_id": "cnd_11111111111111111111111111111111",
+    "expected_base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "integration_ref": "refs/heads/main",
+    "object_format": "sha1",
+    "policy_id": "gpl_55555555555555555555555555555555",
+    "policy_revision": "ab358f00297bbac9d96c9951018a5bc7d4541a632baa660140d0a93e1b67c8ff",
+    "repository_identity": "boxp_33333333333333333333333333333333",
+    "tree_revision": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "kind": "local_validation",
+  "outcome": "passed",
+  "output_bytes": 42,
+  "output_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "sandbox_id": "run_66666666666666666666666666666666",
+  "schema_version": 1,
+  "validation_name": "unit"
+}

@@ -37,7 +37,8 @@ contains:
 - all active runs plus a bounded number of recent terminal runs;
 - attempts, owners, leases, cancellation signals, interactions, retained
   result summaries, run-bound provider authorities, pinned supervision
-  policies, durable supervisor actions, and threshold escalation records; and
+  policies, candidate-backed review bindings, redacted exact-input gate
+  readiness, durable supervisor actions, and threshold escalation records; and
 - an attention queue for pending interactions, open or expired assignments,
   blocker evidence, expired attempt leases, cancellation requests, inconsistent
   active runs, unavailable authorities, and exhausted supervisor work. Every
@@ -46,7 +47,8 @@ contains:
 
 `--history-limit` accepts 0 through 500 and limits only terminal runs. It never
 hides an active run. The same bound selects the attempts, interactions,
-results, and authority bindings attached to the visible run set. Aggregate
+results, candidates, gate policies, review-run bindings, and authority bindings
+attached to the visible run set. Aggregate
 counts—including action and escalation lifecycle states—still describe all
 local state and the snapshot reports whether terminal history was truncated.
 

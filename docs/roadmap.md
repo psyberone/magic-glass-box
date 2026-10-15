@@ -359,16 +359,16 @@ part of this checkpoint.
 
 ## Milestone 7B: exact-input gate ledger
 
-**Status: planned**
-
-> **DESIGN ONLY — NOT IMPLEMENTED:** No exact-input gate ledger, independent
-> review gate, readiness state, or validation-evidence store exists yet.
+**Status: complete**
 
 - Pin one versioned gate policy to the candidate's repository identity,
   integration ref, expected base, head/tree, and policy revision.
 - Record independent-review evidence with producer and reviewer provenance and
   an explicit separation rule; a distinct run alone is not sufficient proof of
   independence.
+- Bind reviewer runs durably to the policy candidate, materialize that exact
+  private tree for every attempt and retry, and reject revision-only claims as
+  review authority.
 - Run configured local validation against the materialized candidate tree and
   retain bounded evidence rather than command output or transcripts.
 - Invalidate every affected gate when its candidate or policy input changes.
@@ -378,6 +378,17 @@ part of this checkpoint.
 **Exit proof:** a producer cannot satisfy its own configured independent-review
 gate, evidence for another head/base/policy tuple is rejected, and a candidate
 becomes ready only when every gate required by its pinned policy passes.
+
+The 2026-10-15 end-of-slice internal checkpoint closed M7B after the frozen
+tree passed 588 tests, 86% branch coverage, the 25-test exact-input gate proof,
+and a clean-tree 27,879-mutant run with 23,435 killed (84.06%). The final audit
+removed run-only review separation because another run ID is not independent,
+and aligned the public/runtime validation-command argument ceiling with the
+executor's 1,024-byte contract. It also confirmed candidate-backed reviewer
+workspaces, unbound-evidence rejection, separation across replacement paths,
+isolated bounded local evidence, Docker-lazy review-only policies, complete
+readiness derivation, and control-room visibility. M7C was not started as part
+of this checkpoint.
 
 ## Milestone 7C: integration queue and manual landing
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1191,6 +1191,165 @@ CREATE INDEX provider_dispatch_grant_expiry
     ON provider_dispatch_reservations(provider_grant_id, expires_at);
 """
 
+GATE_SCHEMA = """
+CREATE TABLE integration_gate_policies (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    manifest_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    repository_identity TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    context_version_id TEXT NOT NULL,
+    work_thread_id TEXT NOT NULL,
+    integration_ref TEXT NOT NULL,
+    expected_base_revision TEXT NOT NULL,
+    head_revision TEXT NOT NULL,
+    tree_revision TEXT NOT NULL,
+    object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+    policy_revision TEXT NOT NULL,
+    review_separation TEXT CHECK (
+        review_separation IS NULL OR review_separation IN (
+            'different_profile', 'different_identity',
+            'different_profile_and_identity'
+        )
+    ),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (context_version_id)
+        REFERENCES project_context_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (object_format = 'sha1'
+            AND length(expected_base_revision) = 40
+            AND length(head_revision) = 40
+            AND length(tree_revision) = 40)
+        OR
+        (object_format = 'sha256'
+            AND length(expected_base_revision) = 64
+            AND length(head_revision) = 64
+            AND length(tree_revision) = 64)
+    )
+) STRICT;
+
+CREATE INDEX integration_gate_policy_candidate_created
+    ON integration_gate_policies(candidate_id, created_at DESC, id DESC);
+CREATE INDEX integration_gate_policy_project_created
+    ON integration_gate_policies(project_id, created_at DESC, id DESC);
+CREATE INDEX integration_gate_policy_thread_created
+    ON integration_gate_policies(work_thread_id, created_at DESC, id DESC);
+
+CREATE TABLE integration_gate_review_runs (
+    run_id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE integration_gate_evidence (
+    id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('independent_review', 'local_validation')
+    ),
+    gate_name TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('passed', 'failed')),
+    evidence_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    repository_identity TEXT NOT NULL,
+    integration_ref TEXT NOT NULL,
+    expected_base_revision TEXT NOT NULL,
+    head_revision TEXT NOT NULL,
+    tree_revision TEXT NOT NULL,
+    object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+    policy_revision TEXT NOT NULL,
+    reviewer_run_id TEXT,
+    reviewer_attempt_id TEXT,
+    recorded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (policy_id, sequence),
+    UNIQUE (policy_id, content_sha256),
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_attempt_id)
+        REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (recorded_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (kind = 'independent_review'
+            AND reviewer_run_id IS NOT NULL
+            AND reviewer_attempt_id IS NOT NULL)
+        OR
+        (kind = 'local_validation'
+            AND reviewer_run_id IS NULL
+            AND reviewer_attempt_id IS NULL)
+    ),
+    CHECK (
+        (object_format = 'sha1'
+            AND length(expected_base_revision) = 40
+            AND length(head_revision) = 40
+            AND length(tree_revision) = 40)
+        OR
+        (object_format = 'sha256'
+            AND length(expected_base_revision) = 64
+            AND length(head_revision) = 64
+            AND length(tree_revision) = 64)
+    )
+) STRICT;
+
+CREATE INDEX integration_gate_evidence_policy_sequence
+    ON integration_gate_evidence(policy_id, sequence DESC);
+CREATE INDEX integration_gate_evidence_policy_gate_sequence
+    ON integration_gate_evidence(policy_id, gate_name, sequence DESC);
+CREATE INDEX integration_gate_evidence_candidate_created
+    ON integration_gate_evidence(candidate_id, created_at DESC, id DESC);
+
+CREATE TRIGGER integration_gate_policy_immutable_update
+BEFORE UPDATE ON integration_gate_policies
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate policies are immutable');
+END;
+CREATE TRIGGER integration_gate_policy_immutable_delete
+BEFORE DELETE ON integration_gate_policies
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate policies cannot be deleted');
+END;
+CREATE TRIGGER integration_gate_review_run_immutable_update
+BEFORE UPDATE ON integration_gate_review_runs
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate review runs are immutable');
+END;
+CREATE TRIGGER integration_gate_review_run_immutable_delete
+BEFORE DELETE ON integration_gate_review_runs
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate review runs cannot be deleted');
+END;
+CREATE TRIGGER integration_gate_evidence_immutable_update
+BEFORE UPDATE ON integration_gate_evidence
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate evidence is immutable');
+END;
+CREATE TRIGGER integration_gate_evidence_immutable_delete
+BEFORE DELETE ON integration_gate_evidence
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate evidence cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -1204,6 +1363,7 @@ SCHEMA = (
     + SUPERVISION_SCHEMA
     + CANDIDATE_SCHEMA
     + PROVIDER_DISPATCH_SCHEMA
+    + GATE_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -1217,4 +1377,5 @@ MIGRATIONS = {
     9: SUPERVISION_SCHEMA,
     10: CANDIDATE_SCHEMA,
     11: PROVIDER_DISPATCH_SCHEMA,
+    12: GATE_SCHEMA,
 }

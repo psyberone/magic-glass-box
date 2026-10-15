@@ -25,6 +25,7 @@ from magic_glass_box.cli import (
     build_parser,
     main,
 )
+from magic_glass_box.db import SCHEMA_VERSION
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
@@ -165,6 +166,38 @@ class FakeControlPlane:
     def list_candidates(self, **kwargs: object) -> dict[str, object]:
         return self._called("candidate.list", **kwargs)
 
+    def create_gate_policy(
+        self, candidate_id: str, policy: object, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "gate.policy-create", candidate_id=candidate_id, policy=policy, **kwargs
+        )
+
+    def get_gate_policy(self, policy_id: str) -> dict[str, object]:
+        return self._called("gate.policy-show", policy_id=policy_id)
+
+    def list_gate_policies(self, **kwargs: object) -> dict[str, object]:
+        return self._called("gate.policy-list", **kwargs)
+
+    def create_review_run(self, policy_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("gate.review-create", policy_id=policy_id, **kwargs)
+
+    def record_review_evidence(
+        self, policy_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("gate.review-record", policy_id=policy_id, **kwargs)
+
+    def run_local_validation(
+        self, policy_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("gate.validate", policy_id=policy_id, **kwargs)
+
+    def list_gate_evidence(self, policy_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("gate.evidence-list", policy_id=policy_id, **kwargs)
+
+    def gate_readiness(self, policy_id: str) -> dict[str, object]:
+        return self._called("gate.readiness", policy_id=policy_id)
+
 
 class FakeRunCoordinator:
     def __init__(self) -> None:
@@ -277,6 +310,7 @@ class CLITests(unittest.TestCase):
                     ("supervisor", "run the autonomous control loop"),
                     ("result", "inspect and apply retained work"),
                     ("candidate", "materialize and inspect trusted candidates"),
+                    ("gate", "manage exact-input integration gates"),
                 ),
             ),
             ("user",): (
@@ -400,6 +434,23 @@ class CLITests(unittest.TestCase):
                     ),
                 ),
             ),
+            ("gate",): (
+                "gate_command",
+                True,
+                (
+                    ("policy-create", "pin a gate policy to one exact candidate"),
+                    ("policy-show", "show one immutable gate policy"),
+                    ("policy-list", "list recent immutable gate policies"),
+                    (
+                        "review-create",
+                        "create a candidate-backed independent review run",
+                    ),
+                    ("review-record", "record independent-review evidence"),
+                    ("validate", "run one pinned local validation gate"),
+                    ("evidence-list", "list append-only gate evidence"),
+                    ("readiness", "derive current exact-input readiness"),
+                ),
+            ),
         }
 
         actual: dict[
@@ -513,6 +564,22 @@ class CLITests(unittest.TestCase):
                 ),
                 ("result", "apply"): ("--repository",),
                 ("candidate", "create"): ("--created-by",),
+                ("gate", "policy-create"): ("--policy", "--created-by"),
+                ("gate", "review-create"): (
+                    "--profile",
+                    "--requested-by",
+                    "--expected-policy-revision",
+                ),
+                ("gate", "review-record"): (
+                    "--reviewer-attempt",
+                    "--outcome",
+                    "--recorded-by",
+                    "--expected-policy-revision",
+                ),
+                ("gate", "validate"): (
+                    "--recorded-by",
+                    "--expected-policy-revision",
+                ),
             },
         )
         self.assertEqual(
@@ -524,14 +591,15 @@ class CLITests(unittest.TestCase):
                     "WARNING",
                     "ERROR",
                     "CRITICAL",
-                )
+                ),
+                (("gate", "review-record"), "outcome"): ("passed", "failed"),
             },
         )
 
     def test_init_user_and_status(self) -> None:
         status, initialized, _ = self.invoke("init")
         self.assertEqual(status, 0)
-        self.assertEqual(initialized["schema_version"], 12)
+        self.assertEqual(initialized["schema_version"], SCHEMA_VERSION)
         status, user, _ = self.invoke(
             "user", "add", "operator", "--display-name", "Local Operator"
         )
@@ -1336,6 +1404,7 @@ class CLITests(unittest.TestCase):
                 "supervisor": "run the autonomous control loop",
                 "result": "inspect and apply retained work",
                 "candidate": "materialize and inspect trusted candidates",
+                "gate": "manage exact-input integration gates",
             },
         )
         expected_nested = {
@@ -1391,6 +1460,16 @@ class CLITests(unittest.TestCase):
                 "create": "materialize one retained result as a candidate",
                 "show": "verify and show one trusted candidate",
                 "list": "list recent durable candidates without reading Git objects",
+            },
+            "gate": {
+                "policy-create": "pin a gate policy to one exact candidate",
+                "policy-show": "show one immutable gate policy",
+                "policy-list": "list recent immutable gate policies",
+                "review-create": "create a candidate-backed independent review run",
+                "review-record": "record independent-review evidence",
+                "validate": "run one pinned local validation gate",
+                "evidence-list": "list append-only gate evidence",
+                "readiness": "derive current exact-input readiness",
             },
         }
         for command, expected_help in expected_nested.items():
@@ -1864,6 +1943,299 @@ class CLITests(unittest.TestCase):
         )
         self.assertEqual(json.loads(stdout.getvalue())["operation"], "candidate.list")
 
+    def test_gate_ledger_read_routes_do_not_open_object_stores(self) -> None:
+        control = FakeControlPlane()
+        policy_id = "gpl_" + "6" * 32
+        candidate_id = "cnd_" + "7" * 32
+        cases = (
+            (
+                ["gate", "policy-show", policy_id],
+                ("gate.policy-show", {"policy_id": policy_id}),
+            ),
+            (
+                [
+                    "gate",
+                    "policy-list",
+                    "--candidate",
+                    candidate_id,
+                    "--limit",
+                    "17",
+                ],
+                (
+                    "gate.policy-list",
+                    {
+                        "candidate_id": candidate_id,
+                        "project_key": None,
+                        "work_thread_id": None,
+                        "limit": 17,
+                    },
+                ),
+            ),
+            (
+                ["gate", "evidence-list", policy_id, "--limit", "19"],
+                (
+                    "gate.evidence-list",
+                    {"policy_id": policy_id, "limit": 19},
+                ),
+            ),
+            (
+                ["gate", "readiness", policy_id],
+                ("gate.readiness", {"policy_id": policy_id}),
+            ),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch(
+                        "magic_glass_box.cli.ControlPlane", return_value=control
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_result_store",
+                        side_effect=AssertionError("result store should stay cold"),
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_candidate_store",
+                        side_effect=AssertionError("candidate store should stay cold"),
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli.DockerCLI",
+                        side_effect=AssertionError("Docker should stay cold"),
+                    ),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(control.calls[-1], expected)
+                self.assertEqual(
+                    json.loads(stdout.getvalue())["operation"], expected[0]
+                )
+
+    def test_gate_policy_create_and_evidence_write_routes_wire_authority(self) -> None:
+        control = FakeControlPlane()
+        candidate_id = "cnd_" + "7" * 32
+        policy_id = "gpl_" + "8" * 32
+        reviewer_attempt = "att_" + "9" * 32
+        policy_path = Path(self.temporary.name) / "gate-policy.json"
+        policy_document = {
+            "schema_version": 1,
+            "review_separation": "different_profile_and_identity",
+            "validations": [
+                {
+                    "name": "unit",
+                    "image": "validator:local",
+                    "command": ["python", "-m", "unittest"],
+                }
+            ],
+        }
+        policy_path.write_text(json.dumps(policy_document), encoding="utf-8")
+        image_engine = mock.Mock()
+
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch("magic_glass_box.cli.DockerCLI", return_value=image_engine),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "policy-create",
+                    candidate_id,
+                    "--policy",
+                    str(policy_path),
+                    "--created-by",
+                    "operator",
+                ]
+            )
+            _, routed_arguments = control.calls[-1]
+            resolved = routed_arguments["image_resolver"]("validator:local")
+        self.assertEqual(status, 0)
+        operation, arguments = control.calls[-1]
+        self.assertEqual(operation, "gate.policy-create")
+        self.assertEqual(arguments["candidate_id"], candidate_id)
+        self.assertEqual(arguments["policy"], policy_document)
+        self.assertEqual(arguments["created_by_handle"], "operator")
+        self.assertIs(resolved, image_engine.inspect_image.return_value)
+        image_engine.inspect_image.assert_called_once_with("validator:local")
+
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "review-create",
+                    policy_id,
+                    "--profile",
+                    "Reviewer",
+                    "--requested-by",
+                    "operator",
+                    "--expected-policy-revision",
+                    "a" * 64,
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "gate.review-create",
+                {
+                    "policy_id": policy_id,
+                    "profile_name": "Reviewer",
+                    "requested_by_handle": "operator",
+                    "expected_policy_revision": "a" * 64,
+                    "krab_session_id": None,
+                    "krab_claim_id": None,
+                    "supervision_policy": None,
+                },
+            ),
+        )
+
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "review-record",
+                    policy_id,
+                    "--reviewer-attempt",
+                    reviewer_attempt,
+                    "--outcome",
+                    "passed",
+                    "--recorded-by",
+                    "operator",
+                    "--expected-policy-revision",
+                    "a" * 64,
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "gate.review-record",
+                {
+                    "policy_id": policy_id,
+                    "reviewer_attempt_id": reviewer_attempt,
+                    "outcome": "passed",
+                    "recorded_by_handle": "operator",
+                    "expected_policy_revision": "a" * 64,
+                },
+            ),
+        )
+
+    def test_review_only_gate_policy_does_not_require_a_docker_client(self) -> None:
+        control = FakeControlPlane()
+        policy_path = Path(self.temporary.name) / "review-policy.json"
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile",
+                    "validations": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch(
+                "magic_glass_box.cli.DockerCLI",
+                side_effect=AssertionError("Docker must remain cold"),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "policy-create",
+                    "cnd_" + "7" * 32,
+                    "--policy",
+                    str(policy_path),
+                    "--created-by",
+                    "operator",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+
+    def test_gate_validation_route_builds_only_the_required_runtime(self) -> None:
+        control = FakeControlPlane()
+        result_store = FakeResultStore()
+        candidate_store = FakeCandidateStore()
+        executor = object()
+        engine = object()
+        policy_id = "gpl_" + "8" * 32
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch(
+                "magic_glass_box.cli._build_result_store",
+                return_value=result_store,
+            ),
+            mock.patch(
+                "magic_glass_box.cli._build_candidate_store",
+                return_value=candidate_store,
+            ) as build_candidate_store,
+            mock.patch("magic_glass_box.cli.DockerCLI", return_value=engine) as docker,
+            mock.patch(
+                "magic_glass_box.cli.DockerExecutor", return_value=executor
+            ) as executor_type,
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "validate",
+                    policy_id,
+                    "unit",
+                    "--recorded-by",
+                    "operator",
+                    "--expected-policy-revision",
+                    "b" * 64,
+                    "--run-timeout",
+                    "75",
+                    "--operation-timeout",
+                    "11",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        docker.assert_called_once_with(run_timeout=75.0)
+        executor_type.assert_called_once_with(engine)
+        build_candidate_store.assert_called_once_with(control, timeout=11.0)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "gate.validate",
+                {
+                    "policy_id": policy_id,
+                    "validation_name": "unit",
+                    "recorded_by_handle": "operator",
+                    "expected_policy_revision": "b" * 64,
+                    "result_store": result_store,
+                    "candidate_store": candidate_store,
+                    "executor": executor,
+                },
+            ),
+        )
+
     def test_run_coordinator_builder_wires_the_run_scoped_gateway(self) -> None:
         control = mock.Mock()
         control.database.path = self.database
@@ -1871,6 +2243,8 @@ class CLITests(unittest.TestCase):
         executor = object()
         gateway = object()
         result_store = object()
+        candidate_store = object()
+        candidate_workspaces = object()
         coordinator = object()
         runtime_root = Path(self.temporary.name) / "runtime"
         with (
@@ -1892,6 +2266,14 @@ class CLITests(unittest.TestCase):
                 "magic_glass_box.cli.FileGatewayManager", return_value=gateway
             ) as gateway_type,
             mock.patch(
+                "magic_glass_box.cli._build_candidate_store",
+                return_value=candidate_store,
+            ) as candidate_store_builder,
+            mock.patch(
+                "magic_glass_box.cli.CandidateReviewWorkspaces",
+                return_value=candidate_workspaces,
+            ) as candidate_workspace_type,
+            mock.patch(
                 "magic_glass_box.cli.RunCoordinator", return_value=coordinator
             ) as coordinator_type,
         ):
@@ -1907,12 +2289,20 @@ class CLITests(unittest.TestCase):
         executor_type.assert_called_once_with("docker")
         gateway_root.assert_called_once_with(self.database)
         gateway_type.assert_called_once_with(runtime_root, control)
+        candidate_store_builder.assert_called_once_with(control)
+        candidate_workspace_type.assert_called_once_with(
+            control.database,
+            workspace,
+            result_store,
+            candidate_store,
+        )
         coordinator_type.assert_called_once_with(
             control.database,
             executor,
             workspace,
             gateway,
             result_store,
+            candidate_workspaces=candidate_workspaces,
         )
 
     def test_emit_has_stable_readable_json(self) -> None:
