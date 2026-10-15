@@ -94,10 +94,10 @@ gateway.
 provider/model through the gateway while undeclared providers, destinations,
 credentials, and direct network attempts fail closed.
 
-This slice proved the worker boundary with credential resolution inside the
-trusted orchestrator. Milestone 7D narrows the boundary again before any
-real-account proof: the core retains authority and reservations while a
-separate inference connector owns every upstream provider credential.
+This slice originally proved the worker boundary with credential resolution
+inside the trusted orchestrator. Milestone 7D.2 has since narrowed the boundary
+again: the core retains authority and reservations while a separate inference
+connector owns every upstream provider credential and network call.
 
 ## Milestone 3: worker replacement and handoff
 
@@ -262,14 +262,15 @@ rules. Legacy profiles retain their content digests.
 
 The live proof builds one pinned image containing the real Codex and Claude
 Code CLIs, then launches three containers through the coordinator, real Docker
-executor, committed-file gateway, trusted provider broker, and a host-only
-deterministic SSE fixture. A Codex worker opens a durable interaction and hands
-off; a clean replacement reads that handoff and accepted answer before
-finishing. The first attempt also creates an ignored dependency tree larger
-than the proof's result path ceiling, demonstrating that only its intended file
-is retained. Claude Code exercises the second protocol. Every container uses
-Docker network policy `none`; reusable credentials, private interaction
-content, and transient model output remain outside durable worker state.
+executor, committed-file gateway, separate reference inference connector, and
+a host-only deterministic SSE fixture. A Codex worker opens a durable
+interaction and hands off; a clean replacement reads that handoff and accepted
+answer before finishing. The first attempt also creates an ignored dependency
+tree larger than the proof's result path ceiling, demonstrating that only its
+intended file is retained. Claude Code exercises the second protocol. Every
+container uses Docker network policy `none`; reusable credentials, private
+interaction content, and transient model output remain outside durable worker
+state.
 
 **Exit proof:** the golden-path demonstration in the product thesis succeeds
 with two interchangeable worker implementations, including a real
@@ -429,7 +430,7 @@ its macOS watchdog thread failed to remain live.
 
 ## Milestone 7D: credential-isolated inference connectors
 
-**Status: in progress — M7D.1 complete**
+**Status: in progress — M7D.1 and M7D.2 complete; M7D.3 pending**
 
 M7D uses three honest internal checkpoints rather than one large cutover:
 **M7D.1** establishes durable connector authority and the strict local carrier,
@@ -469,11 +470,21 @@ The 2026-10-15 M7D.1 checkpoint adds schema-v15 connector registration and
 lifecycle state, immutable connector-bound grants without credential
 references, four public strict contracts, absolute-deadline Unix transport,
 and a separately launched deterministic fake connector. Connector grants are
-visible but cannot enter run authority yet, so this checkpoint does not claim
-the milestone exit proof. The normal quality gate passes with 638 tests and
-86% total branch coverage. M7D.2 owns exclusive dispatch, durable ambiguous
-outcomes, networkless-worker canary containment, and retirement of the direct
-credential path; the clean mutation gate remains due at completed M7D.
+visible but cannot enter run authority at that checkpoint. Its normal quality
+gate passes with 638 tests and 86% total branch coverage.
+
+The 2026-10-15 M7D.2 checkpoint advances to schema v16 and makes connector
+dispatch exclusive for normal execution. MGB no longer creates direct grants,
+resolves AI-provider credentials, or performs provider HTTP transport;
+historical direct records remain readable and revocable. Every invocation
+persists its exact connector authority tuple, lost post-dispatch replies are
+durably ambiguous without automatic retry, and concurrency is enforced across
+both a grant and its connector. The networkless Docker canary proof passes with
+no credential exposure, and the real Codex and Claude Code CLIs both pass the
+two-runtime proof through a separately launched reference connector and
+deterministic host fixture. The normal gate passes with 650 tests, 964
+subtests, clean lint, and 86% total branch coverage. M7D.3 and the clean
+mutation gate remain due before M7D is complete.
 
 ## End-of-Milestone 7 operator golden proof
 

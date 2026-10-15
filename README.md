@@ -20,8 +20,8 @@ This repository currently contains the first executable vertical slice:
   activity, and idempotent session-item write/read operations;
 - verified human-interaction routing that correlates Krab item IDs while
   keeping private question and response content out of control-plane storage;
-- a private-file credential resolver that validates host-side credential files
-  and never copies token values into the database or a worker;
+- a private-file credential resolver for non-inference authorities such as
+  Krab that never copies token values into the database or a worker;
 - a Docker execution adapter that resolves images to immutable digests,
   validates workspaces, rejects every credential-file payload, applies resource
   ceilings for memory, CPU, PIDs, temporary storage, and logs, applies privilege
@@ -33,13 +33,13 @@ This repository currently contains the first executable vertical slice:
 - a run-scoped capability gateway that gives networkless workers typed access
   to pinned run context and asynchronous Krab interactions without mounting a
   reusable token;
-- immutable, revocable, and expiring provider grants that pin destination,
-  method, model, request/response limits, timeout, and concurrency while
-  resolving provider secrets only inside the trusted orchestrator;
-- schema-v15 credential-isolated inference-connector registrations,
-  connector-bound grants, strict request/response envelopes, and a bounded
-  Unix-socket carrier; normal provider dispatch remains on the direct broker
-  until the M7D.2 cutover;
+- immutable, revocable, and expiring inference grants that pin one connector
+  deployment, route, semantic protocol, model, request/response limits,
+  timeout, scope fingerprint, and concurrency without storing or resolving an
+  upstream provider credential;
+- schema-v16 credential-isolated inference-connector registrations, exclusive
+  connector dispatch, strict request/response envelopes, durable ambiguous
+  outcomes, and a bounded Unix-socket carrier;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;
@@ -101,9 +101,9 @@ content. The gateway carrier has
 been exercised through the real Docker executor:
 the worker has `--network none`, direct egress fails, and a typed request still
 reaches the orchestrator. A second live proof reaches one policy-pinned local
-provider while undeclared grants, destinations, models, direct networking, and
-credential exposure all fail closed. The retired `krab_only` mode continues to
-fail closed.
+provider through a separately launched connector while undeclared grants,
+destinations, models, direct networking, and credential exposure all fail
+closed. The retired `krab_only` mode continues to fail closed.
 
 ## Quick start
 
@@ -123,17 +123,8 @@ but the retained-result and candidate stores are created beside that database;
 do not point it into a source checkout unless the whole state location is
 ignored and treated as disposable local control-plane data.
 
-Register an externally stored provider credential and immutable policy before
-creating a profile that names the grant:
-
-```console
-PYTHONPATH=src python3.11 -m magic_glass_box \
-  provider add openai-main --policy examples/provider-policy.json \
-  --credential-file ./private-credentials/openai.key --created-by operator
-```
-
-That is the current production transport. M7D.1 also permits an operator to
-register credential-free connector authority and a connector-bound grant:
+Start an inference connector with its credentials in its own private state,
+then register only its credential-free authority and a connector-bound grant:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
@@ -144,11 +135,13 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --policy examples/inference-grant.json --created-by operator
 ```
 
-Those connector grants are intentionally not dispatchable until M7D.2 moves
-normal provider execution out of MGB. The grant and worker-gateway contract is
-preserved while AI-provider credentials and network transport move into a
-local sidecar or operator-managed external inference connector. The boundary
-and current checkpoint are documented in
+MGB does not launch a provider CLI, read the connector's credential store, or
+perform the upstream provider request. Normal provider execution is exclusive
+to the v1 local sidecar; the transport-neutral client seam preserves a later
+authenticated external-integration carrier. Historical direct grants remain
+readable and revocable for migration, but cannot be created through the
+operator surface or dispatched. The boundary and current checkpoint are
+documented in
 [docs/inference-connectors.md](docs/inference-connectors.md).
 
 Once a project, gateway-only profile, and run have been registered, execute or
@@ -304,10 +297,11 @@ no reusable secret path. Agent output,
 question and answer bodies, and transcripts are not durable control-plane
 state; bounded workspace file changes are retained separately as inert result
 artifacts. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability
-and carrier contracts and [docs/provider-broker.md](docs/provider-broker.md)
-for the current provider policy, plus
+and carrier contracts and
 [docs/inference-connectors.md](docs/inference-connectors.md) for the implemented
-connector authority/carrier and planned dispatch cutover. The replacement
+connector authority and exclusive dispatch. Connector implementers can consult
+[docs/provider-broker.md](docs/provider-broker.md) for the optional reference
+protocol-adapter library. The replacement
 contract and handoff schema are documented in
 [docs/worker-handoffs.md](docs/worker-handoffs.md). Multi-agent coordination and
 replacement-coordinator recovery are documented in
@@ -370,12 +364,12 @@ Use `--image` to select another local, volume-free image with Python installed.
 
 The live runtime proof builds an intentionally narrow image with pinned Codex
 and Claude Code CLIs, then runs three real networkless containers through the
-Docker and provider-gateway path against a host-only deterministic protocol
-fixture. Codex opens a durable question, submits a structured handoff, exits,
-and is replaced after an answer; the replacement reads the durable context and
-finishes. The same proof verifies that a generated ignored dependency tree is
-excluded while the worker's retained file is captured, and Claude Code proves
-the second runtime seam:
+Docker, provider-gateway, and separate inference-connector path against a
+host-only deterministic protocol fixture. Codex opens a durable question,
+submits a structured handoff, exits, and is replaced after an answer; the
+replacement reads the durable context and finishes. The same proof verifies
+that a generated ignored dependency tree is excluded while the worker's
+retained file is captured, and Claude Code proves the second runtime seam:
 
 ```console
 PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build

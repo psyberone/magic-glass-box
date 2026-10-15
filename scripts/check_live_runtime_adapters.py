@@ -11,8 +11,10 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,6 +39,7 @@ from magic_glass_box.executor import (
     SandboxPlan,
 )
 from magic_glass_box.gateway import FileGatewayManager
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity, KrabUserRef, SessionItem
 from magic_glass_box.orchestration import RunCoordinator
 from magic_glass_box.results import WorkspaceResultStore
@@ -650,6 +653,70 @@ def _provider_policy(port: int, runtime: str) -> ProviderGrantSpec:
     )
 
 
+def _inference_connector_policy(socket_path: Path) -> InferenceConnectorSpec:
+    return InferenceConnectorSpec.from_mapping(
+        {
+            "schema_version": 1,
+            "connector_protocol_version": 1,
+            "deployment_sha256": "c" * 64,
+            "transport": {"kind": "unix", "socket_path": str(socket_path)},
+            "routes": [
+                {
+                    "name": "openai-proof",
+                    "provider": "openai",
+                    "protocol": "openai-responses",
+                    "models": [CODEX_MODEL],
+                    "credential_scope_sha256": "d" * 64,
+                },
+                {
+                    "name": "anthropic-proof",
+                    "provider": "anthropic",
+                    "protocol": "anthropic-messages",
+                    "models": [ANTHROPIC_MODEL],
+                    "credential_scope_sha256": "e" * 64,
+                },
+            ],
+            "request_bytes": 2 * 1024 * 1024,
+            "response_bytes": 4 * 1024 * 1024,
+            "timeout_ms": 10_000,
+            "max_concurrency": 2,
+        }
+    )
+
+
+def _inference_grant_policy(runtime: str) -> InferenceGrantSpec:
+    if runtime == "codex":
+        route = "openai-proof"
+        provider = "openai"
+        protocol = "openai-responses"
+        model = CODEX_MODEL
+        scope = "d" * 64
+    elif runtime == "claude-code":
+        route = "anthropic-proof"
+        provider = "anthropic"
+        protocol = "anthropic-messages"
+        model = ANTHROPIC_MODEL
+        scope = "e" * 64
+    else:
+        raise ValueError(f"unsupported proof runtime: {runtime}")
+    return InferenceGrantSpec.from_mapping(
+        {
+            "schema_version": 1,
+            "connector_name": "runtime-sidecar",
+            "deployment_sha256": "c" * 64,
+            "route": route,
+            "credential_scope_sha256": scope,
+            "provider": provider,
+            "protocol": protocol,
+            "model": model,
+            "request_bytes": 2 * 1024 * 1024,
+            "response_bytes": 4 * 1024 * 1024,
+            "timeout_ms": 10_000,
+            "max_concurrency": 1,
+        }
+    )
+
+
 def _assert_observations(observations: tuple[ProviderObservation, ...]) -> None:
     expected_protocols = ("openai-responses",) * 6 + ("anthropic-messages",)
     if tuple(item.protocol for item in observations) != expected_protocols:
@@ -657,7 +724,7 @@ def _assert_observations(observations: tuple[ProviderObservation, ...]) -> None:
     if tuple(item.request_number for item in observations) != (*range(1, 7), 1):
         raise RuntimeError("provider fixture request sequence is inconsistent")
     if not all(item.credential_valid for item in observations):
-        raise RuntimeError("provider credential was not injected by the trusted broker")
+        raise RuntimeError("provider credential was not injected by the connector")
     expected_models = (CODEX_MODEL,) * 6 + (ANTHROPIC_MODEL,)
     if tuple(item.model for item in observations) != expected_models:
         raise RuntimeError("provider model was not pinned by policy")
@@ -703,6 +770,16 @@ def _run_checked(command: list[str], *, cwd: Path | None = None) -> str:
     return completed.stdout
 
 
+def _stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+
+
 def _create_repository(root: Path) -> Path:
     git = shutil.which("git")
     if git is None:
@@ -742,10 +819,8 @@ def _prepare_runs(
     *,
     repository: Path,
     image: str,
-    provider_port: int,
+    connector_socket: Path,
     credential_directory: Path,
-    openai_secret: str,
-    anthropic_secret: str,
 ) -> dict[str, str]:
     database = control.database
     database.initialize()
@@ -794,16 +869,20 @@ def _prepare_runs(
         ),
         imported_by=user["id"],
     )
+    control.register_inference_connector(
+        name="runtime-sidecar",
+        spec=_inference_connector_policy(connector_socket),
+        created_by_handle="operator",
+    )
     grants = {
-        "codex": ("openai-proof", openai_secret),
-        "claude-code": ("anthropic-proof", anthropic_secret),
+        "codex": "openai-proof",
+        "claude-code": "anthropic-proof",
     }
     runs: dict[str, str] = {}
-    for runtime, (grant, secret) in grants.items():
-        control.add_provider_grant(
+    for runtime, grant in grants.items():
+        control.add_connector_provider_grant(
             name=grant,
-            spec=_provider_policy(provider_port, runtime),
-            credential_path=_write_secret(credential_directory, grant, secret),
+            spec=_inference_grant_policy(runtime),
             expires_at=None,
             created_by_handle="operator",
         )
@@ -885,6 +964,7 @@ def main(argv: list[str] | None = None) -> int:
     server = ThreadingHTTPServer(("127.0.0.1", 0), fixture.handler())
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
+    connector_process: subprocess.Popen[str] | None = None
     try:
         with tempfile.TemporaryDirectory(
             prefix="mgb-live-runtime-",
@@ -894,6 +974,77 @@ def main(argv: list[str] | None = None) -> int:
             os.chmod(root, 0o700)
             credential_directory = root / "credentials"
             credential_directory.mkdir(mode=0o700)
+            connector_directory = root / "connector-private"
+            connector_directory.mkdir(mode=0o700)
+            connector_socket = connector_directory / "inference.sock"
+            openai_credential = _write_secret(
+                connector_directory, "openai", openai_secret
+            )
+            anthropic_credential = _write_secret(
+                connector_directory, "anthropic", anthropic_secret
+            )
+            connector_config = connector_directory / "config.json"
+            connector_config.write_text(
+                json.dumps(
+                    {
+                        "routes": [
+                            {
+                                "name": "openai-proof",
+                                "credential_scope_sha256": "d" * 64,
+                                "policy": _provider_policy(
+                                    server.server_port, "codex"
+                                ).to_dict(),
+                                "credential_file": str(openai_credential),
+                            },
+                            {
+                                "name": "anthropic-proof",
+                                "credential_scope_sha256": "e" * 64,
+                                "policy": _provider_policy(
+                                    server.server_port, "claude-code"
+                                ).to_dict(),
+                                "credential_file": str(anthropic_credential),
+                            },
+                        ]
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(connector_config, 0o600)
+            project_root = Path(__file__).resolve().parents[1]
+            connector_environment = {
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(project_root / "src"),
+            }
+            connector_process = subprocess.Popen(  # noqa: S603
+                [
+                    sys.executable,
+                    str(project_root / "scripts" / "reference_inference_connector.py"),
+                    "--socket-path",
+                    str(connector_socket),
+                    "--config",
+                    str(connector_config),
+                    "--max-invocations",
+                    "7",
+                ],
+                cwd=project_root,
+                env=connector_environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if connector_socket.exists() or connector_process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            if not connector_socket.exists():
+                stdout, stderr = connector_process.communicate(timeout=2)
+                raise RuntimeError(
+                    f"runtime inference connector did not start: {stdout}{stderr}"
+                )
             repository = _create_repository(root)
             database = Database(root / "control-plane.db")
             resolver = PrivateFileCredentialResolver()
@@ -915,10 +1066,8 @@ def main(argv: list[str] | None = None) -> int:
                 control,
                 repository=repository,
                 image=args.image,
-                provider_port=server.server_port,
+                connector_socket=connector_socket,
                 credential_directory=credential_directory,
-                openai_secret=openai_secret,
-                anthropic_secret=anthropic_secret,
             )
             docker_engine = _RecordingDockerEngine(
                 DockerCLI(
@@ -1000,6 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
                 if (
                     len(invocations) != expected_invocations
                     or any(item["outcome"] != "succeeded" for item in invocations)
+                    or any(item["dispatch_kind"] != "connector" for item in invocations)
                     or any(item["http_status"] != 200 for item in invocations)
                 ):
                     raise RuntimeError(f"{runtime} provider invocation was not audited")
@@ -1026,7 +1176,23 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError(
                     "private interaction content leaked into durable state"
                 )
+            connector_stdout, connector_stderr = connector_process.communicate(
+                timeout=5
+            )
+            if connector_process.returncode != 0 or connector_stderr:
+                raise RuntimeError(
+                    "runtime inference connector failed: "
+                    + connector_stdout
+                    + connector_stderr
+                )
+            connector_report = json.loads(connector_stdout)
+            if connector_report != {"invocations": 7, "status": "stopped"}:
+                raise RuntimeError("runtime connector invocation count is inconsistent")
+            if any(secret in connector_stdout for secret in secrets_used):
+                raise RuntimeError("provider credential leaked into connector logs")
     finally:
+        if connector_process is not None:
+            _stop_process(connector_process)
         server.shutdown()
         server.server_close()
         server_thread.join(5)

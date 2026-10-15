@@ -29,7 +29,6 @@ from magic_glass_box.db import SCHEMA_VERSION
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
-    ProviderGrantSpec,
     SupervisionPolicy,
     WorkItemEnvelope,
 )
@@ -120,9 +119,6 @@ class FakeControlPlane:
 
     def revise_agent_profile(self, **kwargs: object) -> dict[str, object]:
         return self._called("profile.revise", **kwargs)
-
-    def add_provider_grant(self, **kwargs: object) -> dict[str, object]:
-        return self._called("provider.add", **kwargs)
 
     def revoke_provider_grant(self, name: str, **kwargs: object) -> dict[str, object]:
         return self._called("provider.revoke", name=name, **kwargs)
@@ -442,10 +438,6 @@ class CLITests(unittest.TestCase):
                 "provider_command",
                 True,
                 (
-                    (
-                        "add",
-                        "add an immutable provider policy and credential reference",
-                    ),
                     ("connector-add", "add a connector-bound provider grant"),
                     ("show", "show provider policy and lifecycle metadata"),
                     ("revoke", "revoke a provider grant"),
@@ -679,11 +671,6 @@ class CLITests(unittest.TestCase):
                     "--expected-version",
                     "--revoked-by",
                 ),
-                ("provider", "add"): (
-                    "--policy",
-                    "--credential-file",
-                    "--created-by",
-                ),
                 ("provider", "connector-add"): (
                     "--policy",
                     "--created-by",
@@ -835,29 +822,6 @@ class CLITests(unittest.TestCase):
                 }
             ),
             encoding="utf-8",
-        )
-        provider_policy = Path(self.temporary.name) / "provider.json"
-        provider_policy.write_text(
-            json.dumps(
-                {
-                    "provider": "openai",
-                    "adapter": "json_http",
-                    "destination": "https://api.openai.com/v1/responses",
-                    "method": "POST",
-                    "model": "gpt-test",
-                    "credential_header": "Authorization",
-                    "credential_prefix": "Bearer ",
-                    "static_headers": {},
-                    "request_bytes": 32768,
-                    "response_bytes": 1048576,
-                    "timeout_ms": 30000,
-                    "max_concurrency": 2,
-                }
-            ),
-            encoding="utf-8",
-        )
-        parsed_provider_policy = ProviderGrantSpec.from_mapping(
-            json.loads(provider_policy.read_text(encoding="utf-8"))
         )
         supervision_policy = Path(self.temporary.name) / "supervision.json"
         supervision_policy.write_text(
@@ -1079,33 +1043,6 @@ class CLITests(unittest.TestCase):
                     },
                 ),
                 {"operation": "profile.revise"},
-            ),
-            (
-                "provider.add",
-                [
-                    "provider",
-                    "add",
-                    "openai-main",
-                    "--policy",
-                    str(provider_policy),
-                    "--credential-file",
-                    "/private/openai.secret",
-                    "--expires-at",
-                    "2027-01-01T00:00:00Z",
-                    "--created-by",
-                    "operator",
-                ],
-                (
-                    "provider.add",
-                    {
-                        "name": "openai-main",
-                        "spec": parsed_provider_policy,
-                        "credential_path": Path("/private/openai.secret"),
-                        "expires_at": "2027-01-01T00:00:00Z",
-                        "created_by_handle": "operator",
-                    },
-                ),
-                {"operation": "provider.add"},
             ),
             (
                 "provider.show",
@@ -1625,7 +1562,6 @@ class CLITests(unittest.TestCase):
                 "revise": "append an immutable profile revision",
             },
             "provider": {
-                "add": "add an immutable provider policy and credential reference",
                 "connector-add": "add a connector-bound provider grant",
                 "show": "show provider policy and lifecycle metadata",
                 "revoke": "revoke a provider grant",

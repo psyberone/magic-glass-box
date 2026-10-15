@@ -15,6 +15,8 @@ from scripts.check_live_runtime_adapters import (
     _assert_observations,
     _assert_sandbox_plans,
     _codex_fixture_response,
+    _inference_connector_policy,
+    _inference_grant_policy,
     _openai_sse,
     _openai_tool_sse,
     _provider_policy,
@@ -143,12 +145,24 @@ class LiveRuntimeProofContractTests(unittest.TestCase):
         self.assertEqual(events[0][1]["message"]["model"], ANTHROPIC_MODEL)  # type: ignore[index]
         self.assertEqual(events[2][1]["delta"]["text"], PROOF_TEXT)  # type: ignore[index]
 
-    def test_fixture_policies_pin_vendor_routes_models_and_credential_headers(
+    def test_connector_and_fixture_policies_pin_every_authority_boundary(
         self,
     ) -> None:
         openai = _provider_policy(8765, "codex")
         anthropic = _provider_policy(8765, "claude-code")
+        connector = _inference_connector_policy(Path("/tmp/runtime-sidecar.sock"))  # noqa: S108
+        openai_grant = _inference_grant_policy("codex")
+        anthropic_grant = _inference_grant_policy("claude-code")
 
+        self.assertEqual(connector.transport.kind, "unix")
+        self.assertEqual(
+            [route.name for route in connector.routes],
+            ["openai-proof", "anthropic-proof"],
+        )
+        self.assertEqual(openai_grant.protocol, "openai-responses")
+        self.assertEqual(openai_grant.model, CODEX_MODEL)
+        self.assertEqual(anthropic_grant.protocol, "anthropic-messages")
+        self.assertEqual(anthropic_grant.model, ANTHROPIC_MODEL)
         self.assertEqual(openai.destination, "http://127.0.0.1:8765/v1/responses")
         self.assertEqual(openai.adapter, "openai_responses")
         self.assertEqual(openai.model, CODEX_MODEL)

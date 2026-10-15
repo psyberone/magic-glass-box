@@ -46,6 +46,10 @@ class WorkerTransportError(RuntimeError):
     """The worker transport could not safely use its run-scoped gateway."""
 
 
+class ProviderAmbiguousTransportError(WorkerTransportError):
+    """A provider call may have occurred and this bridge must never replay it."""
+
+
 class GatewayClient(Protocol):
     def exchange(
         self,
@@ -383,8 +387,28 @@ class ProviderHTTPTransport:
         self.gateway = gateway
         self.dialect = dialect
         self.grant = grant
+        self._invoke_lock = threading.Lock()
+        self._ambiguous = False
 
     def invoke(
+        self,
+        target: str,
+        raw: bytes,
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> ProviderHTTPResponse:
+        with self._invoke_lock:
+            if self._ambiguous:
+                raise ProviderAmbiguousTransportError(
+                    "provider invocation outcome is ambiguous"
+                )
+            try:
+                return self._invoke_once(target, raw, headers=headers)
+            except ProviderAmbiguousTransportError:
+                self._ambiguous = True
+                raise
+
+    def _invoke_once(
         self,
         target: str,
         raw: bytes,
@@ -443,6 +467,11 @@ class ProviderHTTPTransport:
             timeout=PROVIDER_GATEWAY_TIMEOUT_SECONDS,
         )
         if response.get("ok") is not True:
+            error = response.get("error")
+            if isinstance(error, dict) and error.get("code") == "ambiguous":
+                raise ProviderAmbiguousTransportError(
+                    "provider invocation outcome is ambiguous"
+                )
             raise WorkerTransportError("provider gateway denied the request")
         result = response.get("result")
         if not isinstance(result, dict):
@@ -524,6 +553,9 @@ class _TransportHandler(BaseHTTPRequestHandler):
                 raw,
                 headers=self.headers,
             )
+        except ProviderAmbiguousTransportError:
+            self._failure(409)
+            return
         except WorkerTransportError:
             self._failure(502)
             return

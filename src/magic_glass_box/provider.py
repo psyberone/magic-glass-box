@@ -38,6 +38,10 @@ class ProviderUpstreamError(ProviderError):
         self.response_bytes = response_bytes
 
 
+class ProviderAmbiguousError(ProviderUpstreamError):
+    """An invocation may have consumed provider quota and must not be replayed."""
+
+
 @dataclass(frozen=True)
 class ProviderInvocationResult:
     status_code: int

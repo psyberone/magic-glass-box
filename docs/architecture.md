@@ -44,14 +44,13 @@ or copied into control-plane state. Magic Glass Box would remain responsible
 for deciding whether a specific operation, mapping, account, scope, and exact
 revision are authorized.
 
-Milestone 7D separately extracts AI-provider authentication and transport from
-the current in-process broker into a credential-isolated inference connector.
-M7D.1 implements the durable authority, strict envelopes, and local Unix
-carrier without switching production dispatch; M7D.2 performs that cutover.
-The core continues to authorize the exact run, grant, semantic protocol, model,
-limits, concurrency, and later budget; a local sidecar or operator-managed
-external integration owns API keys or OAuth tokens, refresh, and upstream
-networking. It exposes a bounded inference contract, not a raw provider CLI or
+Milestone 7D extracts AI-provider authentication and transport into a
+credential-isolated inference connector. M7D.2 makes this the exclusive normal
+dispatch path. The core authorizes the exact run, grant, connector deployment,
+route, semantic protocol, model, limits, concurrency, and later budget. The v1
+local sidecar owns API keys or OAuth tokens, refresh, and upstream networking;
+the transport-neutral client seam preserves a future authenticated external
+carrier. It exposes a bounded inference contract, not a raw provider CLI or
 arbitrary HTTP proxy. See
 [inference-connectors.md](inference-connectors.md).
 
@@ -109,15 +108,14 @@ project-activity projection.
 
 - A local user can be linked to one or more Krab identities. The binding uses the
   immutable Krab `user_id`; handles are cached only for display.
-- A credential reference points to an external secret source. The current
-  implementation supports private token files and never persists the token.
-  M7D removes AI-provider credential resolution from the core; Krab and other
-  credential paths remain separately scoped.
-- A provider grant is an immutable, content-addressed outbound policy with a
-  named credential route. Creation and revocation are audited; expiry is
-  enforced without storing the secret value. M7D replaces its direct
-  credential reference with a registered inference-connector binding and
-  credential-scope fingerprint.
+- A credential reference points to an external secret source. Private token
+  files remain supported for separately scoped non-inference authorities such
+  as Krab and are never persisted. The core does not resolve AI-provider
+  credentials.
+- An inference grant is an immutable, content-addressed binding to a registered
+  connector deployment, route, semantic protocol, exact model, limits, and
+  credential-scope fingerprint. Creation and revocation are audited; expiry is
+  enforced without storing or locating the provider secret.
 - Project context revisions are append-only and content-addressed.
 - Forge-neutral work-item imports are keyed by project, source, and external
   ID. Changed content appends an immutable version; identical imports are
@@ -180,6 +178,11 @@ project-activity projection.
   transport location and non-secret scope fingerprint, never an upstream
   credential or provider-native configuration path. A scope fingerprint is
   not a digest of bearer material.
+- Schema v16 makes connector dispatch exclusive for normal execution and binds
+  every durable invocation outcome to the exact connector, deployment, route,
+  grant policy, scope, provider, protocol, model, and deadline. Historical
+  direct grants and invocations remain readable for migration but are not
+  dispatchable.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -233,7 +236,9 @@ schema v10, and trusted candidates plus their query-backed indexes introduced
 schema v11. Cross-process provider dispatch reservations advanced it to schema
 v12; exact-input gate policy and evidence state advanced it to schema v13; the
 integration queue and manual landing ledger advanced it to schema v14.
-Inference-connector registrations and grant bindings advance it to schema v15.
+Inference-connector registrations and grant bindings advance it to schema v15;
+exclusive connector dispatch and its invocation authority ledger advance it to
+schema v16.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -317,8 +322,9 @@ responses retain a 1 MiB cap. Both `none` and `gateway_only` use Docker network
 policy `none`; `gateway_only` adds a private committed-file mailbox.
 Bundled vendor adapters put a loopback-only HTTP bridge inside that same
 network namespace. It translates the vendor protocol to serialized mailbox
-operations; only the trusted host broker owns an outbound socket or reusable
-provider credential.
+operations. MGB turns an authorized mailbox operation into one strict connector
+invocation; only the separately launched connector owns an upstream socket or
+reusable provider credential.
 The mailbox directory and response files are read-only in the container. Only
 the fixed request payload and request commit files are writable. Sequence,
 size, and SHA-256 commitments prevent torn reads and stale response confusion.
@@ -329,10 +335,12 @@ allowlist comes from the immutable profile revision. The current operations
 cover run description, interactions, handoff, provider invocation, and the
 typed work-memory read/append/checkpoint/assignment lifecycle; none accepts a
 run ID or credential value. Provider calls additionally pin the destination,
-method, model, headers, byte limits, timeout, and concurrency in
-administrator-owned policy. Provider authority also requires a live running
-attempt, including during the short `waiting_for_input` handoff window; a
-parked run cannot call upstream. Opening an interaction tells a
+method, and headers inside the connector while MGB pins the connector
+deployment, route, semantic protocol, model, scope fingerprint, byte limits,
+timeout, and concurrency in administrator-owned authority. Provider authority
+also requires a live running attempt, including during the short
+`waiting_for_input` handoff window; a parked run cannot call upstream. Opening
+an interaction tells a
 handoff-capable worker to submit bounded replacement state and exit. Cleanup
 removes its resources, and the durable run remains `waiting_for_input`. A
 verified response becomes available to the current attempt, but a replacement
@@ -369,9 +377,9 @@ storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
 autonomous supervision, and aging escalation are complete. Trusted candidate
 materialization, exact-input gates, dependency/refold queue, and manual landing
 flow are implemented. The credential-isolated inference connector's D.1
-authority and carrier checkpoint is implemented; exclusive dispatch and
-containment are the next Milestone 7 slice before the real-account proof.
-Optional provider-neutral
+authority/carrier and D.2 exclusive-dispatch/containment checkpoints are
+implemented; the optional real-account proof is the remaining Milestone 7
+slice. Optional provider-neutral
 service sidecars follow the budget and destructive-continuity phases. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),

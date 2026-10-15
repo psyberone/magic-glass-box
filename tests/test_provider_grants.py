@@ -20,23 +20,23 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
     ProjectContext,
-    ProviderGrantSpec,
     WorkItemEnvelope,
 )
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity
 
 
-def provider_policy() -> ProviderGrantSpec:
-    return ProviderGrantSpec.from_mapping(
+def provider_policy() -> InferenceGrantSpec:
+    return InferenceGrantSpec.from_mapping(
         {
+            "schema_version": 1,
+            "connector_name": "openai-sidecar",
+            "deployment_sha256": "a" * 64,
+            "route": "responses-main",
+            "credential_scope_sha256": "b" * 64,
             "provider": "openai",
-            "adapter": "json_http",
-            "destination": "https://api.openai.com/v1/responses",
-            "method": "POST",
+            "protocol": "openai-responses",
             "model": "gpt-test",
-            "credential_header": "Authorization",
-            "credential_prefix": "Bearer ",
-            "static_headers": {},
             "request_bytes": 32768,
             "response_bytes": 1048576,
             "timeout_ms": 30000,
@@ -86,13 +86,42 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
             ),
             imported_by=self.user["id"],
         )
+        self.connector = self.database.register_inference_connector(
+            name="openai-sidecar",
+            spec=InferenceConnectorSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "connector_protocol_version": 1,
+                    "deployment_sha256": "a" * 64,
+                    "transport": {
+                        "kind": "unix",
+                        "socket_path": str(
+                            Path(self.temporary.name) / "openai-sidecar.sock"
+                        ),
+                    },
+                    "routes": [
+                        {
+                            "name": "responses-main",
+                            "provider": "openai",
+                            "protocol": "openai-responses",
+                            "models": ["gpt-test"],
+                            "credential_scope_sha256": "b" * 64,
+                        }
+                    ],
+                    "request_bytes": 32768,
+                    "response_bytes": 1048576,
+                    "timeout_ms": 30000,
+                    "max_concurrency": 2,
+                }
+            ),
+            created_by=self.user["id"],
+        )
         self.spec = provider_policy()
 
     def add_grant(self, *, expires_at: str | None = None) -> dict[str, object]:
-        return self.database.create_provider_grant(
+        return self.database.create_connector_provider_grant(
             name="openai-main",
             spec=self.spec,
-            credential_ref="file:/private/openai-main",
             expires_at=expires_at,
             created_by=self.user["id"],
         )
@@ -154,14 +183,12 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
         execution = self.database.get_run_execution(str(run["id"]))
         self.assertEqual(
             execution["credential_references"],
-            {
-                "krab": "file:/private/krab-agent-one",
-                "openai-main": "file:/private/openai-main",
-            },
+            {"krab": "file:/private/krab-agent-one"},
         )
         authority = self.database.get_run_provider_grant(str(run["id"]), "openai-main")
         self.assertEqual(authority["id"], grant["id"])
-        self.assertEqual(authority["credential_ref"], "file:/private/openai-main")
+        self.assertNotIn("credential_ref", authority)
+        self.assertEqual(authority["connector"]["id"], self.connector["id"])
         self.assertEqual(authority["policy"], self.spec.to_dict())
 
         visible = self.database.get_run(str(run["id"]))
@@ -174,6 +201,7 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
                     "name": "openai-main",
                     "provider": "openai",
                     "model": "gpt-test",
+                    "grant_kind": "connector",
                     "state": "active",
                     "expires_at": None,
                 }
@@ -211,10 +239,9 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
 
         future_name = "future-provider"
         expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-        self.database.create_provider_grant(
+        self.database.create_connector_provider_grant(
             name=future_name,
             spec=self.spec,
-            credential_ref="file:/private/future-provider",
             expires_at=expires_at,
             created_by=self.user["id"],
         )
@@ -238,6 +265,17 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
         record = self.database.record_provider_invocation(
             run_id=str(run["id"]),
             provider_grant_id=str(grant["id"]),
+            dispatch_kind="connector",
+            inference_connector_id=self.connector["id"],
+            connector_protocol_version=1,
+            deployment_sha256="a" * 64,
+            route="responses-main",
+            policy_sha256=self.spec.digest,
+            credential_scope_sha256="b" * 64,
+            provider="openai",
+            protocol="openai-responses",
+            model="gpt-test",
+            deadline="2026-10-09T12:00:30Z",
             outcome="succeeded",
             request_bytes=42,
             response_bytes=84,
@@ -249,7 +287,7 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
         self.assertEqual(record["request_bytes"], 42)
         self.assertEqual(record["response_bytes"], 84)
         self.assertNotIn("body", str(record))
-        self.assertNotIn("credential", str(record))
+        self.assertNotIn("credential_ref", str(record))
         visible = self.database.get_run(str(run["id"]))
         self.assertEqual(visible["provider_invocations"], [record])
 

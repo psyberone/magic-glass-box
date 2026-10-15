@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import socket
+import stat
 import struct
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,6 +17,7 @@ from magic_glass_box.domain import ValidationError, canonical_json
 from magic_glass_box.inference import InferenceInvocationRequest
 
 MAX_REQUEST_FRAME_BYTES = 2 * 1024 * 1024 + 64 * 1024
+MAX_FAKE_CREDENTIAL_BYTES = 16 * 1024
 
 
 def _positive_integer(value: str) -> int:
@@ -82,7 +84,11 @@ def _read_request(connection: socket.socket) -> InferenceInvocationRequest:
     )
 
 
-def _response_for(request: InferenceInvocationRequest) -> dict[str, Any]:
+def _response_for(
+    request: InferenceInvocationRequest, *, credential_loaded: bool = True
+) -> dict[str, Any]:
+    if not credential_loaded:
+        raise ValidationError("fake connector credential is unavailable")
     request_value = request.to_dict()
     request_value.pop("request")
     response = {"output_text": "deterministic fake response"}
@@ -110,7 +116,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--socket-path", required=True, type=Path)
     parser.add_argument("--max-invocations", type=_positive_integer, default=1)
+    parser.add_argument(
+        "--credential-file",
+        type=Path,
+        help="optional connector-private canary credential used by containment proofs",
+    )
     return parser
+
+
+def _load_private_credential(path: Path | None) -> bool:
+    if path is None:
+        return True
+    if not path.is_absolute():
+        raise SystemExit("--credential-file must be absolute")
+    try:
+        info = path.stat()
+        value = path.read_bytes()
+    except OSError as exc:
+        raise SystemExit("connector credential is unavailable") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+        raise SystemExit("connector credential must be a private regular file")
+    if not value or len(value) > MAX_FAKE_CREDENTIAL_BYTES:
+        raise SystemExit("connector credential is empty or oversized")
+    return True
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -121,6 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     socket_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     if socket_path.exists() or socket_path.is_symlink():
         raise SystemExit("--socket-path already exists")
+    credential_loaded = _load_private_credential(args.credential_file)
     completed = 0
     bound = False
     try:
@@ -133,7 +162,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 connection, _ = listener.accept()
                 with connection:
                     request = _read_request(connection)
-                    _write_response(connection, _response_for(request))
+                    _write_response(
+                        connection,
+                        _response_for(request, credential_loaded=credential_loaded),
+                    )
                     completed += 1
     finally:
         if bound:

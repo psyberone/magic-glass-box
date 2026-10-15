@@ -353,7 +353,9 @@ class RunCoordinator:
                 gateway_directory = None
                 if profile.network_mode is NetworkMode.GATEWAY_ONLY:
                     credential_names = self._gateway_credential_names(
-                        profile, inputs["credential_references"]
+                        profile,
+                        inputs["credential_references"],
+                        inputs["provider_authority_names"],
                     )
                     if self.gateway_manager is None:
                         raise RunOrchestrationError(
@@ -510,11 +512,22 @@ class RunCoordinator:
     def _gateway_credential_names(
         profile: AgentProfileSpec,
         references: object,
+        provider_authorities: object,
     ) -> tuple[str, ...]:
         if not isinstance(references, Mapping):
             raise RunOrchestrationError("pinned credential references are invalid")
+        if not isinstance(provider_authorities, list) or any(
+            not isinstance(name, str) for name in provider_authorities
+        ):
+            raise RunOrchestrationError("pinned provider authorities are invalid")
+        authority_names = frozenset(provider_authorities)
         for name in profile.credential_names:
-            if not isinstance(references.get(name), str):
+            available = (
+                isinstance(references.get(name), str)
+                if name == "krab"
+                else name in authority_names
+            )
+            if not available:
                 raise RunOrchestrationError(
                     f"pinned profile credential is unavailable: {name}"
                 )

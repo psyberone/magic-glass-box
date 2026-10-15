@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1855,6 +1855,100 @@ BEGIN
 END;
 """
 
+INFERENCE_DISPATCH_SCHEMA = """
+DROP TRIGGER provider_invocation_immutable_update;
+DROP TRIGGER provider_invocation_immutable_delete;
+DROP INDEX provider_invocation_run;
+
+ALTER TABLE provider_invocations RENAME TO provider_invocations_v15;
+
+CREATE TABLE provider_invocations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    provider_grant_id TEXT NOT NULL,
+    dispatch_kind TEXT NOT NULL CHECK (
+        dispatch_kind IN ('direct', 'connector')
+    ),
+    inference_connector_id TEXT,
+    connector_protocol_version INTEGER,
+    deployment_sha256 TEXT,
+    route TEXT,
+    policy_sha256 TEXT,
+    credential_scope_sha256 TEXT,
+    provider TEXT,
+    protocol TEXT,
+    model TEXT,
+    deadline TEXT,
+    outcome TEXT NOT NULL CHECK (
+        outcome IN ('succeeded', 'failed', 'denied', 'busy', 'ambiguous')
+    ),
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 0),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+    http_status INTEGER CHECK (http_status BETWEEN 100 AND 599),
+    error_code TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (inference_connector_id)
+        REFERENCES inference_connectors(id) ON DELETE RESTRICT,
+    CHECK (
+        (dispatch_kind = 'direct'
+            AND inference_connector_id IS NULL
+            AND connector_protocol_version IS NULL
+            AND deployment_sha256 IS NULL
+            AND route IS NULL
+            AND policy_sha256 IS NULL
+            AND credential_scope_sha256 IS NULL
+            AND provider IS NULL
+            AND protocol IS NULL
+            AND model IS NULL
+            AND deadline IS NULL)
+        OR
+        (dispatch_kind = 'connector'
+            AND inference_connector_id IS NOT NULL
+            AND connector_protocol_version = 1
+            AND length(deployment_sha256) = 64
+            AND route IS NOT NULL
+            AND length(policy_sha256) = 64
+            AND length(credential_scope_sha256) = 64
+            AND provider IS NOT NULL
+            AND protocol IS NOT NULL
+            AND model IS NOT NULL
+            AND deadline IS NOT NULL)
+    )
+) STRICT;
+
+INSERT INTO provider_invocations (
+    id, run_id, provider_grant_id, dispatch_kind, outcome, request_bytes,
+    response_bytes, http_status, error_code, started_at, finished_at
+)
+SELECT
+    id, run_id, provider_grant_id, 'direct', outcome, request_bytes,
+    response_bytes, http_status, error_code, started_at, finished_at
+FROM provider_invocations_v15;
+
+DROP TABLE provider_invocations_v15;
+
+CREATE INDEX provider_invocation_run
+    ON provider_invocations(run_id, started_at, id);
+CREATE INDEX provider_invocation_connector
+    ON provider_invocations(inference_connector_id, started_at, id)
+    WHERE inference_connector_id IS NOT NULL;
+
+CREATE TRIGGER provider_invocation_immutable_update
+BEFORE UPDATE ON provider_invocations
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+CREATE TRIGGER provider_invocation_immutable_delete
+BEFORE DELETE ON provider_invocations
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -1871,6 +1965,7 @@ SCHEMA = (
     + GATE_SCHEMA
     + INTEGRATION_SCHEMA
     + INFERENCE_CONNECTOR_SCHEMA
+    + INFERENCE_DISPATCH_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -1887,4 +1982,5 @@ MIGRATIONS = {
     12: GATE_SCHEMA,
     13: INTEGRATION_SCHEMA,
     14: INFERENCE_CONNECTOR_SCHEMA,
+    15: INFERENCE_DISPATCH_SCHEMA,
 }

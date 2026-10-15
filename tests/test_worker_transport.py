@@ -562,6 +562,26 @@ class ProviderHTTPTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
             transport.invoke("/v1/responses", request)
 
+    def test_ambiguous_result_poison_prevents_vendor_retry_redispatch(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        gateway.response = {
+            "version": 1,
+            "request_id": "worker-response",
+            "ok": False,
+            "error": {"code": "ambiguous", "message": "SECRET detail"},
+        }
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        request = b'{"model":"x","stream":true}'
+
+        for _attempt in range(2):
+            with self.assertRaisesRegex(WorkerTransportError, "ambiguous") as caught:
+                transport.invoke("/v1/responses", request)
+            self.assertNotIn("SECRET", str(caught.exception))
+
+        self.assertEqual(len(gateway.calls), 1)
+
     def test_transport_configuration_and_response_envelope_are_strict(self) -> None:
         gateway = RecordingGateway("openai-responses")
         for dialect, grant in (

@@ -17,6 +17,14 @@ from ..domain import (
     validate_krab_id,
     validate_provider_name,
 )
+from ..inference import (
+    CONNECTOR_ID_RE,
+    INFERENCE_CONNECTOR_PROTOCOL_VERSION,
+    PROVIDER_INVOCATION_ID_RE,
+    SHA256_RE,
+    InferenceConnectorSpec,
+    InferenceGrantSpec,
+)
 from .errors import (
     ConcurrentUpdateError,
     ConflictError,
@@ -366,6 +374,11 @@ class InteractionStorage:
             result["expires_at"] is not None and result["expires_at"] <= self.now()
         ):
             raise ConflictError(f"provider grant is unavailable: {authority_name}")
+        if (
+            result["grant_kind"] == "connector"
+            and result["connector"]["state"] != "active"
+        ):
+            raise ConflictError(f"provider grant is unavailable: {authority_name}")
         result["authority_name"] = authority_name
         return result
 
@@ -411,12 +424,27 @@ class InteractionStorage:
                 )
                 row = connection.execute(
                     "SELECT r.state AS run_state, pg.id AS grant_id, "
-                    "pg.state AS grant_state, pg.expires_at AS grant_expires_at, "
-                    "pg.policy_json, pg.content_sha256, ra.id AS attempt_id, "
-                    "ra.state AS attempt_state "
+                    "pg.state AS grant_state, pg.grant_kind, "
+                    "pg.expires_at AS grant_expires_at, pg.policy_json, "
+                    "pg.content_sha256, ra.id AS attempt_id, "
+                    "ra.state AS attempt_state, pcb.inference_connector_id, "
+                    "pcb.deployment_sha256 AS binding_deployment_sha256, "
+                    "pcb.route AS binding_route, "
+                    "pcb.credential_scope_sha256 AS binding_scope_sha256, "
+                    "pcb.provider AS binding_provider, "
+                    "pcb.protocol AS binding_protocol, pcb.model AS binding_model, "
+                    "ic.name AS connector_name, ic.state AS connector_state, "
+                    "ic.connector_protocol_version, "
+                    "ic.spec_json AS connector_spec_json, "
+                    "ic.content_sha256 AS connector_content_sha256, "
+                    "ic.socket_path "
                     "FROM runs r JOIN run_provider_grants rpg "
                     "ON rpg.run_id = r.id JOIN provider_grants pg "
                     "ON pg.id = rpg.provider_grant_id "
+                    "LEFT JOIN provider_connector_bindings pcb "
+                    "ON pcb.provider_grant_id = pg.id "
+                    "LEFT JOIN inference_connectors ic "
+                    "ON ic.id = pcb.inference_connector_id "
                     "LEFT JOIN run_attempts ra ON ra.run_id = r.id "
                     "AND ra.state IN ('preparing', 'running') "
                     "WHERE r.id = ? AND rpg.authority_name = ?",
@@ -443,17 +471,55 @@ class InteractionStorage:
                     raise ConflictError(
                         f"provider grant is unavailable: {authority_name}"
                     )
+                if row["grant_kind"] != "connector":
+                    raise ConflictError(
+                        f"provider grant is unavailable: {authority_name}"
+                    )
+                if row["connector_state"] != "active":
+                    raise ConflictError(
+                        f"provider grant is unavailable: {authority_name}"
+                    )
                 try:
-                    spec = ProviderGrantSpec.from_mapping(
+                    spec = InferenceGrantSpec.from_mapping(
                         json.loads(row["policy_json"])
                     )
+                    connector_spec = InferenceConnectorSpec.from_mapping(
+                        json.loads(row["connector_spec_json"])
+                    )
                 except (json.JSONDecodeError, TypeError, ValidationError) as exc:
-                    raise StorageError(
-                        "stored provider grant policy is invalid"
-                    ) from exc
+                    raise StorageError("stored inference authority is invalid") from exc
                 if spec.digest != row["content_sha256"]:
                     raise StorageError(
                         "stored provider grant policy digest does not match"
+                    )
+                if connector_spec.digest != row["connector_content_sha256"]:
+                    raise StorageError(
+                        "stored inference connector digest does not match"
+                    )
+                try:
+                    connector_spec.validate_grant(row["connector_name"], spec)
+                except ValidationError as exc:
+                    raise StorageError(
+                        "stored inference grant does not match its connector"
+                    ) from exc
+                binding = (
+                    row["binding_deployment_sha256"],
+                    row["binding_route"],
+                    row["binding_scope_sha256"],
+                    row["binding_provider"],
+                    row["binding_protocol"],
+                    row["binding_model"],
+                )
+                if binding != (
+                    spec.deployment_sha256,
+                    spec.route,
+                    spec.credential_scope_sha256,
+                    spec.provider,
+                    spec.protocol,
+                    spec.model,
+                ):
+                    raise StorageError(
+                        "stored inference grant binding does not match its policy"
                     )
                 active = connection.execute(
                     "SELECT COUNT(*) FROM provider_dispatch_reservations "
@@ -461,6 +527,16 @@ class InteractionStorage:
                     (expected_grant_id, now),
                 ).fetchone()[0]
                 if active >= spec.max_concurrency:
+                    connection.commit()
+                    return None
+                connector_active = connection.execute(
+                    "SELECT COUNT(*) FROM provider_dispatch_reservations pdr "
+                    "JOIN provider_connector_bindings pcb "
+                    "ON pcb.provider_grant_id = pdr.provider_grant_id "
+                    "WHERE pcb.inference_connector_id = ? AND pdr.expires_at > ?",
+                    (row["inference_connector_id"], now),
+                ).fetchone()[0]
+                if connector_active >= connector_spec.max_concurrency:
                     connection.commit()
                     return None
                 connection.execute(
@@ -490,6 +566,21 @@ class InteractionStorage:
             "attempt_id": row["attempt_id"],
             "reserved_at": now,
             "expires_at": expires_at,
+            "inference": {
+                "connector_id": row["inference_connector_id"],
+                "connector_protocol_version": row["connector_protocol_version"],
+                "deployment_sha256": spec.deployment_sha256,
+                "route": spec.route,
+                "policy_sha256": spec.digest,
+                "credential_scope_sha256": spec.credential_scope_sha256,
+                "provider": spec.provider,
+                "protocol": spec.protocol,
+                "model": spec.model,
+                "request_bytes": spec.request_bytes,
+                "response_bytes": spec.response_bytes,
+                "timeout_ms": spec.timeout_ms,
+                "socket_path": row["socket_path"],
+            },
         }
 
     def renew_provider_dispatch(
@@ -578,9 +669,15 @@ class InteractionStorage:
                 raise NotFoundError(f"run not found: {run_id}")
             rows = connection.execute(
                 "SELECT rpg.authority_name, pg.id AS grant_id, pg.name, "
-                "pg.state, pg.expires_at, pg.policy_json, pg.content_sha256 "
+                "pg.state, pg.grant_kind, pg.expires_at, pg.policy_json, "
+                "pg.content_sha256, ic.state AS connector_state "
                 "FROM run_provider_grants rpg JOIN provider_grants pg "
-                "ON pg.id = rpg.provider_grant_id WHERE rpg.run_id = ? "
+                "ON pg.id = rpg.provider_grant_id "
+                "LEFT JOIN provider_connector_bindings pcb "
+                "ON pcb.provider_grant_id = pg.id "
+                "LEFT JOIN inference_connectors ic "
+                "ON ic.id = pcb.inference_connector_id "
+                "WHERE rpg.run_id = ? "
                 "ORDER BY rpg.authority_name",
                 (run_id,),
             ).fetchall()
@@ -588,7 +685,12 @@ class InteractionStorage:
         result: list[dict[str, Any]] = []
         for row in rows:
             try:
-                spec = ProviderGrantSpec.from_mapping(json.loads(row["policy_json"]))
+                raw_policy = json.loads(row["policy_json"])
+                spec = (
+                    ProviderGrantSpec.from_mapping(raw_policy)
+                    if row["grant_kind"] == "direct"
+                    else InferenceGrantSpec.from_mapping(raw_policy)
+                )
             except (json.JSONDecodeError, TypeError, ValidationError) as exc:
                 raise StorageError("stored provider grant policy is invalid") from exc
             if spec.digest != row["content_sha256"]:
@@ -600,6 +702,12 @@ class InteractionStorage:
                 and row["expires_at"] <= now
             ):
                 state = "expired"
+            elif (
+                state == "active"
+                and row["grant_kind"] == "connector"
+                and row["connector_state"] != "active"
+            ):
+                state = "unavailable"
             result.append(
                 {
                     "authority_name": row["authority_name"],
@@ -607,6 +715,7 @@ class InteractionStorage:
                     "name": row["name"],
                     "provider": spec.provider,
                     "model": spec.model,
+                    "grant_kind": row["grant_kind"],
                     "state": state,
                     "expires_at": row["expires_at"],
                 }
@@ -618,6 +727,18 @@ class InteractionStorage:
         *,
         run_id: str,
         provider_grant_id: str,
+        invocation_id: str | None = None,
+        dispatch_kind: str = "direct",
+        inference_connector_id: str | None = None,
+        connector_protocol_version: int | None = None,
+        deployment_sha256: str | None = None,
+        route: str | None = None,
+        policy_sha256: str | None = None,
+        credential_scope_sha256: str | None = None,
+        provider: str | None = None,
+        protocol: str | None = None,
+        model: str | None = None,
+        deadline: str | None = None,
         outcome: str,
         request_bytes: int,
         response_bytes: int,
@@ -625,8 +746,10 @@ class InteractionStorage:
         error_code: str | None,
         started_at: str,
     ) -> dict[str, Any]:
-        if outcome not in {"succeeded", "failed", "denied", "busy"}:
+        if outcome not in {"succeeded", "failed", "denied", "busy", "ambiguous"}:
             raise ValidationError("provider invocation outcome is invalid")
+        if dispatch_kind not in {"direct", "connector"}:
+            raise ValidationError("provider invocation dispatch_kind is invalid")
         for field, value in (
             ("request_bytes", request_bytes),
             ("response_bytes", response_bytes),
@@ -646,30 +769,130 @@ class InteractionStorage:
                 raise ValidationError("successful provider invocation is inconsistent")
         elif error_code is None:
             raise ValidationError("failed provider invocation requires an error_code")
+        connector_values = (
+            inference_connector_id,
+            connector_protocol_version,
+            deployment_sha256,
+            route,
+            policy_sha256,
+            credential_scope_sha256,
+            provider,
+            protocol,
+            model,
+            deadline,
+        )
+        if dispatch_kind == "direct":
+            if any(value is not None for value in connector_values):
+                raise ValidationError(
+                    "direct provider invocation cannot contain connector authority"
+                )
+        else:
+            if (
+                not isinstance(inference_connector_id, str)
+                or CONNECTOR_ID_RE.fullmatch(inference_connector_id) is None
+            ):
+                raise ValidationError("invalid inference connector identifier")
+            if connector_protocol_version != INFERENCE_CONNECTOR_PROTOCOL_VERSION:
+                raise ValidationError("invalid inference connector protocol version")
+            for field, value in (
+                ("deployment_sha256", deployment_sha256),
+                ("policy_sha256", policy_sha256),
+                ("credential_scope_sha256", credential_scope_sha256),
+            ):
+                if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+                    raise ValidationError(f"{field} must be a lowercase SHA-256 digest")
+            route = validate_provider_name(route, field="provider invocation route")
+            provider = validate_provider_name(
+                provider, field="provider invocation provider"
+            )
+            protocol = validate_provider_name(
+                protocol, field="provider invocation protocol"
+            )
+            model = require_string(
+                model, field="provider invocation model", max_bytes=256
+            )
+            if not model.strip():
+                raise ValidationError("provider invocation model must not be blank")
+            deadline = self._timestamp(deadline, field="deadline")
         started_at = self._timestamp(started_at, field="started_at")
-        invocation_id = self.new_id("pinv")
+        if invocation_id is None:
+            invocation_id = self.new_id("pinv")
+        elif (
+            not isinstance(invocation_id, str)
+            or PROVIDER_INVOCATION_ID_RE.fullmatch(invocation_id) is None
+        ):
+            raise ValidationError("invalid provider invocation identifier")
         finished_at = self.now()
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 authority = connection.execute(
-                    "SELECT 1 FROM run_provider_grants "
-                    "WHERE run_id = ? AND provider_grant_id = ?",
+                    "SELECT pg.grant_kind, pg.content_sha256, "
+                    "pcb.inference_connector_id, "
+                    "pcb.deployment_sha256, pcb.route, "
+                    "pcb.credential_scope_sha256, pcb.provider, pcb.protocol, "
+                    "pcb.model FROM run_provider_grants rpg "
+                    "JOIN provider_grants pg ON pg.id = rpg.provider_grant_id "
+                    "LEFT JOIN provider_connector_bindings pcb "
+                    "ON pcb.provider_grant_id = pg.id "
+                    "WHERE rpg.run_id = ? AND rpg.provider_grant_id = ?",
                     (run_id, provider_grant_id),
                 ).fetchone()
                 if authority is None:
                     raise ConflictError(
                         "provider grant is not pinned to the requested run"
                     )
+                if authority["grant_kind"] != dispatch_kind:
+                    raise ConflictError(
+                        "provider invocation dispatch kind does not match its grant"
+                    )
+                if dispatch_kind == "connector" and (
+                    authority["content_sha256"],
+                    authority["inference_connector_id"],
+                    authority["deployment_sha256"],
+                    authority["route"],
+                    authority["credential_scope_sha256"],
+                    authority["provider"],
+                    authority["protocol"],
+                    authority["model"],
+                ) != (
+                    policy_sha256,
+                    inference_connector_id,
+                    deployment_sha256,
+                    route,
+                    credential_scope_sha256,
+                    provider,
+                    protocol,
+                    model,
+                ):
+                    raise ConflictError(
+                        "provider invocation authority does not match its grant"
+                    )
                 connection.execute(
                     "INSERT INTO provider_invocations "
-                    "(id, run_id, provider_grant_id, outcome, request_bytes, "
-                    "response_bytes, http_status, error_code, started_at, "
-                    "finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(id, run_id, provider_grant_id, dispatch_kind, "
+                    "inference_connector_id, connector_protocol_version, "
+                    "deployment_sha256, route, policy_sha256, "
+                    "credential_scope_sha256, provider, protocol, model, deadline, "
+                    "outcome, request_bytes, response_bytes, http_status, "
+                    "error_code, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "?, ?, ?, ?)",
                     (
                         invocation_id,
                         run_id,
                         provider_grant_id,
+                        dispatch_kind,
+                        inference_connector_id,
+                        connector_protocol_version,
+                        deployment_sha256,
+                        route,
+                        policy_sha256,
+                        credential_scope_sha256,
+                        provider,
+                        protocol,
+                        model,
+                        deadline,
                         outcome,
                         request_bytes,
                         response_bytes,
@@ -690,8 +913,12 @@ class InteractionStorage:
                 ) from exc
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT id, run_id, provider_grant_id, outcome, request_bytes, "
-                "response_bytes, http_status, error_code, started_at, finished_at "
+                "SELECT id, run_id, provider_grant_id, dispatch_kind, "
+                "inference_connector_id, connector_protocol_version, "
+                "deployment_sha256, route, policy_sha256, "
+                "credential_scope_sha256, provider, protocol, model, deadline, "
+                "outcome, request_bytes, response_bytes, http_status, error_code, "
+                "started_at, finished_at "
                 "FROM provider_invocations WHERE id = ?",
                 (invocation_id,),
             ).fetchone()
@@ -713,8 +940,12 @@ class InteractionStorage:
             if exists is None:
                 raise NotFoundError(f"run not found: {run_id}")
             rows = connection.execute(
-                "SELECT id, run_id, provider_grant_id, outcome, request_bytes, "
-                "response_bytes, http_status, error_code, started_at, finished_at "
+                "SELECT id, run_id, provider_grant_id, dispatch_kind, "
+                "inference_connector_id, connector_protocol_version, "
+                "deployment_sha256, route, policy_sha256, "
+                "credential_scope_sha256, provider, protocol, model, deadline, "
+                "outcome, request_bytes, response_bytes, http_status, error_code, "
+                "started_at, finished_at "
                 "FROM provider_invocations WHERE run_id = ? "
                 "ORDER BY started_at, id",
                 (run_id,),

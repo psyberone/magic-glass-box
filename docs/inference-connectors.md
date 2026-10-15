@@ -1,17 +1,18 @@
 # Credential-isolated inference connectors
 
-> **M7D.1 IMPLEMENTED; DISPATCH CUTOVER PLANNED FOR M7D.2:** Schema v15 now
-> records immutable connector authority and connector-bound grants, publishes
-> strict v1 envelopes, and carries bounded calls over a local Unix socket.
-> Connector grants are intentionally unavailable to normal runs at this
-> checkpoint. The direct broker remains the production path until M7D.2 moves
-> dispatch across this boundary and removes direct credential resolution from
-> normal execution.
+> **M7D.2 IMPLEMENTED; OPTIONAL REAL-ACCOUNT PROOF PLANNED FOR M7D.3:** Schema
+> v16 makes connector-bound grants the exclusive normal inference path. MGB
+> authorizes and audits each bounded call but neither resolves an upstream
+> provider credential nor performs provider network transport. Historical
+> direct grants remain readable and revocable for migration only.
 
 An inference connector is a narrow API server that performs an already
-authorized model invocation. It may run as a local sidecar or as an
-operator-managed external integration. It is not a raw HTTP proxy, provider
-CLI, model router, or general network escape hatch.
+authorized model invocation. The implemented v1 carrier is a local
+operator-owned Unix socket suitable for a sidecar. The client seam and strict
+envelopes are transport-neutral so an operator-managed external integration can
+be added without changing worker authority, but MGB does not yet ship a native
+authenticated remote carrier. It is not a raw HTTP proxy, provider CLI, model
+router, or general network escape hatch.
 
 ## Current operator surface
 
@@ -36,6 +37,13 @@ rebinds an existing grant. Multiple connector instances may use the same
 pinned deployment digest while retaining distinct socket paths, route sets,
 and credential-scope fingerprints.
 
+Connector lifecycle is deliberately external to MGB. The operator starts a
+local sidecar or configures an external integration at the registered endpoint;
+only that process receives provider credentials or a provider-native
+configuration directory. `scripts/reference_inference_connector.py` is a
+proof/reference implementation for API-key-backed protocol adapters, not a
+built-in credential service or an automatically managed daemon.
+
 The scope fingerprint identifies an operator-defined non-secret account and
 permission scope. It must be derived from canonical non-secret metadata or an
 opaque random scope ID, never by hashing an API key, access token, refresh
@@ -51,9 +59,10 @@ is never retried automatically.
 
 The ordinary test suite launches `scripts/fake_inference_connector.py` as a
 separate process and completes a deterministic bounded invocation over a real
-Unix socket. This proves the D.1 carrier without a credential or provider
-network call. Networkless-worker dispatch, canary containment, durable
-ambiguous outcomes, and removal of the direct path are D.2 proofs.
+Unix socket. The D.2 Docker proof adds a connector-private canary credential,
+then verifies exclusive connector dispatch, networkless-worker containment,
+durable ambiguous outcomes, and removal of direct credential resolution from
+normal MGB execution.
 
 ## Ownership boundary
 
@@ -120,11 +129,11 @@ and the identities needed to bind the result to the invocation. Request and
 response content remains transient. Normalized usage metadata is added under
 Milestone 8's accounting authority rather than being implied by v1.
 
-Local deployments should prefer an operator-owned Unix socket. Authenticated
-loopback or external transports may be supported, but their endpoint and
-identity are operator configuration rather than worker input. An external
-transport credential, if required, is a revocable connector capability—not an
-upstream provider credential.
+Local deployments use an operator-owned Unix socket. A future authenticated
+loopback or external transport must preserve the same client contract; its
+endpoint and identity remain operator configuration rather than worker input.
+An external transport credential, if required, is a revocable connector
+capability—not an upstream provider credential.
 
 ## OAuth and subscription-backed runtimes
 
@@ -165,28 +174,35 @@ credential record.
 ## Failure and retry semantics
 
 An invocation whose response is lost may already have consumed quota. The core
-must therefore record an ambiguous outcome and must not automatically replay
-it. D.1's client already returns a distinct ambiguous result; D.2 makes that
-classification durable when dispatch crosses the connector. Connector
+therefore records an `ambiguous` outcome and does not automatically replay it.
+A failure before connection is recorded as unavailable/failed; a malformed,
+late, mismatched, or lost reply after dispatch is ambiguous. Connector
 operation IDs provide correlation, not a false promise that every provider
-deduplicates inference. Milestone 8 adds normalized usage accounting, budget
-authority, and quota-aware recovery on top of this boundary.
+deduplicates inference. The worker's loopback provider bridge is permanently
+poisoned after an ambiguous result, so even a vendor CLI retry fails locally
+without another gateway or provider dispatch. Milestone 8 adds normalized
+usage accounting, budget authority, and quota-aware recovery on top of this
+boundary.
 
 ## Migration and proof
 
-M7D.1 adds connector bindings beside historical direct grants while preserving
-the existing worker-facing capability contract. It does not infer a connector
-from a legacy credential reference and does not yet permit connector grants to
-be pinned to new runs. M7D.2 makes connector dispatch exclusive while leaving
-historical direct records readable and revocable. Krab and other non-inference
-credential paths are not silently migrated into this contract.
+M7D.1 added connector bindings beside historical direct grants while
+preserving the worker-facing capability contract. M7D.2 makes connector
+dispatch exclusive: connector grants may enter new run authority, while
+historical direct records remain readable and revocable but cannot be created
+through the CLI or dispatched. No connector is inferred from a legacy
+credential reference. Krab and other non-inference credential paths are not
+silently migrated into this contract.
 
-The deterministic exit proof uses a fake connector with a canary credential
-and verifies that wrong connector identities, protocols, models, grant digests,
-and limits fail closed. It also verifies that the canary never enters the
-worker container, MGB database, retained results, runtime output, or logs. Only
-after that proof passes does the opt-in real Codex connector exercise an actual
-subscription-backed invocation. M7D begins with a compatibility probe for the
-provider-supported CLI or service flow. If that route cannot serve the bounded
+The deterministic exit proof now passes with a fake connector and canary
+credential. Wrong connector identities, protocols, models, grant digests, and
+limits fail closed; the canary stays absent from the worker container, MGB
+state and SQLite, retained results, runtime output, and connector logs. The
+separate two-runtime Docker proof also drives the real Codex and Claude Code
+CLIs through a reference connector to a host-only deterministic upstream.
+
+M7D.3 is the explicitly opted-in real-account proof. It begins with a
+compatibility probe for the provider-supported OAuth/service flow and performs
+one bounded invocation with no automatic retry. If that route cannot serve the
 connector contract, the proof stops; credentials are not copied into the core
 or worker as a fallback.

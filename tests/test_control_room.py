@@ -106,28 +106,56 @@ class ControlRoomTests(unittest.TestCase):
             ),
             created_by=self.user["id"],
         )
-        self.policy = ProviderGrantSpec.from_mapping(
+        connector_spec = InferenceConnectorSpec.from_mapping(
             {
-                "provider": "openai",
-                "adapter": "json_http",
-                "destination": (
-                    "https://api.openai.com/v1/responses?private=destination-secret"
-                ),
-                "method": "POST",
-                "model": "gpt-test",
-                "credential_header": "Authorization",
-                "credential_prefix": "Bearer ",
-                "static_headers": {"X-Private-Metadata": "header-secret"},
+                "schema_version": 1,
+                "connector_protocol_version": 1,
+                "deployment_sha256": "a" * 64,
+                "transport": {
+                    "kind": "unix",
+                    "socket_path": str(
+                        Path(self.temporary.name) / "private-connector.sock"
+                    ),
+                },
+                "routes": [
+                    {
+                        "name": "chatgpt-main",
+                        "provider": "openai",
+                        "protocol": "openai-responses",
+                        "models": ["gpt-test"],
+                        "credential_scope_sha256": "b" * 64,
+                    }
+                ],
                 "request_bytes": 32768,
                 "response_bytes": 1048576,
                 "timeout_ms": 30000,
                 "max_concurrency": 2,
             }
         )
-        self.grant = self.database.create_provider_grant(
+        self.connector = self.database.register_inference_connector(
+            name="openai-personal",
+            spec=connector_spec,
+            created_by=self.user["id"],
+        )
+        self.policy = InferenceGrantSpec.from_mapping(
+            {
+                "schema_version": 1,
+                "connector_name": "openai-personal",
+                "deployment_sha256": "a" * 64,
+                "route": "chatgpt-main",
+                "credential_scope_sha256": "b" * 64,
+                "provider": "openai",
+                "protocol": "openai-responses",
+                "model": "gpt-test",
+                "request_bytes": 32768,
+                "response_bytes": 1048576,
+                "timeout_ms": 30000,
+                "max_concurrency": 2,
+            }
+        )
+        self.grant = self.database.create_connector_provider_grant(
             name="openai-main",
             spec=self.policy,
-            credential_ref="file:/private/provider-super-secret",
             expires_at=None,
             created_by=self.user["id"],
         )
@@ -244,7 +272,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 15)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], 16)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",
@@ -259,15 +287,12 @@ class ControlRoomTests(unittest.TestCase):
         self.assertEqual(snapshot["projects"][0]["context_version"], 1)
         self.assertEqual(snapshot["profiles"][0]["command_argv_count"], 3)
         self.assertEqual(
-            snapshot["provider_grants"][0]["policy"]["static_header_names"],
-            ["x-private-metadata"],
+            snapshot["provider_grants"][0]["policy"]["protocol"],
+            "openai-responses",
         )
         self.assertEqual(
-            snapshot["provider_grants"][0]["policy"]["destination"],
-            "https://api.openai.com/v1/responses",
-        )
-        self.assertTrue(
-            snapshot["provider_grants"][0]["policy"]["destination_query_redacted"]
+            snapshot["provider_grants"][0]["connector"]["id"],
+            self.connector["id"],
         )
         self.assertEqual(
             snapshot["work_items"][0]["untrusted_title"],
@@ -497,24 +522,21 @@ class ControlRoomTests(unittest.TestCase):
                 "updated_at",
                 "content_sha256",
                 "policy",
+                "connector",
             },
         )
-        self.assertEqual(snapshot["provider_grants"][0]["grant_kind"], "direct")
+        self.assertEqual(snapshot["provider_grants"][0]["grant_kind"], "connector")
         self.assertEqual(
             snapshot["provider_grants"][0]["policy"],
+            self.policy.to_dict(),
+        )
+        self.assertEqual(
+            snapshot["provider_grants"][0]["connector"],
             {
-                "provider": "openai",
-                "adapter": "json_http",
-                "destination": "https://api.openai.com/v1/responses",
-                "destination_query_redacted": True,
-                "method": "POST",
-                "model": "gpt-test",
-                "credential_header": "authorization",
-                "static_header_names": ["x-private-metadata"],
-                "request_bytes": 32768,
-                "response_bytes": 1048576,
-                "timeout_ms": 30000,
-                "max_concurrency": 2,
+                "id": self.connector["id"],
+                "name": "openai-personal",
+                "state": "active",
+                "version": 1,
             },
         )
         self.assertEqual(
@@ -1451,7 +1473,7 @@ class ControlRoomTests(unittest.TestCase):
         )
 
         self.assertEqual(grant["grant_kind"], "connector")
-        self.assertFalse(grant["available"])
+        self.assertTrue(grant["available"])
         self.assertEqual(
             grant["connector"],
             {

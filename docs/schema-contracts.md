@@ -18,11 +18,13 @@ Milestone 7C adds `integration-fold-v1.schema.json`,
 outcome-to-observed-revision binding, and durable ledger relationships remain
 runtime checks; the portable schemas provide structural preflight.
 
-Milestone 7D.1 adds `inference-connector-v1.schema.json`,
+Milestone 7D adds `inference-connector-v1.schema.json`,
 `inference-grant-v1.schema.json`, `inference-invocation-request-v1.schema.json`,
 and `inference-invocation-response-v1.schema.json`. Runtime validation also
 checks exact connector/grant compatibility, UTF-8 byte ceilings, full response
-correlation, outcome consistency, and absolute transport deadlines.
+correlation, outcome consistency, and absolute transport deadlines. Schema v16
+makes those contracts the exclusive normal inference-dispatch path and records
+the complete connector authority tuple with each durable invocation outcome.
 
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime parser is authoritative and additionally

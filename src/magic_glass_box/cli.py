@@ -24,7 +24,6 @@ from .db import Database, StorageError, default_db_path
 from .domain import (
     AgentProfileSpec,
     ProjectContext,
-    ProviderGrantSpec,
     SupervisionPolicy,
     ValidationError,
     WorkItemEnvelope,
@@ -350,14 +349,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     provider = commands.add_parser("provider", help="manage scoped provider grants")
     provider_commands = provider.add_subparsers(dest="provider_command", required=True)
-    provider_add = provider_commands.add_parser(
-        "add", help="add an immutable provider policy and credential reference"
-    )
-    provider_add.add_argument("name")
-    provider_add.add_argument("--policy", required=True, type=Path)
-    provider_add.add_argument("--credential-file", required=True, type=Path)
-    provider_add.add_argument("--expires-at")
-    provider_add.add_argument("--created-by", required=True)
     provider_connector_add = provider_commands.add_parser(
         "connector-add", help="add a connector-bound provider grant"
     )
@@ -978,14 +969,6 @@ def _dispatch(
                 revoked_by_handle=args.revoked_by,
             )
     if args.command == "provider":
-        if args.provider_command == "add":
-            return control.add_provider_grant(
-                name=args.name,
-                spec=ProviderGrantSpec.from_mapping(_json_file(args.policy)),
-                credential_path=args.credential_file,
-                expires_at=args.expires_at,
-                created_by_handle=args.created_by,
-            )
         if args.provider_command == "connector-add":
             return control.add_connector_provider_grant(
                 name=args.name,

@@ -33,10 +33,11 @@ contract omit `runtime_adapter`, retain their original content digest, and use
 The bundled vendor adapters also require `runtime_provider_grant`. It must name
 one entry in `credential_names`, and the profile must authorize both
 `run.describe` and `provider.invoke`. This is a route selection, not a secret:
-the named grant pins the actual endpoint, protocol adapter, model, credential,
-and limits on the trusted host. Profiles without the field retain their old
-digest. A `command` profile may set it so an explicit per-attempt vendor
-adapter override has the same deterministic route.
+the named grant pins one connector deployment and route, semantic protocol,
+model, non-secret scope fingerprint, and limits. The upstream endpoint and
+credential remain private to the connector. Profiles without the field retain
+their old digest. A `command` profile may set it so an explicit per-attempt
+vendor adapter override has the same deterministic route.
 
 `run execute --runtime-adapter NAME` may select a different compatible adapter
 for one attempt. The immutable profile, context, work item, source revision,
@@ -123,17 +124,19 @@ through the profile's exact `runtime_provider_grant`. It discards every inbound
 HTTP header except the small protocol-feature allowlist documented in
 [provider-broker.md](provider-broker.md).
 
-The current trusted broker injects the pinned model and reusable credential,
-performs the sole outbound request, buffers the bounded SSE response, and
-returns it through the ephemeral committed-file mailbox. Milestone 7D preserves
-this worker-facing flow while moving credential injection and upstream
-transport to a narrow inference connector; MGB will retain authorization and
-reservation authority without resolving the provider credential. The bridge
-replays the returned bytes to the vendor CLI. Buffering adds first-token
-latency, but it preserves Docker `--network none`, keeps the carrier finite,
-and avoids putting a socket or credential in the worker. Neither request nor
+MGB authorizes the exact connector-bound grant, atomically reserves its
+capacity, and sends one strict bounded invocation to the registered inference
+connector. The connector alone resolves the reusable credential, performs the
+upstream request, and returns the bounded result. The bridge replays those
+returned bytes to the vendor CLI. Buffering adds first-token latency, but it
+preserves Docker `--network none`, keeps both carriers finite, and avoids
+putting a connector socket or credential in the worker. Neither request nor
 response bodies are durable. See
 [inference-connectors.md](inference-connectors.md).
+
+If the connector result is ambiguous, the loopback bridge poisons itself for
+the remainder of that worker process. Any automatic retry attempted by the
+vendor CLI fails locally and cannot create a second MGB or provider dispatch.
 
 The same entry point exposes bounded gateway calls to the agent:
 
@@ -180,10 +183,11 @@ an answer, a clean replacement Codex attempt discovers the handoff with
 Claude Code attempt exercises the second adapter and vendor protocol.
 
 A host-only provider fixture returns valid deterministic SSE and is reached
-only by the trusted broker. The proof verifies the attempt and provider audit
-records, pinned-ignore result behavior under a deliberately tiny path ceiling,
-Docker network policy `none`, absence of credential mounts, host-side
-credential injection, container cleanup, and that credentials, private
-interaction content, and transient model output never entered SQLite. It
-therefore tests runtime replacement and protocol continuity rather than a
-provider account, entitlement, quota, or model quality.
+only by a separately launched reference inference connector. The proof verifies
+the attempt and connector-dispatch audit records, pinned-ignore result behavior
+under a deliberately tiny path ceiling, Docker network policy `none`, absence
+of credential mounts, connector-side credential injection, container cleanup,
+and that credentials, private interaction content, and transient model output
+never entered SQLite or connector logs. It therefore tests runtime replacement
+and protocol continuity rather than a provider account, entitlement, quota, or
+model quality.

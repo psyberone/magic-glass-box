@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from .domain import (
     ValidationError,
@@ -40,6 +40,14 @@ class InferenceConnectorUnavailableError(InferenceConnectorError):
 
 class InferenceConnectorAmbiguousError(InferenceConnectorError):
     """The connector may have consumed the invocation before transport failed."""
+
+
+class InferenceConnectorClient(Protocol):
+    """Transport-neutral client seam for one already-authorized invocation."""
+
+    def invoke(
+        self, request: InferenceInvocationRequest
+    ) -> InferenceInvocationResponse: ...
 
 
 def _exact_fields(

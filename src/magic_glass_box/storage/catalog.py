@@ -115,6 +115,7 @@ class CatalogStorage:
             result.pop("credential_ref")
             binding = connection.execute(
                 "SELECT c.id, c.name, c.state, c.version, "
+                "c.connector_protocol_version, "
                 "b.deployment_sha256, b.route, b.credential_scope_sha256, "
                 "b.provider, b.protocol, b.model "
                 "FROM provider_connector_bindings b "
@@ -508,15 +509,21 @@ class CatalogStorage:
             if name == "krab":
                 continue
             row = connection.execute(
-                "SELECT id, name, state, grant_kind, expires_at "
-                "FROM provider_grants "
-                "WHERE name = ?",
+                "SELECT pg.id, pg.name, pg.state, pg.grant_kind, "
+                "pg.expires_at, ic.state AS connector_state "
+                "FROM provider_grants pg "
+                "LEFT JOIN provider_connector_bindings pcb "
+                "ON pcb.provider_grant_id = pg.id "
+                "LEFT JOIN inference_connectors ic "
+                "ON ic.id = pcb.inference_connector_id "
+                "WHERE pg.name = ?",
                 (name,),
             ).fetchone()
             if (
                 row is None
                 or row["state"] != "active"
-                or row["grant_kind"] != "direct"
+                or row["grant_kind"] != "connector"
+                or row["connector_state"] != "active"
                 or (row["expires_at"] is not None and row["expires_at"] <= now)
             ):
                 raise ConflictError(f"provider grant is unavailable: {name}")

@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,6 @@ from .candidates import (
     GitCandidateStore,
 )
 from .credentials import (
-    CredentialError,
     CredentialResolver,
     PrivateFileCredentialResolver,
 )
@@ -36,7 +36,6 @@ from .domain import (
     InteractionKind,
     NetworkMode,
     ProjectContext,
-    ProviderGrantSpec,
     RunState,
     SupervisionPolicy,
     ValidationError,
@@ -56,11 +55,22 @@ from .gates import (
     ValidationEvidence,
     resolve_gate_policy_request,
 )
-from .inference import InferenceConnectorSpec, InferenceGrantSpec
+from .inference import (
+    INFERENCE_SCHEMA_VERSION,
+    InferenceConnectorAmbiguousError,
+    InferenceConnectorClient,
+    InferenceConnectorError,
+    InferenceConnectorSpec,
+    InferenceConnectorUnavailableError,
+    InferenceGrantSpec,
+    InferenceInvocationRequest,
+    InferenceInvocationResponse,
+    UnixInferenceConnectorClient,
+)
 from .integration import FoldManifest, LandingReceiptRequest
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
 from .provider import (
-    ProviderBroker,
+    ProviderAmbiguousError,
     ProviderBusyError,
     ProviderError,
     ProviderUpstreamError,
@@ -72,6 +82,7 @@ if TYPE_CHECKING:
     from .executor import DockerExecutor
 
 ClientFactory = Callable[..., KrabClient]
+InferenceClientFactory = Callable[[Path], InferenceConnectorClient]
 PROVIDER_DISPATCH_LEASE_SECONDS = 30
 PROVIDER_DISPATCH_RENEW_INTERVAL_SECONDS = 10.0
 
@@ -166,14 +177,16 @@ class ControlPlane:
         *,
         credential_resolver: CredentialResolver | None = None,
         client_factory: ClientFactory | None = None,
-        provider_broker: ProviderBroker | None = None,
+        inference_client_factory: InferenceClientFactory | None = None,
     ):
         self.database = database
         self.credential_resolver = (
             credential_resolver or PrivateFileCredentialResolver()
         )
         self.client_factory = client_factory or KrabClient
-        self.provider_broker = provider_broker or ProviderBroker()
+        self.inference_client_factory = (
+            inference_client_factory or UnixInferenceConnectorClient
+        )
 
     def initialize(self) -> dict[str, Any]:
         return self.database.initialize()
@@ -820,29 +833,6 @@ class ControlPlane:
             instance["id"], identity, reference, user_id=user_id
         )
 
-    def add_provider_grant(
-        self,
-        *,
-        name: str,
-        spec: ProviderGrantSpec,
-        credential_path: Path,
-        expires_at: str | None,
-        created_by_handle: str,
-    ) -> dict[str, Any]:
-        if not isinstance(self.credential_resolver, PrivateFileCredentialResolver):
-            raise TypeError(
-                "add_provider_grant with a path requires a private-file resolver"
-            )
-        reference = self.credential_resolver.secret_reference(credential_path)
-        creator = self.database.get_user(created_by_handle)
-        return self.database.create_provider_grant(
-            name=name,
-            spec=spec,
-            credential_ref=reference,
-            expires_at=expires_at,
-            created_by=creator["id"],
-        )
-
     def register_inference_connector(
         self,
         *,
@@ -916,24 +906,40 @@ class ControlPlane:
         if not live_attempt_has_authority:
             raise ConflictError(f"run is not running: {route['state']}")
         grant = self.database.get_run_provider_grant(run_id, grant_name)
-        try:
-            spec = ProviderGrantSpec.from_mapping(grant["policy"])
-        except (KeyError, TypeError, ValidationError) as exc:
-            raise ConflictError("provider grant policy is unavailable") from exc
         started_at = self.database.now()
-        try:
-            credential = self.credential_resolver.resolve_secret(
-                grant["credential_ref"]
-            )
-        except CredentialError as exc:
+        invocation_id = self.database.new_id("pinv")
+        if grant["grant_kind"] != "connector":
             self._record_provider_failure(
                 run_id=run_id,
                 grant_id=grant["id"],
+                invocation_id=invocation_id,
                 outcome="denied",
-                error_code="credential_unavailable",
+                error_code="legacy_direct_denied",
                 started_at=started_at,
             )
-            raise ProviderError("provider credential is unavailable") from exc
+            raise ProviderError("provider authority must be connector-bound")
+        try:
+            spec = InferenceGrantSpec.from_mapping(grant["policy"])
+        except (KeyError, TypeError, ValidationError) as exc:
+            raise ConflictError("provider grant policy is unavailable") from exc
+        deadline = (
+            datetime.fromisoformat(started_at) + timedelta(milliseconds=spec.timeout_ms)
+        ).isoformat(timespec="microseconds")
+        connector = grant["connector"]
+        pinned_authority = {
+            "connector_id": connector["id"],
+            "connector_protocol_version": connector["connector_protocol_version"],
+            "deployment_sha256": spec.deployment_sha256,
+            "route": spec.route,
+            "policy_sha256": spec.digest,
+            "credential_scope_sha256": spec.credential_scope_sha256,
+            "provider": spec.provider,
+            "protocol": spec.protocol,
+            "model": spec.model,
+            "request_bytes": spec.request_bytes,
+            "response_bytes": spec.response_bytes,
+            "timeout_ms": spec.timeout_ms,
+        }
         try:
             reservation = self.database.reserve_provider_dispatch(
                 run_id,
@@ -945,20 +951,92 @@ class ControlPlane:
             self._record_provider_failure(
                 run_id=run_id,
                 grant_id=grant["id"],
+                invocation_id=invocation_id,
                 outcome="denied",
                 error_code="authority_unavailable",
                 started_at=started_at,
+                authority=pinned_authority,
+                deadline=deadline,
             )
             raise
         if reservation is None:
             self._record_provider_failure(
                 run_id=run_id,
                 grant_id=grant["id"],
+                invocation_id=invocation_id,
                 outcome="busy",
                 error_code="concurrency_limit",
                 started_at=started_at,
+                authority=pinned_authority,
+                deadline=deadline,
             )
             raise ProviderBusyError("provider grant concurrency limit is reached")
+        authority = reservation["inference"]
+        try:
+            invocation_request = InferenceInvocationRequest.from_mapping(
+                {
+                    "schema_version": INFERENCE_SCHEMA_VERSION,
+                    "connector_protocol_version": authority[
+                        "connector_protocol_version"
+                    ],
+                    "invocation_id": invocation_id,
+                    "connector_id": authority["connector_id"],
+                    "deployment_sha256": authority["deployment_sha256"],
+                    "route": authority["route"],
+                    "grant_id": grant["id"],
+                    "policy_sha256": authority["policy_sha256"],
+                    "credential_scope_sha256": authority["credential_scope_sha256"],
+                    "provider": authority["provider"],
+                    "protocol": authority["protocol"],
+                    "model": authority["model"],
+                    "deadline": deadline,
+                    "request_limit_bytes": authority["request_bytes"],
+                    "response_limit_bytes": authority["response_bytes"],
+                    "request": request,
+                }
+            )
+        except (KeyError, TypeError, ValidationError) as exc:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="denied",
+                error_code="connector_authority_invalid",
+                started_at=started_at,
+                authority=authority,
+                deadline=deadline,
+            )
+            try:
+                self.database.release_provider_dispatch(reservation["id"])
+            except Exception as release_error:
+                exc.add_note(
+                    "provider dispatch reservation release also failed: "
+                    f"{type(release_error).__name__}: {release_error}"
+                )
+            raise ProviderError("provider connector authority is invalid") from exc
+        try:
+            connector_client = self.inference_client_factory(
+                Path(authority["socket_path"])
+            )
+        except Exception as exc:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="failed",
+                error_code="connector_unavailable",
+                started_at=started_at,
+                authority=authority,
+                deadline=deadline,
+            )
+            try:
+                self.database.release_provider_dispatch(reservation["id"])
+            except Exception as release_error:
+                exc.add_note(
+                    "provider dispatch reservation release also failed: "
+                    f"{type(release_error).__name__}: {release_error}"
+                )
+            raise ProviderUpstreamError("inference connector is unavailable") from exc
         dispatch_monitor = _ProviderDispatchLeaseMonitor(
             self.database,
             reservation["id"],
@@ -967,63 +1045,137 @@ class ControlPlane:
         )
         try:
             dispatch_monitor.start()
-            result = self.provider_broker.invoke(
-                grant_id=grant["id"],
-                spec=spec,
-                credential=credential,
-                request=request,
-            )
+            received_response = connector_client.invoke(invocation_request)
+            if not isinstance(received_response, InferenceInvocationResponse):
+                raise InferenceConnectorAmbiguousError(
+                    "inference connector returned an invalid response type"
+                )
+            try:
+                response = InferenceInvocationResponse.from_mapping(
+                    received_response.to_dict()
+                )
+                response.validate_correlation(invocation_request)
+            except ValidationError as exc:
+                raise InferenceConnectorAmbiguousError(
+                    "inference connector returned an invalid response"
+                ) from exc
             dispatch_monitor.close()
             dispatch_monitor.check()
-        except ProviderBusyError:
+        except InferenceConnectorUnavailableError as exc:
             self._record_provider_failure(
                 run_id=run_id,
                 grant_id=grant["id"],
-                outcome="busy",
-                error_code="concurrency_limit",
-                started_at=started_at,
-            )
-            raise
-        except ProviderUpstreamError as exc:
-            self._record_provider_failure(
-                run_id=run_id,
-                grant_id=grant["id"],
+                invocation_id=invocation_id,
                 outcome="failed",
-                error_code="upstream_error",
+                error_code="connector_unavailable",
                 started_at=started_at,
-                request_bytes=exc.request_bytes,
-                response_bytes=exc.response_bytes,
-                http_status=exc.status_code,
+                authority=authority,
+                deadline=deadline,
             )
-            raise
-        except ProviderError:
+            raise ProviderUpstreamError("inference connector is unavailable") from exc
+        except InferenceConnectorAmbiguousError as exc:
             self._record_provider_failure(
                 run_id=run_id,
                 grant_id=grant["id"],
-                outcome="denied",
-                error_code="request_denied",
+                invocation_id=invocation_id,
+                outcome="ambiguous",
+                error_code="connector_ambiguous",
                 started_at=started_at,
+                authority=authority,
+                deadline=deadline,
             )
-            raise
+            raise ProviderAmbiguousError(
+                "provider invocation outcome is ambiguous"
+            ) from exc
+        except InferenceConnectorError as exc:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="denied",
+                error_code="connector_denied",
+                started_at=started_at,
+                authority=authority,
+                deadline=deadline,
+            )
+            raise ProviderError("provider connector denied the request") from exc
+        except Exception as exc:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="ambiguous",
+                error_code="reservation_lost",
+                started_at=started_at,
+                authority=authority,
+                deadline=deadline,
+            )
+            raise ProviderAmbiguousError(
+                "provider invocation outcome is ambiguous"
+            ) from exc
         finally:
             active_error = sys.exception()
             dispatch_monitor.close()
             try:
                 self.database.release_provider_dispatch(reservation["id"])
             except Exception as release_error:
-                if active_error is None:
-                    raise
-                active_error.add_note(
-                    "provider dispatch reservation release also failed: "
-                    f"{type(release_error).__name__}: {release_error}"
+                if active_error is not None:
+                    active_error.add_note(
+                        "provider dispatch reservation release also failed: "
+                        f"{type(release_error).__name__}: {release_error}"
+                    )
+                # A reservation is a bounded lease. Failure to release it may
+                # briefly reduce capacity, but must not erase the connector's
+                # already-known outcome or prevent its durable audit record.
+        if response.outcome != "succeeded":
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome=response.outcome,
+                error_code=response.error_code or "connector_failed",
+                started_at=started_at,
+                request_bytes=response.request_bytes,
+                response_bytes=response.response_bytes,
+                http_status=response.provider_status,
+                authority=authority,
+                deadline=deadline,
+            )
+            if response.outcome == "ambiguous":
+                raise ProviderAmbiguousError(
+                    "provider invocation outcome is ambiguous",
+                    status_code=response.provider_status,
+                    request_bytes=response.request_bytes,
+                    response_bytes=response.response_bytes,
                 )
+            raise ProviderUpstreamError(
+                "provider request failed",
+                status_code=response.provider_status,
+                request_bytes=response.request_bytes,
+                response_bytes=response.response_bytes,
+            )
+        untrusted_response = response.untrusted_response
+        if untrusted_response is None:
+            raise ProviderError("provider connector returned no response")
         invocation = self.database.record_provider_invocation(
             run_id=run_id,
             provider_grant_id=grant["id"],
+            invocation_id=invocation_id,
+            dispatch_kind="connector",
+            inference_connector_id=authority["connector_id"],
+            connector_protocol_version=authority["connector_protocol_version"],
+            deployment_sha256=authority["deployment_sha256"],
+            route=authority["route"],
+            policy_sha256=authority["policy_sha256"],
+            credential_scope_sha256=authority["credential_scope_sha256"],
+            provider=authority["provider"],
+            protocol=authority["protocol"],
+            model=authority["model"],
+            deadline=deadline,
             outcome="succeeded",
-            request_bytes=result.request_bytes,
-            response_bytes=result.response_bytes,
-            http_status=result.status_code,
+            request_bytes=response.request_bytes,
+            response_bytes=response.response_bytes,
+            http_status=response.provider_status,
             error_code=None,
             started_at=started_at,
         )
@@ -1032,10 +1184,10 @@ class ControlPlane:
             grant_name=grant_name,
             provider=spec.provider,
             model=spec.model,
-            status_code=result.status_code,
-            request_bytes=result.request_bytes,
-            response_bytes=result.response_bytes,
-            untrusted_response=result.untrusted_response,
+            status_code=response.provider_status,
+            request_bytes=response.request_bytes,
+            response_bytes=response.response_bytes,
+            untrusted_response=untrusted_response,
         )
 
     def _record_provider_failure(
@@ -1043,22 +1195,42 @@ class ControlPlane:
         *,
         run_id: str,
         grant_id: str,
+        invocation_id: str,
         outcome: str,
         error_code: str,
         started_at: str,
         request_bytes: int = 0,
         response_bytes: int = 0,
         http_status: int | None = None,
+        authority: Mapping[str, Any] | None = None,
+        deadline: str | None = None,
     ) -> None:
+        connector_metadata: dict[str, Any] = {}
+        if authority is not None:
+            connector_metadata = {
+                "dispatch_kind": "connector",
+                "inference_connector_id": authority["connector_id"],
+                "connector_protocol_version": authority["connector_protocol_version"],
+                "deployment_sha256": authority["deployment_sha256"],
+                "route": authority["route"],
+                "policy_sha256": authority["policy_sha256"],
+                "credential_scope_sha256": authority["credential_scope_sha256"],
+                "provider": authority["provider"],
+                "protocol": authority["protocol"],
+                "model": authority["model"],
+                "deadline": deadline,
+            }
         self.database.record_provider_invocation(
             run_id=run_id,
             provider_grant_id=grant_id,
+            invocation_id=invocation_id,
             outcome=outcome,
             request_bytes=request_bytes,
             response_bytes=response_bytes,
             http_status=http_status,
             error_code=error_code,
             started_at=started_at,
+            **connector_metadata,
         )
 
     def register_project(

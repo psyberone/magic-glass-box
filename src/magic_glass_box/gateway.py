@@ -32,7 +32,12 @@ from .krab import (
     MAX_TITLE_BYTES,
     KrabError,
 )
-from .provider import ProviderBusyError, ProviderError, ProviderUpstreamError
+from .provider import (
+    ProviderAmbiguousError,
+    ProviderBusyError,
+    ProviderError,
+    ProviderUpstreamError,
+)
 from .service import AcceptedInteractionResponse, AcceptedProviderResponse
 
 GATEWAY_PROTOCOL_VERSION = 1
@@ -344,6 +349,12 @@ class RunGateway:
         except ProviderBusyError:
             return self._failure(
                 request_id, "busy", "provider concurrency limit is reached"
+            )
+        except ProviderAmbiguousError:
+            return self._failure(
+                request_id,
+                "ambiguous",
+                "provider invocation outcome is ambiguous",
             )
         except ProviderUpstreamError:
             return self._failure(

@@ -20,10 +20,10 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
     ProjectContext,
-    ProviderGrantSpec,
     ValidationError,
     WorkItemEnvelope,
 )
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.service import ControlPlane
 
@@ -237,25 +237,52 @@ class OperatorRunActionTests(unittest.TestCase):
         self.assertEqual(unchanged["events"], source["events"])
 
     def test_retry_refuses_revoked_pinned_authority(self) -> None:
-        grant = self.database.create_provider_grant(
-            name="provider-main",
-            spec=ProviderGrantSpec.from_mapping(
+        self.database.register_inference_connector(
+            name="provider-sidecar",
+            spec=InferenceConnectorSpec.from_mapping(
                 {
-                    "provider": "openai",
-                    "adapter": "json_http",
-                    "destination": "https://api.openai.com/v1/responses",
-                    "method": "POST",
-                    "model": "gpt-test",
-                    "credential_header": "Authorization",
-                    "credential_prefix": "Bearer ",
-                    "static_headers": {},
+                    "schema_version": 1,
+                    "connector_protocol_version": 1,
+                    "deployment_sha256": "a" * 64,
+                    "transport": {
+                        "kind": "unix",
+                        "socket_path": str(Path(self.temporary.name) / "provider.sock"),
+                    },
+                    "routes": [
+                        {
+                            "name": "responses-main",
+                            "provider": "openai",
+                            "protocol": "openai-responses",
+                            "models": ["gpt-test"],
+                            "credential_scope_sha256": "b" * 64,
+                        }
+                    ],
                     "request_bytes": 32768,
                     "response_bytes": 1048576,
                     "timeout_ms": 30000,
                     "max_concurrency": 1,
                 }
             ),
-            credential_ref="secret-file:/private/provider.key",
+            created_by=self.operator["id"],
+        )
+        grant = self.database.create_connector_provider_grant(
+            name="provider-main",
+            spec=InferenceGrantSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "connector_name": "provider-sidecar",
+                    "deployment_sha256": "a" * 64,
+                    "route": "responses-main",
+                    "credential_scope_sha256": "b" * 64,
+                    "provider": "openai",
+                    "protocol": "openai-responses",
+                    "model": "gpt-test",
+                    "request_bytes": 32768,
+                    "response_bytes": 1048576,
+                    "timeout_ms": 30000,
+                    "max_concurrency": 1,
+                }
+            ),
             expires_at=None,
             created_by=self.operator["id"],
         )

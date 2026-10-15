@@ -7,21 +7,20 @@ import argparse
 import json
 import os
 import secrets
+import subprocess
+import sys
 import tempfile
-import threading
-from collections.abc import Sequence
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
     NetworkMode,
     ProjectContext,
-    ProviderGrantSpec,
     WorkItemEnvelope,
 )
 from magic_glass_box.executor import (
@@ -31,6 +30,7 @@ from magic_glass_box.executor import (
     SandboxRequest,
 )
 from magic_glass_box.gateway import FileGatewayManager
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.runtime import RuntimeLaunch
 from magic_glass_box.service import ControlPlane
@@ -115,7 +115,8 @@ result = valid["result"]
 if (
     result["provider"] != "example-ai"
     or result["model"] != "pinned-model"
-    or result["untrusted_response"] != {"output_text": "provider reached"}
+    or result["untrusted_response"]
+    != {"output_text": "deterministic fake response"}
 ):
     raise SystemExit("provider response did not preserve pinned policy")
 
@@ -149,40 +150,6 @@ if model["ok"] or model["error"]["code"] != "invalid_request":
 """
 
 
-class RecordingProvider:
-    def __init__(self, credential: str):
-        self.credential = credential
-        self.requests: list[dict[str, Any]] = []
-
-    def handler(self) -> type[BaseHTTPRequestHandler]:
-        recorder = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:  # noqa: N802
-                if self.path != "/v1/invoke":
-                    self.send_error(404)
-                    return
-                length = int(self.headers.get("Content-Length", "0"))
-                value = json.loads(self.rfile.read(length))
-                recorder.requests.append(
-                    {
-                        "authorization": self.headers.get("Authorization"),
-                        "body": value,
-                    }
-                )
-                raw = b'{"output_text":"provider reached"}'
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
-
-            def log_message(self, _format: str, *args: object) -> None:
-                return
-
-        return Handler
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="python:3.12-slim")
@@ -190,17 +157,41 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _provider_policy(port: int) -> ProviderGrantSpec:
-    return ProviderGrantSpec.from_mapping(
+def _connector_policy(socket_path: Path) -> InferenceConnectorSpec:
+    return InferenceConnectorSpec.from_mapping(
         {
+            "schema_version": 1,
+            "connector_protocol_version": 1,
+            "deployment_sha256": "a" * 64,
+            "transport": {"kind": "unix", "socket_path": str(socket_path)},
+            "routes": [
+                {
+                    "name": "fake-main",
+                    "provider": "example-ai",
+                    "protocol": "example-json",
+                    "models": ["pinned-model"],
+                    "credential_scope_sha256": "b" * 64,
+                }
+            ],
+            "request_bytes": 4096,
+            "response_bytes": 4096,
+            "timeout_ms": 5000,
+            "max_concurrency": 1,
+        }
+    )
+
+
+def _provider_policy() -> InferenceGrantSpec:
+    return InferenceGrantSpec.from_mapping(
+        {
+            "schema_version": 1,
+            "connector_name": "example-sidecar",
+            "deployment_sha256": "a" * 64,
+            "route": "fake-main",
+            "credential_scope_sha256": "b" * 64,
             "provider": "example-ai",
-            "adapter": "json_http",
-            "destination": f"http://127.0.0.1:{port}/v1/invoke",
-            "method": "POST",
+            "protocol": "example-json",
             "model": "pinned-model",
-            "credential_header": "Authorization",
-            "credential_prefix": "Bearer ",
-            "static_headers": {},
             "request_bytes": 4096,
             "response_bytes": 4096,
             "timeout_ms": 5000,
@@ -211,8 +202,8 @@ def _provider_policy(port: int) -> ProviderGrantSpec:
 
 def _prepare_run(
     control: ControlPlane,
-    secret_path: Path,
-    policy: ProviderGrantSpec,
+    socket_path: Path,
+    policy: InferenceGrantSpec,
     image: str,
 ) -> tuple[str, AgentProfileSpec, dict[str, Any]]:
     database = control.database
@@ -246,10 +237,14 @@ def _prepare_run(
         ),
         imported_by=user["id"],
     )
-    control.add_provider_grant(
+    control.register_inference_connector(
+        name="example-sidecar",
+        spec=_connector_policy(socket_path),
+        created_by_handle="operator",
+    )
+    control.add_connector_provider_grant(
         name="example-main",
         spec=policy,
-        credential_path=secret_path,
         expires_at=None,
         created_by_handle="operator",
     )
@@ -284,28 +279,47 @@ def _prepare_run(
 def _assert_proof(
     *,
     exit_code: int,
-    provider_requests: list[dict[str, Any]],
+    connector_invocations: int,
     audit_invocations: list[dict[str, Any]],
     credential: str,
-    durable_bytes: bytes,
-    gateway_bytes: bytes,
+    scanned_surfaces: Mapping[str, bytes],
 ) -> None:
     if exit_code != 0:
         raise RuntimeError(f"live provider worker exited {exit_code}")
-    if provider_requests != [
-        {
-            "authorization": "Bearer " + credential,
-            "body": {"input": "live hello", "model": "pinned-model"},
-        }
-    ]:
-        raise RuntimeError("provider did not receive exactly the pinned request")
-    if len(audit_invocations) != 1 or audit_invocations[0]["outcome"] != "succeeded":
+    if connector_invocations != 1:
+        raise RuntimeError("connector did not receive exactly one pinned invocation")
+    if (
+        len(audit_invocations) != 1
+        or audit_invocations[0]["outcome"] != "succeeded"
+        or audit_invocations[0]["dispatch_kind"] != "connector"
+        or audit_invocations[0]["provider"] != "example-ai"
+        or audit_invocations[0]["protocol"] != "example-json"
+        or audit_invocations[0]["model"] != "pinned-model"
+        or audit_invocations[0]["route"] != "fake-main"
+    ):
         raise RuntimeError("successful provider invocation was not audited")
     credential_bytes = credential.encode("ascii")
-    if credential_bytes in durable_bytes:
-        raise RuntimeError("provider secret leaked into durable state")
-    if credential_bytes in gateway_bytes:
-        raise RuntimeError("provider secret leaked across the worker gateway")
+    for surface, content in scanned_surfaces.items():
+        if credential_bytes in content:
+            raise RuntimeError(f"provider secret leaked into {surface}")
+
+
+def _collect_regular_files(root: Path) -> bytes:
+    values: list[bytes] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            values.append(path.read_bytes())
+    return b"".join(values)
+
+
+def _stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
 
 
 def main() -> int:
@@ -313,37 +327,69 @@ def main() -> int:
     if not hasattr(os, "getuid") or os.getuid() <= 0 or os.getgid() <= 0:
         raise RuntimeError("live provider proof requires a non-root POSIX user")
     credential = "live_" + secrets.token_urlsafe(32)
-    recorder = RecordingProvider(credential)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), recorder.handler())
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    try:
-        with tempfile.TemporaryDirectory(
-            prefix="mgb-live-provider-",
-            dir="/tmp",  # noqa: S108
-        ) as temporary:
-            root = Path(temporary)
-            os.chmod(root, 0o700)
-            secret_path = root / "provider.secret"
-            secret_path.write_text(credential + "\n", encoding="ascii")
-            os.chmod(secret_path, 0o600)
-            database = Database(root / "control-plane.db")
-            control = ControlPlane(
-                database,
-                credential_resolver=PrivateFileCredentialResolver(),
-            )
+    repository = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(
+        prefix="mgb-live-provider-",
+        dir="/tmp",  # noqa: S108
+    ) as temporary:
+        proof_root = Path(temporary)
+        os.chmod(proof_root, 0o700)
+        connector_root = proof_root / "connector-private"
+        connector_root.mkdir(mode=0o700)
+        credential_path = connector_root / "provider.canary"
+        credential_path.write_text(credential + "\n", encoding="ascii")
+        os.chmod(credential_path, 0o600)
+        socket_path = connector_root / "inference.sock"
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(repository / "src"),
+        }
+        process = subprocess.Popen(  # noqa: S603 - fixed local proof argv
+            [
+                sys.executable,
+                str(repository / "scripts" / "fake_inference_connector.py"),
+                "--socket-path",
+                str(socket_path),
+                "--credential-file",
+                str(credential_path),
+                "--max-invocations",
+                "1",
+            ],
+            cwd=repository,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if socket_path.exists() or process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            if not socket_path.exists():
+                stdout, stderr = process.communicate(timeout=2)
+                raise RuntimeError(
+                    f"inference connector did not start: {stdout}{stderr}"
+                )
+
+            mgb_root = proof_root / "mgb-state"
+            mgb_root.mkdir(mode=0o700)
+            database = Database(mgb_root / "control-plane.db")
+            control = ControlPlane(database)
             run_id, pinned_profile, attempt = _prepare_run(
                 control,
-                secret_path,
-                _provider_policy(server.server_port),
+                socket_path,
+                _provider_policy(),
                 args.image,
             )
-            workspace = root / "workspace"
+            workspace = mgb_root / "workspace"
             workspace.mkdir(mode=0o700)
             (workspace / "provider_probe.py").write_text(
                 AGENT_PROGRAM, encoding="utf-8"
             )
-            manager = FileGatewayManager(root / "gateways", control)
+            manager = FileGatewayManager(mgb_root / "gateways", control)
             try:
                 endpoint = manager.open(
                     run_id,
@@ -383,26 +429,37 @@ def main() -> int:
                 )
             finally:
                 manager.cleanup(run_id)
+            connector_stdout, connector_stderr = process.communicate(timeout=5)
+            if process.returncode != 0 or connector_stderr:
+                raise RuntimeError(
+                    "inference connector failed: " + connector_stdout + connector_stderr
+                )
+            connector_report = json.loads(connector_stdout)
             invocations = database.list_provider_invocations(run_id)
             _assert_proof(
                 exit_code=result.exit_code,
-                provider_requests=recorder.requests,
+                connector_invocations=connector_report.get("invocations"),
                 audit_invocations=invocations,
                 credential=credential,
-                durable_bytes=database.path.read_bytes(),
-                gateway_bytes=gateway_bytes,
+                scanned_surfaces={
+                    "MGB state": _collect_regular_files(mgb_root),
+                    "worker gateway": gateway_bytes,
+                    "worker runtime output": result.stdout.encode("utf-8"),
+                    "connector logs": (connector_stdout + connector_stderr).encode(
+                        "utf-8"
+                    ),
+                },
             )
-    finally:
-        server.shutdown()
-        server.server_close()
-        server_thread.join(5)
+        finally:
+            _stop_process(process)
     print(
         json.dumps(
             {
                 "audited_invocations": 1,
                 "credential_exposure": "none",
                 "direct_network": "denied",
-                "permitted_provider": "reached",
+                "connector_dispatch": "exclusive",
+                "permitted_provider": "reached through connector",
                 "undeclared_authority": "denied",
                 "worker_selected_destination": "denied",
                 "worker_selected_model": "denied",

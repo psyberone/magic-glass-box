@@ -186,15 +186,20 @@ destination, method, credential, or worker-selected model. The orchestrator
 requires a live `running` attempt and permits the enclosing run to be either
 `running` or `waiting_for_input`. The latter keeps a worker alive just long
 enough to submit its handoff after opening a question; a parked run with no
-live attempt has no provider authority. The orchestrator then checks grant
-authority, resolves the external credential reference, and atomically rechecks
-revocation/expiry and reserves a cross-process concurrency slot immediately
-before dispatch. It injects the pinned model and applies the grant's byte and
-timeout limits. The reservation is released after dispatch and expires if its
-owning process dies.
+live attempt has no provider authority. The orchestrator checks grant and
+connector authority, then atomically rechecks revocation/expiry and
+reserves grant- and connector-wide cross-process concurrency immediately before
+dispatch. It constructs the strict invocation from the pinned connector,
+route, semantic protocol, model, scope fingerprint, byte ceilings, and absolute
+deadline. Only the separately launched connector owns the upstream credential
+and network transport. The reservation is released after dispatch and expires
+if its owning process dies.
+
 The JSON object response is transient and explicitly untrusted. Only status,
-byte counts, outcome, error category, timestamps, and grant/run IDs are
-durable. See [provider-broker.md](provider-broker.md).
+byte counts, outcome, error category, timestamps, and the exact connector/grant
+authority tuple are durable. A lost or invalid post-dispatch reply is recorded
+as ambiguous and is never replayed automatically. See
+[inference-connectors.md](inference-connectors.md).
 
 Every mailbox operation retains a worker-side deadline. Provider exchanges use
 that deadline as a 30-second host-liveness window rather than an absolute model

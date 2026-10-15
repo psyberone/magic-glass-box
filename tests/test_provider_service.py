@@ -6,42 +6,44 @@ import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
-from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import ConflictError, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
     InteractionKind,
     ProjectContext,
-    ProviderGrantSpec,
     RunState,
     WorkItemEnvelope,
+    canonical_json,
+)
+from magic_glass_box.inference import (
+    InferenceConnectorSpec,
+    InferenceGrantSpec,
+    InferenceInvocationRequest,
+    InferenceInvocationResponse,
 )
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.provider import (
-    ProviderBroker,
     ProviderBusyError,
     ProviderError,
-    ProviderInvocationResult,
     ProviderUpstreamError,
 )
 from magic_glass_box.service import AcceptedProviderResponse, ControlPlane
 
 
-def policy() -> ProviderGrantSpec:
-    return ProviderGrantSpec.from_mapping(
+def policy() -> InferenceGrantSpec:
+    return InferenceGrantSpec.from_mapping(
         {
+            "schema_version": 1,
+            "connector_name": "example-sidecar",
+            "deployment_sha256": "a" * 64,
+            "route": "chat-main",
+            "credential_scope_sha256": "b" * 64,
             "provider": "example-ai",
-            "adapter": "json_http",
-            "destination": "https://provider.example/v1/invoke",
-            "method": "POST",
+            "protocol": "example-json",
             "model": "bounded-model",
-            "credential_header": "Authorization",
-            "credential_prefix": "Bearer ",
-            "static_headers": {},
             "request_bytes": 4096,
             "response_bytes": 8192,
             "timeout_ms": 10000,
@@ -50,29 +52,62 @@ def policy() -> ProviderGrantSpec:
     )
 
 
-class RecordingAdapter:
+def connector_policy(socket_path: Path) -> InferenceConnectorSpec:
+    return InferenceConnectorSpec.from_mapping(
+        {
+            "schema_version": 1,
+            "connector_protocol_version": 1,
+            "deployment_sha256": "a" * 64,
+            "transport": {"kind": "unix", "socket_path": str(socket_path)},
+            "routes": [
+                {
+                    "name": "chat-main",
+                    "provider": "example-ai",
+                    "protocol": "example-json",
+                    "models": ["bounded-model"],
+                    "credential_scope_sha256": "b" * 64,
+                }
+            ],
+            "request_bytes": 4096,
+            "response_bytes": 8192,
+            "timeout_ms": 10000,
+            "max_concurrency": 1,
+        }
+    )
+
+
+class RecordingConnector:
     def __init__(self) -> None:
-        self.calls: list[tuple[ProviderGrantSpec, str, dict[str, Any]]] = []
-        self.failure: ProviderUpstreamError | None = None
+        self.calls: list[InferenceInvocationRequest] = []
+        self.outcome = "succeeded"
+        self.error_code: str | None = None
+        self.provider_status: int | None = 200
 
     def invoke(
         self,
-        spec: ProviderGrantSpec,
-        credential: str,
-        request: dict[str, Any],
-    ) -> ProviderInvocationResult:
-        self.calls.append((spec, credential, request))
-        if self.failure is not None:
-            raise self.failure
-        return ProviderInvocationResult(
-            status_code=200,
-            request_bytes=51,
-            response_bytes=37,
-            untrusted_response={"output": [{"text": "done"}]},
+        request: InferenceInvocationRequest,
+    ) -> InferenceInvocationResponse:
+        self.calls.append(request)
+        response = request.to_dict()
+        response.pop("request")
+        response.update(
+            {
+                "outcome": self.outcome,
+                "provider_status": self.provider_status,
+                "request_bytes": len(canonical_json(request.request).encode("utf-8")),
+                "response_bytes": 37 if self.outcome == "succeeded" else 25,
+                "error_code": self.error_code,
+                "response": (
+                    {"output": [{"text": "done"}]}
+                    if self.outcome == "succeeded"
+                    else None
+                ),
+            }
         )
+        return InferenceInvocationResponse.from_mapping(response)
 
 
-class BlockingAdapter(RecordingAdapter):
+class BlockingConnector(RecordingConnector):
     def __init__(self) -> None:
         super().__init__()
         self.started = threading.Event()
@@ -80,33 +115,12 @@ class BlockingAdapter(RecordingAdapter):
 
     def invoke(
         self,
-        spec: ProviderGrantSpec,
-        credential: str,
-        request: dict[str, Any],
-    ) -> ProviderInvocationResult:
-        self.calls.append((spec, credential, request))
+        request: InferenceInvocationRequest,
+    ) -> InferenceInvocationResponse:
         self.started.set()
         if not self.release.wait(timeout=2):
             raise RuntimeError("provider test release timed out")
-        return ProviderInvocationResult(
-            status_code=200,
-            request_bytes=51,
-            response_bytes=37,
-            untrusted_response={"output": [{"text": "done"}]},
-        )
-
-
-class BlockingSecretResolver:
-    def __init__(self, secret: str) -> None:
-        self.secret = secret
-        self.started = threading.Event()
-        self.release = threading.Event()
-
-    def resolve_secret(self, reference: str) -> str:
-        self.started.set()
-        if not self.release.wait(timeout=2):
-            raise RuntimeError("credential test release timed out")
-        return self.secret
+        return super().invoke(request)
 
 
 class ProviderServiceTests(unittest.TestCase):
@@ -115,10 +129,6 @@ class ProviderServiceTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         os.chmod(self.root, 0o700)
-        self.secret = "provider-secret-value"  # noqa: S105
-        self.secret_path = self.root / "provider.secret"
-        self.secret_path.write_text(self.secret + "\n", encoding="ascii")
-        os.chmod(self.secret_path, 0o600)
         self.database = Database(self.root / "control-plane.db")
         self.database.initialize()
         self.user = self.database.create_user("operator", "Operator")
@@ -153,16 +163,19 @@ class ProviderServiceTests(unittest.TestCase):
             ),
             imported_by=self.user["id"],
         )
-        self.adapter = RecordingAdapter()
+        self.connector = RecordingConnector()
         self.control = ControlPlane(
             self.database,
-            credential_resolver=PrivateFileCredentialResolver(),
-            provider_broker=ProviderBroker(adapters={"json_http": self.adapter}),
+            inference_client_factory=lambda _path: self.connector,
         )
-        self.grant = self.control.add_provider_grant(
+        self.database.register_inference_connector(
+            name="example-sidecar",
+            spec=connector_policy(self.root / "example-sidecar.sock"),
+            created_by=self.user["id"],
+        )
+        self.grant = self.control.add_connector_provider_grant(
             name="example-main",
             spec=policy(),
-            credential_path=self.secret_path,
             expires_at=None,
             created_by_handle="operator",
         )
@@ -207,9 +220,8 @@ class ProviderServiceTests(unittest.TestCase):
             run = self.database.get_run(str(run["id"]))
         return run
 
-    def test_add_and_invoke_keep_secret_transient_and_audit_only_metadata(self) -> None:
+    def test_add_and_invoke_use_connector_and_audit_only_metadata(self) -> None:
         self.assertNotIn("credential_ref", self.grant)
-        self.assertNotIn(self.secret.encode("ascii"), self.database.path.read_bytes())
         run = self.create_run()
 
         accepted = self.control.invoke_provider(
@@ -223,17 +235,14 @@ class ProviderServiceTests(unittest.TestCase):
         self.assertEqual(accepted.provider, "example-ai")
         self.assertEqual(accepted.model, "bounded-model")
         self.assertEqual(accepted.untrusted_response, {"output": [{"text": "done"}]})
-        self.assertEqual(
-            self.adapter.calls,
-            [(policy(), self.secret, {"input": "hello"})],
-        )
+        self.assertEqual(len(self.connector.calls), 1)
+        self.assertEqual(self.connector.calls[0].request, {"input": "hello"})
         invocations = self.database.list_provider_invocations(str(run["id"]))
         self.assertEqual(len(invocations), 1)
         self.assertEqual(invocations[0]["outcome"], "succeeded")
-        self.assertEqual(invocations[0]["request_bytes"], 51)
+        self.assertEqual(invocations[0]["request_bytes"], 17)
         self.assertEqual(invocations[0]["response_bytes"], 37)
         database_bytes = self.database.path.read_bytes()
-        self.assertNotIn(self.secret.encode("ascii"), database_bytes)
         self.assertNotIn(b"hello", database_bytes)
         self.assertNotIn(b"done", database_bytes)
         with closing(self.database.connect()) as connection:
@@ -241,6 +250,27 @@ class ProviderServiceTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM provider_dispatch_reservations"
             ).fetchone()[0]
         self.assertEqual(active, 0)
+
+    def test_release_failure_does_not_erase_a_completed_invocation(self) -> None:
+        run = self.create_run()
+
+        with mock.patch.object(
+            self.database,
+            "release_provider_dispatch",
+            side_effect=RuntimeError("private release failure"),
+        ):
+            accepted = self.control.invoke_provider(
+                str(run["id"]),
+                grant_name="example-main",
+                request={"input": "hello"},
+            )
+
+        self.assertIsInstance(accepted, AcceptedProviderResponse)
+        invocations = self.database.list_provider_invocations(str(run["id"]))
+        self.assertEqual(
+            [(item["outcome"], item["error_code"]) for item in invocations],
+            [("succeeded", None)],
+        )
 
     def test_dispatch_reservations_release_and_reclaim_expired_slots(self) -> None:
         run = self.create_run()
@@ -327,6 +357,66 @@ class ProviderServiceTests(unittest.TestCase):
         ):
             self.database.renew_provider_dispatch(reservation["id"], lease_seconds=2)
 
+    def test_connector_concurrency_limit_is_shared_across_distinct_grants(
+        self,
+    ) -> None:
+        second = self.database.create_connector_provider_grant(
+            name="example-secondary",
+            spec=policy(),
+            expires_at=None,
+            created_by=self.user["id"],
+        )
+        self.database.create_agent_profile(
+            name="Two Grant Worker",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:abc",
+                command=["agent"],
+                credential_names=["example-main", "example-secondary"],
+                gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
+            ),
+            krab_identity_id=self.identity["id"],
+            created_by=self.user["id"],
+        )
+        run = self.database.create_run(
+            project_key="box-project",
+            profile_name="Two Grant Worker",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+        )
+        attempt = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="codex",
+            owner_id="orchestrator-provider-test",
+            expected_run_version=run["version"],
+        )
+        self.database.start_run_attempt(
+            attempt["id"],
+            expected_attempt_version=attempt["version"],
+            expected_run_version=attempt["run_version"],
+            source_revision="abc123",
+            container_id="c" * 64,
+            container_name="magic-glass-box-two-grant-test",
+            image_id="sha256:" + "a" * 64,
+        )
+
+        first = self.database.reserve_provider_dispatch(
+            run["id"],
+            "example-main",
+            expected_grant_id=self.grant["id"],
+            lease_seconds=30,
+        )
+        blocked = self.database.reserve_provider_dispatch(
+            run["id"],
+            "example-secondary",
+            expected_grant_id=second["id"],
+            lease_seconds=30,
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(blocked)
+        assert first is not None
+        self.assertTrue(self.database.release_provider_dispatch(first["id"]))
+
     def test_non_running_and_revoked_run_authority_fail_before_resolution(self) -> None:
         queued = self.create_run(running=False)
         with self.assertRaisesRegex(ConflictError, "run is not running"):
@@ -335,7 +425,7 @@ class ProviderServiceTests(unittest.TestCase):
                 grant_name="example-main",
                 request={"input": "hello"},
             )
-        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.connector.calls, [])
 
         running = self.create_run()
         self.control.revoke_provider_grant(
@@ -347,17 +437,25 @@ class ProviderServiceTests(unittest.TestCase):
                 grant_name="example-main",
                 request={"input": "hello"},
             )
-        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.connector.calls, [])
 
     def test_revocation_committed_before_dispatch_fails_closed(self) -> None:
         run = self.create_run()
-        resolver = BlockingSecretResolver(self.secret)
-        adapter = RecordingAdapter()
+        connector = RecordingConnector()
         control = ControlPlane(
             self.database,
-            credential_resolver=resolver,  # type: ignore[arg-type]
-            provider_broker=ProviderBroker(adapters={"json_http": adapter}),
+            inference_client_factory=lambda _path: connector,
         )
+        reserve_started = threading.Event()
+        reserve_release = threading.Event()
+        original_reserve = self.database.reserve_provider_dispatch
+
+        def reserve(*args: object, **kwargs: object) -> object:
+            reserve_started.set()
+            if not reserve_release.wait(timeout=2):
+                raise RuntimeError("reservation test release timed out")
+            return original_reserve(*args, **kwargs)  # type: ignore[arg-type]
+
         outcomes: list[object] = []
 
         def invoke() -> None:
@@ -372,19 +470,22 @@ class ProviderServiceTests(unittest.TestCase):
             except Exception as exc:  # noqa: BLE001 - asserted below
                 outcomes.append(exc)
 
-        worker = threading.Thread(target=invoke)
-        worker.start()
-        self.assertTrue(resolver.started.wait(timeout=1))
-        self.control.revoke_provider_grant(
-            "example-main", expected_version=1, revoked_by_handle="operator"
-        )
-        resolver.release.set()
-        worker.join(timeout=2)
+        with mock.patch.object(
+            self.database, "reserve_provider_dispatch", side_effect=reserve
+        ):
+            worker = threading.Thread(target=invoke)
+            worker.start()
+            self.assertTrue(reserve_started.wait(timeout=1))
+            self.control.revoke_inference_connector(
+                "example-sidecar", expected_version=1, revoked_by_handle="operator"
+            )
+            reserve_release.set()
+            worker.join(timeout=2)
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(len(outcomes), 1)
         self.assertIsInstance(outcomes[0], ConflictError)
-        self.assertEqual(adapter.calls, [])
+        self.assertEqual(connector.calls, [])
         invocations = self.database.list_provider_invocations(str(run["id"]))
         self.assertEqual(
             [(item["outcome"], item["error_code"]) for item in invocations],
@@ -393,17 +494,15 @@ class ProviderServiceTests(unittest.TestCase):
 
     def test_concurrency_limit_is_shared_by_control_plane_instances(self) -> None:
         run = self.create_run()
-        first_adapter = BlockingAdapter()
-        second_adapter = RecordingAdapter()
+        first_connector = BlockingConnector()
+        second_connector = RecordingConnector()
         first_control = ControlPlane(
             self.database,
-            credential_resolver=PrivateFileCredentialResolver(),
-            provider_broker=ProviderBroker(adapters={"json_http": first_adapter}),
+            inference_client_factory=lambda _path: first_connector,
         )
         second_control = ControlPlane(
             self.database,
-            credential_resolver=PrivateFileCredentialResolver(),
-            provider_broker=ProviderBroker(adapters={"json_http": second_adapter}),
+            inference_client_factory=lambda _path: second_connector,
         )
         first_outcomes: list[object] = []
 
@@ -421,7 +520,7 @@ class ProviderServiceTests(unittest.TestCase):
 
         worker = threading.Thread(target=invoke_first)
         worker.start()
-        self.assertTrue(first_adapter.started.wait(timeout=1))
+        self.assertTrue(first_connector.started.wait(timeout=1))
         try:
             with self.assertRaises(ProviderBusyError):
                 second_control.invoke_provider(
@@ -430,13 +529,13 @@ class ProviderServiceTests(unittest.TestCase):
                     request={"input": "second"},
                 )
         finally:
-            first_adapter.release.set()
+            first_connector.release.set()
             worker.join(timeout=2)
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(len(first_outcomes), 1)
         self.assertIsInstance(first_outcomes[0], AcceptedProviderResponse)
-        self.assertEqual(second_adapter.calls, [])
+        self.assertEqual(second_connector.calls, [])
         invocations = self.database.list_provider_invocations(str(run["id"]))
         self.assertEqual(
             sorted(item["outcome"] for item in invocations),
@@ -445,11 +544,10 @@ class ProviderServiceTests(unittest.TestCase):
 
     def test_live_provider_dispatch_renews_its_cross_process_slot(self) -> None:
         run = self.create_run()
-        adapter = BlockingAdapter()
+        connector = BlockingConnector()
         control = ControlPlane(
             self.database,
-            credential_resolver=PrivateFileCredentialResolver(),
-            provider_broker=ProviderBroker(adapters={"json_http": adapter}),
+            inference_client_factory=lambda _path: connector,
         )
         renewed = threading.Event()
         original_renew = self.database.renew_provider_dispatch
@@ -483,11 +581,11 @@ class ProviderServiceTests(unittest.TestCase):
         ):
             worker = threading.Thread(target=invoke)
             worker.start()
-            self.assertTrue(adapter.started.wait(timeout=1))
+            self.assertTrue(connector.started.wait(timeout=1))
             try:
                 self.assertTrue(renewed.wait(timeout=1))
             finally:
-                adapter.release.set()
+                connector.release.set()
                 worker.join(timeout=2)
 
         self.assertFalse(worker.is_alive())
@@ -496,11 +594,10 @@ class ProviderServiceTests(unittest.TestCase):
 
     def test_provider_dispatch_renewal_failure_fails_closed_and_releases(self) -> None:
         run = self.create_run()
-        adapter = BlockingAdapter()
+        connector = BlockingConnector()
         control = ControlPlane(
             self.database,
-            credential_resolver=PrivateFileCredentialResolver(),
-            provider_broker=ProviderBroker(adapters={"json_http": adapter}),
+            inference_client_factory=lambda _path: connector,
         )
         renewal_attempted = threading.Event()
         outcomes: list[object] = []
@@ -534,11 +631,11 @@ class ProviderServiceTests(unittest.TestCase):
         ):
             worker = threading.Thread(target=invoke)
             worker.start()
-            self.assertTrue(adapter.started.wait(timeout=1))
+            self.assertTrue(connector.started.wait(timeout=1))
             try:
                 self.assertTrue(renewal_attempted.wait(timeout=1))
             finally:
-                adapter.release.set()
+                connector.release.set()
                 worker.join(timeout=2)
 
         self.assertFalse(worker.is_alive())
@@ -553,7 +650,7 @@ class ProviderServiceTests(unittest.TestCase):
         invocations = self.database.list_provider_invocations(str(run["id"]))
         self.assertEqual(
             [(item["outcome"], item["error_code"]) for item in invocations],
-            [("denied", "request_denied")],
+            [("ambiguous", "reservation_lost")],
         )
 
     def test_waiting_run_keeps_provider_authority_only_for_its_live_attempt(
@@ -590,7 +687,7 @@ class ProviderServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(accepted.model, "bounded-model")
-        self.assertEqual(len(self.adapter.calls), 1)
+        self.assertEqual(len(self.connector.calls), 1)
 
     def test_running_state_without_a_live_attempt_has_no_provider_authority(
         self,
@@ -618,7 +715,7 @@ class ProviderServiceTests(unittest.TestCase):
                 request={"input": "must remain denied"},
             )
 
-        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.connector.calls, [])
 
         waiting = self.database.transition_run(
             str(running["id"]),
@@ -631,16 +728,13 @@ class ProviderServiceTests(unittest.TestCase):
                 grant_name="example-main",
                 request={"input": "must remain denied"},
             )
-        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.connector.calls, [])
 
     def test_upstream_failure_is_redacted_and_metadata_is_audited(self) -> None:
         run = self.create_run()
-        self.adapter.failure = ProviderUpstreamError(
-            "provider request failed",
-            status_code=429,
-            request_bytes=50,
-            response_bytes=25,
-        )
+        self.connector.outcome = "failed"
+        self.connector.error_code = "quota_exhausted"
+        self.connector.provider_status = 429
         with self.assertRaises(ProviderUpstreamError):
             self.control.invoke_provider(
                 str(run["id"]),
@@ -650,10 +744,9 @@ class ProviderServiceTests(unittest.TestCase):
         invocation = self.database.list_provider_invocations(str(run["id"]))[0]
         self.assertEqual(invocation["outcome"], "failed")
         self.assertEqual(invocation["http_status"], 429)
-        self.assertEqual(invocation["error_code"], "upstream_error")
+        self.assertEqual(invocation["error_code"], "quota_exhausted")
         serialized = str(invocation)
         self.assertNotIn("sensitive", serialized)
-        self.assertNotIn(self.secret, serialized)
 
 
 if __name__ == "__main__":

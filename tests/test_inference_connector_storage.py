@@ -162,6 +162,7 @@ class InferenceConnectorStorageTests(unittest.TestCase):
                 "name": "openai-personal",
                 "state": "active",
                 "version": 1,
+                "connector_protocol_version": 1,
                 "deployment_sha256": "a" * 64,
                 "route": "chatgpt-main",
                 "credential_scope_sha256": "b" * 64,
@@ -194,7 +195,7 @@ class InferenceConnectorStorageTests(unittest.TestCase):
                     (grant["id"],),
                 )
 
-    def test_connector_grant_cannot_enter_run_authority_before_cutover(self) -> None:
+    def test_connector_grant_enters_run_authority_after_cutover(self) -> None:
         self.register()
         self.database.create_connector_provider_grant(
             name="openai-main",
@@ -212,18 +213,19 @@ class InferenceConnectorStorageTests(unittest.TestCase):
             user_id=self.user["id"],
         )
 
-        with self.assertRaisesRegex(ConflictError, "provider grant is unavailable"):
-            self.database.create_agent_profile(
-                name="Connector Worker",
-                spec=AgentProfileSpec.create(
-                    image="worker@sha256:abc",
-                    command=["worker"],
-                    credential_names=["openai-main"],
-                    gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
-                ),
-                krab_identity_id=identity["id"],
-                created_by=self.user["id"],
-            )
+        profile = self.database.create_agent_profile(
+            name="Connector Worker",
+            spec=AgentProfileSpec.create(
+                image="worker@sha256:abc",
+                command=["worker"],
+                credential_names=["openai-main"],
+                gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
+            ),
+            krab_identity_id=identity["id"],
+            created_by=self.user["id"],
+        )
+
+        self.assertEqual(profile["spec"]["credential_names"], ["openai-main"])
 
     def test_incompatible_or_inactive_connector_fails_without_partial_grant(
         self,
@@ -349,7 +351,8 @@ class InferenceConnectorMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-fourteen.db"
             connection = sqlite3.connect(path)
-            schema_fourteen = SCHEMA[: -len(INFERENCE_CONNECTOR_SCHEMA)]
+            connector_start = SCHEMA.index(INFERENCE_CONNECTOR_SCHEMA)
+            schema_fourteen = SCHEMA[:connector_start]
             connection.executescript(schema_fourteen)
             user_id = "boxu_" + "1" * 32
             connection.execute(
@@ -387,8 +390,8 @@ class InferenceConnectorMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 15)
-            self.assertEqual(first["schema_version"], 15)
+            self.assertEqual(SCHEMA_VERSION, 16)
+            self.assertEqual(first["schema_version"], 16)
             self.assertEqual(second, first)
             legacy = database.get_provider_grant("legacy-direct")
             self.assertEqual(legacy["grant_kind"], "direct")

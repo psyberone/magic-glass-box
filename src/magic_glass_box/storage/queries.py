@@ -55,11 +55,9 @@ class QueryStorage:
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
-            provider_references = connection.execute(
-                "SELECT rpg.authority_name, pg.credential_ref "
-                "FROM run_provider_grants rpg JOIN provider_grants pg "
-                "ON pg.id = rpg.provider_grant_id WHERE rpg.run_id = ? "
-                "ORDER BY rpg.authority_name",
+            provider_authorities = connection.execute(
+                "SELECT authority_name FROM run_provider_grants "
+                "WHERE run_id = ? ORDER BY authority_name",
                 (run_id,),
             ).fetchall()
             handoff_row = connection.execute(
@@ -110,11 +108,10 @@ class QueryStorage:
             raise StorageError("pinned run data is invalid") from exc
         result["credential_references"] = {
             "krab": result.pop("credential_ref"),
-            **{
-                provider["authority_name"]: provider["credential_ref"]
-                for provider in provider_references
-            },
         }
+        result["provider_authority_names"] = [
+            authority["authority_name"] for authority in provider_authorities
+        ]
         result["handoff"] = (
             None if handoff_row is None else self._handoff_record(handoff_row)
         )

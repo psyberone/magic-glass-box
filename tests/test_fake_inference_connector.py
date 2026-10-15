@@ -28,10 +28,31 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
 
             self.assertEqual(existing.read_text(encoding="utf-8"), "operator data")
 
+    def test_fake_connector_rejects_a_non_private_credential_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            credential = root / "provider.canary"
+            credential.write_text("private-value\n", encoding="ascii")
+            credential.chmod(0o644)
+
+            with self.assertRaisesRegex(SystemExit, "private regular file"):
+                fake_connector_main(
+                    [
+                        "--socket-path",
+                        str(root / "fake.sock"),
+                        "--credential-file",
+                        str(credential),
+                    ]
+                )
+
     def test_separate_process_serves_one_deterministic_bounded_invocation(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             socket_path = Path(temporary) / "fake.sock"
+            credential_path = Path(temporary) / "provider.canary"
+            credential = "connector-only-canary"  # noqa: S105
+            credential_path.write_text(credential + "\n", encoding="ascii")
+            credential_path.chmod(0o600)
             environment = {
                 "PATH": os.environ.get("PATH", ""),
                 "PYTHONDONTWRITEBYTECODE": "1",
@@ -48,6 +69,8 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
                     str(socket_path),
                     "--max-invocations",
                     "1",
+                    "--credential-file",
+                    str(credential_path),
                 ],
                 cwd=repository,
                 env=environment,
@@ -93,6 +116,7 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
 
         self.assertEqual(process.returncode, 0)
         self.assertEqual(stderr, "")
+        self.assertNotIn(credential, stdout)
         self.assertEqual(response.outcome, "succeeded")
         self.assertEqual(
             response.untrusted_response,

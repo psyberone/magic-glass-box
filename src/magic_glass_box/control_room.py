@@ -379,7 +379,9 @@ class ControlRoom:
                 row["expires_at"] is not None
                 and _timestamp(row["expires_at"], label="provider expiry") <= now
             )
-            dispatch_enabled = row["grant_kind"] == "direct"
+            dispatch_enabled = (
+                row["grant_kind"] == "connector" and row["connector_state"] == "active"
+            )
             available = row["state"] == "active" and not expired and dispatch_enabled
             if row["grant_kind"] == "direct":
                 assert isinstance(spec, ProviderGrantSpec)
@@ -909,9 +911,14 @@ class ControlRoom:
             connection,
             run_ids,
             "SELECT rpg.run_id, rpg.authority_name, pg.id AS grant_id, "
-            "pg.name, pg.state, pg.expires_at, pg.revoked_at "
+            "pg.name, pg.state, pg.grant_kind, pg.expires_at, pg.revoked_at, "
+            "c.state AS connector_state "
             "FROM run_provider_grants rpg JOIN provider_grants pg "
             "ON pg.id = rpg.provider_grant_id "
+            "LEFT JOIN provider_connector_bindings pcb "
+            "ON pcb.provider_grant_id = pg.id "
+            "LEFT JOIN inference_connectors c "
+            "ON c.id = pcb.inference_connector_id "
             "WHERE rpg.run_id IN ({run_ids}) "
             "ORDER BY rpg.run_id, rpg.authority_name",
         )
@@ -921,13 +928,21 @@ class ControlRoom:
                 row["expires_at"] is not None
                 and _timestamp(row["expires_at"], label="provider expiry") <= now
             )
-            authorities.append(
+            authority = dict(row)
+            authority.pop("grant_kind")
+            authority.pop("connector_state")
+            authority.update(
                 {
-                    **dict(row),
                     "expired": expired,
-                    "available": row["state"] == "active" and not expired,
+                    "available": (
+                        row["state"] == "active"
+                        and row["grant_kind"] == "connector"
+                        and row["connector_state"] == "active"
+                        and not expired
+                    ),
                 }
             )
+            authorities.append(authority)
         return authorities
 
     @staticmethod

@@ -8,7 +8,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import Database, StorageError
 from magic_glass_box.domain import (
     AgentProfileSpec,
@@ -17,13 +16,13 @@ from magic_glass_box.domain import (
     InteractionKind,
     NetworkMode,
     ProjectContext,
-    ProviderGrantSpec,
     RunState,
     WorkItemEnvelope,
     WorkspaceMode,
 )
 from magic_glass_box.executor import SandboxPlan, SandboxRequest, SandboxResult
 from magic_glass_box.gateway import GatewayEndpoint
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import (
     RunCoordinator,
@@ -32,7 +31,6 @@ from magic_glass_box.orchestration import (
 )
 from magic_glass_box.results import CapturedResult, ResultManifest
 from magic_glass_box.runtime import RuntimeAdapterError, RuntimeLaunch
-from magic_glass_box.service import ControlPlane
 from magic_glass_box.workspace import PreparedWorkspace
 
 USER_ID = "usr_" + "1" * 32
@@ -205,33 +203,54 @@ class RunCoordinatorTests(unittest.TestCase):
         self.database = Database(self.root / "control-plane.db")
         self.database.initialize()
         self.user = self.database.create_user("operator", "Local Operator")
-        provider_secret = self.root / "provider.secret"
-        provider_secret.write_text("provider-test-secret\n", encoding="ascii")
-        os.chmod(provider_secret, 0o600)
-        ControlPlane(
-            self.database,
-            credential_resolver=PrivateFileCredentialResolver(),
-        ).add_provider_grant(
-            name="provider-main",
-            spec=ProviderGrantSpec.from_mapping(
+        self.database.register_inference_connector(
+            name="test-sidecar",
+            spec=InferenceConnectorSpec.from_mapping(
                 {
-                    "provider": "test-provider",
-                    "adapter": "openai_responses",
-                    "destination": "http://127.0.0.1:9999/v1/responses",
-                    "method": "POST",
-                    "model": "pinned-test-model",
-                    "credential_header": "Authorization",
-                    "credential_prefix": "Bearer ",
-                    "static_headers": {},
+                    "schema_version": 1,
+                    "connector_protocol_version": 1,
+                    "deployment_sha256": "d" * 64,
+                    "transport": {
+                        "kind": "unix",
+                        "socket_path": str(self.root / "provider.sock"),
+                    },
+                    "routes": [
+                        {
+                            "name": "responses-main",
+                            "provider": "test-provider",
+                            "protocol": "openai-responses",
+                            "models": ["pinned-test-model"],
+                            "credential_scope_sha256": "e" * 64,
+                        }
+                    ],
                     "request_bytes": 2 * 1024 * 1024,
                     "response_bytes": 4 * 1024 * 1024,
                     "timeout_ms": 1000,
                     "max_concurrency": 1,
                 }
             ),
-            credential_path=provider_secret,
+            created_by=self.user["id"],
+        )
+        self.database.create_connector_provider_grant(
+            name="provider-main",
+            spec=InferenceGrantSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "connector_name": "test-sidecar",
+                    "deployment_sha256": "d" * 64,
+                    "route": "responses-main",
+                    "credential_scope_sha256": "e" * 64,
+                    "provider": "test-provider",
+                    "protocol": "openai-responses",
+                    "model": "pinned-test-model",
+                    "request_bytes": 2 * 1024 * 1024,
+                    "response_bytes": 4 * 1024 * 1024,
+                    "timeout_ms": 1000,
+                    "max_concurrency": 1,
+                }
+            ),
             expires_at=None,
-            created_by_handle="operator",
+            created_by=self.user["id"],
         )
         instance = self.database.create_krab_instance(
             "Local Krab", "http://127.0.0.1:8765"
