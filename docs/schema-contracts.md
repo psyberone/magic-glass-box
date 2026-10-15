@@ -12,6 +12,12 @@ request, the resolved immutable policy manifest, and review/validation evidence:
 `gate-evidence-v1.schema.json`. The request permits mutable image references;
 the durable policy contains only resolved immutable image IDs.
 
+Milestone 7C adds `integration-fold-v1.schema.json`,
+`landing-plan-v1.schema.json`, `landing-receipt-request-v1.schema.json`, and
+`landing-receipt-v1.schema.json`. Exact command derivation, nonce hashing,
+outcome-to-observed-revision binding, and durable ledger relationships remain
+runtime checks; the portable schemas provide structural preflight.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime parser is authoritative and additionally
 enforces invariants that portable JSON Schema cannot express, including:

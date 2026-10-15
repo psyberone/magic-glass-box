@@ -123,12 +123,17 @@ through the profile's exact `runtime_provider_grant`. It discards every inbound
 HTTP header except the small protocol-feature allowlist documented in
 [provider-broker.md](provider-broker.md).
 
-The trusted broker injects the pinned model and reusable credential, performs
-the sole outbound request, buffers the bounded SSE response, and returns it
-through the ephemeral committed-file mailbox. The bridge replays those bytes
-to the vendor CLI. Buffering adds first-token latency, but it preserves Docker
-`--network none`, keeps the carrier finite, and avoids putting a socket or
-credential in the worker. Neither request nor response bodies are durable.
+The current trusted broker injects the pinned model and reusable credential,
+performs the sole outbound request, buffers the bounded SSE response, and
+returns it through the ephemeral committed-file mailbox. Milestone 7D preserves
+this worker-facing flow while moving credential injection and upstream
+transport to a narrow inference connector; MGB will retain authorization and
+reservation authority without resolving the provider credential. The bridge
+replays the returned bytes to the vendor CLI. Buffering adds first-token
+latency, but it preserves Docker `--network none`, keeps the carrier finite,
+and avoids putting a socket or credential in the worker. Neither request nor
+response bodies are durable. See
+[inference-connectors.md](inference-connectors.md).
 
 The same entry point exposes bounded gateway calls to the agent:
 

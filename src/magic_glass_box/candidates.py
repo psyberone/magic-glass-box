@@ -1281,6 +1281,8 @@ class GitCandidateStore:
         blobs: Mapping[str, bytes],
         *,
         expected: CandidateManifest | None,
+        requested_base: str | None = None,
+        requested_object_format: str | None = None,
     ) -> MaterializedCandidate:
         if not isinstance(result, ResultManifest):
             raise CandidateError("candidate result must be a validated manifest")
@@ -1289,26 +1291,38 @@ class GitCandidateStore:
         self._validate_result_blobs(result, blobs)
         operation = self._new_operation()
         source: Path | None = None
-        if expected is None:
+        if (requested_base is None) != (requested_object_format is None):
+            raise CandidateError("candidate requested revision is incomplete")
+        if requested_base is None and expected is None:
             source = self._source_repository(repository)
             object_format, base = self._source_identity(
                 source, result.source_revision, operation
             )
+        elif requested_base is not None and requested_object_format is not None:
+            object_format = requested_object_format
+            base = requested_base
         else:
+            assert expected is not None
             object_format = expected.object_format
             base = expected.base_revision
-        object_length = GIT_OBJECT_FORMATS[object_format]
+        object_length = GIT_OBJECT_FORMATS.get(object_format)
+        if (
+            object_length is None
+            or not isinstance(base, str)
+            or OBJECT_ID_RE.fullmatch(base) is None
+            or len(base) != object_length
+        ):
+            raise CandidateError("candidate requested base revision is invalid")
         if expected is not None and (
             expected.project_id != project_id
             or expected.attempt_id != result.attempt_id
-            or result.source_revision != base
             or expected.result_content_sha256 != result.digest
         ):
             raise CandidateError("candidate recovery identity does not match")
         with self._lock(project_id, object_format, operation, create=True) as directory:
             self._sweep_abandoned_operations(directory)
             store = self._repository(directory, object_format, operation, create=True)
-            if expected is not None and not self._stored_commit(
+            if source is None and not self._stored_commit(
                 store,
                 base,
                 object_length=object_length,
@@ -1316,7 +1330,7 @@ class GitCandidateStore:
             ):
                 source = self._source_repository(repository)
                 source_format, source_base = self._source_identity(
-                    source, result.source_revision, operation
+                    source, base, operation
                 )
                 if source_format != object_format or source_base != base:
                     raise CandidateError("candidate recovery identity does not match")
@@ -1451,6 +1465,8 @@ class GitCandidateStore:
     ) -> MaterializedCandidate:
         if not isinstance(manifest, CandidateManifest):
             raise CandidateError("candidate recovery manifest is invalid")
+        if result.source_revision != manifest.base_revision:
+            raise CandidateError("candidate recovery identity does not match")
         return self._materialize(
             manifest.project_id,
             repository,
@@ -1458,6 +1474,66 @@ class GitCandidateStore:
             blobs,
             expected=manifest,
         )
+
+    def refold(
+        self,
+        origin: CandidateManifest,
+        repository: Path,
+        result: ResultManifest,
+        blobs: Mapping[str, bytes],
+        *,
+        base_revision: str,
+    ) -> MaterializedCandidate:
+        """Replay an original result against one exact, newer base revision."""
+
+        if not isinstance(origin, CandidateManifest):
+            raise CandidateError("candidate origin manifest is invalid")
+        if (
+            origin.attempt_id != result.attempt_id
+            or origin.result_content_sha256 != result.digest
+            or origin.base_revision != result.source_revision
+        ):
+            raise CandidateError("candidate refold origin does not match")
+        return self._materialize(
+            origin.project_id,
+            repository,
+            result,
+            blobs,
+            expected=None,
+            requested_base=base_revision,
+            requested_object_format=origin.object_format,
+        )
+
+    def recover_revision(
+        self,
+        manifest: CandidateManifest,
+        repository: Path,
+        result: ResultManifest,
+        blobs: Mapping[str, bytes],
+    ) -> MaterializedCandidate:
+        """Recover an exact original or derived revision from retained inputs."""
+
+        if not isinstance(manifest, CandidateManifest):
+            raise CandidateError("candidate recovery manifest is invalid")
+        return self._materialize(
+            manifest.project_id,
+            repository,
+            result,
+            blobs,
+            expected=manifest,
+        )
+
+    def repository_path(self, project_id: str, object_format: str) -> Path:
+        """Return the validated private repository backing one project."""
+
+        operation = self._new_operation()
+        with self._lock(
+            project_id,
+            object_format,
+            operation,
+            create=False,
+        ) as directory:
+            return self._repository(directory, object_format, operation, create=False)
 
     def inspect(self, manifest: CandidateManifest) -> MaterializedCandidate:
         if not isinstance(manifest, CandidateManifest):

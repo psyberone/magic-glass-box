@@ -4,6 +4,7 @@ import json
 import sqlite3
 from typing import Any
 
+from ..candidates import CandidateError, CandidateManifest
 from ..domain import (
     AttemptState,
     ProjectContext,
@@ -180,7 +181,8 @@ class GateStorage:
                 source = connection.execute(
                     "SELECT ic.id, ic.project_id, ic.context_version_id, "
                     "ic.work_thread_id, ic.base_revision, ic.head_revision, "
-                    "ic.tree_revision, ic.object_format, pc.context_json "
+                    "ic.tree_revision, ic.object_format, "
+                    "ic.result_content_sha256, pc.context_json "
                     "FROM integration_candidates ic "
                     "JOIN project_context_versions pc "
                     "ON pc.id = ic.context_version_id WHERE ic.id = ?",
@@ -194,7 +196,7 @@ class GateStorage:
                     )
                 except (ValidationError, TypeError, json.JSONDecodeError) as exc:
                     raise StorageError("candidate project context is invalid") from exc
-                expected = {
+                expected_identity = {
                     "project_id": source["project_id"],
                     "repository_identity": source["project_id"],
                     "context_version_id": source["context_version_id"],
@@ -202,17 +204,49 @@ class GateStorage:
                     "integration_ref": normalize_integration_ref(
                         context.default_branch
                     ),
+                }
+                if any(
+                    getattr(manifest, key) != value
+                    for key, value in expected_identity.items()
+                ):
+                    raise ConflictError(
+                        "gate policy does not match its candidate exact inputs"
+                    )
+                expected_revision = {
                     "expected_base_revision": source["base_revision"],
                     "head_revision": source["head_revision"],
                     "tree_revision": source["tree_revision"],
                     "object_format": source["object_format"],
                 }
                 if any(
-                    getattr(manifest, key) != value for key, value in expected.items()
+                    getattr(manifest, key) != value
+                    for key, value in expected_revision.items()
                 ):
-                    raise ConflictError(
-                        "gate policy does not match its candidate exact inputs"
-                    )
+                    fold = connection.execute(
+                        "SELECT 1 FROM integration_folds WHERE candidate_id = ? "
+                        "AND project_id = ? AND context_version_id = ? "
+                        "AND work_thread_id = ? AND integration_ref = ? "
+                        "AND base_revision = ? AND head_revision = ? "
+                        "AND tree_revision = ? AND object_format = ? "
+                        "AND result_content_sha256 = ?",
+                        (
+                            manifest.candidate_id,
+                            manifest.project_id,
+                            manifest.context_version_id,
+                            manifest.work_thread_id,
+                            manifest.integration_ref,
+                            manifest.expected_base_revision,
+                            manifest.head_revision,
+                            manifest.tree_revision,
+                            manifest.object_format,
+                            source["result_content_sha256"],
+                        ),
+                    ).fetchone()
+                    if fold is None:
+                        raise ConflictError(
+                            "gate policy does not match its candidate exact inputs "
+                            "or a recorded fold"
+                        )
                 creator = connection.execute(
                     "SELECT active FROM users WHERE id = ?", (created_by,)
                 ).fetchone()
@@ -322,6 +356,86 @@ class GateStorage:
             ).to_dict()
         except (ValidationError, TypeError, json.JSONDecodeError) as exc:
             raise StorageError("candidate project context is invalid") from exc
+
+    def get_gate_revision(self, policy_id: str) -> dict[str, Any]:
+        """Resolve one policy to its exact original or folded candidate tree."""
+
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        with self._read_snapshot() as connection:
+            policy_row = connection.execute(
+                f"SELECT {self._policy_columns()} "  # noqa: S608
+                "FROM integration_gate_policies WHERE id = ?",
+                (policy_id,),
+            ).fetchone()
+            if policy_row is None:
+                raise NotFoundError(f"gate policy not found: {policy_id}")
+            policy_record = self._policy_record(policy_row)
+            policy = GatePolicyManifest.from_mapping(policy_record["manifest"])
+            source = connection.execute(
+                "SELECT ic.manifest_json, pc.context_json "
+                "FROM integration_candidates ic "
+                "JOIN project_context_versions pc "
+                "ON pc.id = ic.context_version_id WHERE ic.id = ?",
+                (policy.candidate_id,),
+            ).fetchone()
+            if source is None:
+                raise StorageError("gate policy candidate is unavailable")
+            try:
+                origin = CandidateManifest.from_mapping(
+                    json.loads(source["manifest_json"])
+                )
+                context = ProjectContext.from_mapping(
+                    json.loads(source["context_json"])
+                )
+            except (
+                CandidateError,
+                ValidationError,
+                TypeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise StorageError("gate policy candidate identity is invalid") from exc
+            exact = CandidateManifest(
+                schema_version=origin.schema_version,
+                attempt_id=origin.attempt_id,
+                attempt_result_id=origin.attempt_result_id,
+                producer_run_id=origin.producer_run_id,
+                project_id=origin.project_id,
+                context_version_id=origin.context_version_id,
+                work_thread_id=origin.work_thread_id,
+                base_revision=policy.expected_base_revision,
+                result_content_sha256=origin.result_content_sha256,
+                head_revision=policy.head_revision,
+                tree_revision=policy.tree_revision,
+                object_format=policy.object_format,
+            )
+            if exact != origin:
+                fold = connection.execute(
+                    "SELECT 1 FROM integration_folds WHERE candidate_id = ? "
+                    "AND project_id = ? AND context_version_id = ? "
+                    "AND work_thread_id = ? AND integration_ref = ? "
+                    "AND base_revision = ? AND head_revision = ? "
+                    "AND tree_revision = ? AND object_format = ? "
+                    "AND result_content_sha256 = ?",
+                    (
+                        policy.candidate_id,
+                        policy.project_id,
+                        policy.context_version_id,
+                        policy.work_thread_id,
+                        policy.integration_ref,
+                        policy.expected_base_revision,
+                        policy.head_revision,
+                        policy.tree_revision,
+                        policy.object_format,
+                        origin.result_content_sha256,
+                    ),
+                ).fetchone()
+                if fold is None:
+                    raise StorageError("gate policy exact revision is unavailable")
+        return {
+            "policy": policy_record,
+            "manifest": exact.to_dict(),
+            "repository_path": context.repository_path,
+        }
 
     def list_gate_policies(
         self,
@@ -632,25 +746,25 @@ class GateStorage:
             ).fetchall()
         return [self._evidence_record(row) for row in rows]
 
-    def gate_readiness(self, policy_id: str) -> dict[str, Any]:
-        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
-        with self._read_snapshot() as connection:
-            policy_row = connection.execute(
-                f"SELECT {self._policy_columns()} "  # noqa: S608
-                "FROM integration_gate_policies WHERE id = ?",
-                (policy_id,),
-            ).fetchone()
-            if policy_row is None:
-                raise NotFoundError(f"gate policy not found: {policy_id}")
-            evidence_rows = connection.execute(
-                f"SELECT {self._evidence_columns('e')} "  # noqa: S608
-                "FROM integration_gate_evidence e JOIN ("
-                "SELECT gate_name, MAX(sequence) AS sequence "
-                "FROM integration_gate_evidence WHERE policy_id = ? "
-                "GROUP BY gate_name) latest ON latest.gate_name = e.gate_name "
-                "AND latest.sequence = e.sequence WHERE e.policy_id = ?",
-                (policy_id, policy_id),
-            ).fetchall()
+    def _gate_readiness(
+        self, connection: sqlite3.Connection, policy_id: str
+    ) -> dict[str, Any]:
+        policy_row = connection.execute(
+            f"SELECT {self._policy_columns()} "  # noqa: S608
+            "FROM integration_gate_policies WHERE id = ?",
+            (policy_id,),
+        ).fetchone()
+        if policy_row is None:
+            raise NotFoundError(f"gate policy not found: {policy_id}")
+        evidence_rows = connection.execute(
+            f"SELECT {self._evidence_columns('e')} "  # noqa: S608
+            "FROM integration_gate_evidence e JOIN ("
+            "SELECT gate_name, MAX(sequence) AS sequence "
+            "FROM integration_gate_evidence WHERE policy_id = ? "
+            "GROUP BY gate_name) latest ON latest.gate_name = e.gate_name "
+            "AND latest.sequence = e.sequence WHERE e.policy_id = ?",
+            (policy_id, policy_id),
+        ).fetchall()
         policy_record = self._policy_record(policy_row)
         manifest = GatePolicyManifest.from_mapping(policy_record["manifest"])
         latest = {
@@ -695,3 +809,8 @@ class GateStorage:
             "pending_count": pending,
             "gates": gates,
         }
+
+    def gate_readiness(self, policy_id: str) -> dict[str, Any]:
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        with self._read_snapshot() as connection:
+            return self._gate_readiness(connection, policy_id)

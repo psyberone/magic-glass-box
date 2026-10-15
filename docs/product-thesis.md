@@ -36,7 +36,10 @@ Magic Glass Box should preserve five guarantees:
 ## Ownership boundary
 
 Magic Glass Box owns execution policy, immutable run inputs, lifecycle state,
-interaction correlation, credential grants, cleanup, and audit metadata.
+interaction correlation, credential authority grants, cleanup, and audit
+metadata. Credential-bearing integrations own their upstream secret material;
+the core records and enforces what may be invoked without becoming the secret
+store itself.
 
 External work enters through a versioned, forge-neutral import document. Its
 text is untrusted input, not authority: it cannot choose a project, profile,
@@ -49,6 +52,12 @@ client or forge credential into the core. Optional provider sidecars may perform
 explicitly authorized effects using user-supplied configuration that is mounted
 only into that sidecar. Agents receive narrow capabilities, never the
 configuration directory or reusable credential.
+
+AI inference follows the same separation with a distinct narrow contract. MGB
+pins and authorizes the run, model, limits, concurrency, and later budget; an
+inference sidecar or external integration owns provider OAuth/API credentials,
+refresh, and outbound transport. It is not a raw proxy and does not give a
+worker a provider client.
 
 Imitation Krab owns identities, project roles, private message content,
 sessions, work claims, delivery, and message status. Magic Glass Box may retain

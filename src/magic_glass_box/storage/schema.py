@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1350,6 +1350,379 @@ BEGIN
 END;
 """
 
+INTEGRATION_SCHEMA = """
+CREATE TABLE work_item_landing_dependencies (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    dependent_work_item_id TEXT NOT NULL,
+    prerequisite_work_item_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'removed')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    created_by TEXT NOT NULL,
+    removed_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    removed_at TEXT,
+    UNIQUE (dependent_work_item_id, prerequisite_work_item_id),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (dependent_work_item_id)
+        REFERENCES work_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (prerequisite_work_item_id)
+        REFERENCES work_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (dependent_work_item_id != prerequisite_work_item_id),
+    CHECK (
+        (state = 'active' AND removed_by IS NULL AND removed_at IS NULL)
+        OR
+        (state = 'removed' AND removed_by IS NOT NULL AND removed_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE work_item_landing_dependency_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dependency_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('dependency.added', 'dependency.removed')),
+    actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (dependency_id, sequence),
+    FOREIGN KEY (dependency_id)
+        REFERENCES work_item_landing_dependencies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX work_item_landing_dependency_active
+    ON work_item_landing_dependencies(
+        project_id, dependent_work_item_id, prerequisite_work_item_id
+    ) WHERE state = 'active';
+CREATE INDEX work_item_landing_dependency_event_stream
+    ON work_item_landing_dependency_events(dependency_id, sequence);
+
+CREATE TABLE integration_refs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    repository_identity TEXT NOT NULL,
+    integration_ref TEXT NOT NULL,
+    object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+    current_revision TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (repository_identity = project_id),
+    CHECK (
+        (object_format = 'sha1' AND length(current_revision) = 40)
+        OR (object_format = 'sha256' AND length(current_revision) = 64)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX integration_ref_identity
+    ON integration_refs(project_id, integration_ref);
+
+CREATE TABLE integration_queue_items (
+    id TEXT PRIMARY KEY,
+    integration_ref_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    work_item_id TEXT NOT NULL,
+    work_thread_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    current_policy_id TEXT NOT NULL,
+    current_fold_id TEXT,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'queued', 'claimed', 'awaiting_receipt',
+            'refold_required', 'landed', 'cancelled'
+        )
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    event_sequence INTEGER NOT NULL CHECK (event_sequence >= 1),
+    owner_id TEXT,
+    lease_expires_at TEXT,
+    landed_receipt_id TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    landed_at TEXT,
+    cancelled_at TEXT,
+    UNIQUE (integration_ref_id, candidate_id),
+    FOREIGN KEY (integration_ref_id) REFERENCES integration_refs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (current_policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (current_fold_id) REFERENCES integration_folds(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landed_receipt_id)
+        REFERENCES integration_landing_receipts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (
+            state IN ('queued', 'refold_required')
+            AND owner_id IS NULL AND lease_expires_at IS NULL
+            AND landed_receipt_id IS NULL
+            AND landed_at IS NULL AND cancelled_at IS NULL
+        ) OR (
+            state = 'claimed'
+            AND owner_id IS NOT NULL AND lease_expires_at IS NOT NULL
+            AND landed_receipt_id IS NULL
+            AND landed_at IS NULL AND cancelled_at IS NULL
+        ) OR (
+            state = 'awaiting_receipt'
+            AND owner_id IS NULL AND lease_expires_at IS NULL
+            AND landed_receipt_id IS NULL
+            AND landed_at IS NULL AND cancelled_at IS NULL
+        ) OR (
+            state = 'landed'
+            AND owner_id IS NULL AND lease_expires_at IS NULL
+            AND landed_receipt_id IS NOT NULL
+            AND landed_at IS NOT NULL AND cancelled_at IS NULL
+        ) OR (
+            state = 'cancelled'
+            AND owner_id IS NULL AND lease_expires_at IS NULL
+            AND landed_receipt_id IS NULL
+            AND landed_at IS NULL AND cancelled_at IS NOT NULL
+        )
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX integration_queue_one_active_thread
+    ON integration_queue_items(integration_ref_id, work_thread_id)
+    WHERE state NOT IN ('landed', 'cancelled');
+CREATE UNIQUE INDEX integration_queue_one_lane_owner
+    ON integration_queue_items(integration_ref_id)
+    WHERE state IN ('claimed', 'awaiting_receipt');
+CREATE INDEX integration_queue_state_created
+    ON integration_queue_items(state, created_at, id);
+CREATE INDEX integration_queue_ref_created
+    ON integration_queue_items(integration_ref_id, created_at, id);
+CREATE INDEX integration_queue_work_item
+    ON integration_queue_items(work_item_id, state, created_at);
+
+CREATE TABLE integration_folds (
+    id TEXT PRIMARY KEY,
+    queue_item_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    manifest_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    context_version_id TEXT NOT NULL,
+    work_thread_id TEXT NOT NULL,
+    integration_ref TEXT NOT NULL,
+    base_revision TEXT NOT NULL,
+    head_revision TEXT NOT NULL,
+    tree_revision TEXT NOT NULL,
+    object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+    result_content_sha256 TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (queue_item_id, generation),
+    UNIQUE (candidate_id, integration_ref, base_revision, head_revision),
+    FOREIGN KEY (queue_item_id)
+        REFERENCES integration_queue_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (context_version_id)
+        REFERENCES project_context_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (object_format = 'sha1'
+            AND length(base_revision) = 40
+            AND length(head_revision) = 40
+            AND length(tree_revision) = 40)
+        OR
+        (object_format = 'sha256'
+            AND length(base_revision) = 64
+            AND length(head_revision) = 64
+            AND length(tree_revision) = 64)
+    )
+) STRICT;
+
+CREATE INDEX integration_fold_item_generation
+    ON integration_folds(queue_item_id, generation DESC);
+CREATE INDEX integration_fold_exact_target
+    ON integration_folds(candidate_id, integration_ref, base_revision, head_revision);
+
+CREATE TABLE integration_queue_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_item_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'queue.created', 'queue.claimed', 'queue.claim_expired',
+            'queue.claim_released', 'queue.plan_issued',
+            'queue.not_landed', 'queue.refolded',
+            'queue.refold_required', 'queue.landed', 'queue.cancelled'
+        )
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (queue_item_id, sequence),
+    FOREIGN KEY (queue_item_id)
+        REFERENCES integration_queue_items(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX integration_queue_event_stream
+    ON integration_queue_events(queue_item_id, sequence);
+
+CREATE TABLE integration_landing_plans (
+    id TEXT PRIMARY KEY,
+    queue_item_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    plan_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    nonce_sha256 TEXT NOT NULL,
+    evidence_snapshot_json TEXT NOT NULL,
+    evidence_snapshot_sha256 TEXT NOT NULL,
+    actuator TEXT NOT NULL CHECK (actuator = 'git-force-with-lease-v1'),
+    assurance TEXT NOT NULL CHECK (assurance = 'base_and_head_enforced'),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'landed', 'not_landed')),
+    issued_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (queue_item_id, sequence),
+    FOREIGN KEY (queue_item_id)
+        REFERENCES integration_queue_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (issued_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'pending' AND resolved_at IS NULL)
+        OR (state IN ('landed', 'not_landed') AND resolved_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX integration_plan_one_pending
+    ON integration_landing_plans(queue_item_id) WHERE state = 'pending';
+CREATE INDEX integration_plan_created
+    ON integration_landing_plans(created_at DESC, id DESC);
+
+CREATE TABLE integration_landing_receipts (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    receipt_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    outcome TEXT NOT NULL CHECK (outcome IN ('landed', 'not_landed')),
+    observed_revision TEXT NOT NULL,
+    assurance TEXT NOT NULL CHECK (
+        assurance IN ('base_and_head_enforced', 'operator_attested')
+    ),
+    recorded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (plan_id)
+        REFERENCES integration_landing_plans(id) ON DELETE RESTRICT,
+    FOREIGN KEY (recorded_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX integration_receipt_created
+    ON integration_landing_receipts(created_at DESC, id DESC);
+
+CREATE TRIGGER work_item_landing_dependency_identity_immutable
+BEFORE UPDATE OF
+    id, project_id, dependent_work_item_id, prerequisite_work_item_id,
+    created_by, created_at
+ON work_item_landing_dependencies
+BEGIN
+    SELECT RAISE(ABORT, 'landing dependency identity is immutable');
+END;
+CREATE TRIGGER work_item_landing_dependency_immutable_delete
+BEFORE DELETE ON work_item_landing_dependencies
+BEGIN
+    SELECT RAISE(ABORT, 'landing dependencies cannot be deleted');
+END;
+CREATE TRIGGER work_item_landing_dependency_event_immutable_update
+BEFORE UPDATE ON work_item_landing_dependency_events
+BEGIN
+    SELECT RAISE(ABORT, 'landing dependency events are immutable');
+END;
+CREATE TRIGGER work_item_landing_dependency_event_immutable_delete
+BEFORE DELETE ON work_item_landing_dependency_events
+BEGIN
+    SELECT RAISE(ABORT, 'landing dependency events cannot be deleted');
+END;
+CREATE TRIGGER integration_ref_identity_immutable
+BEFORE UPDATE OF
+    id, project_id, repository_identity, integration_ref, object_format,
+    created_by, created_at
+ON integration_refs
+BEGIN
+    SELECT RAISE(ABORT, 'integration ref identity is immutable');
+END;
+CREATE TRIGGER integration_ref_immutable_delete
+BEFORE DELETE ON integration_refs
+BEGIN
+    SELECT RAISE(ABORT, 'integration refs cannot be deleted');
+END;
+CREATE TRIGGER integration_queue_identity_immutable
+BEFORE UPDATE OF
+    id, integration_ref_id, project_id, work_item_id, work_thread_id,
+    candidate_id, created_by, created_at
+ON integration_queue_items
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue identity is immutable');
+END;
+CREATE TRIGGER integration_queue_immutable_delete
+BEFORE DELETE ON integration_queue_items
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue items cannot be deleted');
+END;
+CREATE TRIGGER integration_fold_immutable_update
+BEFORE UPDATE ON integration_folds
+BEGIN
+    SELECT RAISE(ABORT, 'integration folds are immutable');
+END;
+CREATE TRIGGER integration_fold_immutable_delete
+BEFORE DELETE ON integration_folds
+BEGIN
+    SELECT RAISE(ABORT, 'integration folds cannot be deleted');
+END;
+CREATE TRIGGER integration_queue_event_immutable_update
+BEFORE UPDATE ON integration_queue_events
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue events are immutable');
+END;
+CREATE TRIGGER integration_queue_event_immutable_delete
+BEFORE DELETE ON integration_queue_events
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue events cannot be deleted');
+END;
+CREATE TRIGGER integration_landing_plan_identity_immutable
+BEFORE UPDATE OF
+    id, queue_item_id, sequence, schema_version, plan_json, content_sha256,
+    nonce_sha256, evidence_snapshot_json, evidence_snapshot_sha256,
+    actuator, assurance, issued_by, created_at
+ON integration_landing_plans
+BEGIN
+    SELECT RAISE(ABORT, 'landing plan identity is immutable');
+END;
+CREATE TRIGGER integration_landing_plan_immutable_delete
+BEFORE DELETE ON integration_landing_plans
+BEGIN
+    SELECT RAISE(ABORT, 'landing plans cannot be deleted');
+END;
+CREATE TRIGGER integration_landing_receipt_immutable_update
+BEFORE UPDATE ON integration_landing_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'landing receipts are immutable');
+END;
+CREATE TRIGGER integration_landing_receipt_immutable_delete
+BEFORE DELETE ON integration_landing_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'landing receipts cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -1364,6 +1737,7 @@ SCHEMA = (
     + CANDIDATE_SCHEMA
     + PROVIDER_DISPATCH_SCHEMA
     + GATE_SCHEMA
+    + INTEGRATION_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -1378,4 +1752,5 @@ MIGRATIONS = {
     10: CANDIDATE_SCHEMA,
     11: PROVIDER_DISPATCH_SCHEMA,
     12: GATE_SCHEMA,
+    13: INTEGRATION_SCHEMA,
 }

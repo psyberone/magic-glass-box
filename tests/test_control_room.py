@@ -243,7 +243,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 13)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], 14)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",
@@ -311,6 +311,8 @@ class ControlRoomTests(unittest.TestCase):
                 "retained_results",
                 "candidates",
                 "gate_policies",
+                "landing_dependencies",
+                "integration_queue",
                 "run_authorities",
                 "supervisor_actions",
                 "escalations",
@@ -346,6 +348,9 @@ class ControlRoomTests(unittest.TestCase):
                 "integration_gate_policies",
                 "integration_gate_review_runs",
                 "integration_gate_evidence",
+                "integration_queue",
+                "landing_dependencies",
+                "pending_landing_plans",
                 "supervisor_actions",
                 "escalations",
                 "attention",

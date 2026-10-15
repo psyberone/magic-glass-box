@@ -198,6 +198,82 @@ class FakeControlPlane:
     def gate_readiness(self, policy_id: str) -> dict[str, object]:
         return self._called("gate.readiness", policy_id=policy_id)
 
+    def add_landing_dependency(
+        self,
+        dependent_work_item_id: str,
+        prerequisite_work_item_id: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        return self._called(
+            "integration.dependency-add",
+            dependent_work_item_id=dependent_work_item_id,
+            prerequisite_work_item_id=prerequisite_work_item_id,
+            **kwargs,
+        )
+
+    def remove_landing_dependency(
+        self, dependency_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "integration.dependency-remove", dependency_id=dependency_id, **kwargs
+        )
+
+    def list_landing_dependencies(self, **kwargs: object) -> dict[str, object]:
+        return self._called("integration.dependency-list", **kwargs)
+
+    def enqueue_integration(
+        self, policy_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("integration.enqueue", policy_id=policy_id, **kwargs)
+
+    def get_integration_queue_item(self, queue_item_id: str) -> dict[str, object]:
+        return self._called("integration.show", queue_item_id=queue_item_id)
+
+    def list_integration_queue(self, **kwargs: object) -> dict[str, object]:
+        return self._called("integration.list", **kwargs)
+
+    def refold_integration_item(
+        self, queue_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("integration.refold", queue_item_id=queue_item_id, **kwargs)
+
+    def activate_integration_fold(
+        self, queue_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "integration.activate", queue_item_id=queue_item_id, **kwargs
+        )
+
+    def claim_integration_item(
+        self, queue_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("integration.claim", queue_item_id=queue_item_id, **kwargs)
+
+    def release_integration_claim(
+        self, queue_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "integration.release", queue_item_id=queue_item_id, **kwargs
+        )
+
+    def cancel_integration_item(
+        self, queue_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("integration.cancel", queue_item_id=queue_item_id, **kwargs)
+
+    def issue_landing_plan(
+        self, queue_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("integration.plan", queue_item_id=queue_item_id, **kwargs)
+
+    def get_landing_plan(self, plan_id: str) -> dict[str, object]:
+        return self._called("integration.plan-show", plan_id=plan_id)
+
+    def record_landing_receipt(
+        self, request: object, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("integration.receipt", request=request, **kwargs)
+
 
 class FakeRunCoordinator:
     def __init__(self) -> None:
@@ -311,6 +387,10 @@ class CLITests(unittest.TestCase):
                     ("result", "inspect and apply retained work"),
                     ("candidate", "materialize and inspect trusted candidates"),
                     ("gate", "manage exact-input integration gates"),
+                    (
+                        "integration",
+                        "order, refold, and manually land exact candidates",
+                    ),
                 ),
             ),
             ("user",): (
@@ -451,6 +531,56 @@ class CLITests(unittest.TestCase):
                     ("readiness", "derive current exact-input readiness"),
                 ),
             ),
+            ("integration",): (
+                "integration_command",
+                True,
+                (
+                    (
+                        "dependency-add",
+                        "add a hard work-item landing dependency",
+                    ),
+                    (
+                        "dependency-remove",
+                        "remove a hard landing dependency",
+                    ),
+                    (
+                        "dependency-list",
+                        "list durable work-item landing dependencies",
+                    ),
+                    ("enqueue", "queue one gate policy for its integration ref"),
+                    (
+                        "show",
+                        "show one integration queue item and its event stream",
+                    ),
+                    ("list", "list durable integration queue items"),
+                    (
+                        "refold",
+                        "replay an original result onto the current integration base",
+                    ),
+                    (
+                        "activate",
+                        "bind a fresh folded policy and return the item to queue",
+                    ),
+                    (
+                        "claim",
+                        "lease one ready item on its serialized ref lane",
+                    ),
+                    (
+                        "release",
+                        "release a claimed item before authority is issued",
+                    ),
+                    (
+                        "cancel",
+                        "cancel an item before landing authority is issued",
+                    ),
+                    ("plan", "issue an exact argv-only manual landing plan"),
+                    ("plan-show", "show one issued plan without its raw nonce"),
+                    (
+                        "receipt",
+                        "record one nonce-bound landed or not-landed outcome",
+                    ),
+                ),
+            ),
         }
 
         actual: dict[
@@ -580,6 +710,40 @@ class CLITests(unittest.TestCase):
                     "--recorded-by",
                     "--expected-policy-revision",
                 ),
+                ("integration", "dependency-add"): ("--created-by",),
+                ("integration", "dependency-remove"): (
+                    "--expected-version",
+                    "--removed-by",
+                ),
+                ("integration", "enqueue"): ("--created-by",),
+                ("integration", "refold"): (
+                    "--expected-version",
+                    "--created-by",
+                ),
+                ("integration", "activate"): (
+                    "--fold",
+                    "--policy",
+                    "--expected-version",
+                    "--actor",
+                ),
+                ("integration", "claim"): (
+                    "--owner",
+                    "--expected-version",
+                ),
+                ("integration", "release"): (
+                    "--owner",
+                    "--expected-version",
+                ),
+                ("integration", "cancel"): (
+                    "--expected-version",
+                    "--cancelled-by",
+                ),
+                ("integration", "plan"): (
+                    "--owner",
+                    "--expected-version",
+                    "--issued-by",
+                ),
+                ("integration", "receipt"): ("--document", "--recorded-by"),
             },
         )
         self.assertEqual(
@@ -1405,6 +1569,7 @@ class CLITests(unittest.TestCase):
                 "result": "inspect and apply retained work",
                 "candidate": "materialize and inspect trusted candidates",
                 "gate": "manage exact-input integration gates",
+                "integration": "order, refold, and manually land exact candidates",
             },
         )
         expected_nested = {
@@ -1470,6 +1635,24 @@ class CLITests(unittest.TestCase):
                 "validate": "run one pinned local validation gate",
                 "evidence-list": "list append-only gate evidence",
                 "readiness": "derive current exact-input readiness",
+            },
+            "integration": {
+                "dependency-add": "add a hard work-item landing dependency",
+                "dependency-remove": "remove a hard landing dependency",
+                "dependency-list": "list durable work-item landing dependencies",
+                "enqueue": "queue one gate policy for its integration ref",
+                "show": "show one integration queue item and its event stream",
+                "list": "list durable integration queue items",
+                "refold": (
+                    "replay an original result onto the current integration base"
+                ),
+                "activate": ("bind a fresh folded policy and return the item to queue"),
+                "claim": "lease one ready item on its serialized ref lane",
+                "release": "release a claimed item before authority is issued",
+                "cancel": "cancel an item before landing authority is issued",
+                "plan": "issue an exact argv-only manual landing plan",
+                "plan-show": "show one issued plan without its raw nonce",
+                "receipt": "record one nonce-bound landed or not-landed outcome",
             },
         }
         for command, expected_help in expected_nested.items():
@@ -2134,6 +2317,305 @@ class CLITests(unittest.TestCase):
                 },
             ),
         )
+
+    def test_integration_ledger_routes_stay_off_object_stores(self) -> None:
+        control = FakeControlPlane()
+        queue_id = "iqm_" + "1" * 32
+        policy_id = "gpl_" + "2" * 32
+        fold_id = "ifd_" + "3" * 32
+        dependency_id = "ldp_" + "4" * 32
+        plan_id = "lpl_" + "5" * 32
+        receipt_path = Path(self.temporary.name) / "receipt.json"
+        receipt_document = {
+            "schema_version": 1,
+            "plan_id": plan_id,
+            "request_sha256": "6" * 64,
+            "nonce": "7" * 64,
+            "outcome": "landed",
+            "observed_revision": "8" * 40,
+        }
+        receipt_path.write_text(json.dumps(receipt_document), encoding="utf-8")
+        cases = (
+            (
+                [
+                    "integration",
+                    "dependency-add",
+                    "wi-dependent",
+                    "wi-prerequisite",
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "integration.dependency-add",
+                    {
+                        "dependent_work_item_id": "wi-dependent",
+                        "prerequisite_work_item_id": "wi-prerequisite",
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "dependency-remove",
+                    dependency_id,
+                    "--expected-version",
+                    "2",
+                    "--removed-by",
+                    "operator",
+                ],
+                (
+                    "integration.dependency-remove",
+                    {
+                        "dependency_id": dependency_id,
+                        "expected_version": 2,
+                        "removed_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "dependency-list",
+                    "--project",
+                    "project",
+                    "--active-only",
+                    "--limit",
+                    "12",
+                ],
+                (
+                    "integration.dependency-list",
+                    {"project_key": "project", "active_only": True, "limit": 12},
+                ),
+            ),
+            (
+                ["integration", "enqueue", policy_id, "--created-by", "operator"],
+                (
+                    "integration.enqueue",
+                    {"policy_id": policy_id, "created_by_handle": "operator"},
+                ),
+            ),
+            (
+                ["integration", "show", queue_id],
+                ("integration.show", {"queue_item_id": queue_id}),
+            ),
+            (
+                ["integration", "list", "--project", "project", "--limit", "9"],
+                ("integration.list", {"project_key": "project", "limit": 9}),
+            ),
+            (
+                [
+                    "integration",
+                    "activate",
+                    queue_id,
+                    "--fold",
+                    fold_id,
+                    "--policy",
+                    policy_id,
+                    "--expected-version",
+                    "3",
+                    "--actor",
+                    "operator",
+                ],
+                (
+                    "integration.activate",
+                    {
+                        "queue_item_id": queue_id,
+                        "fold_id": fold_id,
+                        "policy_id": policy_id,
+                        "expected_version": 3,
+                        "actor_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "claim",
+                    queue_id,
+                    "--owner",
+                    "supervisor",
+                    "--expected-version",
+                    "3",
+                    "--lease-seconds",
+                    "90",
+                ],
+                (
+                    "integration.claim",
+                    {
+                        "queue_item_id": queue_id,
+                        "owner_id": "supervisor",
+                        "expected_version": 3,
+                        "lease_seconds": 90,
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "release",
+                    queue_id,
+                    "--owner",
+                    "supervisor",
+                    "--expected-version",
+                    "4",
+                ],
+                (
+                    "integration.release",
+                    {
+                        "queue_item_id": queue_id,
+                        "owner_id": "supervisor",
+                        "expected_version": 4,
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "cancel",
+                    queue_id,
+                    "--expected-version",
+                    "4",
+                    "--cancelled-by",
+                    "operator",
+                ],
+                (
+                    "integration.cancel",
+                    {
+                        "queue_item_id": queue_id,
+                        "expected_version": 4,
+                        "cancelled_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                ["integration", "plan-show", plan_id],
+                ("integration.plan-show", {"plan_id": plan_id}),
+            ),
+            (
+                [
+                    "integration",
+                    "receipt",
+                    "--document",
+                    str(receipt_path),
+                    "--recorded-by",
+                    "operator",
+                ],
+                (
+                    "integration.receipt",
+                    {
+                        "request": receipt_document,
+                        "recorded_by_handle": "operator",
+                    },
+                ),
+            ),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch(
+                        "magic_glass_box.cli.ControlPlane", return_value=control
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_result_store",
+                        side_effect=AssertionError("result store should stay cold"),
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_candidate_store",
+                        side_effect=AssertionError("candidate store should stay cold"),
+                    ),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(control.calls[-1], expected)
+                self.assertEqual(
+                    json.loads(stdout.getvalue())["operation"], expected[0]
+                )
+
+    def test_integration_refold_and_plan_routes_open_both_object_stores(self) -> None:
+        control = FakeControlPlane()
+        result_store = FakeResultStore()
+        candidate_store = FakeCandidateStore()
+        queue_id = "iqm_" + "1" * 32
+        cases = (
+            (
+                [
+                    "integration",
+                    "refold",
+                    queue_id,
+                    "--expected-version",
+                    "7",
+                    "--created-by",
+                    "operator",
+                    "--operation-timeout",
+                    "12.5",
+                ],
+                (
+                    "integration.refold",
+                    {
+                        "queue_item_id": queue_id,
+                        "expected_version": 7,
+                        "created_by_handle": "operator",
+                        "result_store": result_store,
+                        "candidate_store": candidate_store,
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "plan",
+                    queue_id,
+                    "--owner",
+                    "supervisor",
+                    "--expected-version",
+                    "8",
+                    "--remote",
+                    "upstream",
+                    "--issued-by",
+                    "operator",
+                ],
+                (
+                    "integration.plan",
+                    {
+                        "queue_item_id": queue_id,
+                        "owner_id": "supervisor",
+                        "expected_version": 8,
+                        "remote": "upstream",
+                        "issued_by_handle": "operator",
+                        "result_store": result_store,
+                        "candidate_store": candidate_store,
+                    },
+                ),
+            ),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch(
+                        "magic_glass_box.cli.ControlPlane", return_value=control
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_result_store",
+                        return_value=result_store,
+                    ),
+                    mock.patch(
+                        "magic_glass_box.cli._build_candidate_store",
+                        return_value=candidate_store,
+                    ) as build_candidate_store,
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                timeout = 12.5 if arguments[1] == "refold" else 60.0
+                build_candidate_store.assert_called_once_with(control, timeout=timeout)
+                self.assertEqual(control.calls[-1], expected)
+                self.assertEqual(
+                    json.loads(stdout.getvalue())["operation"], expected[0]
+                )
 
     def test_review_only_gate_policy_does_not_require_a_docker_client(self) -> None:
         control = FakeControlPlane()

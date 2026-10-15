@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:integration-fold:v1",
+  "title": "Magic Glass Box Integration Fold v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "base_revision",
+    "candidate_id",
+    "context_version_id",
+    "generation",
+    "head_revision",
+    "integration_ref",
+    "object_format",
+    "project_id",
+    "result_content_sha256",
+    "schema_version",
+    "tree_revision",
+    "work_thread_id"
+  ],
+  "properties": {
+    "base_revision": { "$ref": "#/$defs/objectId" },
+    "candidate_id": { "type": "string", "pattern": "^cnd_[0-9a-f]{32}$" },
+    "context_version_id": { "type": "string", "pattern": "^ctx_[0-9a-f]{32}$" },
+    "generation": { "type": "integer", "minimum": 1 },
+    "head_revision": { "$ref": "#/$defs/objectId" },
+    "integration_ref": { "$ref": "#/$defs/integrationRef" },
+    "object_format": { "enum": ["sha1", "sha256"] },
+    "project_id": { "type": "string", "pattern": "^boxp_[0-9a-f]{32}$" },
+    "result_content_sha256": { "$ref": "#/$defs/sha256" },
+    "schema_version": { "const": 1 },
+    "tree_revision": { "$ref": "#/$defs/objectId" },
+    "work_thread_id": { "type": "string", "pattern": "^wth_[0-9a-f]{32}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "object_format": { "const": "sha1" } }, "required": ["object_format"] },
+      "then": {
+        "properties": {
+          "base_revision": { "pattern": "^[0-9a-f]{40}$" },
+          "head_revision": { "pattern": "^[0-9a-f]{40}$" },
+          "tree_revision": { "pattern": "^[0-9a-f]{40}$" }
+        }
+      },
+      "else": {
+        "properties": {
+          "base_revision": { "pattern": "^[0-9a-f]{64}$" },
+          "head_revision": { "pattern": "^[0-9a-f]{64}$" },
+          "tree_revision": { "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "integrationRef": {
+      "type": "string",
+      "pattern": "^refs/heads/[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$",
+      "maxLength": 512
+    },
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

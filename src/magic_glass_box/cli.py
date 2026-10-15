@@ -37,6 +37,7 @@ from .executor import (
 )
 from .gates import GateError
 from .gateway import FileGatewayManager, default_gateway_root
+from .integration import IntegrationError
 from .krab import KrabError
 from .orchestration import (
     CandidateReviewWorkspaces,
@@ -147,6 +148,10 @@ def _worker_count(value: str) -> int:
 
 def _action_lease_seconds(value: str) -> int:
     return _bounded_integer(value, minimum=10, maximum=3600)
+
+
+def _integration_lease_seconds(value: str) -> int:
+    return _bounded_integer(value, minimum=1, maximum=3600)
 
 
 def _json_file(path: Path) -> dict[str, Any]:
@@ -549,6 +554,9 @@ def build_parser() -> argparse.ArgumentParser:
     gate_policy_create.add_argument("candidate_id")
     gate_policy_create.add_argument("--policy", required=True, type=Path)
     gate_policy_create.add_argument("--created-by", required=True)
+    gate_policy_create.add_argument(
+        "--fold", help="bind the fresh policy to this recorded fold"
+    )
     gate_policy_show = gate_commands.add_parser(
         "policy-show", help="show one immutable gate policy"
     )
@@ -622,6 +630,107 @@ def build_parser() -> argparse.ArgumentParser:
         "readiness", help="derive current exact-input readiness"
     )
     gate_readiness.add_argument("policy_id")
+
+    integration = commands.add_parser(
+        "integration", help="order, refold, and manually land exact candidates"
+    )
+    integration_commands = integration.add_subparsers(
+        dest="integration_command", required=True
+    )
+    dependency_add = integration_commands.add_parser(
+        "dependency-add", help="add a hard work-item landing dependency"
+    )
+    dependency_add.add_argument("dependent_work_item_id")
+    dependency_add.add_argument("prerequisite_work_item_id")
+    dependency_add.add_argument("--created-by", required=True)
+    dependency_remove = integration_commands.add_parser(
+        "dependency-remove", help="remove a hard landing dependency"
+    )
+    dependency_remove.add_argument("dependency_id")
+    dependency_remove.add_argument("--expected-version", required=True, type=int)
+    dependency_remove.add_argument("--removed-by", required=True)
+    dependency_list = integration_commands.add_parser(
+        "dependency-list", help="list durable work-item landing dependencies"
+    )
+    dependency_list.add_argument("--project")
+    dependency_list.add_argument("--active-only", action="store_true")
+    dependency_list.add_argument("--limit", type=_candidate_limit, default=500)
+    enqueue = integration_commands.add_parser(
+        "enqueue", help="queue one gate policy for its integration ref"
+    )
+    enqueue.add_argument("policy_id")
+    enqueue.add_argument("--created-by", required=True)
+    queue_show = integration_commands.add_parser(
+        "show", help="show one integration queue item and its event stream"
+    )
+    queue_show.add_argument("queue_item_id")
+    queue_list = integration_commands.add_parser(
+        "list", help="list durable integration queue items"
+    )
+    queue_list.add_argument("--project")
+    queue_list.add_argument("--limit", type=_candidate_limit, default=100)
+    refold = integration_commands.add_parser(
+        "refold", help="replay an original result onto the current integration base"
+    )
+    refold.add_argument("queue_item_id")
+    refold.add_argument("--expected-version", required=True, type=int)
+    refold.add_argument("--created-by", required=True)
+    refold.add_argument(
+        "--operation-timeout",
+        dest="candidate_timeout",
+        type=_positive_seconds,
+        default=DEFAULT_GIT_TIMEOUT_SECONDS,
+    )
+    activate = integration_commands.add_parser(
+        "activate", help="bind a fresh folded policy and return the item to queue"
+    )
+    activate.add_argument("queue_item_id")
+    activate.add_argument("--fold", required=True)
+    activate.add_argument("--policy", required=True)
+    activate.add_argument("--expected-version", required=True, type=int)
+    activate.add_argument("--actor", required=True)
+    claim = integration_commands.add_parser(
+        "claim", help="lease one ready item on its serialized ref lane"
+    )
+    claim.add_argument("queue_item_id")
+    claim.add_argument("--owner", required=True)
+    claim.add_argument("--expected-version", required=True, type=int)
+    claim.add_argument("--lease-seconds", type=_integration_lease_seconds, default=60)
+    release = integration_commands.add_parser(
+        "release", help="release a claimed item before authority is issued"
+    )
+    release.add_argument("queue_item_id")
+    release.add_argument("--owner", required=True)
+    release.add_argument("--expected-version", required=True, type=int)
+    cancel = integration_commands.add_parser(
+        "cancel", help="cancel an item before landing authority is issued"
+    )
+    cancel.add_argument("queue_item_id")
+    cancel.add_argument("--expected-version", required=True, type=int)
+    cancel.add_argument("--cancelled-by", required=True)
+    plan = integration_commands.add_parser(
+        "plan", help="issue an exact argv-only manual landing plan"
+    )
+    plan.add_argument("queue_item_id")
+    plan.add_argument("--owner", required=True)
+    plan.add_argument("--expected-version", required=True, type=int)
+    plan.add_argument("--remote", default="origin")
+    plan.add_argument("--issued-by", required=True)
+    plan.add_argument(
+        "--operation-timeout",
+        dest="candidate_timeout",
+        type=_positive_seconds,
+        default=DEFAULT_GIT_TIMEOUT_SECONDS,
+    )
+    plan_show = integration_commands.add_parser(
+        "plan-show", help="show one issued plan without its raw nonce"
+    )
+    plan_show.add_argument("plan_id")
+    receipt = integration_commands.add_parser(
+        "receipt", help="record one nonce-bound landed or not-landed outcome"
+    )
+    receipt.add_argument("--document", required=True, type=Path)
+    receipt.add_argument("--recorded-by", required=True)
     return parser
 
 
@@ -966,6 +1075,7 @@ def _dispatch(
                 _json_file(args.policy),
                 created_by_handle=args.created_by,
                 image_resolver=gate_engine.inspect_image,
+                fold_id=args.fold,
             )
         if args.gate_command == "policy-show":
             return control.get_gate_policy(args.policy_id)
@@ -1017,6 +1127,94 @@ def _dispatch(
             return control.list_gate_evidence(args.policy_id, limit=args.limit)
         if args.gate_command == "readiness":
             return control.gate_readiness(args.policy_id)
+    if args.command == "integration":
+        if args.integration_command == "dependency-add":
+            return control.add_landing_dependency(
+                args.dependent_work_item_id,
+                args.prerequisite_work_item_id,
+                created_by_handle=args.created_by,
+            )
+        if args.integration_command == "dependency-remove":
+            return control.remove_landing_dependency(
+                args.dependency_id,
+                expected_version=args.expected_version,
+                removed_by_handle=args.removed_by,
+            )
+        if args.integration_command == "dependency-list":
+            return control.list_landing_dependencies(
+                project_key=args.project,
+                active_only=args.active_only,
+                limit=args.limit,
+            )
+        if args.integration_command == "enqueue":
+            return control.enqueue_integration(
+                args.policy_id, created_by_handle=args.created_by
+            )
+        if args.integration_command == "show":
+            return control.get_integration_queue_item(args.queue_item_id)
+        if args.integration_command == "list":
+            return control.list_integration_queue(
+                project_key=args.project, limit=args.limit
+            )
+        if (
+            args.integration_command == "refold"
+            and result_store is not None
+            and candidate_store is not None
+        ):
+            return control.refold_integration_item(
+                args.queue_item_id,
+                expected_version=args.expected_version,
+                created_by_handle=args.created_by,
+                result_store=result_store,
+                candidate_store=candidate_store,
+            )
+        if args.integration_command == "activate":
+            return control.activate_integration_fold(
+                args.queue_item_id,
+                fold_id=args.fold,
+                policy_id=args.policy,
+                expected_version=args.expected_version,
+                actor_handle=args.actor,
+            )
+        if args.integration_command == "claim":
+            return control.claim_integration_item(
+                args.queue_item_id,
+                owner_id=args.owner,
+                expected_version=args.expected_version,
+                lease_seconds=args.lease_seconds,
+            )
+        if args.integration_command == "release":
+            return control.release_integration_claim(
+                args.queue_item_id,
+                owner_id=args.owner,
+                expected_version=args.expected_version,
+            )
+        if args.integration_command == "cancel":
+            return control.cancel_integration_item(
+                args.queue_item_id,
+                expected_version=args.expected_version,
+                cancelled_by_handle=args.cancelled_by,
+            )
+        if (
+            args.integration_command == "plan"
+            and result_store is not None
+            and candidate_store is not None
+        ):
+            return control.issue_landing_plan(
+                args.queue_item_id,
+                owner_id=args.owner,
+                expected_version=args.expected_version,
+                remote=args.remote,
+                issued_by_handle=args.issued_by,
+                result_store=result_store,
+                candidate_store=candidate_store,
+            )
+        if args.integration_command == "plan-show":
+            return control.get_landing_plan(args.plan_id)
+        if args.integration_command == "receipt":
+            return control.record_landing_receipt(
+                _json_file(args.document), recorded_by_handle=args.recorded_by
+            )
     raise RuntimeError("unreachable command")
 
 
@@ -1072,6 +1270,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             gate_engine = DockerCLI(run_timeout=args.run_timeout)
             gate_executor = DockerExecutor(gate_engine)
+        elif args.command == "integration" and args.integration_command in {
+            "refold",
+            "plan",
+        }:
+            result_store = _build_result_store(control)
+            candidate_store = _build_candidate_store(
+                control, timeout=args.candidate_timeout
+            )
         if (
             args.command == "control-room"
             and args.control_room_command == "serve"
@@ -1099,6 +1305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ExecutionError,
         GateError,
         InputError,
+        IntegrationError,
         KrabError,
         ProviderError,
         ResultError,

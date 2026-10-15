@@ -150,8 +150,9 @@ magic-glass-box candidate list --work-thread wth_<id>
 
 Candidate operations perform no push, remote fetch, pull-request creation,
 remote CI query, approval query, or merge. Exact-input review and local gates
-are implemented by Milestone 7B; ordering, re-folding, and manual landing
-belong to Milestone 7C. See [integration-gates.md](integration-gates.md).
+are implemented by Milestone 7B; Milestone 7C adds separate immutable folds,
+ordering, and nonce-bound manual landing without mutating the origin candidate.
+See [integration-gates.md](integration-gates.md).
 
 ## Repeatable proof
 

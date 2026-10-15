@@ -438,6 +438,10 @@ def _render_control_room(
     summary = summary if isinstance(summary, Mapping) else {}
     run_summary = summary.get("runs")
     run_summary = run_summary if isinstance(run_summary, Mapping) else {}
+    integration_summary = summary.get("integration_queue")
+    integration_summary = (
+        integration_summary if isinstance(integration_summary, Mapping) else {}
+    )
     krab = snapshot.get("krab")
     krab = krab if isinstance(krab, Mapping) else {}
 
@@ -625,6 +629,37 @@ def _render_control_room(
         for row in snapshot.get("gate_policies", [])
         if isinstance(row, Mapping)
     ]
+    dependency_rows = [
+        (
+            row.get("id"),
+            row.get("dependent_work_item_id"),
+            row.get("prerequisite_work_item_id"),
+            row.get("state"),
+            row.get("version"),
+            row.get("created_by_handle"),
+            row.get("updated_at"),
+        )
+        for row in snapshot.get("landing_dependencies", [])
+        if isinstance(row, Mapping)
+    ]
+    integration_rows = [
+        (
+            row.get("id"),
+            row.get("project_key"),
+            row.get("untrusted_work_item_title"),
+            row.get("state"),
+            row.get("version"),
+            row.get("integration_ref"),
+            row.get("current_revision"),
+            row.get("current_fold_id"),
+            row.get("current_policy_id"),
+            row.get("gates_ready"),
+            row.get("blocked_dependency_count"),
+            row.get("pending_plan_id"),
+        )
+        for row in snapshot.get("integration_queue", [])
+        if isinstance(row, Mapping)
+    ]
     role_rows = [
         (row.get("project_key"), row.get("krab_handle"), row.get("role"))
         for row in krab.get("roles", [])
@@ -705,6 +740,10 @@ def _render_control_room(
                 _card(run_summary.get("active", 0), "active runs"),
                 _card(run_summary.get("terminal", 0), "terminal runs"),
                 _card(summary.get("work_items", 0), "work items"),
+                _card(
+                    integration_summary.get("awaiting_receipt", 0),
+                    "landing receipts",
+                ),
             )
         )
         + "</div>"
@@ -820,6 +859,41 @@ def _render_control_room(
                     "Policy revision",
                 ),
                 gate_policy_rows,
+            ),
+        ),
+        _section(
+            "Integration queue",
+            _table(
+                (
+                    "ID",
+                    "Project",
+                    "Untrusted work title",
+                    "State",
+                    "Version",
+                    "Ref",
+                    "Current revision",
+                    "Fold",
+                    "Policy",
+                    "Gates ready",
+                    "Blocked deps",
+                    "Pending plan",
+                ),
+                integration_rows,
+            ),
+        ),
+        _section(
+            "Landing dependencies",
+            _table(
+                (
+                    "ID",
+                    "Dependent work item",
+                    "Prerequisite work item",
+                    "State",
+                    "Version",
+                    "Created by",
+                    "Updated",
+                ),
+                dependency_rows,
             ),
         ),
         _section(

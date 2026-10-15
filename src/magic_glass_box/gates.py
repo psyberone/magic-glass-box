@@ -396,6 +396,47 @@ class GatePolicyManifest:
         )
 
     @classmethod
+    def bind_revision(
+        cls,
+        candidate: Mapping[str, object],
+        revision: Mapping[str, object],
+        *,
+        default_branch: object,
+        policy: GatePolicySpec,
+    ) -> GatePolicyManifest:
+        """Bind a policy to an exact derived revision of one candidate."""
+
+        if not isinstance(candidate, dict):
+            raise GateError("candidate record must be an object")
+        if not isinstance(revision, dict):
+            raise GateError("candidate revision must be an object")
+        required = {
+            "candidate_id",
+            "base_revision",
+            "head_revision",
+            "tree_revision",
+            "object_format",
+        }
+        missing = required - set(revision)
+        if missing:
+            raise GateError(
+                "candidate revision is missing fields: " + ", ".join(sorted(missing))
+            )
+        if revision["candidate_id"] != candidate.get("id"):
+            raise GateError("candidate revision belongs to another candidate")
+        return cls.bind(
+            {
+                **candidate,
+                "base_revision": revision["base_revision"],
+                "head_revision": revision["head_revision"],
+                "tree_revision": revision["tree_revision"],
+                "object_format": revision["object_format"],
+            },
+            default_branch=default_branch,
+            policy=policy,
+        )
+
+    @classmethod
     def from_mapping(cls, value: object) -> GatePolicyManifest:
         if not isinstance(value, dict):
             raise GateError("gate policy manifest must be an object")

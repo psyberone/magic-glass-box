@@ -94,6 +94,11 @@ gateway.
 provider/model through the gateway while undeclared providers, destinations,
 credentials, and direct network attempts fail closed.
 
+This slice proved the worker boundary with credential resolution inside the
+trusted orchestrator. Milestone 7D narrows the boundary again before any
+real-account proof: the core retains authority and reservations while a
+separate inference connector owns every upstream provider credential.
+
 ## Milestone 3: worker replacement and handoff
 
 **Status: complete**
@@ -392,10 +397,7 @@ of this checkpoint.
 
 ## Milestone 7C: integration queue and manual landing
 
-**Status: planned**
-
-> **DESIGN ONLY — NOT IMPLEMENTED:** No dependency/refold queue, landing lease,
-> manual actuator plan, landing receipt, push, or merge operation exists yet.
+**Status: complete**
 
 - Give work items explicit hard landing dependencies and reject dependency
   cycles.
@@ -414,6 +416,89 @@ revalidated. A manual plan contains no unresolved revision, and its imported
 receipt is accepted only for the authorized operation and records the immutable
 landed revision at its truthful assurance level. See
 [integration-gates.md](integration-gates.md).
+
+The 2026-10-15 end-of-slice checkpoint closed M7C after 615 tests at 86% branch
+coverage, a 21-test integration proof against real local repositories and a
+bare remote, and a clean 31,180-mutant run with 26,326 killed (84.43%). The
+final audit also closed an authority ambiguity: replaying an enqueue is
+idempotent only for the exact policy, while requesting a different policy for
+the same queued candidate now fails explicitly. The accepted mutation run
+classified every generated mutant; three already-audited nontermination/FIFO
+mutants required Mutmut's own timeout signal to be delivered manually after
+its macOS watchdog thread failed to remain live.
+
+## Milestone 7D: credential-isolated inference connectors
+
+**Status: planned**
+
+M7D uses three honest internal checkpoints rather than one large cutover:
+**M7D.1** establishes durable connector authority and the strict local carrier,
+**M7D.2** moves normal dispatch across that boundary and proves credential
+containment with a networkless worker, and **M7D.3** adds the optional
+provider-specific OAuth integration and bounded live proof. Each checkpoint
+receives its own quality gate and internal review.
+
+- Preserve the existing networkless worker-facing `provider.invoke` contract,
+  immutable grant binding, exact model/limit policy, revocation, expiry, and
+  cross-process concurrency reservation.
+- Move provider API keys and OAuth registration, access, refresh, and network
+  transport out of the MGB process into a narrow versioned inference
+  connector. A connector may be a local sidecar or an operator-managed
+  external integration.
+- Permit an explicitly approved provider-native configuration directory only
+  inside the connector. MGB does not parse that credential format. For OpenAI,
+  the connector owns its own supported Sign in with ChatGPT registration and
+  renewable session; it never borrows another Codex installation's private
+  credential record.
+- Bind grants to a registered connector identity, semantic protocol, exact
+  operator-approved model mapping, and credential-scope fingerprint without
+  storing or resolving the upstream credential in MGB.
+- Expose neither a raw provider CLI nor an arbitrary HTTP proxy. Workers cannot
+  choose connector endpoints, upstream destinations, accounts, headers,
+  credentials, or model overrides.
+- Treat a lost response as potentially quota-consuming and do not
+  automatically replay an ambiguous invocation.
+
+**Exit proof:** a deterministic fake connector completes one authorized
+invocation while wrong connector, grant, protocol, model, and limit tuples fail
+closed. A canary upstream credential remains absent from the worker container,
+MGB state directory and SQLite database, retained results, runtime output, and
+logs. See [inference-connectors.md](inference-connectors.md).
+
+## End-of-Milestone 7 operator golden proof
+
+**Status: planned checkpoint**
+
+This checkpoint does not add another product milestone. It exercises the
+completed M1-M7 path with one real model account before budget work begins:
+
+- Keep the deterministic, credential-free proofs as the mandatory repeatable
+  gates. A paid or quota-consuming proof is explicit and never runs from
+  ordinary test or CI targets.
+- Build one project-specific worker image with its test and build dependencies
+  already installed; the worker remains networkless.
+- Begin with Codex through OpenAI's documented Sign in with ChatGPT flow. The
+  inference connector owns its separately revocable OAuth registration and
+  protected token record; MGB stores only its connector binding and bounded
+  metadata. Neither component parses another Codex installation's private
+  credential format, and no access or refresh token enters the worker.
+- Use one deliberately small disposable work item, bounded wall time, no
+  automatic retry, and an operator-configured app usage limit. Because this
+  uses the same ChatGPT-plan quota pool as an interactive Codex session, the
+  initial risk is treated like spawning one bounded subagent. Before M8A, that
+  account-side limit is the quota backstop; MGB must not claim it enforced a
+  dollar budget itself.
+- Drive the work through real Docker execution, provider transport, retained
+  result, candidate, exact-input gates, and the manual landing boundary, then
+  inspect the redacted control room and durable evidence.
+
+**Exit proof:** an explicitly opted-in real Codex run completes one disposable
+task using the operator's ChatGPT-plan quota through the inference connector.
+Reusable OAuth material remains absent from the container, MGB state and
+SQLite, retained results, runtime output, and logs. The deterministic proofs
+continue to cover all failure paths without spending quota. Subscription
+authentication for any other runtime is not inferred from this proof and
+requires its own supported connector.
 
 ## Milestone 8A: provider usage and budget authority
 
@@ -467,6 +552,10 @@ the expected final result and audit trail with no unaccounted file loss.
 
 > **DESIGN ONLY — NOT IMPLEMENTED:** No sidecar protocol, registration,
 > transport, capability invocation, or reconciliation state exists yet.
+
+These service sidecars reuse the isolation pattern proven by the M7D inference
+connector but expose different semantic capabilities and durable-effect
+reconciliation. They are not model-inference connectors.
 
 - Register a pinned sidecar protocol version, connector identity, operator-owned
   service/repository mappings, and advertised semantic capability families such

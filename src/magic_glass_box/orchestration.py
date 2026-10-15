@@ -78,7 +78,7 @@ class RunResultStore(Protocol):
 
 
 class CandidateReviewWorkspaceProvider(Protocol):
-    def prepare(self, run_id: str, candidate_id: str) -> PreparedWorkspace: ...
+    def prepare(self, run_id: str, policy_id: str) -> PreparedWorkspace: ...
 
 
 class CandidateReviewWorkspaces:
@@ -96,10 +96,10 @@ class CandidateReviewWorkspaces:
         self.result_store = result_store
         self.candidate_store = candidate_store
 
-    def prepare(self, run_id: str, candidate_id: str) -> PreparedWorkspace:
-        record = self.database.get_candidate(candidate_id)
+    def prepare(self, run_id: str, policy_id: str) -> PreparedWorkspace:
+        revision = self.database.get_gate_revision(policy_id)
         try:
-            manifest = CandidateManifest.from_mapping(record["manifest"])
+            manifest = CandidateManifest.from_mapping(revision["manifest"])
         except (CandidateError, TypeError) as exc:
             raise RunOrchestrationError(
                 "candidate-backed review has invalid durable identity"
@@ -107,7 +107,7 @@ class CandidateReviewWorkspaces:
         try:
             self.candidate_store.inspect(manifest)
         except CandidateError:
-            repository_path = self.database.get_candidate_repository_path(candidate_id)
+            repository_path = revision["repository_path"]
             if repository_path is None:
                 raise RunOrchestrationError(
                     "candidate-backed review has no recovery repository"
@@ -116,7 +116,7 @@ class CandidateReviewWorkspaces:
                 manifest.attempt_id,
                 expected_digest=manifest.result_content_sha256,
             )
-            self.candidate_store.recover(
+            self.candidate_store.recover_revision(
                 manifest,
                 Path(repository_path),
                 result,
@@ -332,7 +332,7 @@ class RunCoordinator:
                             "candidate-backed review has no workspace provider"
                         )
                     prepared = self.candidate_workspaces.prepare(
-                        run_id, review_candidate_id
+                        run_id, inputs["gate_policy_id"]
                     )
                 else:
                     if context.repository_path is None:

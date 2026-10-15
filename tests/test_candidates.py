@@ -278,6 +278,114 @@ class CandidateKernelTests(unittest.TestCase):
             first,
         )
 
+    def test_refolds_original_result_onto_new_base_and_recovers_exact_revision(
+        self,
+    ) -> None:
+        original = self.store.materialize(
+            self.project_id, self.repository, self.result, self.blobs
+        )
+        origin_manifest = self.manifest(original)
+        (self.repository / "nested" / "base.txt").write_text(
+            "landed-a\n", encoding="utf-8"
+        )
+        git(self.git_binary, "add", "nested/base.txt", cwd=self.repository)
+        git(
+            self.git_binary,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "land A",
+            cwd=self.repository,
+        )
+        new_base = git(self.git_binary, "rev-parse", "HEAD", cwd=self.repository)
+
+        first = self.store.refold(
+            origin_manifest,
+            self.repository,
+            self.result,
+            self.blobs,
+            base_revision=new_base,
+        )
+        second = self.store.refold(
+            origin_manifest,
+            self.repository,
+            self.result,
+            self.blobs,
+            base_revision=new_base,
+        )
+
+        self.assertEqual(second, first)
+        self.assertEqual(
+            self.candidate_git("rev-parse", f"{first.head_revision}^"), new_base
+        )
+        self.assertEqual(
+            self.candidate_git("show", f"{first.head_revision}:tracked.txt"),
+            "after",
+        )
+        self.assertEqual(
+            self.candidate_git("show", f"{first.head_revision}:nested/base.txt"),
+            "landed-a",
+        )
+        self.assertEqual(
+            self.candidate_git("show", f"{original.head_revision}:nested/base.txt"),
+            "nested",
+        )
+
+        exact = replace(
+            origin_manifest,
+            base_revision=first.base_revision,
+            head_revision=first.head_revision,
+            tree_revision=first.tree_revision,
+        )
+        self.assertEqual(self.store.inspect(exact), first)
+        self.assertEqual(
+            self.store.repository_path(self.project_id, first.object_format),
+            self.candidate_repository(),
+        )
+
+        shutil.rmtree(self.store.root)
+        recovered = self.store.recover_revision(
+            exact, self.repository, self.result, self.blobs
+        )
+        self.assertEqual(recovered, first)
+        self.assertEqual(self.store.inspect(exact), first)
+
+    def test_refold_rejects_new_base_that_changed_a_worker_preimage(self) -> None:
+        original = self.store.materialize(
+            self.project_id, self.repository, self.result, self.blobs
+        )
+        origin_manifest = self.manifest(original)
+        (self.repository / "tracked.txt").write_text("someone else\n", encoding="utf-8")
+        git(self.git_binary, "add", "tracked.txt", cwd=self.repository)
+        git(
+            self.git_binary,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "conflict",
+            cwd=self.repository,
+        )
+        conflicting_base = git(
+            self.git_binary, "rev-parse", "HEAD", cwd=self.repository
+        )
+
+        with self.assertRaisesRegex(CandidateError, "base"):
+            self.store.refold(
+                origin_manifest,
+                self.repository,
+                self.result,
+                self.blobs,
+                base_revision=conflicting_base,
+            )
+
     def test_common_umask_succeeds_and_hostile_git_configuration_is_inert(
         self,
     ) -> None:

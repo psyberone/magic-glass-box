@@ -1220,7 +1220,7 @@ class GateMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "control-plane.db"
             connection = sqlite3.connect(path)
-            connection.executescript(SCHEMA.removesuffix(GATE_SCHEMA))
+            connection.executescript(SCHEMA[: SCHEMA.index(GATE_SCHEMA)])
             connection.execute("PRAGMA user_version = 12")
             connection.commit()
             connection.close()

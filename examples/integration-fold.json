@@ -1,0 +1,14 @@
+{
+  "base_revision": "cccccccccccccccccccccccccccccccccccccccc",
+  "candidate_id": "cnd_11111111111111111111111111111111",
+  "context_version_id": "ctx_33333333333333333333333333333333",
+  "generation": 1,
+  "head_revision": "dddddddddddddddddddddddddddddddddddddddd",
+  "integration_ref": "refs/heads/main",
+  "object_format": "sha1",
+  "project_id": "boxp_22222222222222222222222222222222",
+  "result_content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "schema_version": 1,
+  "tree_revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "work_thread_id": "wth_44444444444444444444444444444444"
+}

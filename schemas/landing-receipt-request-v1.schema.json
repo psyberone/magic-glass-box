@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:landing-receipt-request:v1",
+  "title": "Magic Glass Box Landing Receipt Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "nonce",
+    "observed_revision",
+    "outcome",
+    "plan_id",
+    "request_sha256",
+    "schema_version"
+  ],
+  "properties": {
+    "nonce": { "$ref": "#/$defs/sha256" },
+    "observed_revision": { "$ref": "#/$defs/objectId" },
+    "outcome": { "enum": ["landed", "not_landed"] },
+    "plan_id": { "type": "string", "pattern": "^lpl_[0-9a-f]{32}$" },
+    "request_sha256": { "$ref": "#/$defs/sha256" },
+    "schema_version": { "const": 1 }
+  },
+  "$defs": {
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

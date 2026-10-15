@@ -1,0 +1,10 @@
+{
+  "actuator": "git-force-with-lease-v1",
+  "assurance": "base_and_head_enforced",
+  "nonce_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "observed_revision": "8888888888888888888888888888888888888888",
+  "outcome": "landed",
+  "plan_id": "lpl_cccccccccccccccccccccccccccccccc",
+  "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema_version": 1
+}

@@ -27,6 +27,13 @@ from magic_glass_box.gates import (
     parse_gate_evidence,
     resolve_gate_policy_request,
 )
+from magic_glass_box.integration import (
+    FoldManifest,
+    IntegrationError,
+    LandingPlan,
+    LandingReceipt,
+    LandingReceiptRequest,
+)
 from magic_glass_box.results import ResultError, ResultManifest
 
 
@@ -325,6 +332,53 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             evidence_validator.validate(validation)
         with self.assertRaises(GateError):
             parse_gate_evidence(validation)
+
+    def test_integration_examples_match_runtime_contracts(self) -> None:
+        factories = {
+            "integration-fold": FoldManifest.from_mapping,
+            "landing-plan": LandingPlan.from_mapping,
+            "landing-receipt-request": LandingReceiptRequest.from_mapping,
+            "landing-receipt": LandingReceipt.from_mapping,
+        }
+        for name, factory in factories.items():
+            with self.subTest(name=name):
+                validator, example = self.load(name)
+                validator.validate(example)
+                parsed = factory(example)
+                self.assertEqual(parsed.to_dict(), example)
+
+    def test_integration_schemas_and_runtime_reject_tampering(self) -> None:
+        validator, plan = self.load("landing-plan")
+        tampered_plan = copy.deepcopy(plan)
+        tampered_plan["commands"][1][-1] = "HEAD:refs/heads/main"
+        validator.validate(tampered_plan)
+        with self.assertRaises(IntegrationError):
+            LandingPlan.from_mapping(tampered_plan)
+        credentialed_remote = copy.deepcopy(plan)
+        credentialed_remote["remote"] = (
+            "https://operator:secret@example.invalid/repository.git"
+        )
+        credentialed_remote["commands"][1][3] = credentialed_remote["remote"]
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(credentialed_remote)
+        with self.assertRaises(IntegrationError):
+            LandingPlan.from_mapping(credentialed_remote)
+
+        validator, receipt = self.load("landing-receipt")
+        false_assurance = copy.deepcopy(receipt)
+        false_assurance["assurance"] = "operator_attested"
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(false_assurance)
+        with self.assertRaises(IntegrationError):
+            LandingReceipt.from_mapping(false_assurance)
+
+        validator, fold = self.load("integration-fold")
+        wrong_format = copy.deepcopy(fold)
+        wrong_format["head_revision"] = "f" * 64
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(wrong_format)
+        with self.assertRaises(IntegrationError):
+            FoldManifest.from_mapping(wrong_format)
 
 
 if __name__ == "__main__":

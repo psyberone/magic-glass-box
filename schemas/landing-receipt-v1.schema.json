@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:landing-receipt:v1",
+  "title": "Magic Glass Box Durable Landing Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "actuator",
+    "assurance",
+    "nonce_sha256",
+    "observed_revision",
+    "outcome",
+    "plan_id",
+    "request_sha256",
+    "schema_version"
+  ],
+  "properties": {
+    "actuator": { "const": "git-force-with-lease-v1" },
+    "assurance": { "enum": ["base_and_head_enforced", "operator_attested"] },
+    "nonce_sha256": { "$ref": "#/$defs/sha256" },
+    "observed_revision": { "$ref": "#/$defs/objectId" },
+    "outcome": { "enum": ["landed", "not_landed"] },
+    "plan_id": { "type": "string", "pattern": "^lpl_[0-9a-f]{32}$" },
+    "request_sha256": { "$ref": "#/$defs/sha256" },
+    "schema_version": { "const": 1 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "landed" } }, "required": ["outcome"] },
+      "then": { "properties": { "assurance": { "const": "base_and_head_enforced" } } },
+      "else": { "properties": { "assurance": { "const": "operator_attested" } } }
+    }
+  ],
+  "$defs": {
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

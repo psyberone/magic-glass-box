@@ -1,0 +1,24 @@
+{
+  "actuator": "git-force-with-lease-v1",
+  "assurance": "base_and_head_enforced",
+  "candidate_id": "cnd_44444444444444444444444444444444",
+  "candidate_repository": "/private/mgb/candidates/repository.git",
+  "commands": [
+    ["git", "fetch", "--no-tags", "/private/mgb/candidates/repository.git", "8888888888888888888888888888888888888888"],
+    ["git", "push", "--force-with-lease=refs/heads/main:7777777777777777777777777777777777777777", "origin", "8888888888888888888888888888888888888888:refs/heads/main"]
+  ],
+  "evidence_snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected_base_revision": "7777777777777777777777777777777777777777",
+  "fold_id": "ifd_55555555555555555555555555555555",
+  "head_revision": "8888888888888888888888888888888888888888",
+  "integration_ref": "refs/heads/main",
+  "object_format": "sha1",
+  "policy_id": "gpl_22222222222222222222222222222222",
+  "policy_revision": "3333333333333333333333333333333333333333333333333333333333333333",
+  "queue_item_id": "iqm_11111111111111111111111111111111",
+  "queue_version": 3,
+  "remote": "origin",
+  "repository_identity": "boxp_66666666666666666666666666666666",
+  "schema_version": 1,
+  "tree_revision": "9999999999999999999999999999999999999999"
+}

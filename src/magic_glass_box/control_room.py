@@ -150,6 +150,10 @@ class ControlRoom:
         retained_results = self._results(connection, run_ids)
         candidates = self._candidates(connection, run_ids)
         gate_policies = self._gate_policies(connection, run_ids)
+        landing_dependencies = self._landing_dependencies(connection, history_limit)
+        integration_queue = self._integration_queue(
+            connection, history_limit, generated_at
+        )
         authorities = self._run_authorities(connection, run_ids, generated_at)
         supervisor_actions = self._supervisor_actions(connection, run_ids)
         escalations = self._escalations(connection, run_ids)
@@ -167,6 +171,7 @@ class ControlRoom:
             supervisor_actions,
             escalations,
             gate_policies,
+            integration_queue,
             generated_at=generated_at,
         )
         return (
@@ -194,6 +199,8 @@ class ControlRoom:
                 "retained_results": retained_results,
                 "candidates": candidates,
                 "gate_policies": gate_policies,
+                "landing_dependencies": landing_dependencies,
+                "integration_queue": integration_queue,
                 "run_authorities": authorities,
                 "supervisor_actions": supervisor_actions,
                 "escalations": escalations,
@@ -894,6 +901,109 @@ class ControlRoom:
         return authorities
 
     @staticmethod
+    def _landing_dependencies(
+        connection: sqlite3.Connection, history_limit: int
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            "WITH removed AS (SELECT id FROM work_item_landing_dependencies "
+            "WHERE state = 'removed' ORDER BY updated_at DESC, id DESC LIMIT ?), "
+            "visible AS (SELECT id FROM work_item_landing_dependencies "
+            "WHERE state = 'active' UNION ALL SELECT id FROM removed) "
+            "SELECT d.id, d.project_id, d.dependent_work_item_id, "
+            "d.prerequisite_work_item_id, d.state, d.version, "
+            "creator.handle AS created_by_handle, "
+            "remover.handle AS removed_by_handle, d.created_at, d.updated_at, "
+            "d.removed_at FROM visible v "
+            "JOIN work_item_landing_dependencies d ON d.id = v.id "
+            "JOIN users creator ON creator.id = d.created_by "
+            "LEFT JOIN users remover ON remover.id = d.removed_by "
+            "ORDER BY CASE d.state WHEN 'active' THEN 0 ELSE 1 END, "
+            "d.updated_at DESC, d.id",
+            (history_limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _integration_queue(
+        self,
+        connection: sqlite3.Connection,
+        history_limit: int,
+        generated_at: str,
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            "WITH terminal AS (SELECT id FROM integration_queue_items "
+            "WHERE state IN ('landed', 'cancelled') "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?), visible AS ("
+            "SELECT id, 0 AS group_order FROM integration_queue_items "
+            "WHERE state NOT IN ('landed', 'cancelled') UNION ALL "
+            "SELECT id, 1 AS group_order FROM terminal) "
+            "SELECT q.id, q.integration_ref_id, q.project_id, "
+            "p.krab_project_key AS project_key, q.work_item_id, q.work_thread_id, "
+            "q.candidate_id, q.current_policy_id, q.current_fold_id, q.state, "
+            "q.version, q.owner_id, q.lease_expires_at, q.landed_receipt_id, "
+            "q.created_at, q.updated_at, q.landed_at, q.cancelled_at, "
+            "r.integration_ref, r.current_revision, r.object_format, "
+            "r.version AS integration_ref_version, "
+            "u.handle AS created_by_handle, wiv.content_json, "
+            "lp.id AS pending_plan_id, lp.created_at AS plan_issued_at "
+            "FROM visible v JOIN integration_queue_items q ON q.id = v.id "
+            "JOIN integration_refs r ON r.id = q.integration_ref_id "
+            "JOIN projects p ON p.id = q.project_id "
+            "JOIN users u ON u.id = q.created_by "
+            "LEFT JOIN work_item_versions wiv ON wiv.id = ("
+            "SELECT latest.id FROM work_item_versions latest "
+            "WHERE latest.work_item_id = q.work_item_id "
+            "ORDER BY latest.version DESC LIMIT 1) "
+            "LEFT JOIN integration_landing_plans lp "
+            "ON lp.queue_item_id = q.id AND lp.state = 'pending' "
+            "ORDER BY v.group_order, q.updated_at DESC, q.id",
+            (history_limit,),
+        ).fetchall()
+        now = _timestamp(generated_at, label="snapshot")
+        queue: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                title = (
+                    None
+                    if row["content_json"] is None
+                    else json.loads(row["content_json"])["title"]
+                )
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise StorageError("stored integration work item is invalid") from exc
+            readiness = self.database._gate_readiness(  # noqa: SLF001
+                connection, row["current_policy_id"]
+            )
+            blocked_dependencies = connection.execute(
+                "SELECT COUNT(*) FROM work_item_landing_dependencies d "
+                "WHERE d.dependent_work_item_id = ? AND d.state = 'active' "
+                "AND NOT EXISTS (SELECT 1 FROM integration_queue_items prerequisite "
+                "WHERE prerequisite.integration_ref_id = ? "
+                "AND prerequisite.work_item_id = d.prerequisite_work_item_id "
+                "AND prerequisite.state = 'landed')",
+                (row["work_item_id"], row["integration_ref_id"]),
+            ).fetchone()[0]
+            lease_expired = (
+                row["state"] == "claimed"
+                and row["lease_expires_at"] is not None
+                and _timestamp(row["lease_expires_at"], label="integration lease")
+                <= now
+            )
+            item = dict(row)
+            item.pop("content_json")
+            item.update(
+                {
+                    "untrusted_work_item_title": title,
+                    "blocked_dependency_count": blocked_dependencies,
+                    "lease_expired": lease_expired,
+                    "gates_ready": readiness["ready"],
+                    "gate_passed_count": readiness["passed_count"],
+                    "gate_failed_count": readiness["failed_count"],
+                    "gate_pending_count": readiness["pending_count"],
+                }
+            )
+            queue.append(item)
+        return queue
+
+    @staticmethod
     def _attach_run_counts(
         runs: list[dict[str, Any]],
         attempts: list[dict[str, Any]],
@@ -946,6 +1056,14 @@ class ControlRoom:
         )
         escalation_states = states(
             "SELECT state, COUNT(*) AS count FROM supervisor_escalations GROUP BY state"
+        )
+        integration_states = states(
+            "SELECT state, COUNT(*) AS count FROM integration_queue_items "
+            "GROUP BY state"
+        )
+        dependency_states = states(
+            "SELECT state, COUNT(*) AS count "
+            "FROM work_item_landing_dependencies GROUP BY state"
         )
         run_total = sum(run_states.values())
         attempt_total = sum(attempt_states.values())
@@ -1036,6 +1154,28 @@ class ControlRoom:
             "integration_gate_evidence": connection.execute(
                 "SELECT COUNT(*) FROM integration_gate_evidence"
             ).fetchone()[0],
+            "integration_queue": {
+                "total": sum(integration_states.values()),
+                **{
+                    state: integration_states.get(state, 0)
+                    for state in (
+                        "queued",
+                        "claimed",
+                        "awaiting_receipt",
+                        "refold_required",
+                        "landed",
+                        "cancelled",
+                    )
+                },
+            },
+            "landing_dependencies": {
+                "total": sum(dependency_states.values()),
+                "active": dependency_states.get("active", 0),
+                "removed": dependency_states.get("removed", 0),
+            },
+            "pending_landing_plans": connection.execute(
+                "SELECT COUNT(*) FROM integration_landing_plans WHERE state = 'pending'"
+            ).fetchone()[0],
         }
 
     @staticmethod
@@ -1049,6 +1189,7 @@ class ControlRoom:
         supervisor_actions: list[dict[str, Any]] | None = None,
         escalations: list[dict[str, Any]] | None = None,
         gate_policies: list[dict[str, Any]] | None = None,
+        integration_queue: list[dict[str, Any]] | None = None,
         *,
         generated_at: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -1261,6 +1402,60 @@ class ControlRoom:
                 },
                 policy["latest_evidence_at"] or policy["created_at"],
             )
+        for item in integration_queue or []:
+            common = {
+                "subject_type": "integration_queue_item",
+                "subject_id": item["id"],
+                "work_item_id": item["work_item_id"],
+                "candidate_id": item["candidate_id"],
+                "integration_ref": item["integration_ref"],
+            }
+            if item["state"] == "refold_required":
+                add(
+                    {
+                        **common,
+                        "kind": "integration.refold_required",
+                        "severity": "action",
+                        "updated_at": item["updated_at"],
+                    },
+                    item["updated_at"],
+                )
+            elif item["state"] == "awaiting_receipt":
+                add(
+                    {
+                        **common,
+                        "kind": "integration.receipt_pending",
+                        "severity": "action",
+                        "plan_id": item["pending_plan_id"],
+                        "plan_issued_at": item["plan_issued_at"],
+                    },
+                    item["plan_issued_at"] or item["updated_at"],
+                )
+            elif item["state"] == "claimed" and item["lease_expired"]:
+                add(
+                    {
+                        **common,
+                        "kind": "integration.claim_expired",
+                        "severity": "warning",
+                        "owner_id": item["owner_id"],
+                        "lease_expires_at": item["lease_expires_at"],
+                    },
+                    item["lease_expires_at"],
+                )
+            elif item["state"] == "queued" and not item["gates_ready"]:
+                add(
+                    {
+                        **common,
+                        "kind": "integration.gates_pending",
+                        "severity": (
+                            "warning" if item["gate_failed_count"] else "action"
+                        ),
+                        "policy_id": item["current_policy_id"],
+                        "failed_count": item["gate_failed_count"],
+                        "pending_count": item["gate_pending_count"],
+                    },
+                    item["updated_at"],
+                )
         attention.sort(
             key=lambda item: (
                 0 if item["severity"] == "action" else 1,

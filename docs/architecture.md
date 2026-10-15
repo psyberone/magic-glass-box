@@ -4,8 +4,10 @@
 
 Magic Glass Box is the trusted control plane. It owns local users, Krab
 identity bindings, versioned project context, versioned agent profiles, run
-lifecycle, credential policy, container lifecycle, pending human interactions,
-trusted candidate identity, and integration semantics.
+lifecycle, credential authority policy, container lifecycle, pending human
+interactions, trusted candidate identity, and integration semantics. The target
+boundary does not require the core process to possess an upstream AI-provider
+credential.
 
 Imitation Krab is the communications authority. It owns Krab users, tokens,
 project membership and roles, sessions, items, work claims, and message
@@ -42,6 +44,15 @@ control-plane state. Magic Glass Box would remain responsible for deciding
 whether a specific operation, mapping, account, scope, and exact revision are
 authorized.
 
+Milestone 7D separately extracts AI-provider authentication and transport from
+the current in-process broker into a credential-isolated inference connector.
+The core continues to authorize the exact run, grant, semantic protocol, model,
+limits, concurrency, and later budget; a local sidecar or operator-managed
+external integration owns API keys or OAuth tokens, refresh, and upstream
+networking. It exposes a bounded inference contract, not a raw provider CLI or
+arbitrary HTTP proxy. See
+[inference-connectors.md](inference-connectors.md).
+
 ## Threat-model rule: outside scary, inside safe
 
 MGB treats every input crossing into the control plane as adversarial until it
@@ -76,6 +87,11 @@ Magic Glass Box ------ stable IDs / metadata ----> imitation-krab
       |
       <---- structured events/questions -----+
       |
+      +---- authorized model invocation ----> inference connector
+      |                                              |
+      |                                              v
+      |                                         AI provider
+      |
       +---- durable authorized action -----> optional service sidecar
                                                     |
                                                     v
@@ -93,9 +109,13 @@ project-activity projection.
   immutable Krab `user_id`; handles are cached only for display.
 - A credential reference points to an external secret source. The current
   implementation supports private token files and never persists the token.
+  M7D removes AI-provider credential resolution from the core; Krab and other
+  credential paths remain separately scoped.
 - A provider grant is an immutable, content-addressed outbound policy with a
-  named external credential reference. Creation and revocation are audited;
-  expiry is enforced without storing the secret value.
+  named credential route. Creation and revocation are audited; expiry is
+  enforced without storing the secret value. M7D replaces its direct
+  credential reference with a registered inference-connector binding and
+  credential-scope fingerprint.
 - Project context revisions are append-only and content-addressed.
 - Forge-neutral work-item imports are keyed by project, source, and external
   ID. Changed content appends an immutable version; identical imports are
@@ -149,6 +169,10 @@ project-activity projection.
   and receive its private snapshot; local validation runs networkless and
   credentialless against a read-only snapshot. Append-only bounded evidence
   derives readiness without retaining review transcripts or command output.
+- Schema v14 adds hard work-item landing dependencies, one serialized lane per
+  project/ref, immutable derived folds, exact argv-only landing plans, and
+  nonce-bound receipts. Landing one item advances the durable ref and marks
+  every remaining sibling `refold_required`; its origin candidate is unchanged.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -200,7 +224,8 @@ artifacts, trusted candidates, supervision, and composite query projections.
 The storage split preserved schema v9; autonomous supervision advanced it to
 schema v10, and trusted candidates plus their query-backed indexes introduced
 schema v11. Cross-process provider dispatch reservations advanced it to schema
-v12; exact-input gate policy and evidence state advanced it to schema v13.
+v12; exact-input gate policy and evidence state advanced it to schema v13; the
+integration queue and manual landing ledger advanced it to schema v14.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -315,16 +340,15 @@ run outside the control plane and may only submit content; project selection,
 assignment, profiles, credentials, network policy, and lifecycle remain trusted
 local decisions. Imported content is therefore never an authority channel.
 
-Provider-specific operations are planned for optional service sidecars; none of
-this integration state or connector surface is implemented today. The design
-makes integration effects durable supervisor work: a worker may provide a
-result, review, or bounded proposal, but cannot turn that proposal into landing
-authority. The core would check the exact candidate, gates, mapping, account,
-scope, and limits before passing one bounded operation to a sidecar. Separately
-authorized worker reads would remain capability-scoped and normalized. Without
-a configured sidecar, the planned integration state machine would stop at a
-structured human-executable plan and record the assurance the actuator actually
-established.
+Provider-specific operations remain planned optional service sidecars. The
+provider-neutral integration state is implemented: a worker may provide a
+result or review, but cannot turn it into landing authority. The core checks
+the exact candidate or fold, dependencies, current ref, gates, lane lease, and
+optimistic versions before issuing a structured manual Git plan. It holds no
+remote credential and runs no network command. A nonce-bound receipt records
+the assurance that the manual actuator actually established. A future sidecar
+will consume the same bounded authority rather than receiving raw `gh`, `glab`,
+or provider credentials inside the worker.
 
 ## Planned slices
 
@@ -335,9 +359,11 @@ broker, structured worker replacement, multi-agent work memory, work-item
 completion, execution integrity, the redacted interactive control room, and the
 storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
 autonomous supervision, and aging escalation are complete. Trusted candidate
-materialization and exact-input gates are implemented. The dependency/refold
-queue and manual landing flow come next; optional provider-neutral sidecars
-follow the budget and destructive-continuity phases. See
+materialization, exact-input gates, dependency/refold queue, and manual landing
+flow are implemented. The credential-isolated inference connector is the next
+Milestone 7 slice before the real-account proof. Optional provider-neutral
+service sidecars follow the budget and destructive-continuity phases. See
+[inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),

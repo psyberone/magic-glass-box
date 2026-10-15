@@ -9,6 +9,12 @@ Service sidecars are optional credential-bearing add-ons planned for Milestone
 10 and later. They execute already-authorized provider mechanics; they do not
 own candidate readiness, dependency order, budget policy, or landing policy.
 
+They are distinct from Milestone 7D
+[inference connectors](inference-connectors.md). Both isolate upstream
+credentials behind a narrow versioned API, but inference calls are transient,
+quota-consuming model operations while service sidecars perform durable reads
+and effects that may require provider-side reconciliation after a lost reply.
+
 This boundary is broader than a “forge API.” GitHub may support work items,
 changes, refs, checks, and landing, while a Jira connector may support only work
 operations. The core speaks semantic capability families and does not require

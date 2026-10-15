@@ -275,6 +275,32 @@ class DatabaseCore:
                     "integration_gate_evidence",
                     "SELECT COUNT(*) FROM integration_gate_evidence",
                 ),
+                (
+                    "work_item_landing_dependencies",
+                    "SELECT COUNT(*) FROM work_item_landing_dependencies",
+                ),
+                (
+                    "work_item_landing_dependency_events",
+                    "SELECT COUNT(*) FROM work_item_landing_dependency_events",
+                ),
+                ("integration_refs", "SELECT COUNT(*) FROM integration_refs"),
+                (
+                    "integration_queue_items",
+                    "SELECT COUNT(*) FROM integration_queue_items",
+                ),
+                (
+                    "integration_queue_events",
+                    "SELECT COUNT(*) FROM integration_queue_events",
+                ),
+                ("integration_folds", "SELECT COUNT(*) FROM integration_folds"),
+                (
+                    "integration_landing_plans",
+                    "SELECT COUNT(*) FROM integration_landing_plans",
+                ),
+                (
+                    "integration_landing_receipts",
+                    "SELECT COUNT(*) FROM integration_landing_receipts",
+                ),
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
                 ("work_items", "SELECT COUNT(*) FROM work_items"),
                 ("work_threads", "SELECT COUNT(*) FROM work_threads"),

@@ -12,6 +12,11 @@ from .storage.errors import (
     StorageError,
 )
 from .storage.gates import GateStorage
+from .storage.integration import (
+    MAX_INTEGRATION_LEASE_SECONDS,
+    MIN_INTEGRATION_LEASE_SECONDS,
+    IntegrationStorage,
+)
 from .storage.interactions import InteractionStorage
 from .storage.queries import QueryStorage
 from .storage.runs import RunStorage
@@ -21,6 +26,7 @@ from .storage.schema import (
     DATABASE_FILENAME,
     EXECUTION_INTEGRITY_SCHEMA,
     GATE_SCHEMA,
+    INTEGRATION_SCHEMA,
     INTERACTION_SCHEMA,
     LEGACY_DATABASE_FILENAME,
     LEGACY_STATE_DIRECTORY_NAME,
@@ -55,13 +61,16 @@ __all__ = [
     "EXECUTION_INTEGRITY_SCHEMA",
     "GATE_SCHEMA",
     "INTERACTION_SCHEMA",
+    "INTEGRATION_SCHEMA",
     "LEGACY_DATABASE_FILENAME",
     "LEGACY_STATE_DIRECTORY_NAME",
     "MAX_ATTEMPT_LEASE_SECONDS",
+    "MAX_INTEGRATION_LEASE_SECONDS",
     "MAX_VISIBLE_ASSIGNMENT_EVENTS",
     "MAX_WORK_ASSIGNMENTS_PER_THREAD",
     "MIGRATIONS",
     "MIN_ATTEMPT_LEASE_SECONDS",
+    "MIN_INTEGRATION_LEASE_SECONDS",
     "NotFoundError",
     "PROVIDER_SCHEMA",
     "PROVIDER_DISPATCH_SCHEMA",
@@ -82,6 +91,7 @@ __all__ = [
 class Database(
     SupervisionStorage,
     QueryStorage,
+    IntegrationStorage,
     GateStorage,
     CandidateStorage,
     ArtifactStorage,

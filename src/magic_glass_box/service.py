@@ -56,6 +56,7 @@ from .gates import (
     ValidationEvidence,
     resolve_gate_policy_request,
 )
+from .integration import FoldManifest, LandingReceiptRequest
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
 from .provider import (
     ProviderBroker,
@@ -323,6 +324,7 @@ class ControlPlane:
         *,
         created_by_handle: str,
         image_resolver: Callable[[str], object],
+        fold_id: str | None = None,
     ) -> dict[str, Any]:
         """Resolve mutable image references and pin one exact candidate policy."""
 
@@ -336,12 +338,252 @@ class ControlPlane:
         policy = resolve_gate_policy_request(
             policy_request, image_resolver=image_resolver
         )
-        manifest = GatePolicyManifest.bind(
-            candidate,
-            default_branch=context.default_branch,
-            policy=policy,
+        manifest = (
+            GatePolicyManifest.bind(
+                candidate,
+                default_branch=context.default_branch,
+                policy=policy,
+            )
+            if fold_id is None
+            else GatePolicyManifest.bind_revision(
+                candidate,
+                self.database.get_integration_fold(fold_id)["manifest"],
+                default_branch=context.default_branch,
+                policy=policy,
+            )
         )
         return self.database.create_gate_policy(manifest, created_by=creator["id"])
+
+    def add_landing_dependency(
+        self,
+        dependent_work_item_id: str,
+        prerequisite_work_item_id: str,
+        *,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.add_landing_dependency(
+            dependent_work_item_id,
+            prerequisite_work_item_id,
+            created_by=creator["id"],
+        )
+
+    def remove_landing_dependency(
+        self,
+        dependency_id: str,
+        *,
+        expected_version: int,
+        removed_by_handle: str,
+    ) -> dict[str, Any]:
+        remover = self.database.get_user(removed_by_handle)
+        return self.database.remove_landing_dependency(
+            dependency_id,
+            expected_version=expected_version,
+            removed_by=remover["id"],
+        )
+
+    def list_landing_dependencies(
+        self,
+        *,
+        project_key: str | None = None,
+        active_only: bool = False,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        project_id = None
+        if project_key is not None:
+            project_id = self.database.get_project(project_key)["id"]
+        return self.database.list_landing_dependencies(
+            project_id=project_id,
+            active_only=active_only,
+            limit=limit,
+        )
+
+    def enqueue_integration(
+        self, policy_id: str, *, created_by_handle: str
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.enqueue_integration(policy_id, created_by=creator["id"])
+
+    def refold_integration_item(
+        self,
+        queue_item_id: str,
+        *,
+        expected_version: int,
+        created_by_handle: str,
+        result_store: WorkspaceResultStore,
+        candidate_store: GitCandidateStore,
+    ) -> dict[str, Any]:
+        """Materialize and retain one exact fold against the current ref."""
+
+        creator = self.database.get_user(created_by_handle)
+        if creator["active"] != 1:
+            raise ConflictError("fold creator is inactive")
+        queue = self.database.get_integration_queue_item(queue_item_id)
+        if queue["version"] != expected_version:
+            raise ConcurrentUpdateError("integration queue version changed")
+        if queue["state"] != "refold_required":
+            raise ConflictError("integration item does not require a refold")
+        candidate = self.database.get_candidate(queue["candidate_id"])
+        origin = CandidateManifest.from_mapping(candidate["manifest"])
+        repository_path = self.database.get_candidate_repository_path(
+            queue["candidate_id"]
+        )
+        if repository_path is None:
+            raise ConflictError("integration candidate has no recovery repository")
+        result, blobs = result_store.load_bundle(
+            origin.attempt_id,
+            expected_digest=origin.result_content_sha256,
+        )
+        materialized = candidate_store.refold(
+            origin,
+            Path(repository_path),
+            result,
+            blobs,
+            base_revision=queue["current_revision"],
+        )
+        manifest = FoldManifest.create(
+            candidate,
+            integration_ref=queue["integration_ref"],
+            generation=self.database.next_integration_fold_generation(queue_item_id),
+            materialized=materialized,
+        )
+        return self.database.record_integration_fold(
+            queue_item_id,
+            manifest,
+            expected_version=expected_version,
+            created_by=creator["id"],
+        )
+
+    def activate_integration_fold(
+        self,
+        queue_item_id: str,
+        *,
+        fold_id: str,
+        policy_id: str,
+        expected_version: int,
+        actor_handle: str,
+    ) -> dict[str, Any]:
+        actor = self.database.get_user(actor_handle)
+        return self.database.activate_integration_fold(
+            queue_item_id,
+            fold_id=fold_id,
+            policy_id=policy_id,
+            expected_version=expected_version,
+            actor=actor["id"],
+        )
+
+    def claim_integration_item(
+        self,
+        queue_item_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+        lease_seconds: int,
+    ) -> dict[str, Any]:
+        return self.database.claim_integration_item(
+            queue_item_id,
+            owner_id=owner_id,
+            expected_version=expected_version,
+            lease_seconds=lease_seconds,
+        )
+
+    def release_integration_claim(
+        self,
+        queue_item_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return self.database.release_integration_claim(
+            queue_item_id,
+            owner_id=owner_id,
+            expected_version=expected_version,
+        )
+
+    def cancel_integration_item(
+        self,
+        queue_item_id: str,
+        *,
+        expected_version: int,
+        cancelled_by_handle: str,
+    ) -> dict[str, Any]:
+        canceller = self.database.get_user(cancelled_by_handle)
+        return self.database.cancel_integration_item(
+            queue_item_id,
+            expected_version=expected_version,
+            cancelled_by=canceller["id"],
+        )
+
+    def issue_landing_plan(
+        self,
+        queue_item_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+        remote: str,
+        issued_by_handle: str,
+        result_store: WorkspaceResultStore,
+        candidate_store: GitCandidateStore,
+    ) -> dict[str, Any]:
+        """Issue argv-only authority for the exact policy revision."""
+
+        issuer = self.database.get_user(issued_by_handle)
+        if issuer["active"] != 1:
+            raise ConflictError("landing plan issuer is inactive")
+        queue = self.database.get_integration_queue_item(queue_item_id)
+        revision = self.database.get_gate_revision(queue["current_policy_id"])
+        manifest = CandidateManifest.from_mapping(revision["manifest"])
+        try:
+            candidate_store.inspect(manifest)
+        except CandidateError:
+            repository_path = revision["repository_path"]
+            if repository_path is None:
+                raise ConflictError(
+                    "integration candidate has no recovery repository"
+                ) from None
+            result, blobs = result_store.load_bundle(
+                manifest.attempt_id,
+                expected_digest=manifest.result_content_sha256,
+            )
+            candidate_store.recover_revision(
+                manifest,
+                Path(repository_path),
+                result,
+                blobs,
+            )
+        return self.database.issue_landing_plan(
+            queue_item_id,
+            owner_id=owner_id,
+            expected_version=expected_version,
+            candidate_repository=candidate_store.repository_path(
+                manifest.project_id, manifest.object_format
+            ),
+            remote=remote,
+            issued_by=issuer["id"],
+        )
+
+    def record_landing_receipt(
+        self, request: object, *, recorded_by_handle: str
+    ) -> dict[str, Any]:
+        recorder = self.database.get_user(recorded_by_handle)
+        receipt_request = LandingReceiptRequest.from_mapping(request)
+        return self.database.record_landing_receipt(
+            receipt_request, recorded_by=recorder["id"]
+        )
+
+    def get_integration_queue_item(self, queue_item_id: str) -> dict[str, Any]:
+        return self.database.get_integration_queue_item(queue_item_id)
+
+    def get_landing_plan(self, plan_id: str) -> dict[str, Any]:
+        return self.database.get_landing_plan(plan_id)
+
+    def list_integration_queue(
+        self, *, project_key: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        project_id = None
+        if project_key is not None:
+            project_id = self.database.get_project(project_key)["id"]
+        return self.database.list_integration_queue(project_id=project_id, limit=limit)
 
     def get_gate_policy(self, policy_id: str) -> dict[str, Any]:
         return self.database.get_gate_policy(policy_id)
@@ -465,12 +707,8 @@ class ControlPlane:
             raise ConflictError("gate policy revision changed")
         policy = GatePolicyManifest.from_mapping(policy_record["manifest"])
         validation = policy.policy.validation(validation_name)
-        candidate_record = self.get_candidate(
-            policy.candidate_id,
-            result_store=result_store,
-            candidate_store=candidate_store,
-        )
-        candidate = CandidateManifest.from_mapping(candidate_record["manifest"])
+        revision = self.database.get_gate_revision(policy_id)
+        candidate = CandidateManifest.from_mapping(revision["manifest"])
         if (
             candidate.head_revision != policy.head_revision
             or candidate.tree_revision != policy.tree_revision
@@ -478,6 +716,24 @@ class ControlPlane:
             or candidate.object_format != policy.object_format
         ):
             raise ConflictError("gate policy candidate identity changed")
+        try:
+            candidate_store.inspect(candidate)
+        except CandidateError:
+            repository_path = revision["repository_path"]
+            if repository_path is None:
+                raise ConflictError(
+                    "gate policy candidate has no recovery repository"
+                ) from None
+            result, blobs = result_store.load_bundle(
+                candidate.attempt_id,
+                expected_digest=candidate.result_content_sha256,
+            )
+            candidate_store.recover_revision(
+                candidate,
+                Path(repository_path),
+                result,
+                blobs,
+            )
 
         workspace_root = self.database.path.parent / "gate-workspaces"
         try:

@@ -58,6 +58,10 @@ This repository currently contains the first executable vertical slice:
   and/or identity separation policy, networkless read-only local validation,
   append-only bounded evidence, and derived readiness without transcripts or
   command output;
+- hard work-item landing dependencies, immutable deterministic refolds, one
+  leased integration lane per ref, exact argv-only manual Git plans, and
+  nonce-bound receipts that conservatively invalidate every remaining sibling
+  after a base advance without storing a Git-host credential;
 - a durable attempt ledger and bounded structured handoff that let a clean
   replacement worker resume the same run from its pinned commit without a
   transcript or inherited mutable sandbox;
@@ -77,7 +81,8 @@ This repository currently contains the first executable vertical slice:
 - an administrative CLI that can execute, cancel, retry, or reassign runs,
   reconcile interrupted ones, inspect or apply retained results, materialize,
   reconstruct, list, or verify trusted candidates, and manage exact-input gate
-  policy, review, validation, evidence, and readiness state.
+  policy, review, validation, evidence, readiness, dependency, refold, queue,
+  landing-plan, and receipt state.
 
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
@@ -122,6 +127,12 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   provider add openai-main --policy examples/provider-policy.json \
   --credential-file ./private-credentials/openai.key --created-by operator
 ```
+
+That is the current Milestone 2 transport. Milestone 7D will preserve the
+grant and worker-gateway contract while moving AI-provider credentials and
+network transport into a local sidecar or operator-managed external inference
+connector. The target boundary is documented in
+[docs/inference-connectors.md](docs/inference-connectors.md).
 
 Once a project, gateway-only profile, and run have been registered, execute or
 recover its lifecycle with:
@@ -228,6 +239,24 @@ from the operator checkout. Local validation uses an immutable image, read-only
 workspace, no network, gateway, or credential, and retains only bounded hashed
 metadata. See [docs/integration-gates.md](docs/integration-gates.md).
 
+Once the exact policy is ready, queue and manually land it without giving MGB
+a remote credential:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  integration enqueue gpl_<id> --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  integration claim iqm_<id> --owner supervisor-1 \
+  --expected-version <version> --lease-seconds 60
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  integration plan iqm_<id> --owner supervisor-1 \
+  --expected-version <claimed-version> --remote origin --issued-by operator
+```
+
+The returned commands are argv arrays and are never executed by MGB. After the
+operator executes them, `integration receipt` imports the nonce-bound outcome.
+Any sibling must be refolded and fully re-gated before another plan can issue.
+
 After all runs and assignments are terminal and the final work-log entry is an
 `outcome`, seal or later reopen the local work cycle with:
 
@@ -259,8 +288,10 @@ question and answer bodies, and transcripts are not durable control-plane
 state; bounded workspace file changes are retained separately as inert result
 artifacts. See [docs/agent-gateway.md](docs/agent-gateway.md) for the capability
 and carrier contracts and [docs/provider-broker.md](docs/provider-broker.md)
-for provider policy and secret-handling details. The replacement contract and
-handoff schema are documented in
+for the current provider policy, plus
+[docs/inference-connectors.md](docs/inference-connectors.md) for the planned
+credential-isolated transport boundary. The replacement contract and handoff
+schema are documented in
 [docs/worker-handoffs.md](docs/worker-handoffs.md). Multi-agent coordination and
 replacement-coordinator recovery are documented in
 [docs/work-memory.md](docs/work-memory.md). Runtime launch and completion
@@ -297,6 +328,7 @@ make quality
 make mutation-clean
 make candidate-test
 make gate-test
+make integration-test
 make live-supervisor
 ```
 

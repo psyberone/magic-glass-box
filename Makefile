@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 MUTMUT ?= $(PYTHON) -m mutmut
 MUTMUT_RUN_ARGS ?=
 
-.PHONY: test lint coverage mutation mutation-clean quality candidate-test gate-test live-supervisor
+.PHONY: test lint coverage mutation mutation-clean quality candidate-test gate-test integration-test live-supervisor
 
 test:
 	PYTHONPATH=src "$(PYTHON)" -m unittest discover -s tests -v
@@ -34,6 +34,9 @@ candidate-test:
 
 gate-test:
 	PYTHONPATH=src "$(PYTHON)" -m unittest tests.test_integration_gates -v
+
+integration-test:
+	PYTHONPATH=src "$(PYTHON)" -m unittest tests.test_integration_queue -v
 
 live-supervisor:
 	PYTHONPATH=src "$(PYTHON)" scripts/check_live_supervisor.py

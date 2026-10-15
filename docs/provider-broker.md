@@ -1,5 +1,12 @@
 # Scoped provider broker
 
+> **CURRENT IMPLEMENTATION AND MIGRATION NOTE:** This broker already keeps
+> reusable credentials out of workers, but the MGB process currently resolves
+> the credential and performs provider HTTP transport. Milestone 7D will keep
+> its authorization, grant, reservation, and audit semantics while moving
+> upstream authentication and transport into a credential-isolated inference
+> connector. See [inference-connectors.md](inference-connectors.md).
+
 The provider broker lets a networkless worker call one administrator-defined
 AI endpoint without receiving a reusable credential or choosing where the
 request goes. A provider grant is a named, immutable policy. An agent profile

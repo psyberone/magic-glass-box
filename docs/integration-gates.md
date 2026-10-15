@@ -1,10 +1,9 @@
 # Integration candidates and gates
 
-> **MILESTONES 7A AND 7B IMPLEMENTED:** Trusted candidates, exact-input gate
-> policies, candidate-backed independent-review runs, local validation, bounded
-> evidence, and derived readiness are implemented. The dependency/refold queue,
-> manual landing plan, landing receipt, push, remote review/CI/approval query,
-> and merge actuator remain design-only Milestone 7C work.
+> **MILESTONES 7A–7C IMPLEMENTED:** Trusted candidates, exact-input gates,
+> hard dependencies, deterministic refolds, a serialized integration queue,
+> argv-only manual Git plans, and nonce-bound receipts are implemented. MGB
+> still performs no push, forge query, pull-request operation, or remote merge.
 
 Magic Glass Box owns integration semantics: what exact Git tree is proposed,
 what evidence applies to it, what must land first, whether the current base is
@@ -12,8 +11,9 @@ still the one that was validated, and what bounded receipt the actuator
 returned. Provider-specific API calls and reusable credentials are outside this
 boundary.
 
-Milestone 7A implements trusted candidate materialization and Milestone 7B
-implements the exact-input gate ledger. Milestone 7C remains planned. See
+Milestone 7A implements trusted candidate materialization, Milestone 7B the
+exact-input gate ledger, and Milestone 7C the provider-neutral integration
+queue and manual landing actuator. See
 [candidates.md](candidates.md) and [roadmap.md](roadmap.md).
 
 ## Candidate authority
@@ -73,12 +73,13 @@ Candidate-only checks are insufficient when two individually valid changes
 compose into an invalid integration tree. The readiness decision must validate
 the tree as it would exist on the expected base.
 
-Milestone 7B local validation covers the single-candidate tree. Each configured
+Local validation covers the policy's exact candidate or folded tree. Each configured
 command is pinned to an immutable Docker image ID and executes with a read-only
 workspace, Docker network mode `none`, no gateway, and no credentials. The
 ledger retains exit status, duration, image and command identities, and a hash
-and byte count of output; output itself is discarded. Combined-tree validation
-after dependencies and refolding belongs to Milestone 7C.
+and byte count of output; output itself is discarded. A folded policy resolves
+the derived base/head/tree for both validation and independent-review
+workspaces, including deterministic recovery after private-cache loss.
 
 Some checks described as “post-landing-only” can be reproduced against a folded
 tree before landing; those are readiness gates. A check that truly cannot run
@@ -122,6 +123,68 @@ The request and durable manifest/evidence shapes are published in `schemas/`.
 `make gate-test` repeats the real Git/SQLite candidate, review, recovery, and
 gate-ledger proof without requiring a live hosting service.
 
+Queue a ready policy, lease its ref lane, and obtain a one-time manual plan:
+
+```console
+magic-glass-box integration enqueue gpl_<id> --created-by operator
+magic-glass-box integration claim iqm_<id> --owner supervisor-1 \
+  --expected-version <version> --lease-seconds 60
+magic-glass-box integration plan iqm_<id> --owner supervisor-1 \
+  --expected-version <claimed-version> --remote origin --issued-by operator
+```
+
+Repeating `enqueue` with the exact policy is idempotent. Supplying another
+policy for a candidate that already has a queue item fails explicitly; MGB
+never silently substitutes the queue item's earlier or folded policy for the
+policy the operator named.
+
+Before a plan is issued, queued, claimed, or refold-required work may instead
+be cancelled explicitly:
+
+```console
+magic-glass-box integration cancel iqm_<id> \
+  --expected-version <version> --cancelled-by operator
+```
+
+`--remote` is a syntactically bounded Git remote name, never a URL or
+credential-bearing transport string. MGB does not read the operator checkout's
+remote configuration; the operator must run the returned commands in the
+intended checkout where that name is configured. The `plan` response contains
+two argv arrays and the only copy of the raw receipt nonce. Execute each array
+directly; do not join it into shell text. Then submit a document matching
+`landing-receipt-request-v1.schema.json`:
+
+```console
+magic-glass-box integration receipt \
+  --document landing-receipt-request.json --recorded-by operator
+```
+
+After a landed receipt advances the durable ref, every remaining sibling is
+`refold_required`. Rebuild it from the original result, create an entirely new
+fold-bound policy, collect fresh evidence, and activate it:
+
+```console
+magic-glass-box integration refold iqm_<id> \
+  --expected-version <version> --created-by operator
+magic-glass-box gate policy-create cnd_<id> --fold ifd_<id> \
+  --policy gate-policy-request.json --created-by operator
+# run review and validation for the new gpl_<id>
+magic-glass-box integration activate iqm_<id> --fold ifd_<id> \
+  --policy gpl_<id> --expected-version <version> --actor operator
+```
+
+Hard ordering is explicit and cycle-checked:
+
+```console
+magic-glass-box integration dependency-add wki_<dependent> wki_<prerequisite> \
+  --created-by operator
+magic-glass-box integration dependency-list --project project-key --active-only
+```
+
+`make integration-test` runs the ledger failures and a real local-bare-remote
+proof in which A lands, B is invalidated and refolded, and B lands with the
+combined tree.
+
 ### Base-advance invalidation
 
 The initial correctness rule is intentionally conservative: land one candidate
@@ -145,8 +208,9 @@ otherwise independent candidates is optional future optimization.
 
 Workers may produce results and review evidence, then exit. Waiting for review,
 validation, an integration lease, or a remote provider may outlive any worker.
-Landing therefore advances through durable supervisor actions rather than a
-worker-held capability.
+Landing therefore advances through durable control-plane actions rather than a
+worker-held capability. M7C exposes these actions through the CLI; automatic
+queue driving is a later supervisor integration.
 
 The landing lease serializes the expected integration ref. Before issuing an
 actuator plan, the supervisor rechecks dependencies, gate evidence, expected
@@ -157,14 +221,17 @@ base, head/tree, and policy revision in one authority decision.
 With no service sidecar configured, the state machine stops at a structured
 human-executable plan. Arguments and body files are represented separately; MGB
 does not emit an interpolated shell program containing untrusted text. The plan
-contains a nonce/request digest and every revision known at authorization time.
+contains the evidence/request digest and every revision known at authorization
+time. Its issuance response carries a separate one-time nonce; only the nonce
+hash is retained.
 
 The imported receipt must bind that nonce and report what was actually done.
 The control plane records the assurance that the actuator established:
 
 - **base-and-head enforced** — the actuator atomically required both expected
   values;
-- **head enforced** — the candidate head was fixed but the base was not; or
+- **head enforced** — reserved for a future actuator that fixes the candidate
+  head but not the base; or
 - **operator attested** — the provider offered no machine-verifiable
   precondition through the selected path.
 
@@ -177,14 +244,15 @@ must not claim base-and-head compare-and-swap. See the
 ## Receipts
 
 A landing receipt is bounded, immutable metadata containing the request digest,
-assurance level, actuator identity, merge method, and landed integration
-revision. Provider-confirmed closed work references may be attached after a
+assurance level, actuator identity, outcome, and observed integration revision.
+Provider-confirmed closed work references may be attached after a
 credential-bearing connector reads them; they are never inferred from proposed
 change-body prose.
 
-Provider data may settle asynchronously. Receipts may therefore remain pending
-until bounded reconciliation confirms the landed ref and closing effects. An
-unknown outcome is not silently converted into failure or success.
+The generic Git actuator accepts only `landed` when the observed ref is the
+planned head, or `not_landed` when it remains the expected base. An unknown or
+drifted outcome stays pending; it is not silently converted into failure or
+success. Future provider actuators may add bounded asynchronous reconciliation.
 
 ## Deliberate deferrals
 
