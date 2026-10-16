@@ -602,8 +602,7 @@ class ProviderHTTPTransportTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "magic_glass_box.worker_transport."
-                    "PROVIDER_GATEWAY_TIMEOUT_SECONDS",
+                    "magic_glass_box.worker_transport.PROVIDER_GATEWAY_TIMEOUT_SECONDS",
                     0.1,
                 ),
                 self.assertRaisesRegex(WorkerTransportError, "ambiguous"),

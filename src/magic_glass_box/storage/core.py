@@ -172,9 +172,7 @@ class DatabaseCore:
             while version < SCHEMA_VERSION:
                 migration = MIGRATIONS.get(version)
                 if migration is None:
-                    raise StorageError(
-                        f"no migration from database schema {version}"
-                    )
+                    raise StorageError(f"no migration from database schema {version}")
                 target = version + 1
                 cls._execute_statements(connection, migration)
                 connection.execute(f"PRAGMA user_version = {target}")

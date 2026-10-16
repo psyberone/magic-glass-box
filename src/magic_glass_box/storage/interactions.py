@@ -779,9 +779,7 @@ class InteractionStorage:
                 or http_status is not None
                 or error_code is not None
             ):
-                raise ValidationError(
-                    "dispatching provider invocation is inconsistent"
-                )
+                raise ValidationError("dispatching provider invocation is inconsistent")
         elif outcome == "succeeded":
             if http_status is None or not 200 <= http_status < 300 or error_code:
                 raise ValidationError("successful provider invocation is inconsistent")

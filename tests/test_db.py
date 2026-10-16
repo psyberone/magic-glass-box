@@ -153,9 +153,7 @@ class DatabaseTests(unittest.TestCase):
             _source: str | None,
         ) -> int:
             return (
-                sqlite3.SQLITE_DENY
-                if action in denied_actions
-                else sqlite3.SQLITE_OK
+                sqlite3.SQLITE_DENY if action in denied_actions else sqlite3.SQLITE_OK
             )
 
         connection.set_authorizer(reject_destructive_reapplication)

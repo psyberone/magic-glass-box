@@ -1044,15 +1044,11 @@ class ControlPlane:
                 invocation_id=invocation_id,
                 dispatch_kind="connector",
                 inference_connector_id=authority["connector_id"],
-                connector_protocol_version=authority[
-                    "connector_protocol_version"
-                ],
+                connector_protocol_version=authority["connector_protocol_version"],
                 deployment_sha256=authority["deployment_sha256"],
                 route=authority["route"],
                 policy_sha256=authority["policy_sha256"],
-                credential_scope_sha256=authority[
-                    "credential_scope_sha256"
-                ],
+                credential_scope_sha256=authority["credential_scope_sha256"],
                 provider=authority["provider"],
                 protocol=authority["protocol"],
                 model=authority["model"],
@@ -1166,9 +1162,7 @@ class ControlPlane:
                 outcome="ambiguous",
                 error_code="connector_response_missing",
             )
-            raise ProviderAmbiguousError(
-                "provider invocation outcome is ambiguous"
-            )
+            raise ProviderAmbiguousError("provider invocation outcome is ambiguous")
         invocation = self._finalize_provider_invocation(
             invocation_id=invocation_id,
             reservation_id=reservation["id"],
