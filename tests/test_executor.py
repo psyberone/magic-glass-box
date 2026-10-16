@@ -884,9 +884,32 @@ class DockerCLITests(unittest.TestCase):
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=12.5,
             check=False,
         )
+
+    def test_cli_decodes_non_utf8_output_without_changing_success(self) -> None:
+        def decode_like_subprocess(
+            _args: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            errors = kwargs.get("errors")
+            if errors != "replace":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")
+            return subprocess.CompletedProcess(
+                ["docker"],
+                0,
+                stdout=b"progress:\xff\xfe\n".decode("utf-8", errors),
+                stderr="",
+            )
+
+        client = DockerCLI(
+            binary=Path("/usr/local/bin/docker"),
+            runner=decode_like_subprocess,
+        )
+
+        self.assertEqual(client.logs(CONTAINER_ID), "progress:\ufffd\ufffd\n")
 
     def test_image_without_declared_volumes_is_accepted(self) -> None:
         self.runner.return_value = self.completed(

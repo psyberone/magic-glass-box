@@ -5,8 +5,11 @@ import contextlib
 import http.client
 import io
 import json
+import os
 import socket
 import struct
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -282,6 +285,88 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
             serve_unix(protected, 1, connector)
         self.assertEqual(protected.read_text(encoding="utf-8"), "keep")
 
+    def test_unix_server_isolates_malformed_and_idle_clients(self) -> None:
+        connector = EchoConnector()
+        socket_path = self.root / "resilient-connector.sock"
+        result: list[int] = []
+        failure: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                result.append(
+                    serve_unix(
+                        socket_path,
+                        1,
+                        connector,
+                        client_timeout=0.05,
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failure.append(exc)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not socket_path.exists():
+            time.sleep(0.01)
+        self.assertTrue(socket_path.exists())
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as malformed:
+            malformed.connect(str(socket_path))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as idle:
+            idle.connect(str(socket_path))
+            time.sleep(0.1)
+
+        request = invocation(self.session.credential_scope_sha256)
+        response = UnixInferenceConnectorClient(socket_path).invoke(request)
+        thread.join(3)
+
+        self.assertEqual(failure, [])
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [1])
+        self.assertEqual(connector.requests, [request])
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertFalse(socket_path.exists())
+
+    def test_unix_server_removes_socket_after_sigterm(self) -> None:
+        socket_path = self.root / "terminated-connector.sock"
+        script = "\n".join(
+            (
+                "import sys",
+                "from pathlib import Path",
+                "from magic_glass_box.openai_chatgpt_cli import serve_unix",
+                "class Connector:",
+                "    def invoke(self, request):",
+                "        raise AssertionError('no invocation expected')",
+                "serve_unix(Path(sys.argv[1]), 1, Connector())",
+            )
+        )
+        environment = os.environ.copy()
+        source_root = str(Path(__file__).resolve().parents[1] / "src")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            value for value in (source_root, environment.get("PYTHONPATH", "")) if value
+        )
+        process = subprocess.Popen(  # noqa: S603 - fixed interpreter argv
+            [sys.executable, "-c", script, str(socket_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+        )
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not socket_path.exists():
+            if process.poll() is not None:
+                break
+            time.sleep(0.01)
+        self.assertTrue(socket_path.exists())
+
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=3)
+
+        self.assertEqual(process.returncode, 0, (stdout, stderr))
+        self.assertFalse(socket_path.exists())
+
     def test_status_command_never_prints_tokens(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -441,6 +526,13 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
             serve_unix(Path("connector.sock"), 1, connector)
         with self.assertRaisesRegex(ChatGPTAuthenticationError, "positive"):
             serve_unix(self.root / "connector.sock", 0, connector)
+        with self.assertRaisesRegex(ChatGPTAuthenticationError, "timeout"):
+            serve_unix(
+                self.root / "connector.sock",
+                1,
+                connector,
+                client_timeout=0,
+            )
 
         public = self.root / "public"
         public.mkdir(mode=0o755)

@@ -27,6 +27,11 @@ from .openai_chatgpt import (
     OpenAIResponsesClient,
     _strict_json_object,
 )
+from .sidecar import (
+    DEFAULT_CLIENT_TIMEOUT_SECONDS,
+    UnixSidecarError,
+    serve_unix_socket,
+)
 
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_REQUEST_FRAME_BYTES = 2 * 1024 * 1024 + 64 * 1024
@@ -307,48 +312,24 @@ def serve_unix(
     socket_path: Path,
     max_invocations: int,
     connector: Connector,
+    *,
+    client_timeout: float = DEFAULT_CLIENT_TIMEOUT_SECONDS,
 ) -> int:
-    socket_path = Path(socket_path)
-    if not socket_path.is_absolute():
-        raise ChatGPTAuthenticationError("socket path must be absolute")
-    if (
-        isinstance(max_invocations, bool)
-        or not isinstance(max_invocations, int)
-        or max_invocations < 1
-    ):
-        raise ChatGPTAuthenticationError("max invocations must be positive")
+    def handle(connection: socket.socket) -> None:
+        request = _read_request(connection)
+        response = connector.invoke(request)
+        _write_response(connection, response)
+
     try:
-        socket_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        parent = socket_path.parent.lstat()
-    except OSError as exc:
-        raise ChatGPTAuthenticationError("socket directory is unavailable") from exc
-    if (
-        stat.S_ISLNK(parent.st_mode)
-        or not stat.S_ISDIR(parent.st_mode)
-        or parent.st_mode & 0o077
-        or (hasattr(os, "getuid") and parent.st_uid != os.getuid())
-    ):
-        raise ChatGPTAuthenticationError("socket directory must be private")
-    if socket_path.exists() or socket_path.is_symlink():
-        raise ChatGPTAuthenticationError("socket path already exists")
-    completed = 0
-    bound = False
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(str(socket_path))
-            bound = True
-            os.chmod(socket_path, 0o600)
-            listener.listen(1)
-            for _ in range(max_invocations):
-                connection, _ = listener.accept()
-                with connection:
-                    request = _read_request(connection)
-                    _write_response(connection, connector.invoke(request))
-                    completed += 1
-    finally:
-        if bound:
-            socket_path.unlink(missing_ok=True)
-    return completed
+        return serve_unix_socket(
+            socket_path,
+            max_invocations,
+            handle,
+            recoverable_errors=(ChatGPTConnectorError, ValidationError, OSError),
+            client_timeout=client_timeout,
+        )
+    except UnixSidecarError as exc:
+        raise ChatGPTAuthenticationError(str(exc)) from exc
 
 
 def _serve(args: argparse.Namespace) -> dict[str, Any]:

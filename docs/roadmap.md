@@ -557,7 +557,7 @@ The credential scan was clean and direct worker networking remained denied.
 
 ## Post-Milestone 7 external-audit stabilization
 
-**Status: in progress — R1, R2, and R3 complete**
+**Status: in progress — R1 through R4 complete**
 
 Three independent cold promise audits follow M7. This is a correctness and
 boundary-hardening sequence, not a compressed feature milestone. Repairs are
@@ -577,9 +577,12 @@ grouped by invariant so overlapping findings produce one coherent change:
    authority and fences stale transition writers; a truthful third-revision
    `not_landed` receipt advances the observed ref and requires refold. Schema
    v18 preserves prior attempt events while adding the owner-change event.
-4. **R4 — operational boundary resilience:** redaction, non-UTF-8 runtime
-   output, read-only workspace cleanup, and sidecar connection/socket
-   lifecycle.
+4. **R4 — operational boundary resilience (complete):** live Krab failures are
+   reduced to redacted categories; Docker output uses deterministic replacement
+   decoding; stopped-worker read-only directory trees are reclaimable; all
+   shipped Unix sidecars isolate malformed and idle clients and clean their
+   sockets on controlled termination; queued cancellation stays independent of
+   Docker construction.
 5. **R5/R6 — authority, protocol, and contract closure:** revoked-authority
    retry/supervision, user and interaction binding, connector capability
    allowlists, OAuth/SSE edge cases, remaining bounded reads, and documentation

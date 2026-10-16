@@ -6,7 +6,7 @@ import logging
 import math
 import signal
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
@@ -889,6 +889,7 @@ def _dispatch(
     candidate_store: GitCandidateStore | None = None,
     gate_engine: DockerCLI | _LazyDockerImageInspector | None = None,
     gate_executor: DockerExecutor | None = None,
+    coordinator_factory: Callable[[], RunCoordinator] | None = None,
 ) -> object:
     if args.command == "init":
         return control.initialize()
@@ -1046,6 +1047,10 @@ def _dispatch(
                 expected_run_version=args.expected_version,
                 reason=args.reason,
             )
+            if requested.get("state") == "cancelled":
+                return requested
+            if coordinator is None and coordinator_factory is not None:
+                coordinator = coordinator_factory()
             if coordinator is not None:
                 coordinator.reconcile(args.run_id)
                 return control.database.get_run(args.run_id)
@@ -1270,11 +1275,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidate_store = None
         gate_engine = None
         gate_executor = None
-        if args.command == "run" and args.run_command in {
-            "cancel",
-            "execute",
-            "reconcile",
-        }:
+        coordinator_factory = None
+        if args.command == "run" and args.run_command in {"execute", "reconcile"}:
             result_store = _build_result_store(control)
             coordinator = _build_run_coordinator(
                 control,
@@ -1283,6 +1285,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 result_store=result_store,
             )
+        elif args.command == "run" and args.run_command == "cancel":
+
+            def build_cancel_coordinator() -> RunCoordinator:
+                cancel_result_store = _build_result_store(control)
+                return _build_run_coordinator(
+                    control,
+                    result_store=cancel_result_store,
+                )
+
+            coordinator_factory = build_cancel_coordinator
         elif args.command == "control-room" and args.control_room_command == "serve":
             result_store = _build_result_store(control)
             coordinator = _build_run_coordinator(
@@ -1340,6 +1352,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             candidate_store,
             gate_engine,
             gate_executor,
+            coordinator_factory,
         )
     except (
         CandidateError,

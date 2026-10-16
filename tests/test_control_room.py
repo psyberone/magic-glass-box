@@ -27,6 +27,7 @@ from magic_glass_box.gates import GatePolicyManifest, GatePolicySpec
 from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import (
     KrabError,
+    KrabHTTPError,
     KrabIdentity,
     KrabProject,
     KrabUserRef,
@@ -1124,6 +1125,61 @@ class ControlRoomTests(unittest.TestCase):
         )
         factory.assert_not_called()
 
+    def test_live_krab_refresh_redacts_upstream_and_host_failure_details(
+        self,
+    ) -> None:
+        failures = (
+            (
+                "whoami",
+                KrabHTTPError(
+                    401,
+                    "unauthorized",
+                    "token rejected: UPSTREAM-ERROR-BODY-MARKER",
+                ),
+            ),
+            (
+                "whoami",
+                KrabError(
+                    "Krab is unavailable: [Errno 61] connection refused at "
+                    "/Users/operator/private/socket"
+                ),
+            ),
+            (
+                "projects",
+                KrabError(
+                    "Krab is unavailable: host detail from "
+                    "/Users/operator/private/projects.sock"
+                ),
+            ),
+        )
+
+        for method, failure in failures:
+            with self.subTest(method=method, failure=type(failure).__name__):
+                client = mock.Mock()
+                client.whoami.return_value = self.krab_identity
+                getattr(client, method).side_effect = failure
+                snapshot = ControlRoom(
+                    self.database,
+                    credential_resolver=FakeResolver(),
+                    client_factory=lambda _base_url, _token, client=client: client,
+                ).snapshot(refresh_krab=True)
+
+                self.assertEqual(snapshot["krab"]["status"], "degraded")
+                self.assertEqual(
+                    snapshot["krab"]["errors"][0]["message"],
+                    "Krab identity refresh failed",
+                )
+                encoded = json.dumps(snapshot, sort_keys=True)
+                for private_detail in (
+                    "UPSTREAM-ERROR-BODY-MARKER",
+                    "token rejected",
+                    "/Users/operator/private/socket",
+                    "/Users/operator/private/projects.sock",
+                    "connection refused",
+                    "host detail",
+                ):
+                    self.assertNotIn(private_detail, encoded)
+
     def test_live_krab_refresh_isolates_identity_and_project_mismatches(self) -> None:
         second_krab_identity = KrabIdentity(
             "usr_" + "5" * 32,
@@ -1248,7 +1304,7 @@ class ControlRoomTests(unittest.TestCase):
                     "project_key": "box-project",
                     "kind": "issue",
                     "error_type": "KrabError",
-                    "message": "issue queue unavailable",
+                    "message": "Krab work-claim refresh failed",
                 }
             ],
         )

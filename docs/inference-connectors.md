@@ -69,6 +69,15 @@ then verifies exclusive connector dispatch, networkless-worker containment,
 durable ambiguous outcomes, and removal of direct credential resolution from
 normal MGB execution.
 
+The optional ChatGPT connector, API-key reference connector, and deterministic
+proof connector share one local listener policy. The socket lives in an
+operator-owned mode-`0700` directory and uses mode `0600`; each accepted client
+has a 30-second I/O timeout. Truncated, malformed, oversized, abandoned, or
+broken-pipe clients are isolated to that connection and do not consume a
+successful invocation slot. A controlled `SIGTERM` unwinds the listener and
+removes its socket before exit, so an operator can restart the sidecar without
+manual stale-path cleanup.
+
 ## Ownership boundary
 
 Magic Glass Box owns:

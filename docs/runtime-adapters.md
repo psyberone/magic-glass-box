@@ -73,11 +73,14 @@ workspace policy.
 MiB at both the Docker read boundary and the adapter parser, parsed in memory
 after the container exits, and discarded. Docker itself retains no more than
 two rotating 10 MiB local log files. Ordinary Docker control commands keep a
-tighter 1 MiB output limit. Runtime output is never written to SQLite, a result
-manifest, a work log, or the control room. A non-zero process exit remains the
-outcome even if its output is malformed, so private error output is not parsed
-into a durable failure reason. A zero exit with a malformed or incomplete
-success envelope fails closed.
+tighter 1 MiB output limit. Docker output is decoded explicitly as UTF-8 with
+invalid byte sequences replaced in the transient string, independent of the
+host locale. One invalid progress byte therefore cannot turn an exit-zero
+command run into an execution exception. Runtime output is never written to
+SQLite, a result manifest, a work log, or the control room. A non-zero process
+exit remains the outcome even if its output is malformed, so private error
+output is not parsed into a durable failure reason. A structured adapter still
+fails closed when an exit-zero success envelope is malformed or incomplete.
 
 `RuntimeAdapterRegistry` validates names, rejects duplicates and unknown
 selections, and validates every launch and completion value returned across

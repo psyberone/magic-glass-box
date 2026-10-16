@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,9 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
             if not socket_path.exists():
                 stdout, stderr = process.communicate(timeout=1)
                 self.fail(f"fake connector did not start: {stdout}{stderr}")
+
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as malformed:
+                malformed.connect(str(socket_path))
 
             request = InferenceInvocationRequest.from_mapping(
                 {

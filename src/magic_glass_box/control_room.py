@@ -1526,11 +1526,6 @@ class ControlRoom:
                 token = self.credential_resolver.resolve(route["credential_ref"])
                 client = self.client_factory(route["base_url"], token)
                 actual = client.whoami()
-                if actual.user_id != route["krab_user_id"]:
-                    raise KrabError(
-                        "credential now belongs to a different Krab identity"
-                    )
-                visible = client.projects()
             except (CredentialError, KrabError) as exc:
                 errors.append(
                     {
@@ -1541,8 +1536,34 @@ class ControlRoom:
                         "message": (
                             "configured credential is unavailable"
                             if isinstance(exc, CredentialError)
-                            else str(exc)
+                            else "Krab identity refresh failed"
                         ),
+                    }
+                )
+                continue
+            if actual.user_id != route["krab_user_id"]:
+                errors.append(
+                    {
+                        "scope": "identity",
+                        "identity_id": route["id"],
+                        "krab_handle": route["handle"],
+                        "error_type": "KrabError",
+                        "message": (
+                            "credential now belongs to a different Krab identity"
+                        ),
+                    }
+                )
+                continue
+            try:
+                visible = client.projects()
+            except KrabError as exc:
+                errors.append(
+                    {
+                        "scope": "identity",
+                        "identity_id": route["id"],
+                        "krab_handle": route["handle"],
+                        "error_type": type(exc).__name__,
+                        "message": "Krab identity refresh failed",
                     }
                 )
                 continue
@@ -1612,7 +1633,7 @@ class ControlRoom:
                             "project_key": project_key,
                             "kind": kind,
                             "error_type": type(exc).__name__,
-                            "message": str(exc),
+                            "message": "Krab work-claim refresh failed",
                         }
                     )
                     continue

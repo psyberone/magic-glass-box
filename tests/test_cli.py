@@ -1722,6 +1722,47 @@ class CLITests(unittest.TestCase):
             ),
         )
 
+    def test_queued_run_cancellation_does_not_construct_docker_runtime(self) -> None:
+        class QueuedRunControl(FakeControlPlane):
+            def request_run_cancellation(
+                self, run_id: str, **kwargs: object
+            ) -> dict[str, object]:
+                self.calls.append(("run.cancel", {"run_id": run_id, **kwargs}))
+                return {"id": run_id, "state": "cancelled", "version": 4}
+
+        control = QueuedRunControl()
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch(
+                "magic_glass_box.cli._build_result_store",
+                side_effect=AssertionError("result store must remain cold"),
+            ),
+            mock.patch(
+                "magic_glass_box.cli._build_run_coordinator",
+                side_effect=AssertionError("Docker must remain cold"),
+            ),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "run",
+                    "cancel",
+                    "run_" + "2" * 32,
+                    "--expected-version",
+                    "3",
+                    "--requested-by",
+                    "operator",
+                    "--reason",
+                    "no longer needed",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["state"], "cancelled")
+
     def test_control_room_server_prints_the_private_url_and_closes_cleanly(
         self,
     ) -> None:

@@ -741,7 +741,33 @@ class WorkspaceManager:
         if destination is None:
             return False
         try:
+            self._make_directories_removable(destination)
             shutil.rmtree(destination)
         except OSError as exc:
             raise WorkspaceError("cannot remove run workspace") from exc
         return True
+
+    @staticmethod
+    def _make_directories_removable(destination: Path) -> None:
+        def make_owner_writable(path: Path) -> None:
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode):
+                return
+            required = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+            mode = stat.S_IMODE(info.st_mode)
+            if mode & required != required:
+                path.chmod(mode | required)
+
+        def raise_walk_error(error: OSError) -> None:
+            raise error
+
+        make_owner_writable(destination)
+        for current, directories, _files in os.walk(
+            destination,
+            topdown=True,
+            followlinks=False,
+            onerror=raise_walk_error,
+        ):
+            make_owner_writable(Path(current))
+            for name in directories:
+                make_owner_writable(Path(current) / name)

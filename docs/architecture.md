@@ -291,8 +291,9 @@ For an execution request, Magic Glass Box:
    cancellation; Docker command timeouts remain bounded, and agent runtime has
    a six-hour default ceiling that the operator may override with
    `--run-timeout`;
-9. captures bounded stdout transiently, lets the adapter validate only its
-   completion envelope, and retains none of that output;
+9. captures bounded stdout transiently with deterministic UTF-8 replacement
+   decoding, lets the adapter validate only its completion envelope, and
+   retains none of that output;
 10. captures a bounded file-level result and binds its digest to the attempt;
 11. removes all labeled containers, gateway files, and the disposable snapshot;
    and
@@ -308,6 +309,13 @@ owner lease expires. Reconciliation finds containers by product and run-ID
 labels rather than trusting an in-memory container handle. It also recognizes
 the retired label namespace so an upgrade can clean interrupted legacy
 containers.
+
+Workspace cleanup may restore owner permissions on directories inside the
+stopped worker's one disposable run root, without following symlinks, before
+removing it. That admission-side normalization handles common read-only
+dependency caches; it does not treat private control-plane state as a hostile
+filesystem or weaken the rule that unexplained cleanup failure stays
+recoverable and visible.
 
 The result store is trusted host state beside the control-plane database. It
 contains a canonical manifest plus deduplicated changed-file blobs, never a Git

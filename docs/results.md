@@ -116,6 +116,13 @@ the result boundary. Cleanup failures still leave the attempt active for later
 reconciliation, and reconciliation never treats a currently leased attempt as
 abandoned.
 
+Before deleting the stopped worker's copy-on-write workspace, cleanup restores
+owner read, write, and traversal permission on actual directories beneath that
+one run root without following symlinks. Ordinary read-only package caches can
+therefore be removed rather than wedging an otherwise completed run. Other
+filesystem failures remain explicit and retain the existing lease-aware
+reconciliation path.
+
 ## Inspect and apply
 
 Use the attempt ID shown by `run show`:

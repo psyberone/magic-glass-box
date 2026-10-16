@@ -91,6 +91,13 @@ The local timestamp is the consistency point for the SQLite projection. A live
 Krab refresh has its own `refreshed_at` timestamp because no transaction can
 span the two independent projects.
 
+Live Krab failures are reduced to fixed operational categories at this
+boundary. The projection may identify the failed identity or claim queue and
+the local exception class, but it never copies an upstream error body, socket
+path, operating-system diagnostic, or arbitrary exception message into JSON or
+HTML. A failed identity or queue degrades only that overlay; the transactional
+local snapshot remains available.
+
 ## Interactive browser
 
 `control-room serve` prints a fresh private URL and serves the same projection
@@ -120,7 +127,7 @@ the URL.
 | Action | Contract |
 | --- | --- |
 | Answer | Binds one operator-selected Krab response item to an open interaction under optimistic concurrency. The item is re-fetched and verified against the pinned project, session, human sender, and agent recipient; its title and body are neither rendered nor retained. |
-| Cancel | Records an optimistic cancellation request. A queued or waiting run becomes terminal immediately; an owned attempt stops through its coordinator heartbeat path. |
+| Cancel | Records an optimistic cancellation request. A queued or waiting run becomes terminal immediately without constructing a Docker runtime; an owned attempt lazily opens the coordinator and stops through its heartbeat path. |
 | Retry | Creates one queued successor to a terminal run with the same immutable context, profile, work-item version, work thread, source revision, Krab route, and exact provider grants. Unavailable pinned authority fails closed. |
 | Reassign | Creates a queued successor to a terminal run with the same work identity and source but an explicitly selected profile's latest revision and current provider grants. |
 | Revoke | Revokes an active provider grant under optimistic concurrency; already-pinned runs observe the live kill switch. |

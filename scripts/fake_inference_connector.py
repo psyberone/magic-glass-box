@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import socket
 import stat
 import struct
@@ -15,6 +14,7 @@ from typing import Any
 
 from magic_glass_box.domain import ValidationError, canonical_json
 from magic_glass_box.inference import InferenceInvocationRequest
+from magic_glass_box.sidecar import UnixSidecarError, serve_unix_socket
 
 MAX_REQUEST_FRAME_BYTES = 2 * 1024 * 1024 + 64 * 1024
 MAX_FAKE_CREDENTIAL_BYTES = 16 * 1024
@@ -143,33 +143,24 @@ def _load_private_credential(path: Path | None) -> bool:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    socket_path = args.socket_path
-    if not socket_path.is_absolute():
-        raise SystemExit("--socket-path must be absolute")
-    socket_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    if socket_path.exists() or socket_path.is_symlink():
-        raise SystemExit("--socket-path already exists")
     credential_loaded = _load_private_credential(args.credential_file)
-    completed = 0
-    bound = False
+
+    def handle(connection: socket.socket) -> None:
+        request = _read_request(connection)
+        _write_response(
+            connection,
+            _response_for(request, credential_loaded=credential_loaded),
+        )
+
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(str(socket_path))
-            bound = True
-            os.chmod(socket_path, 0o600)
-            listener.listen(1)
-            for _ in range(args.max_invocations):
-                connection, _ = listener.accept()
-                with connection:
-                    request = _read_request(connection)
-                    _write_response(
-                        connection,
-                        _response_for(request, credential_loaded=credential_loaded),
-                    )
-                    completed += 1
-    finally:
-        if bound:
-            socket_path.unlink(missing_ok=True)
+        completed = serve_unix_socket(
+            args.socket_path,
+            args.max_invocations,
+            handle,
+            recoverable_errors=(OSError, ValidationError),
+        )
+    except UnixSidecarError as exc:
+        raise SystemExit(str(exc)) from exc
     print(json.dumps({"invocations": completed, "status": "stopped"}))
     return 0
 

@@ -39,7 +39,8 @@ This repository currently contains the first executable vertical slice:
   upstream provider credential;
 - schema-v17 credential-isolated inference-connector registrations, exclusive
   connector dispatch, strict request/response envelopes, durable pre-dispatch
-  intent and ambiguous outcomes, and a bounded Unix-socket carrier;
+  intent and ambiguous outcomes, and a bounded Unix-socket carrier that
+  isolates bad clients and removes its socket on controlled termination;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;
@@ -77,7 +78,9 @@ This repository currently contains the first executable vertical slice:
 - operator-controlled work completion that seals audit history and an explicit
   reopen into a blank next-generation memory thread;
 - a transactionally consistent, redacted control-room projection with an
-  optional live overlay of configured Krab identities' roles and claim queues;
+  optional live overlay of configured Krab identities' roles and claim queues,
+  where upstream bodies and host-private failure details are reduced to fixed
+  operational categories;
 - a loopback-only, capability-addressed browser control room with explicit
   cancel, retry, reassign, revoke, and reconcile forms;
 - a leader-safe long-lived supervisor with per-run opt-in, finite durable

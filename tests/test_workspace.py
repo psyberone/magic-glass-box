@@ -69,6 +69,18 @@ class WorkspaceManagerTests(unittest.TestCase):
         self.assertFalse(prepared.path.exists())
         self.assertFalse(manager.cleanup(RUN_ID))
 
+    def test_cleanup_removes_worker_created_read_only_directories(self) -> None:
+        manager = WorkspaceManager(self.root, FakeSnapshotter())
+        prepared = manager.prepare(RUN_ID, self.repository, None)
+        package = prepared.path / "vendor" / "pkg"
+        package.mkdir(parents=True)
+        (package / "module.py").write_text("worker output", encoding="utf-8")
+        os.chmod(package, 0o500)
+        os.chmod(package.parent, 0o500)
+
+        self.assertTrue(manager.cleanup(RUN_ID))
+        self.assertFalse(prepared.path.exists())
+
     def test_prepare_does_not_infer_gitlinks_from_ordinary_empty_directories(
         self,
     ) -> None:
