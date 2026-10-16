@@ -8,8 +8,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
-from magic_glass_box.db import ConflictError, Database
+from magic_glass_box.db import SCHEMA_VERSION, ConflictError, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -382,6 +383,34 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             [("ambiguous", "connector_ambiguous")],
         )
 
+    def test_post_dispatch_storage_failure_remains_durably_ambiguous(self) -> None:
+        run = self.create_run()
+
+        with (
+            mock.patch.object(
+                self.database,
+                "finalize_provider_invocation",
+                side_effect=sqlite3.OperationalError("private database detail"),
+            ),
+            self.assertRaisesRegex(ProviderError, "ambiguous") as raised,
+        ):
+            self.control.invoke_provider(
+                run["id"], grant_name="example-main", request={"input": "one"}
+            )
+
+        self.assertNotIn("private database detail", str(raised.exception))
+        self.assertEqual(len(self.client.calls), 1)
+        invocations = self.database.list_provider_invocations(run["id"])
+        self.assertEqual(
+            [(item["outcome"], item["error_code"]) for item in invocations],
+            [("dispatching", None)],
+        )
+        with self.database.connect() as connection:
+            reservations = connection.execute(
+                "SELECT COUNT(*) FROM provider_dispatch_reservations"
+            ).fetchone()[0]
+        self.assertEqual(reservations, 1)
+
     def test_revoked_connector_fails_atomic_reservation_before_dispatch(self) -> None:
         run = self.create_run()
         self.database.revoke_inference_connector(
@@ -505,7 +534,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         second = self.database.initialize()
         migrated = self.database.list_provider_invocations(run["id"])[0]
 
-        self.assertEqual(first["schema_version"], 16)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(second, first)
         self.assertEqual(migrated["id"], invocation_id)
         self.assertEqual(migrated["dispatch_kind"], "direct")

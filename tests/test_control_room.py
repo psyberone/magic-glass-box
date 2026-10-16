@@ -11,7 +11,7 @@ from unittest import mock
 from magic_glass_box.candidates import CandidateManifest
 from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.credentials import CredentialError
-from magic_glass_box.db import Database, StorageError
+from magic_glass_box.db import SCHEMA_VERSION, Database, StorageError
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -272,7 +272,7 @@ class ControlRoomTests(unittest.TestCase):
             snapshot = room.snapshot(history_limit=25)
 
         self.assertEqual(connect.call_count, 1)
-        self.assertEqual(snapshot["snapshot"]["schema_version"], 16)
+        self.assertEqual(snapshot["snapshot"]["schema_version"], SCHEMA_VERSION)
         self.assertEqual(
             snapshot["snapshot"]["consistency"],
             "single_sqlite_read_transaction",

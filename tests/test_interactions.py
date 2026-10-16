@@ -528,15 +528,26 @@ class InteractionMigrationTests(unittest.TestCase):
         self.assertIn("work_items", tables)
 
     def test_missing_and_broken_migrations_fail_closed(self) -> None:
-        connection = mock.Mock()
-        with self.assertRaisesRegex(StorageError, "no migration"):
-            Database._migrate(connection, 0)
-
-        connection = mock.Mock()
-        connection.executescript.side_effect = sqlite3.OperationalError("broken")
-        with self.assertRaisesRegex(StorageError, "cannot migrate"):
+        connection = sqlite3.connect(":memory:", isolation_level=None)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA user_version = 1")
+        with (
+            mock.patch("magic_glass_box.storage.core.MIGRATIONS", {}),
+            self.assertRaisesRegex(StorageError, "no migration"),
+        ):
             Database._migrate(connection, 1)
-        connection.rollback.assert_called_once_with()
+        self.assertFalse(connection.in_transaction)
+
+        with (
+            mock.patch.object(
+                Database,
+                "_execute_statements",
+                side_effect=sqlite3.OperationalError("broken"),
+            ),
+            self.assertRaisesRegex(StorageError, "cannot migrate"),
+        ):
+            Database._migrate(connection, 1)
+        self.assertFalse(connection.in_transaction)
 
     def test_newer_schema_is_still_rejected(self) -> None:
         path = Path(self.temporary.name) / "future.db"

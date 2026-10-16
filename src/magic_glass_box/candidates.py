@@ -430,6 +430,91 @@ class GitCandidateStore:
             *arguments,
         ]
 
+    def _bounded_process(
+        self,
+        command: list[str],
+        *,
+        operation: _Operation,
+        output_limit: int,
+        input_bytes: bytes | None,
+        environment: Mapping[str, str],
+        cwd: Path | None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        process = subprocess.Popen(  # noqa: S603 - configured absolute Git
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL if input_bytes is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            start_new_session=True,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        input_offset = 0
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            if process.stdin is not None:
+                if input_bytes:
+                    selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+                else:
+                    process.stdin.close()
+            try:
+                while selector.get_map():
+                    remaining = operation.deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, self.timeout)
+                    events = selector.select(remaining)
+                    if not events:
+                        raise subprocess.TimeoutExpired(command, self.timeout)
+                    for key, _ in events:
+                        name = key.data
+                        if name == "stdin":
+                            assert process.stdin is not None and input_bytes is not None
+                            try:
+                                written = os.write(
+                                    key.fd,
+                                    input_bytes[
+                                        input_offset : input_offset + 64 * 1024
+                                    ],
+                                )
+                            except BrokenPipeError:
+                                written = 0
+                                input_offset = len(input_bytes)
+                            else:
+                                input_offset += written
+                            if input_offset >= len(input_bytes) or written == 0:
+                                selector.unregister(key.fileobj)
+                                process.stdin.close()
+                            continue
+                        chunk = os.read(key.fd, 64 * 1024)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                            continue
+                        ceiling = output_limit if name == "stdout" else MAX_STDERR_BYTES
+                        if len(buffers[name]) + len(chunk) > ceiling:
+                            raise CandidateError("Git command exceeds output limit")
+                        buffers[name].extend(chunk)
+                remaining = operation.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, self.timeout)
+                returncode = process.wait(timeout=remaining)
+            except BaseException:
+                self._stop(process)
+                raise
+            finally:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            bytes(buffers["stdout"]),
+            bytes(buffers["stderr"]),
+        )
+
     def _run(
         self,
         arguments: Sequence[str],
@@ -449,29 +534,25 @@ class GitCandidateStore:
             raise CandidateError("Git command exceeds the input limit")
         command = self._command(arguments)
         try:
-            process = subprocess.Popen(  # noqa: S603 - configured absolute Git
+            completed = self._bounded_process(
                 command,
+                operation=operation,
+                output_limit=output_limit,
+                input_bytes=input_bytes,
+                environment=self._environment(extra_environment),
                 cwd=cwd,
-                stdin=subprocess.DEVNULL if input_bytes is None else subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=self._environment(extra_environment),
-                start_new_session=True,
             )
-            try:
-                stdout, stderr = process.communicate(
-                    input_bytes, timeout=self._remaining(operation)
-                )
-            except subprocess.TimeoutExpired:
-                self._stop(process)
-                raise CandidateError("candidate operation timed out") from None
         except CandidateError:
             raise
+        except subprocess.TimeoutExpired:
+            raise CandidateError("candidate operation timed out") from None
         except OSError:
             raise CandidateError("cannot execute Git CLI") from None
+        stdout = completed.stdout
+        stderr = completed.stderr
         if len(stdout) > output_limit or len(stderr) > MAX_STDERR_BYTES:
             raise CandidateError("Git command exceeds output limit")
-        if process.returncode not in allowed_returncodes:
+        if completed.returncode not in allowed_returncodes:
             detail = stderr.decode("utf-8", "replace").strip()
             suffix = f": {detail[:4096]}" if detail else ""
             raise CandidateError(f"Git cannot {label}{suffix}")

@@ -183,6 +183,10 @@ project-activity projection.
   grant policy, scope, provider, protocol, model, and deadline. Historical
   direct grants and invocations remain readable for migration but are not
   dispatchable.
+- Schema v17 records immutable provider-dispatch intent before a connector call
+  and permits one terminal finalization. A process or storage failure after the
+  external boundary therefore leaves durable uncertainty instead of erasing
+  evidence and making the call appear safely retryable.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -238,7 +242,8 @@ v12; exact-input gate policy and evidence state advanced it to schema v13; the
 integration queue and manual landing ledger advanced it to schema v14.
 Inference-connector registrations and grant bindings advance it to schema v15;
 exclusive connector dispatch and its invocation authority ledger advance it to
-schema v16.
+schema v16. Durable pre-dispatch invocation intent and one-way finalization
+advance it to schema v17.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted

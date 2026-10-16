@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -135,6 +136,47 @@ class DatabaseTests(unittest.TestCase):
         finally:
             lock.rollback()
             lock.close()
+
+    def test_stale_migration_version_is_rechecked_under_exclusive_lock(self) -> None:
+        connection = sqlite3.connect(self.database.path)
+        denied_actions = {
+            sqlite3.SQLITE_DROP_INDEX,
+            sqlite3.SQLITE_DROP_TABLE,
+            sqlite3.SQLITE_DROP_TRIGGER,
+        }
+
+        def reject_destructive_reapplication(
+            action: int,
+            _arg1: str | None,
+            _arg2: str | None,
+            _database: str | None,
+            _source: str | None,
+        ) -> int:
+            return (
+                sqlite3.SQLITE_DENY
+                if action in denied_actions
+                else sqlite3.SQLITE_OK
+            )
+
+        connection.set_authorizer(reject_destructive_reapplication)
+        try:
+            Database._migrate(connection, SCHEMA_VERSION - 1)
+        finally:
+            connection.close()
+
+        self.assertEqual(self.database.status()["schema_version"], SCHEMA_VERSION)
+
+    def test_concurrent_initializers_converge_on_one_current_schema(self) -> None:
+        path = Path(self.temporary.name) / "concurrent-control-plane.db"
+
+        def initialize() -> int:
+            return int(Database(path).initialize()["schema_version"])
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            versions = list(pool.map(lambda _index: initialize(), range(6)))
+
+        self.assertEqual(versions, [SCHEMA_VERSION] * 6)
+        self.assertEqual(Database(path).status()["schema_version"], SCHEMA_VERSION)
 
     def test_snapshot_transaction_failures_use_the_storage_error_boundary(self) -> None:
         connection = mock.Mock()

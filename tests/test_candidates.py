@@ -441,15 +441,13 @@ class CandidateKernelTests(unittest.TestCase):
     def test_timeout_terminates_the_git_process_group(self) -> None:
         process = mock.MagicMock()
         process.pid = 4242
-        process.communicate.side_effect = subprocess.TimeoutExpired(["git"], 1)
         process.wait.return_value = 0
 
         with (
             mock.patch(
-                "magic_glass_box.candidates.subprocess.Popen",
-                return_value=process,
-            ) as popen,
-            mock.patch("magic_glass_box.candidates.os.killpg") as killpg,
+                "magic_glass_box.candidates.GitCandidateStore._bounded_process",
+                side_effect=subprocess.TimeoutExpired(["git"], 1),
+            ),
             self.assertRaisesRegex(CandidateError, "timed out"),
         ):
             self.store._run(
@@ -458,8 +456,32 @@ class CandidateKernelTests(unittest.TestCase):
                 operation=self.store._new_operation(),
             )
 
-        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        with mock.patch("magic_glass_box.candidates.os.killpg") as killpg:
+            self.store._stop(process)  # noqa: SLF001 - process-group contract
         killpg.assert_called_once_with(4242, signal.SIGTERM)
+
+    def test_git_output_limit_stops_the_process_before_full_allocation(self) -> None:
+        marker = self.root / "fake-git-completed"
+        fake_git = self.root / "fake-git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            "dd if=/dev/zero bs=65536 count=128 2>/dev/null\n"
+            ': > "$MGB_TEST_MARKER"\n',
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        store = GitCandidateStore(self.root / "bounded-store", binary=fake_git)
+
+        with self.assertRaisesRegex(CandidateError, "output limit"):
+            store._run(  # noqa: SLF001 - exercise the hostile process boundary
+                ["ignored"],
+                label="bound fake Git output",
+                operation=store._new_operation(),  # noqa: SLF001
+                output_limit=1024 * 1024,
+                extra_environment={"MGB_TEST_MARKER": str(marker)},
+            )
+
+        self.assertFalse(marker.exists())
 
     def test_recover_rebuilds_deleted_cache_and_missing_ref(self) -> None:
         original = self.store.materialize(

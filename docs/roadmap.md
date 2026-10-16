@@ -555,6 +555,37 @@ connector invocations, one retained result path, a candidate at the exact
 result revision, a passing validation gate, and an unexecuted landing plan.
 The credential scan was clean and direct worker networking remained denied.
 
+## Post-Milestone 7 external-audit stabilization
+
+**Status: in progress — R1 complete**
+
+Three independent cold promise audits follow M7. This is a correctness and
+boundary-hardening sequence, not a compressed feature milestone. Repairs are
+grouped by invariant so overlapping findings produce one coherent change:
+
+1. **R1 — dispatch ambiguity and bounded subprocesses (complete):** schema v17
+   records provider-dispatch intent before the connector call and permits one
+   terminal finalization; committed mailbox failures poison the worker bridge;
+   candidate Git output is streamed to its actual memory ceiling; concurrent
+   initializers re-read schema state under one exclusive migration lock.
+2. **R2 — portable result-path identity:** reject case/normalization alias
+   collisions and alias-composed symlink escapes at hostile capture and target
+   apply boundaries without treating private retained state as adversarial.
+3. **R3 — ownership and landing recovery:** close integration/attempt lease
+   takeover holes and provide a truthful recovery path when an issued landing
+   plan encounters out-of-band ref drift.
+4. **R4 — operational boundary resilience:** redaction, non-UTF-8 runtime
+   output, read-only workspace cleanup, and sidecar connection/socket
+   lifecycle.
+5. **R5/R6 — authority, protocol, and contract closure:** revoked-authority
+   retry/supervision, user and interaction binding, connector capability
+   allowlists, OAuth/SSE edge cases, remaining bounded reads, and documentation
+   alignment.
+
+Each checkpoint is RED-first with happy and sad paths. The completed boundary
+must repeat the test, branch-coverage, mutation, deterministic live, and
+explicitly authorized real-account proofs before M8 begins.
+
 ## Milestone 8A: provider usage and budget authority
 
 **Status: planned**

@@ -4,6 +4,7 @@ import os
 import secrets
 import sqlite3
 import stat
+import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
@@ -105,19 +106,7 @@ class DatabaseCore:
                     f"{SCHEMA_VERSION}"
                 )
             if version == 0:
-                existing = connection.execute(
-                    "SELECT name FROM sqlite_schema WHERE type = 'table' "
-                    "AND name NOT LIKE 'sqlite_%' LIMIT 1"
-                ).fetchone()
-                if existing is not None:
-                    raise StorageError("unversioned database is not empty")
-                try:
-                    connection.executescript("BEGIN EXCLUSIVE;\n" + SCHEMA)
-                    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                    connection.commit()
-                except sqlite3.Error as exc:
-                    connection.rollback()
-                    raise StorageError(f"cannot initialize database: {exc}") from exc
+                self._initialize_schema(connection)
             elif version < SCHEMA_VERSION:
                 self._migrate(connection, version)
             self._check_schema(connection)
@@ -125,24 +114,80 @@ class DatabaseCore:
         return self.status()
 
     @staticmethod
-    def _migrate(connection: sqlite3.Connection, version: int) -> None:
-        while version < SCHEMA_VERSION:
-            migration = MIGRATIONS.get(version)
-            if migration is None:
-                raise StorageError(f"no migration from database schema {version}")
-            target = version + 1
-            try:
-                connection.executescript(
-                    "BEGIN EXCLUSIVE;\n"
-                    + migration
-                    + f"\nPRAGMA user_version = {target};\nCOMMIT;"
-                )
-            except sqlite3.Error as exc:
-                connection.rollback()
+    def _execute_statements(connection: sqlite3.Connection, script: str) -> None:
+        pending = ""
+        for line in script.splitlines(keepends=True):
+            pending += line
+            if not sqlite3.complete_statement(pending):
+                continue
+            statement = pending.strip()
+            pending = ""
+            if statement:
+                connection.execute(statement)
+        if pending.strip():
+            raise sqlite3.OperationalError("incomplete database schema statement")
+
+    @classmethod
+    def _initialize_schema(cls, connection: sqlite3.Connection) -> None:
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
                 raise StorageError(
-                    f"cannot migrate database from schema {version} to {target}: {exc}"
-                ) from exc
-            version = target
+                    f"database schema {version} is newer than supported "
+                    f"{SCHEMA_VERSION}"
+                )
+            if version != 0:
+                connection.commit()
+                if version < SCHEMA_VERSION:
+                    cls._migrate(connection, version)
+                return
+            existing = connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' "
+                "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+            ).fetchone()
+            if existing is not None:
+                raise StorageError("unversioned database is not empty")
+            cls._execute_statements(connection, SCHEMA)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.commit()
+        except StorageError:
+            connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise StorageError(f"cannot initialize database: {exc}") from exc
+
+    @classmethod
+    def _migrate(cls, connection: sqlite3.Connection, version: int) -> None:
+        target = version + 1
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise StorageError(
+                    f"database schema {version} is newer than supported "
+                    f"{SCHEMA_VERSION}"
+                )
+            while version < SCHEMA_VERSION:
+                migration = MIGRATIONS.get(version)
+                if migration is None:
+                    raise StorageError(
+                        f"no migration from database schema {version}"
+                    )
+                target = version + 1
+                cls._execute_statements(connection, migration)
+                connection.execute(f"PRAGMA user_version = {target}")
+                version = target
+            connection.commit()
+        except StorageError:
+            connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise StorageError(
+                f"cannot migrate database from schema {version} to {target}: {exc}"
+            ) from exc
 
     def _prepare_file(self) -> None:
         parent_exists = self.path.parent.exists()
@@ -160,6 +205,14 @@ class DatabaseCore:
                 flags |= os.O_NOFOLLOW
             try:
                 descriptor = os.open(self.path, flags, 0o600)
+            except FileExistsError:
+                try:
+                    self._validate_file_info(self.path.lstat())
+                except OSError as exc:
+                    raise StorageError(
+                        f"cannot inspect concurrently created database: {exc}"
+                    ) from exc
+                return
             except OSError as exc:
                 raise StorageError(f"cannot create database: {exc}") from exc
             os.close(descriptor)
@@ -184,6 +237,7 @@ class DatabaseCore:
         except FileNotFoundError as exc:
             raise StorageError("database is not initialized") from exc
         self._validate_file_info(info)
+        connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(
                 self.path,
@@ -195,10 +249,26 @@ class DatabaseCore:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA trusted_schema = OFF")
             connection.execute("PRAGMA busy_timeout = 5000")
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = FULL")
+            deadline = time.monotonic() + 5.0
+            for statement in (
+                "PRAGMA journal_mode = WAL",
+                "PRAGMA synchronous = FULL",
+            ):
+                while True:
+                    try:
+                        connection.execute(statement)
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if (
+                            "locked" not in str(exc).lower()
+                            or time.monotonic() >= deadline
+                        ):
+                            raise
+                        time.sleep(0.01)
             return connection
         except sqlite3.Error as exc:
+            if connection is not None:
+                connection.close()
             raise StorageError(f"cannot open database: {exc}") from exc
 
     @contextmanager

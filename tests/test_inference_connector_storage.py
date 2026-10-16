@@ -390,8 +390,8 @@ class InferenceConnectorMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 16)
-            self.assertEqual(first["schema_version"], 16)
+            self.assertEqual(SCHEMA_VERSION, 17)
+            self.assertEqual(first["schema_version"], 17)
             self.assertEqual(second, first)
             legacy = database.get_provider_grant("legacy-direct")
             self.assertEqual(legacy["grant_kind"], "direct")

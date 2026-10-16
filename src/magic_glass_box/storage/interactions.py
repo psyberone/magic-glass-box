@@ -746,7 +746,14 @@ class InteractionStorage:
         error_code: str | None,
         started_at: str,
     ) -> dict[str, Any]:
-        if outcome not in {"succeeded", "failed", "denied", "busy", "ambiguous"}:
+        if outcome not in {
+            "dispatching",
+            "succeeded",
+            "failed",
+            "denied",
+            "busy",
+            "ambiguous",
+        }:
             raise ValidationError("provider invocation outcome is invalid")
         if dispatch_kind not in {"direct", "connector"}:
             raise ValidationError("provider invocation dispatch_kind is invalid")
@@ -764,7 +771,18 @@ class InteractionStorage:
             raise ValidationError("http_status must be between 100 and 599")
         if error_code is not None:
             error_code = require_string(error_code, field="error_code", max_bytes=64)
-        if outcome == "succeeded":
+        if outcome == "dispatching":
+            if (
+                dispatch_kind != "connector"
+                or request_bytes != 0
+                or response_bytes != 0
+                or http_status is not None
+                or error_code is not None
+            ):
+                raise ValidationError(
+                    "dispatching provider invocation is inconsistent"
+                )
+        elif outcome == "succeeded":
             if http_status is None or not 200 <= http_status < 300 or error_code:
                 raise ValidationError("successful provider invocation is inconsistent")
         elif error_code is None:
@@ -822,7 +840,7 @@ class InteractionStorage:
             or PROVIDER_INVOCATION_ID_RE.fullmatch(invocation_id) is None
         ):
             raise ValidationError("invalid provider invocation identifier")
-        finished_at = self.now()
+        finished_at = None if outcome == "dispatching" else self.now()
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -925,6 +943,92 @@ class InteractionStorage:
         if row is None:
             raise StorageError("provider invocation was not recorded")
         return dict(row)
+
+    def finalize_provider_invocation(
+        self,
+        invocation_id: str,
+        *,
+        outcome: str,
+        request_bytes: int,
+        response_bytes: int,
+        http_status: int | None,
+        error_code: str | None,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(invocation_id, str)
+            or PROVIDER_INVOCATION_ID_RE.fullmatch(invocation_id) is None
+        ):
+            raise ValidationError("invalid provider invocation identifier")
+        if outcome not in {"succeeded", "failed", "denied", "busy", "ambiguous"}:
+            raise ValidationError("provider invocation outcome is invalid")
+        for field, value in (
+            ("request_bytes", request_bytes),
+            ("response_bytes", response_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValidationError(f"{field} must be a non-negative integer")
+        if http_status is not None and (
+            isinstance(http_status, bool)
+            or not isinstance(http_status, int)
+            or not 100 <= http_status <= 599
+        ):
+            raise ValidationError("http_status must be between 100 and 599")
+        if error_code is not None:
+            error_code = require_string(error_code, field="error_code", max_bytes=64)
+        if outcome == "succeeded":
+            if http_status is None or not 200 <= http_status < 300 or error_code:
+                raise ValidationError("successful provider invocation is inconsistent")
+        elif error_code is None:
+            raise ValidationError("failed provider invocation requires an error_code")
+        finished_at = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                changed = connection.execute(
+                    "UPDATE provider_invocations SET outcome = ?, request_bytes = ?, "
+                    "response_bytes = ?, http_status = ?, error_code = ?, "
+                    "finished_at = ? WHERE id = ? AND outcome = 'dispatching'",
+                    (
+                        outcome,
+                        request_bytes,
+                        response_bytes,
+                        http_status,
+                        error_code,
+                        finished_at,
+                        invocation_id,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    exists = connection.execute(
+                        "SELECT 1 FROM provider_invocations WHERE id = ?",
+                        (invocation_id,),
+                    ).fetchone()
+                    if exists is None:
+                        raise NotFoundError(
+                            f"provider invocation not found: {invocation_id}"
+                        )
+                    raise ConflictError("provider invocation is already final")
+                row = connection.execute(
+                    "SELECT id, run_id, provider_grant_id, dispatch_kind, "
+                    "inference_connector_id, connector_protocol_version, "
+                    "deployment_sha256, route, policy_sha256, "
+                    "credential_scope_sha256, provider, protocol, model, deadline, "
+                    "outcome, request_bytes, response_bytes, http_status, error_code, "
+                    "started_at, finished_at FROM provider_invocations WHERE id = ?",
+                    (invocation_id,),
+                ).fetchone()
+                assert row is not None
+                result = dict(row)
+                connection.commit()
+            except (NotFoundError, ConflictError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "provider invocation could not be finalized"
+                ) from exc
+        return result
 
     def list_provider_invocations(self, run_id: str) -> list[dict[str, Any]]:
         with self._read_snapshot() as connection:

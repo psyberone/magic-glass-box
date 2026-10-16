@@ -25,6 +25,9 @@ checks exact connector/grant compatibility, UTF-8 byte ceilings, full response
 correlation, outcome consistency, and absolute transport deadlines. Schema v16
 makes those contracts the exclusive normal inference-dispatch path and records
 the complete connector authority tuple with each durable invocation outcome.
+Schema v17 adds a durable `dispatching` state that is committed before the
+connector call and may be finalized exactly once, preserving uncertainty when
+post-dispatch persistence fails.
 
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime parser is authoritative and additionally

@@ -4,11 +4,11 @@ import hashlib
 import os
 import secrets
 import stat
-import sys
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1037,6 +1037,42 @@ class ControlPlane:
                     f"{type(release_error).__name__}: {release_error}"
                 )
             raise ProviderUpstreamError("inference connector is unavailable") from exc
+        try:
+            self.database.record_provider_invocation(
+                run_id=run_id,
+                provider_grant_id=grant["id"],
+                invocation_id=invocation_id,
+                dispatch_kind="connector",
+                inference_connector_id=authority["connector_id"],
+                connector_protocol_version=authority[
+                    "connector_protocol_version"
+                ],
+                deployment_sha256=authority["deployment_sha256"],
+                route=authority["route"],
+                policy_sha256=authority["policy_sha256"],
+                credential_scope_sha256=authority[
+                    "credential_scope_sha256"
+                ],
+                provider=authority["provider"],
+                protocol=authority["protocol"],
+                model=authority["model"],
+                deadline=deadline,
+                outcome="dispatching",
+                request_bytes=0,
+                response_bytes=0,
+                http_status=None,
+                error_code=None,
+                started_at=started_at,
+            )
+        except Exception as exc:
+            try:
+                self.database.release_provider_dispatch(reservation["id"])
+            except Exception as release_error:
+                exc.add_note(
+                    "provider dispatch reservation release also failed: "
+                    f"{type(release_error).__name__}: {release_error}"
+                )
+            raise ProviderError("provider dispatch could not be recorded") from exc
         dispatch_monitor = _ProviderDispatchLeaseMonitor(
             self.database,
             reservation["id"],
@@ -1062,84 +1098,52 @@ class ControlPlane:
             dispatch_monitor.close()
             dispatch_monitor.check()
         except InferenceConnectorUnavailableError as exc:
-            self._record_provider_failure(
-                run_id=run_id,
-                grant_id=grant["id"],
+            self._finalize_provider_invocation(
                 invocation_id=invocation_id,
+                reservation_id=reservation["id"],
                 outcome="failed",
                 error_code="connector_unavailable",
-                started_at=started_at,
-                authority=authority,
-                deadline=deadline,
             )
             raise ProviderUpstreamError("inference connector is unavailable") from exc
         except InferenceConnectorAmbiguousError as exc:
-            self._record_provider_failure(
-                run_id=run_id,
-                grant_id=grant["id"],
+            self._finalize_provider_invocation(
                 invocation_id=invocation_id,
+                reservation_id=reservation["id"],
                 outcome="ambiguous",
                 error_code="connector_ambiguous",
-                started_at=started_at,
-                authority=authority,
-                deadline=deadline,
             )
             raise ProviderAmbiguousError(
                 "provider invocation outcome is ambiguous"
             ) from exc
         except InferenceConnectorError as exc:
-            self._record_provider_failure(
-                run_id=run_id,
-                grant_id=grant["id"],
+            self._finalize_provider_invocation(
                 invocation_id=invocation_id,
+                reservation_id=reservation["id"],
                 outcome="denied",
                 error_code="connector_denied",
-                started_at=started_at,
-                authority=authority,
-                deadline=deadline,
             )
             raise ProviderError("provider connector denied the request") from exc
         except Exception as exc:
-            self._record_provider_failure(
-                run_id=run_id,
-                grant_id=grant["id"],
+            self._finalize_provider_invocation(
                 invocation_id=invocation_id,
+                reservation_id=reservation["id"],
                 outcome="ambiguous",
                 error_code="reservation_lost",
-                started_at=started_at,
-                authority=authority,
-                deadline=deadline,
             )
             raise ProviderAmbiguousError(
                 "provider invocation outcome is ambiguous"
             ) from exc
         finally:
-            active_error = sys.exception()
             dispatch_monitor.close()
-            try:
-                self.database.release_provider_dispatch(reservation["id"])
-            except Exception as release_error:
-                if active_error is not None:
-                    active_error.add_note(
-                        "provider dispatch reservation release also failed: "
-                        f"{type(release_error).__name__}: {release_error}"
-                    )
-                # A reservation is a bounded lease. Failure to release it may
-                # briefly reduce capacity, but must not erase the connector's
-                # already-known outcome or prevent its durable audit record.
         if response.outcome != "succeeded":
-            self._record_provider_failure(
-                run_id=run_id,
-                grant_id=grant["id"],
+            self._finalize_provider_invocation(
                 invocation_id=invocation_id,
+                reservation_id=reservation["id"],
                 outcome=response.outcome,
                 error_code=response.error_code or "connector_failed",
-                started_at=started_at,
                 request_bytes=response.request_bytes,
                 response_bytes=response.response_bytes,
                 http_status=response.provider_status,
-                authority=authority,
-                deadline=deadline,
             )
             if response.outcome == "ambiguous":
                 raise ProviderAmbiguousError(
@@ -1156,28 +1160,23 @@ class ControlPlane:
             )
         untrusted_response = response.untrusted_response
         if untrusted_response is None:
-            raise ProviderError("provider connector returned no response")
-        invocation = self.database.record_provider_invocation(
-            run_id=run_id,
-            provider_grant_id=grant["id"],
+            self._finalize_provider_invocation(
+                invocation_id=invocation_id,
+                reservation_id=reservation["id"],
+                outcome="ambiguous",
+                error_code="connector_response_missing",
+            )
+            raise ProviderAmbiguousError(
+                "provider invocation outcome is ambiguous"
+            )
+        invocation = self._finalize_provider_invocation(
             invocation_id=invocation_id,
-            dispatch_kind="connector",
-            inference_connector_id=authority["connector_id"],
-            connector_protocol_version=authority["connector_protocol_version"],
-            deployment_sha256=authority["deployment_sha256"],
-            route=authority["route"],
-            policy_sha256=authority["policy_sha256"],
-            credential_scope_sha256=authority["credential_scope_sha256"],
-            provider=authority["provider"],
-            protocol=authority["protocol"],
-            model=authority["model"],
-            deadline=deadline,
+            reservation_id=reservation["id"],
             outcome="succeeded",
             request_bytes=response.request_bytes,
             response_bytes=response.response_bytes,
             http_status=response.provider_status,
             error_code=None,
-            started_at=started_at,
         )
         return AcceptedProviderResponse(
             invocation_id=invocation["id"],
@@ -1189,6 +1188,36 @@ class ControlPlane:
             response_bytes=response.response_bytes,
             untrusted_response=untrusted_response,
         )
+
+    def _finalize_provider_invocation(
+        self,
+        *,
+        invocation_id: str,
+        reservation_id: str,
+        outcome: str,
+        error_code: str | None,
+        request_bytes: int = 0,
+        response_bytes: int = 0,
+        http_status: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            invocation = self.database.finalize_provider_invocation(
+                invocation_id,
+                outcome=outcome,
+                request_bytes=request_bytes,
+                response_bytes=response_bytes,
+                http_status=http_status,
+                error_code=error_code,
+            )
+        except Exception as exc:
+            raise ProviderAmbiguousError(
+                "provider invocation outcome is ambiguous"
+            ) from exc
+        # The durable invocation outcome is authoritative. A reservation is a
+        # bounded lease, so release failure can only reduce capacity briefly.
+        with suppress(Exception):
+            self.database.release_provider_dispatch(reservation_id)
+        return invocation
 
     def _record_provider_failure(
         self,

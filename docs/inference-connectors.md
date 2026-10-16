@@ -1,6 +1,6 @@
 # Credential-isolated inference connectors
 
-> **M7D.3 COMPLETE; REAL-ACCOUNT GOLDEN PROOF PASSED 2026-10-16:** Schema v16
+> **M7D.3 COMPLETE; REAL-ACCOUNT GOLDEN PROOF PASSED 2026-10-16:** Schema v17
 > makes connector-bound grants the exclusive normal inference path. The
 > optional OpenAI connector owns its Sign in with ChatGPT registration,
 > renewable session, model discovery, and Responses transport. MGB authorizes
@@ -239,16 +239,21 @@ credential record.
 
 ## Failure and retry semantics
 
-An invocation whose response is lost may already have consumed quota. The core
-therefore records an `ambiguous` outcome and does not automatically replay it.
+An invocation whose response is lost may already have consumed quota. Before
+crossing the connector boundary, the core durably records a `dispatching`
+invocation. It finalizes that record exactly once after a verified response.
+A stranded `dispatching` record is conservative evidence of an uncertain call;
+the core does not automatically replay it.
 A failure before connection is recorded as unavailable/failed; a malformed,
 late, mismatched, or lost reply after dispatch is ambiguous. Connector
 operation IDs provide correlation, not a false promise that every provider
 deduplicates inference. The worker's loopback provider bridge is permanently
-poisoned after an ambiguous result, so even a vendor CLI retry fails locally
-without another gateway or provider dispatch. Milestone 8 adds normalized
-usage accounting, budget authority, and quota-aware recovery on top of this
-boundary.
+poisoned after an explicit ambiguous result, a committed mailbox timeout, or a
+malformed post-dispatch reply, so even a vendor CLI retry fails locally without
+another gateway or provider dispatch. The bounded dispatch reservation is not
+released until terminal ledger finalization succeeds. Milestone 8 adds
+normalized usage accounting, budget authority, and quota-aware recovery on top
+of this boundary.
 
 ## Migration and proof
 

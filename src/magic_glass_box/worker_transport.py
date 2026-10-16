@@ -46,6 +46,10 @@ class WorkerTransportError(RuntimeError):
     """The worker transport could not safely use its run-scoped gateway."""
 
 
+class GatewayRequestCommittedError(WorkerTransportError):
+    """A gateway request was committed but its authoritative reply was lost."""
+
+
 class ProviderAmbiguousTransportError(WorkerTransportError):
     """A provider call may have occurred and this bridge must never replay it."""
 
@@ -281,12 +285,17 @@ class FileGatewayClient:
                 self.directory / GATEWAY_REQUEST_READY_NAME,
                 marker.encode(),
             )
-            response = self._wait_response(
-                sequence,
-                request_id,
-                float(effective_timeout),
-                allow_progress=operation == "provider.invoke",
-            )
+            try:
+                response = self._wait_response(
+                    sequence,
+                    request_id,
+                    float(effective_timeout),
+                    allow_progress=operation == "provider.invoke",
+                )
+            except WorkerTransportError as exc:
+                raise GatewayRequestCommittedError(
+                    "gateway request outcome is ambiguous"
+                ) from exc
         finally:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -404,6 +413,11 @@ class ProviderHTTPTransport:
                 )
             try:
                 return self._invoke_once(target, raw, headers=headers)
+            except GatewayRequestCommittedError as exc:
+                self._ambiguous = True
+                raise ProviderAmbiguousTransportError(
+                    "provider invocation outcome is ambiguous"
+                ) from exc
             except ProviderAmbiguousTransportError:
                 self._ambiguous = True
                 raise
@@ -466,16 +480,26 @@ class ProviderHTTPTransport:
             },
             timeout=PROVIDER_GATEWAY_TIMEOUT_SECONDS,
         )
-        if response.get("ok") is not True:
+        if not isinstance(response, dict) or not isinstance(response.get("ok"), bool):
+            raise ProviderAmbiguousTransportError(
+                "provider gateway returned an invalid response"
+            )
+        if response["ok"] is False:
             error = response.get("error")
             if isinstance(error, dict) and error.get("code") == "ambiguous":
                 raise ProviderAmbiguousTransportError(
                     "provider invocation outcome is ambiguous"
                 )
+            if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+                raise ProviderAmbiguousTransportError(
+                    "provider gateway returned an invalid response"
+                )
             raise WorkerTransportError("provider gateway denied the request")
         result = response.get("result")
         if not isinstance(result, dict):
-            raise WorkerTransportError("provider gateway returned an invalid response")
+            raise ProviderAmbiguousTransportError(
+                "provider gateway returned an invalid response"
+            )
         accepted = {
             "grant_name",
             "invocation_id",
@@ -498,7 +522,9 @@ class ProviderHTTPTransport:
             or set(upstream) != {"body", "content_type", "protocol"}
             or upstream.get("protocol") != self.dialect
         ):
-            raise WorkerTransportError("provider gateway returned an invalid response")
+            raise ProviderAmbiguousTransportError(
+                "provider gateway returned an invalid response"
+            )
         content_type = upstream.get("content_type")
         body = upstream.get("body")
         if (
@@ -507,7 +533,9 @@ class ProviderHTTPTransport:
             or not isinstance(body, str)
             or not body
         ):
-            raise WorkerTransportError("provider gateway returned an invalid response")
+            raise ProviderAmbiguousTransportError(
+                "provider gateway returned an invalid response"
+            )
         return ProviderHTTPResponse(status_code, content_type, body.encode("utf-8"))
 
 

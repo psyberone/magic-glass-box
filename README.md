@@ -37,9 +37,9 @@ This repository currently contains the first executable vertical slice:
   deployment, route, semantic protocol, model, request/response limits,
   timeout, scope fingerprint, and concurrency without storing or resolving an
   upstream provider credential;
-- schema-v16 credential-isolated inference-connector registrations, exclusive
-  connector dispatch, strict request/response envelopes, durable ambiguous
-  outcomes, and a bounded Unix-socket carrier;
+- schema-v17 credential-isolated inference-connector registrations, exclusive
+  connector dispatch, strict request/response envelopes, durable pre-dispatch
+  intent and ambiguous outcomes, and a bounded Unix-socket carrier;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;

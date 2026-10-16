@@ -161,7 +161,7 @@ class FileGatewayClientTests(unittest.TestCase):
                     client.exchange("run.describe", {}, timeout=300.1)
             self.assertEqual((mailbox / "request.ready").read_bytes(), committed)
 
-            with self.assertRaisesRegex(WorkerTransportError, "timed out"):
+            with self.assertRaisesRegex(WorkerTransportError, "ambiguous"):
                 client.exchange("run.describe", {})
 
     def test_sequence_exhaustion_fails_before_overwriting_the_mailbox(self) -> None:
@@ -287,7 +287,7 @@ class FileGatewayClientTests(unittest.TestCase):
             publisher = threading.Thread(target=publish_one_progress_frame)
             publisher.start()
             try:
-                with self.assertRaisesRegex(WorkerTransportError, "timed out"):
+                with self.assertRaisesRegex(WorkerTransportError, "ambiguous"):
                     client.exchange("provider.invoke", {}, timeout=0.1)
             finally:
                 publisher.join(1)
@@ -582,6 +582,58 @@ class ProviderHTTPTransportTests(unittest.TestCase):
 
         self.assertEqual(len(gateway.calls), 1)
 
+    def test_committed_mailbox_timeout_poison_prevents_vendor_retry(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            transport = ProviderHTTPTransport(
+                FileGatewayClient(mailbox, timeout=0.1),
+                dialect="openai-responses",
+                grant="provider-main",
+            )
+            request = b'{"model":"x","stream":true}'
+
+            with (
+                mock.patch(
+                    "magic_glass_box.worker_transport."
+                    "PROVIDER_GATEWAY_TIMEOUT_SECONDS",
+                    0.1,
+                ),
+                self.assertRaisesRegex(WorkerTransportError, "ambiguous"),
+            ):
+                transport.invoke("/v1/responses", request)
+            committed = (mailbox / "request.ready").read_bytes()
+
+            with self.assertRaisesRegex(WorkerTransportError, "ambiguous"):
+                transport.invoke("/v1/responses", request)
+
+            self.assertTrue(committed)
+            self.assertEqual((mailbox / "request.ready").read_bytes(), committed)
+
+    def test_malformed_post_dispatch_reply_poison_prevents_vendor_retry(
+        self,
+    ) -> None:
+        gateway = RecordingGateway("openai-responses")
+        gateway.response = {"ok": True, "result": {"status_code": 200}}
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        request = b'{"model":"x","stream":true}'
+
+        with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
+            transport.invoke("/v1/responses", request)
+        with self.assertRaisesRegex(WorkerTransportError, "ambiguous"):
+            transport.invoke("/v1/responses", request)
+
+        self.assertEqual(len(gateway.calls), 1)
+
     def test_transport_configuration_and_response_envelope_are_strict(self) -> None:
         gateway = RecordingGateway("openai-responses")
         for dialect, grant in (
@@ -595,9 +647,6 @@ class ProviderHTTPTransportTests(unittest.TestCase):
             ):
                 ProviderHTTPTransport(gateway, dialect=dialect, grant=grant)
 
-        transport = ProviderHTTPTransport(
-            gateway, dialect="openai-responses", grant="provider-main"
-        )
         request = b'{"model":"x","stream":true}'
         upstream = gateway.response["result"]["untrusted_response"]
         for replacement in (
@@ -608,11 +657,14 @@ class ProviderHTTPTransportTests(unittest.TestCase):
         ):
             with self.subTest(replacement=replacement):
                 gateway.response["result"]["untrusted_response"] = replacement
+                transport = ProviderHTTPTransport(
+                    gateway, dialect="openai-responses", grant="provider-main"
+                )
                 with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
                     transport.invoke("/v1/responses", request)
 
         gateway.response["result"]["untrusted_response"] = upstream
-        result = gateway.response["result"]
+        result = dict(gateway.response["result"])
         for replacement in (
             {**result, "grant_name": "other-provider"},
             {**result, "status_code": True},
@@ -622,6 +674,9 @@ class ProviderHTTPTransportTests(unittest.TestCase):
         ):
             with self.subTest(replacement=replacement):
                 gateway.response["result"] = replacement
+                transport = ProviderHTTPTransport(
+                    gateway, dialect="openai-responses", grant="provider-main"
+                )
                 with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
                     transport.invoke("/v1/responses", request)
 
