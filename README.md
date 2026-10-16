@@ -144,6 +144,24 @@ operator surface or dispatched. The boundary and current checkpoint are
 documented in
 [docs/inference-connectors.md](docs/inference-connectors.md).
 
+The optional OpenAI connector owns its own Sign in with ChatGPT profile. Keep
+that profile outside both the checkout and MGB state:
+
+```console
+python3.11 -m pip install '.[openai-connector]'
+PYTHONPATH=src python3.11 scripts/openai_chatgpt_connector.py \
+  login --profile-dir /absolute/private/openai-chatgpt-profile
+PYTHONPATH=src python3.11 scripts/openai_chatgpt_connector.py \
+  models --profile-dir /absolute/private/openai-chatgpt-profile
+```
+
+The browser callback binds only to `127.0.0.1`. Use `login --no-browser` when
+the URL must be opened deliberately on the same host. The connector stores its
+registration and renewable OAuth session in the private profile; MGB receives
+only the resulting non-secret scope fingerprint and exact model binding. The
+explicit, quota-consuming end-to-end proof is documented separately and never
+runs from the ordinary test or CI targets.
+
 Once a project, gateway-only profile, and run have been registered, execute or
 recover its lifecycle with:
 

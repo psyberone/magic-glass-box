@@ -15,6 +15,15 @@ connectors may implement the public inference protocol independently.
 See [inference-connectors.md](inference-connectors.md) for the normal operator,
 authority, carrier, and failure contracts.
 
+The optional production-shaped OpenAI implementation lives in
+`magic_glass_box.openai_chatgpt` and the
+`magic-glass-box-openai-connector` entry point. It owns a dedicated Sign in
+with ChatGPT profile and calls only the public streaming Responses endpoint.
+It does not reuse this historical API-key adapter's credential loading or move
+provider transport back into the control plane. Installation, sign-in, strict
+tool/body policy, and the explicit live proof are documented in
+[inference-connectors.md](inference-connectors.md#openai-connector-operator-flow).
+
 ## Reference-connector boundary
 
 `scripts/reference_inference_connector.py` accepts a private connector-owned

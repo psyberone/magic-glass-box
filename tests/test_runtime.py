@@ -55,6 +55,7 @@ class RuntimeAdapterContractTests(unittest.TestCase):
             "--dangerously-bypass-approvals-and-sandbox",
         ):
             self.assertIn(argument, codex.command)
+        self.assertIn('web_search="disabled"', codex.command)
         self.assertEqual(
             claude.command[:8],
             (

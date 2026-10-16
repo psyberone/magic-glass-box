@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from magic_glass_box.executor import SandboxPlan
+from magic_glass_box.openai_chatgpt import ChatGPTProfileStore
+from scripts.check_live_openai_chatgpt import (
+    MAX_DIAGNOSTIC_LOG_CHARACTERS,
+    _assert_sandbox_boundaries,
+    _failure_diagnostic,
+    _serialize_sandbox_plans,
+    _session_secrets,
+    _verified_failure_diagnostic,
+)
+
+
+class LiveOpenAIChatGPTProofContractTests(unittest.TestCase):
+    def test_session_secrets_can_tolerate_a_terminally_cleared_session(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = ChatGPTProfileStore(Path(temporary_directory) / "profile")
+
+            with self.assertRaisesRegex(RuntimeError, "sign-in is required"):
+                _session_secrets(store)
+            self.assertEqual(_session_secrets(store, required=False), ())
+
+    def test_failure_diagnostic_is_bounded_and_allowlists_audit_metadata(self) -> None:
+        report = _failure_diagnostic(
+            run={
+                "state": "failed",
+                "attempts": [
+                    {
+                        "state": "failed",
+                        "exit_code": 1,
+                        "reason": "runtime exited unsuccessfully",
+                        "result": None,
+                        "events": [{"private": "do not expose"}],
+                    }
+                ],
+                "private": "do not expose",
+            },
+            invocations=[
+                {
+                    "outcome": "failed",
+                    "http_status": 200,
+                    "error_code": "subscription_sharing_unsupported_capability",
+                    "request_bytes": 123,
+                    "response_bytes": 456,
+                    "model": "gpt-test",
+                    "route": "openai-chatgpt",
+                    "protocol": "openai-responses",
+                    "request": "do not expose",
+                    "response": "do not expose",
+                }
+            ],
+            worker_logs=["prefix-" + "x" * MAX_DIAGNOSTIC_LOG_CHARACTERS + "-tail"],
+            orchestration_error=RuntimeError("private exception detail"),
+        )
+
+        self.assertEqual(
+            set(report),
+            {
+                "attempts",
+                "orchestrator_error",
+                "provider_invocations",
+                "run_state",
+                "worker_log_tail",
+            },
+        )
+        self.assertEqual(report["run_state"], "failed")
+        self.assertEqual(report["orchestrator_error"], "RuntimeError")
+        self.assertEqual(
+            report["attempts"],
+            [
+                {
+                    "exit_code": 1,
+                    "has_result": False,
+                    "reason": "runtime exited unsuccessfully",
+                    "state": "failed",
+                }
+            ],
+        )
+        self.assertEqual(
+            report["provider_invocations"],
+            [
+                {
+                    "error_code": "subscription_sharing_unsupported_capability",
+                    "http_status": 200,
+                    "model": "gpt-test",
+                    "outcome": "failed",
+                    "protocol": "openai-responses",
+                    "request_bytes": 123,
+                    "response_bytes": 456,
+                    "route": "openai-chatgpt",
+                }
+            ],
+        )
+        self.assertEqual(len(report["worker_log_tail"]), MAX_DIAGNOSTIC_LOG_CHARACTERS)
+        self.assertTrue(report["worker_log_tail"].endswith("-tail"))
+        self.assertNotIn("private", repr(report))
+
+    def test_verified_failure_diagnostic_refuses_a_leaking_surface(self) -> None:
+        arguments = {
+            "run": {"state": "failed", "attempts": []},
+            "invocations": [],
+            "worker_logs": [],
+            "orchestration_error": None,
+            "secrets": ("access-secret",),
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "worker output"):
+            _verified_failure_diagnostic(
+                **arguments,
+                surfaces={"worker output": b"prefix access-secret suffix"},
+            )
+
+        report = _verified_failure_diagnostic(
+            **arguments,
+            surfaces={"worker output": b"safe"},
+        )
+        self.assertEqual(report["run_state"], "failed")
+
+    def test_failure_plan_still_enforces_the_sandbox_boundary(self) -> None:
+        profile = Path("/private/openai-profile")
+        valid = SandboxPlan(
+            "run_" + "1" * 32,
+            "magic-glass-box-" + "1" * 32,
+            "sha256:" + "a" * 64,
+            ("container", "create", "--network", "none"),
+        )
+
+        _assert_sandbox_boundaries(
+            (valid,), profile_dir=profile, secrets=("access-secret",)
+        )
+        self.assertIn(b"--network", _serialize_sandbox_plans((valid,)))
+
+        cases = (
+            (
+                ("container", "create", "--network", "bridge"),
+                "direct network access",
+            ),
+            (("container", "create", "--network"), "network boundary"),
+            (
+                ("container", "create", "--network", "none", str(profile)),
+                "profile was mounted",
+            ),
+            (
+                ("container", "create", "--network", "none", "access-secret"),
+                "Docker sandbox launch plans",
+            ),
+        )
+        for create_args, message in cases:
+            with (
+                self.subTest(create_args=create_args),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                _assert_sandbox_boundaries(
+                    (
+                        SandboxPlan(
+                            valid.run_id,
+                            valid.container_name,
+                            valid.image_id,
+                            create_args,
+                        ),
+                    ),
+                    profile_dir=profile,
+                    secrets=("access-secret",),
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

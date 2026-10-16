@@ -223,6 +223,8 @@ class CodexRuntimeAdapter:
                     "model_providers.magic_glass_box.requires_openai_auth=false",
                     "-c",
                     "model_providers.magic_glass_box.supports_websockets=false",
+                    "-c",
+                    'web_search="disabled"',
                     BOOTSTRAP_PROMPT,
                 ),
             ),

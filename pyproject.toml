@@ -17,12 +17,15 @@ development = [
     "coverage[toml]",
     "jsonschema[format]",
     "mutmut==3.6.0",
+    "PyJWT[crypto]>=2.10,<3",
     "pytest",
     "ruff",
 ]
+openai-connector = ["PyJWT[crypto]>=2.10,<3"]
 
 [project.scripts]
 magic-glass-box = "magic_glass_box.cli:main"
+magic-glass-box-openai-connector = "magic_glass_box.openai_chatgpt_cli:main"
 magic-glass-box-worker = "magic_glass_box.worker_transport:main"
 
 [tool.setuptools]

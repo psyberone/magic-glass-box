@@ -1,10 +1,15 @@
 # Credential-isolated inference connectors
 
-> **M7D.2 IMPLEMENTED; OPTIONAL REAL-ACCOUNT PROOF PLANNED FOR M7D.3:** Schema
-> v16 makes connector-bound grants the exclusive normal inference path. MGB
-> authorizes and audits each bounded call but neither resolves an upstream
-> provider credential nor performs provider network transport. Historical
-> direct grants remain readable and revocable for migration only.
+> **M7D.3 COMPLETE; REAL-ACCOUNT GOLDEN PROOF PASSED 2026-10-16:** Schema v16
+> makes connector-bound grants the exclusive normal inference path. The
+> optional OpenAI connector owns its Sign in with ChatGPT registration,
+> renewable session, model discovery, and Responses transport. MGB authorizes
+> and audits each bounded call but neither resolves an upstream credential nor
+> performs provider network transport. Browser consent and model discovery
+> succeeded. The first one-attempt live run exposed a provider-compatibility
+> and proof-diagnostics defect; both received RED-first fixes. A separately
+> authorized second attempt then passed the complete result, candidate, gate,
+> and manual-landing path without exposing credentials or worker networking.
 
 An inference connector is a narrow API server that performs an already
 authorized model invocation. The implemented v1 carrier is a local
@@ -157,6 +162,67 @@ the connector. See
 and
 [Accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions).
 
+### OpenAI connector operator flow
+
+Install the optional connector dependency, then create a dedicated profile
+outside the source checkout and the MGB state directory:
+
+```console
+python3.11 -m pip install '.[openai-connector]'
+PYTHONPATH=src python3.11 scripts/openai_chatgpt_connector.py \
+  login --profile-dir /absolute/private/openai-chatgpt-profile
+PYTHONPATH=src python3.11 scripts/openai_chatgpt_connector.py \
+  status --profile-dir /absolute/private/openai-chatgpt-profile
+PYTHONPATH=src python3.11 scripts/openai_chatgpt_connector.py \
+  models --profile-dir /absolute/private/openai-chatgpt-profile
+```
+
+`login` opens the system browser and listens only on an ephemeral
+`127.0.0.1` callback. `--no-browser` prints the one-use authorization URL for
+deliberate opening on that same host. The profile directory must be owned by
+the current user with mode `0700`; its host, registration, session, and refresh
+lock records are private. `status` returns account metadata and the non-secret
+credential-scope fingerprint but never a token. `models` obtains the current
+account-visible catalog with the connector-owned access token.
+
+Serving requires a private connector configuration that exactly matches the
+credential-free MGB registration: connector ID, deployment digest, route,
+scope fingerprint, model set, byte ceilings, and timeout. The service binds a
+mode-`0600` Unix socket in an operator-owned mode-`0700` directory. It accepts
+the same strict framed v1 invocation contract as the reference connector; it
+does not expose OAuth, arbitrary URLs, raw HTTP, or a provider CLI over that
+socket.
+
+The OpenAI route additionally enforces the current Sign in with ChatGPT
+requirements before any HTTPS dispatch: `store` is false, `stream` is true,
+the model is connector-pinned, unsupported or unknown top-level fields fail
+closed, and only Codex's local `function` and `namespace` tool declarations are
+accepted. MGB starts Codex with `web_search="disabled"`; hosted web search,
+MCP, file search, code interpreter, computer use, image generation, unknown
+future tool types, and hosted tools nested inside a namespace are rejected by
+the connector. This prevents the inference sidecar from becoming an
+undeclared general egress path. The provider-specific restrictions track
+OpenAI's documented
+[preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations),
+with a deliberately narrower local-tool policy for MGB workers.
+
+For a disposable real-account proof after sign-in, first select a slug from
+`models`, then run exactly one explicitly opted-in attempt:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_openai_chatgpt.py \
+  --profile-dir /absolute/private/openai-chatgpt-profile \
+  --model MODEL_SLUG --build --max-invocations 6 --run-timeout 300 \
+  --i-understand-this-uses-live-quota
+```
+
+The proof refuses to start without the opt-in flag. It builds the pinned
+runtime, allows one run attempt with no automatic provider replay, requires
+both the worker and exact-input gate containers to use `--network none`, and
+stops at an issued landing plan without executing it. `--max-invocations`
+bounds the agent loop but is not a dollar budget. Until Milestone 8A, configure
+the app's usage limit in ChatGPT settings as the spend/quota backstop.
+
 A local connector may receive an explicitly approved, dedicated
 provider-native configuration directory and run the provider's supported CLI
 or service process against it. Only the connector gets that mount. MGB neither
@@ -201,8 +267,20 @@ state and SQLite, retained results, runtime output, and connector logs. The
 separate two-runtime Docker proof also drives the real Codex and Claude Code
 CLIs through a reference connector to a host-only deterministic upstream.
 
-M7D.3 is the explicitly opted-in real-account proof. It begins with a
-compatibility probe for the provider-supported OAuth/service flow and performs
-one bounded invocation with no automatic retry. If that route cannot serve the
-connector contract, the proof stops; credentials are not copied into the core
-or worker as a fallback.
+M7D.3 implements the provider-supported OAuth and Responses flow in the
+separate OpenAI connector. Browser consent and account-visible model discovery
+now pass. The first bounded live run launched exactly one networkless worker
+but failed before producing a result. Comparison with
+[OpenAI's official DevKit](https://github.com/openai/sign-in-with-chatgpt-devkit/blob/main/packages/local/src/responses.ts)
+identified that successful streaming responses may omit `Content-Type`, while
+the initial adapter required it; the adapter now validates such responses by
+their complete SSE terminal event and still rejects an explicitly wrong
+content type. Structured top-level SSE errors also retain their
+machine-readable code. The live harness now performs its credential-leak scan
+on failure and reports only bounded allowlisted audit metadata. Following a
+fresh explicit opt-in, one additional bounded attempt passed using five of six
+allowed connector invocations. It retained `golden-proof.txt`, created a
+candidate, passed the exact validation gate, and issued a landing plan without
+executing its commands. Direct worker networking remained denied and reusable
+credentials remained confined to the connector profile. No automatic retry
+occurred, and credentials are not copied into the core or worker as a fallback.

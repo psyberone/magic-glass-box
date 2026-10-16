@@ -430,7 +430,7 @@ its macOS watchdog thread failed to remain live.
 
 ## Milestone 7D: credential-isolated inference connectors
 
-**Status: in progress — M7D.1 and M7D.2 complete; M7D.3 pending**
+**Status: complete — M7D.1 through M7D.3 and the live golden proof pass**
 
 M7D uses three honest internal checkpoints rather than one large cutover:
 **M7D.1** establishes durable connector authority and the strict local carrier,
@@ -483,12 +483,41 @@ both a grant and its connector. The networkless Docker canary proof passes with
 no credential exposure, and the real Codex and Claude Code CLIs both pass the
 two-runtime proof through a separately launched reference connector and
 deterministic host fixture. The normal gate passes with 650 tests, 964
-subtests, clean lint, and 86% total branch coverage. M7D.3 and the clean
-mutation gate remain due before M7D is complete.
+subtests, clean lint, and 86% total branch coverage. At that checkpoint, the
+M7D.3 real-account proof remained due. The completed-slice mutation gate now
+passes with 29,433 of 35,432 mutants killed (83.07%), 5,939 survived, 36
+uncovered, 24 timed out, and zero suspicious classifications.
+
+The 2026-10-15 M7D.3 implementation adds a separately launched OpenAI
+connector with its own dynamic Sign in with ChatGPT registration, private
+renewable session, account model discovery, RS256 ID-token validation, strict
+Responses transport, and redacted failure semantics. The MGB process retains
+only the registered connector authority and non-secret credential-scope
+fingerprint. Codex now starts with provider-hosted web search disabled, while
+the connector accepts only the pinned CLI's known request fields and local
+function/namespace tool declarations; unknown fields, hosted tools, and nested
+hosted tools fail before HTTPS dispatch. The rebuilt credential-free
+two-runtime Docker proof passes with only local Codex tools. Browser consent
+and account model discovery also pass. The first one-attempt real-account run
+launched the networkless worker but failed before producing a result. That
+attempt exposed two issues instead of being papered over: successful OpenAI
+SSE may omit `Content-Type`, and the proof harness raised before scanning or
+reporting bounded failure evidence. RED-first corrections now accept only a
+headerless body with a valid completed SSE terminal, preserve structured SSE
+error codes, and run the credential-leak audit on both success and failure.
+The normal suite now passes with 708 tests and 86% total branch coverage. The
+clean mutation gate passes at 83.07%. On 2026-10-16, the operator separately
+authorized one additional `gpt-6.1-sol` attempt with a six-invocation and
+300-second ceiling. It passed using five connector invocations: the networkless
+worker retained only `golden-proof.txt`, candidate creation and the exact
+validation gate passed, and a two-command landing plan was issued but not
+executed. The proof reported no credential exposure outside the connector
+profile and denied direct worker networking. No automatic retry occurred. M7D
+is complete.
 
 ## End-of-Milestone 7 operator golden proof
 
-**Status: planned checkpoint**
+**Status: completed 2026-10-16**
 
 This checkpoint does not add another product milestone. It exercises the
 completed M1-M7 path with one real model account before budget work begins:
@@ -520,6 +549,11 @@ SQLite, retained results, runtime output, and logs. The deterministic proofs
 continue to cover all failure paths without spending quota. Subscription
 authentication for any other runtime is not inferred from this proof and
 requires its own supported connector.
+
+The explicitly opted-in proof passed with one networkless Codex worker, five
+connector invocations, one retained result path, a candidate at the exact
+result revision, a passing validation gate, and an unexecuted landing plan.
+The credential scan was clean and direct worker networking remained denied.
 
 ## Milestone 8A: provider usage and budget authority
 
