@@ -244,7 +244,7 @@ class ArtifactSchemaContractTests(unittest.TestCase):
         with self.assertRaises(CandidateError):
             CandidateManifest.from_mapping(wrong_format)
 
-    def test_result_symlink_containment_is_a_runtime_semantic_guard(self) -> None:
+    def test_result_schema_is_looser_than_runtime_symlink_target_guard(self) -> None:
         validator, result = self.load("result")
         escaping_symlink = copy.deepcopy(result)
         escaping_symlink["changes"][0]["after"] = {

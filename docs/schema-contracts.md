@@ -30,16 +30,20 @@ connector call and may be finalized exactly once, preserving uncertainty when
 post-dispatch persistence fails.
 
 Schema validation is useful adapter-side preflight, but it is not an acceptance
-decision. Magic Glass Box's runtime parser is authoritative and additionally
-enforces invariants that portable JSON Schema cannot express, including:
+decision. Magic Glass Box's runtime acceptance paths are authoritative and
+additionally enforce invariants that portable JSON Schema cannot express,
+including:
 
 - UTF-8 byte limits rather than Unicode code-point counts;
 - uniqueness by one property of an object, such as artifact path;
 - strictly increasing supervision schedules;
 - relationships between fields and records; and
-- repository-relative symlink-graph containment.
+- repository-relative, portable-identity symlink-graph containment at
+  workspace capture and destination application.
 
 An input that passes a published schema may therefore still be rejected by the
-runtime semantic validator. The conformance tests deliberately cover both the
-shared structural surface and these documented runtime-only guards; they do not
-claim that two different validation languages accept identical input sets.
+runtime boundary that would act on it. Context-dependent graph checks are not
+claims that every in-memory record constructor re-audits already admitted
+private state. The conformance tests deliberately cover both the shared
+structural surface and these documented runtime-only guards; they do not claim
+that two different validation languages accept identical input sets.

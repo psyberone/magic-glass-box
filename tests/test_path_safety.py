@@ -37,6 +37,9 @@ class RepositoryPathSafetyTests(unittest.TestCase):
             "dir/.git:stream/config",
             "dir/git~1/config",
             "dir/.g\u200dit/config",
+            "dir/.\u200cgit./config",
+            "dir/.\u200cgit:stream/config",
+            "dir/git\u200c~1/config",
             "a" * (MAX_PATH_BYTES + 1),
             "/".join("a" for _ in range(MAX_PATH_DEPTH + 1)),
         )
@@ -87,6 +90,39 @@ class SymlinkGraphSafetyTests(unittest.TestCase):
                 ),
             ):
                 validate_symlink_graph(links)
+
+    def test_rejects_escapes_composed_through_portable_path_aliases(self) -> None:
+        cases = (
+            {
+                PurePosixPath("d/up"): "..",
+                PurePosixPath("escape"): "D/up/..",
+            },
+            {
+                PurePosixPath("caf\u00e9/up"): "..",
+                PurePosixPath("escape"): "cafe\u0301/up/..",
+            },
+        )
+        for links in cases:
+            with (
+                self.subTest(links=links),
+                self.assertRaisesRegex(
+                    UnsafeSymlinkError,
+                    "^symlink graph escapes its root$",
+                ),
+            ):
+                validate_symlink_graph(links)
+
+    def test_rejects_aliased_symlink_sources(self) -> None:
+        with self.assertRaisesRegex(
+            UnsafeSymlinkError,
+            "^symlink graph contains portable path aliases$",
+        ):
+            validate_symlink_graph(
+                {
+                    PurePosixPath("LINK"): "one",
+                    PurePosixPath("link"): "two",
+                }
+            )
 
     def test_rejects_invalid_absolute_and_cyclic_targets(self) -> None:
         cases: tuple[tuple[dict[PurePosixPath, object], str], ...] = (

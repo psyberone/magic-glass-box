@@ -228,10 +228,11 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
 ```
 
 Application performs a complete conflict preflight, but the target must remain
-quiescent while files are changed and the filesystem update is not one atomic
-whole-tree transaction. A failure after mutation begins can therefore require
-operator recovery. To create an isolated Git candidate instead of modifying
-the checkout:
+quiescent while files are changed. Case and Unicode-normalization aliases are
+rejected before mutation, while a verified one-for-one case-only rename is
+supported. The filesystem update is not one atomic whole-tree transaction; a
+failure after mutation begins can therefore require operator recovery. To
+create an isolated Git candidate instead of modifying the checkout:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \

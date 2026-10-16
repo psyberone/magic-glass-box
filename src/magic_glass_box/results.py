@@ -11,7 +11,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from .domain import canonical_json
 from .path_safety import (
     UnsafePathError,
     UnsafeSymlinkError,
+    portable_path_identity,
     reserved_git_component,
     validate_repo_path,
     validate_symlink_graph,
@@ -182,6 +182,29 @@ def _safe_symlink(path: str, target: object) -> str:
         return validate_symlink_target(path, target)
     except UnsafeSymlinkError as exc:
         raise ResultError(f"result contains an unsafe symlink: {path}") from exc
+
+
+def _validate_portable_leaf_paths(paths: Sequence[str], *, context: str) -> None:
+    entries = sorted(
+        (portable_path_identity(path), path.parts)
+        for path in (PurePosixPath(value) for value in paths)
+    )
+    for (previous, previous_parts), (identity, parts) in zip(
+        entries, entries[1:], strict=False
+    ):
+        if identity == previous:
+            raise ResultError(f"{context} contain portable aliases")
+        shared = 0
+        while (
+            shared < len(previous)
+            and shared < len(identity)
+            and previous[shared] == identity[shared]
+        ):
+            if previous_parts[shared] != parts[shared]:
+                raise ResultError(f"{context} contain portable aliases")
+            shared += 1
+        if shared == len(previous) and len(previous) < len(identity):
+            raise ResultError(f"{context} contain portable leaf/descendant aliases")
 
 
 @dataclass(frozen=True)
@@ -719,6 +742,9 @@ class WorkspaceResultStore:
                 if changed_bytes > max_changed_bytes:
                     raise ResultError("result changed content exceeds the size limit")
         try:
+            _validate_portable_leaf_paths(
+                tuple(states), context="result workspace paths"
+            )
             validate_symlink_graph(
                 {
                     PurePosixPath(path): state.target
@@ -1383,6 +1409,16 @@ class WorkspaceResultStore:
     def _preflight_apply(
         self, root: Path, changes: Sequence[ResultChange]
     ) -> tuple[_DirectoryReplacement, ...]:
+        if not isinstance(changes, tuple):
+            changes = tuple(changes)
+        _validate_portable_leaf_paths(
+            tuple(change.path for change in changes if change.before is not None),
+            context="result baseline paths",
+        )
+        _validate_portable_leaf_paths(
+            tuple(change.path for change in changes if change.after is not None),
+            context="result final paths",
+        )
         replacements: list[_DirectoryReplacement] = []
         deleted_leaves, deleted_descendants = self._index_deleted_descendants(changes)
         for change in changes:
@@ -1418,7 +1454,7 @@ class WorkspaceResultStore:
                     current = self._file_state(target, change.path)
                 except ResultError as exc:
                     raise ResultError(f"result target changed: {change.path}") from exc
-            if current != change.before and self._is_case_only_deleted_alias(
+            if current != change.before and self._is_portable_deleted_alias(
                 root,
                 change,
                 current,
@@ -1430,7 +1466,29 @@ class WorkspaceResultStore:
         return tuple(replacements)
 
     @staticmethod
-    def _is_case_only_deleted_alias(
+    def _path_has_exact_spelling(root: Path, path: PurePosixPath) -> bool:
+        current = root
+        try:
+            for component in path.parts:
+                with os.scandir(current) as iterator:
+                    entry = next(
+                        (
+                            candidate
+                            for candidate in iterator
+                            if candidate.name == component
+                        ),
+                        None,
+                    )
+                if entry is None:
+                    return False
+                current = Path(entry.path)
+        except OSError:
+            return False
+        return True
+
+    @classmethod
+    def _is_portable_deleted_alias(
+        cls,
         root: Path,
         change: ResultChange,
         current: FileState | None,
@@ -1440,32 +1498,22 @@ class WorkspaceResultStore:
             return False
 
         path = PurePosixPath(change.path)
-
-        def folded_parts(candidate: PurePosixPath) -> tuple[str, ...]:
-            return tuple(
-                unicodedata.normalize("NFC", part).casefold()
-                for part in candidate.parts
-            )
-
-        folded = folded_parts(path)
+        identity = portable_path_identity(path)
         target = root.joinpath(*path.parts)
         try:
-            with os.scandir(target.parent) as iterator:
-                exact_names = {entry.name for entry in iterator}
             target_info = target.lstat()
         except OSError:
             return False
-        if target.name in exact_names:
+        if cls._path_has_exact_spelling(root, path):
             return False
 
-        aliases: list[ResultChange] = []
         for candidate in changes:
             candidate_path = PurePosixPath(candidate.path)
             if (
                 candidate.after is not None
                 or candidate.before is None
                 or candidate.path == change.path
-                or folded_parts(candidate_path) != folded
+                or portable_path_identity(candidate_path) != identity
             ):
                 continue
             alias = root.joinpath(*candidate_path.parts)
@@ -1474,15 +1522,13 @@ class WorkspaceResultStore:
             except OSError:
                 continue
             if (
-                candidate_path.name in exact_names
+                cls._path_has_exact_spelling(root, candidate_path)
                 and (target_info.st_dev, target_info.st_ino)
                 == (alias_info.st_dev, alias_info.st_ino)
                 and candidate.before == current
             ):
-                aliases.append(candidate)
-        if len(aliases) > 1:
-            raise ResultError(f"result target changed: {change.path}")
-        return bool(aliases)
+                return True
+        return False
 
     @staticmethod
     def _ensure_parents(root: Path, target: Path) -> None:
@@ -1585,6 +1631,9 @@ class WorkspaceResultStore:
     @staticmethod
     def _validate_applied_symlinks(root: Path, changes: Sequence[ResultChange]) -> None:
         final_states = {change.path: change.after for change in changes}
+        final_identities = {
+            portable_path_identity(PurePosixPath(path)) for path in final_states
+        }
         changed_links = {
             PurePosixPath(path): state.target
             for path, state in final_states.items()
@@ -1594,8 +1643,13 @@ class WorkspaceResultStore:
         }
         if not changed_links:
             return
+        changed_by_identity = {
+            portable_path_identity(path): target
+            for path, target in changed_links.items()
+        }
 
         existing_links: dict[PurePosixPath, str] = {}
+        existing_by_identity: dict[tuple[str, ...], str] = {}
         pending = [PurePosixPath(".")]
         inspected = 0
         try:
@@ -1618,10 +1672,11 @@ class WorkspaceResultStore:
                         reserved_git_component(part) for part in relative_path.parts
                     ):
                         continue
-                    relative = _safe_path(relative_path.as_posix())
-                    if relative in final_states or any(
-                        parent.as_posix() in final_states
-                        for parent in relative_path.parents
+                    _safe_path(relative_path.as_posix())
+                    identity = portable_path_identity(relative_path)
+                    if identity in final_identities or any(
+                        identity[:depth] in final_identities
+                        for depth in range(1, len(identity))
                     ):
                         continue
                     inspected += 1
@@ -1632,7 +1687,13 @@ class WorkspaceResultStore:
                         )
                     info = entry.stat(follow_symlinks=False)
                     if stat.S_ISLNK(info.st_mode):
-                        existing_links[relative_path] = os.readlink(entry.path)
+                        target = os.readlink(entry.path)
+                        if identity in existing_by_identity:
+                            raise ResultError(
+                                "result target contains portable symlink aliases"
+                            )
+                        existing_links[relative_path] = target
+                        existing_by_identity[identity] = target
                     elif stat.S_ISDIR(info.st_mode):
                         pending.append(relative_path)
         except ResultError:
@@ -1644,24 +1705,32 @@ class WorkspaceResultStore:
             if state is None:
                 continue
             candidate = PurePosixPath(path)
+            identity = portable_path_identity(candidate)
             if any(
-                parent in changed_links or parent in existing_links
-                for parent in candidate.parents
+                identity[:depth] in changed_by_identity
+                or identity[:depth] in existing_by_identity
+                for depth in range(1, len(identity))
             ):
                 raise ResultError("result contains a path beneath a symlink")
 
         try:
-            validate_symlink_graph(changed_links, lookup=existing_links.get)
+            validate_symlink_graph(
+                changed_links,
+                lookup=lambda path: existing_by_identity.get(
+                    portable_path_identity(path)
+                ),
+            )
             for source, target in existing_links.items():
                 touched_changed = False
 
                 def lookup(path: PurePosixPath) -> str | None:
                     nonlocal touched_changed
-                    changed = changed_links.get(path)
-                    if changed is not None:
+                    identity = portable_path_identity(path)
+                    changed = changed_by_identity.get(identity)
+                    if identity in changed_by_identity:
                         touched_changed = True
                         return changed
-                    return existing_links.get(path)
+                    return existing_by_identity.get(identity)
 
                 try:
                     validate_symlink_graph({source: target}, lookup=lookup)

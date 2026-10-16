@@ -503,6 +503,39 @@ class WorkspaceResultStoreTests(unittest.TestCase):
         self.assertFalse((target / "new-link").exists())
         self.assertEqual((target / "modify.txt").read_text(), "before\n")
 
+    def test_capture_rejects_escape_composed_through_case_alias(self) -> None:
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        directory = self.workspace / "d"
+        directory.mkdir()
+        (directory / "up").symlink_to("..")
+        (self.workspace / "escape").symlink_to("D/up/..")
+
+        with self.assertRaisesRegex(
+            ResultError, r"^result contains an unsafe symlink$"
+        ):
+            self.results.capture(ATTEMPT_ID, self.workspace)
+
+    def test_apply_rejects_escape_through_portable_checkout_link_alias(
+        self,
+    ) -> None:
+        target = self.root / "portable-link-target"
+        directory = target / "d"
+        directory.mkdir(parents=True)
+        (directory / "up").symlink_to("..")
+        changes = (
+            ResultChange(
+                "escape",
+                "added",
+                None,
+                FileState(kind="symlink", target="D/up/.."),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            ResultError, r"^result contains an unsafe symlink$"
+        ):
+            self.results._validate_applied_symlinks(target, changes)
+
     def test_apply_rejects_unchanged_link_that_escapes_through_new_link(self) -> None:
         nested = self.workspace / "a" / "b"
         nested.mkdir(parents=True)
@@ -550,6 +583,139 @@ class WorkspaceResultStoreTests(unittest.TestCase):
         self.assertNotIn("case-name.txt", os.listdir(target))
         self.assertIn("CASE-NAME.txt", os.listdir(target))
         self.assertEqual((target / "CASE-NAME.txt").read_text(), "same bytes\n")
+
+    def test_apply_supports_parent_directory_case_only_rename(
+        self,
+    ) -> None:
+        source = self.workspace / "old-dir" / "name.txt"
+        source.parent.mkdir()
+        source.write_text("same bytes\n", encoding="utf-8")
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        source.parent.rename(self.workspace / "OLD-DIR")
+        self.results.capture(ATTEMPT_ID, self.workspace)
+
+        target = self.root / "directory-case-rename-target"
+        old_target = target / "old-dir" / "name.txt"
+        old_target.parent.mkdir(parents=True)
+        old_target.write_text("same bytes\n", encoding="utf-8")
+        if not (target / "OLD-DIR" / "name.txt").exists():
+            return
+
+        self.results.apply(ATTEMPT_ID, target)
+
+        self.assertNotIn("old-dir", os.listdir(target))
+        self.assertIn("OLD-DIR", os.listdir(target))
+        self.assertEqual((target / "OLD-DIR" / "name.txt").read_text(), "same bytes\n")
+
+    def test_case_only_rename_rejects_a_changed_source_alias(self) -> None:
+        source = self.workspace / "case-conflict.txt"
+        source.write_text("baseline\n", encoding="utf-8")
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        source.rename(self.workspace / "CASE-CONFLICT.txt")
+        self.results.capture(ATTEMPT_ID, self.workspace)
+
+        target = self.root / "case-rename-conflict-target"
+        target.mkdir(mode=0o700)
+        old_target = target / "case-conflict.txt"
+        old_target.write_text("local edit\n", encoding="utf-8")
+        if not (target / "CASE-CONFLICT.txt").exists():
+            return
+
+        with self.assertRaisesRegex(
+            ResultError, r"^result target changed: CASE-CONFLICT.txt$"
+        ):
+            self.results.apply(ATTEMPT_ID, target)
+
+        self.assertEqual(os.listdir(target), ["case-conflict.txt"])
+        self.assertEqual(old_target.read_text(), "local edit\n")
+
+    def test_apply_preflight_rejects_portable_final_path_aliases(self) -> None:
+        first_body = b"one\n"
+        second_body = b"two\n"
+        first = FileState(
+            kind="file",
+            mode=0o644,
+            size=len(first_body),
+            sha256=hashlib.sha256(first_body).hexdigest(),
+        )
+        second = FileState(
+            kind="file",
+            mode=0o644,
+            size=len(second_body),
+            sha256=hashlib.sha256(second_body).hexdigest(),
+        )
+        cases = (
+            (
+                ResultChange("README", "added", None, first),
+                ResultChange("readme", "added", None, second),
+            ),
+            (
+                ResultChange("caf\u00e9.txt", "added", None, first),
+                ResultChange("cafe\u0301.txt", "added", None, second),
+            ),
+            (
+                ResultChange("Directory/one", "added", None, first),
+                ResultChange("directory/two", "added", None, second),
+            ),
+            (
+                ResultChange("Foo", "deleted", first, None),
+                ResultChange("foo", "added", None, first),
+                ResultChange("FOO", "added", None, second),
+            ),
+        )
+        target = self.root / "portable-alias-target"
+        target.mkdir(mode=0o700)
+        for changes in cases:
+            with (
+                self.subTest(paths=[change.path for change in changes]),
+                self.assertRaisesRegex(
+                    ResultError,
+                    r"^result final paths contain portable aliases$",
+                ),
+            ):
+                self.results._preflight_apply(target, changes)
+
+    def test_apply_preflight_rejects_portable_leaf_descendant_alias(self) -> None:
+        body = b"body\n"
+        regular = FileState(
+            kind="file",
+            mode=0o644,
+            size=len(body),
+            sha256=hashlib.sha256(body).hexdigest(),
+        )
+        changes = (
+            ResultChange("leaf", "added", None, regular),
+            ResultChange("leaf/child", "added", None, regular),
+        )
+        target = self.root / "portable-descendant-target"
+        target.mkdir(mode=0o700)
+
+        with self.assertRaisesRegex(
+            ResultError,
+            r"^result final paths contain portable leaf/descendant aliases$",
+        ):
+            self.results._preflight_apply(target, changes)
+
+    def test_apply_preflight_rejects_portable_baseline_aliases(self) -> None:
+        body = b"old\n"
+        regular = FileState(
+            kind="file",
+            mode=0o644,
+            size=len(body),
+            sha256=hashlib.sha256(body).hexdigest(),
+        )
+        changes = (
+            ResultChange("OLD", "deleted", regular, None),
+            ResultChange("old", "deleted", regular, None),
+        )
+        target = self.root / "portable-baseline-alias-target"
+        target.mkdir(mode=0o700)
+
+        with self.assertRaisesRegex(
+            ResultError,
+            r"^result baseline paths contain portable aliases$",
+        ):
+            self.results._preflight_apply(target, changes)
 
     def test_apply_uses_final_file_before_existing_checkout_symlink(self) -> None:
         inside = self.workspace / "inside"

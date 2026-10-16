@@ -309,14 +309,15 @@ The result store is trusted host state beside the control-plane database. It
 contains a canonical manifest plus deduplicated changed-file blobs, never a Git
 repository or an executable action. Applying a result verifies the database
 digest, checks every affected path against its captured baseline before making
-any change, and then reconstructs files, safe relative symlinks, deletions, and
-executable modes. Apply requires a quiescent target and is not one atomic
-whole-tree filesystem transaction; a failure after mutation begins may require
-operator recovery. It never pushes, opens a pull request, or needs service
-credentials. An operator may instead materialize a deterministic candidate
-commit in the separate private candidate store; neither the result artifact nor
-a worker gains that authority. See [results.md](results.md) and
-[candidates.md](candidates.md).
+any change, and rejects case/Unicode path aliases before reconstructing files,
+safe relative symlinks, deletions, and executable modes. Symlink resolution
+uses the same portable path identity at capture and apply. Apply requires a
+quiescent target and is not one atomic whole-tree filesystem transaction; a
+failure after mutation begins may require operator recovery. It never pushes,
+opens a pull request, or needs service credentials. An operator may instead
+materialize a deterministic candidate commit in the separate private candidate
+store; neither the result artifact nor a worker gains that authority. See
+[results.md](results.md) and [candidates.md](candidates.md).
 
 The Docker boundary rejects images with Dockerfile-declared volumes, validates
 host paths before mounting them, runs as the host's non-root numeric identity,

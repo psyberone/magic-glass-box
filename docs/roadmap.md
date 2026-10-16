@@ -557,7 +557,7 @@ The credential scan was clean and direct worker networking remained denied.
 
 ## Post-Milestone 7 external-audit stabilization
 
-**Status: in progress — R1 complete**
+**Status: in progress — R1 and R2 complete**
 
 Three independent cold promise audits follow M7. This is a correctness and
 boundary-hardening sequence, not a compressed feature milestone. Repairs are
@@ -568,9 +568,10 @@ grouped by invariant so overlapping findings produce one coherent change:
    terminal finalization; committed mailbox failures poison the worker bridge;
    candidate Git output is streamed to its actual memory ceiling; concurrent
    initializers re-read schema state under one exclusive migration lock.
-2. **R2 — portable result-path identity:** reject case/normalization alias
-   collisions and alias-composed symlink escapes at hostile capture and target
-   apply boundaries without treating private retained state as adversarial.
+2. **R2 — portable result-path identity (complete):** case/normalization alias
+   collisions and alias-composed symlink escapes fail at hostile capture and
+   target apply boundaries; one-for-one parent-directory case renames remain
+   supported, and private retained state is not treated as adversarial.
 3. **R3 — ownership and landing recovery:** close integration/attempt lease
    takeover holes and provide a truthful recovery path when an issued landing
    plan encounters out-of-band ref drift.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import PurePosixPath
@@ -39,6 +40,29 @@ class UnsafeSymlinkError(ValueError):
 LinkLookup = Callable[[PurePosixPath], str | None]
 
 
+def portable_path_identity(path: PurePosixPath) -> tuple[str, ...]:
+    """Return the conservative identity used by supported checkout filesystems.
+
+    Default macOS filesystems compare names without case or canonical-Unicode
+    distinctions.  Git additionally ignores a small set of formatting code
+    points when protecting its administrative directory on HFS/APFS.  Treating
+    those spellings as one namespace keeps a Linux worker from producing paths
+    that collapse or resolve differently when applied on macOS.
+    """
+
+    return tuple(
+        unicodedata.normalize(
+            "NFD",
+            "".join(
+                character
+                for character in component
+                if character not in HFS_GIT_IGNORABLES
+            ).casefold(),
+        )
+        for component in path.parts
+    )
+
+
 def reserved_git_component(value: str) -> bool:
     """Match Git's cross-platform protections for aliases of ``.git``."""
 
@@ -48,7 +72,7 @@ def reserved_git_component(value: str) -> bool:
     if hfs_name.casefold() == ".git":
         return True
 
-    ntfs_name = value.casefold()
+    ntfs_name = hfs_name.casefold()
     if ntfs_name.startswith(".git"):
         remainder = ntfs_name[4:]
     elif ntfs_name.startswith("git~1"):
@@ -129,7 +153,7 @@ def validate_symlink_graph(
     interpreting the remaining ``..`` components.
     """
 
-    normalized = dict(links)
+    normalized: dict[tuple[str, ...], str] = {}
 
     def target_parts(target: object) -> tuple[str, ...]:
         if not isinstance(target, str) or not target or "\x00" in target:
@@ -149,7 +173,7 @@ def validate_symlink_graph(
             raise UnsafeSymlinkError("symlink target is unsafe")
         return expanded.parts
 
-    for source, target in normalized.items():
+    for source, target in links.items():
         if (
             not isinstance(source, PurePosixPath)
             or not source.parts
@@ -158,16 +182,21 @@ def validate_symlink_graph(
         ):
             raise UnsafeSymlinkError("symlink path is invalid")
         target_parts(target)
+        identity = portable_path_identity(source)
+        if identity in normalized:
+            raise UnsafeSymlinkError("symlink graph contains portable path aliases")
+        normalized[identity] = target
 
     def target_for(path: PurePosixPath) -> str | None:
-        if path in normalized:
-            return normalized[path]
+        identity = portable_path_identity(path)
+        if identity in normalized:
+            return normalized[identity]
         return None if lookup is None else lookup(path)
 
     # Bound hostile graphs without imposing a small fixed chain limit.  A
     # normal repository consumes roughly one step per target component.
     remaining_steps = max(4096, len(normalized) * 32)
-    for source, initial_target in normalized.items():
+    for source, initial_target in links.items():
         resolved: list[str] = []
         pending = deque((*source.parent.parts, *target_parts(initial_target)))
         while pending:

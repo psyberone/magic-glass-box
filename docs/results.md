@@ -34,11 +34,17 @@ rewrite them. Applying a result writes those retained bytes unchanged.
 `.git` paths and their case-insensitive, HFS-ignorable, NTFS short-name,
 trailing-dot/space, and alternate-stream aliases fail closed. Absolute or
 escaping symlinks, sockets, devices, FIFOs, and other special files fail closed
-as well. Symlink containment is evaluated as a graph: sibling links are
-recursively expanded before `..` is interpreted, so two individually plausible
-links cannot compose into an escape. The same graph check runs again before
-applying a retained bundle, including bundles captured by an older build and
-chains that cross unchanged checkout links.
+as well. Every admitted workspace path also has one portable identity formed
+from its case-folded, canonically decomposed components. Two leaves, or two
+directory spellings, that would be distinct in a Linux worker but collapse on
+a default macOS filesystem are rejected before publication.
+
+Symlink containment is evaluated as a graph using that same portable identity:
+sibling links are recursively expanded before `..` is interpreted, so two
+individually plausible links cannot compose into an escape through a case or
+Unicode-normalization alias. The same graph check runs again before applying a
+retained bundle, including bundles captured by an older build and chains that
+cross unchanged checkout links.
 
 Untracked files ignored by the pinned rules are excluded before the workspace
 path ceiling is counted. Matching uses Git's `check-ignore` semantics with
@@ -126,6 +132,12 @@ symlink-graph check across every affected destination path. Mode-only changes
 stream the exact baseline body into a fresh inode and atomically install the
 new mode; they never `chmod` a possibly shared inode. Written files and
 symlinks also use atomic leaf replacement.
+
+The preflight rejects portable aliases independently in the baseline and final
+path sets before changing the checkout. A one-for-one case-only rename remains
+valid: the differently spelled destination must resolve to the exact captured
+deletion, including when a parent directory changes case. Two final paths that
+collapse to one destination never qualify as a rename.
 
 A retained file or symlink can replace a directory only when a complete
 no-follow preflight proves that every leaf below that directory is an exact
