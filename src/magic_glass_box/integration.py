@@ -616,12 +616,20 @@ class LandingReceipt:
             raise IntegrationError("landing receipt belongs to another plan")
         if request.request_sha256 != plan.digest:
             raise IntegrationError("landing receipt request digest does not match")
-        expected_revision = (
-            plan.head_revision
-            if request.outcome is LandingOutcome.LANDED
-            else plan.expected_base_revision
+        _object_id(
+            request.observed_revision,
+            field="landing receipt observed revision",
+            object_format=plan.object_format,
         )
-        if request.observed_revision != expected_revision:
+        if (
+            request.outcome is LandingOutcome.LANDED
+            and request.observed_revision != plan.head_revision
+        ):
+            raise IntegrationError("landing receipt observed revision is invalid")
+        if (
+            request.outcome is LandingOutcome.NOT_LANDED
+            and request.observed_revision == plan.head_revision
+        ):
             raise IntegrationError("landing receipt observed revision is invalid")
         return cls(
             schema_version=LANDING_RECEIPT_SCHEMA_VERSION,

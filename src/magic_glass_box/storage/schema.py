@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -2089,6 +2089,68 @@ BEGIN
 END;
 """
 
+ATTEMPT_OWNER_AUDIT_SCHEMA = """
+DROP TRIGGER run_attempt_event_immutable_update;
+DROP TRIGGER run_attempt_event_immutable_delete;
+DROP INDEX run_attempt_event_stream;
+
+ALTER TABLE run_attempt_events RENAME TO run_attempt_events_v17;
+
+CREATE TABLE run_attempt_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'attempt.created', 'attempt.started', 'attempt.owner_changed',
+            'attempt.handoff_submitted', 'attempt.completed',
+            'attempt.failed', 'attempt.interrupted'
+        )
+    ),
+    from_state TEXT CHECK (
+        from_state IS NULL OR from_state IN (
+            'preparing', 'running', 'handed_off', 'succeeded', 'failed',
+            'cancelled', 'interrupted'
+        )
+    ),
+    to_state TEXT NOT NULL CHECK (
+        to_state IN (
+            'preparing', 'running', 'handed_off', 'succeeded', 'failed',
+            'cancelled', 'interrupted'
+        )
+    ),
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (attempt_id, sequence),
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO run_attempt_events (
+    id, attempt_id, sequence, kind, from_state, to_state, metadata_json,
+    created_at
+)
+SELECT
+    id, attempt_id, sequence, kind, from_state, to_state, metadata_json,
+    created_at
+FROM run_attempt_events_v17;
+
+DROP TABLE run_attempt_events_v17;
+
+CREATE INDEX run_attempt_event_stream
+    ON run_attempt_events(attempt_id, sequence);
+
+CREATE TRIGGER run_attempt_event_immutable_update
+BEFORE UPDATE ON run_attempt_events
+BEGIN
+    SELECT RAISE(ABORT, 'run attempt events are immutable');
+END;
+CREATE TRIGGER run_attempt_event_immutable_delete
+BEFORE DELETE ON run_attempt_events
+BEGIN
+    SELECT RAISE(ABORT, 'run attempt events are immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -2107,6 +2169,7 @@ SCHEMA = (
     + INFERENCE_CONNECTOR_SCHEMA
     + INFERENCE_DISPATCH_SCHEMA
     + PROVIDER_INVOCATION_LIFECYCLE_SCHEMA
+    + ATTEMPT_OWNER_AUDIT_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -2125,4 +2188,5 @@ MIGRATIONS = {
     14: INFERENCE_CONNECTOR_SCHEMA,
     15: INFERENCE_DISPATCH_SCHEMA,
     16: PROVIDER_INVOCATION_LIFECYCLE_SCHEMA,
+    17: ATTEMPT_OWNER_AUDIT_SCHEMA,
 }

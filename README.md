@@ -48,7 +48,8 @@ This repository currently contains the first executable vertical slice:
 - a run coordinator that records preparation, container identity, resolved
   source revision, exit status, and terminal state;
 - owner-leased attempts with heartbeats, audited cancellation requests, real
-  container stops, and reconciliation that touches only expired ownership;
+  container stops, versioned and audited expired-owner takeover, stale-owner
+  transition fencing, and reconciliation that touches only expired ownership;
 - immutable host-captured workspace results that retain bounded file changes
   before disposable snapshots are removed, with explicit conflict-checked
   application and no Git hosting credentials;
@@ -64,8 +65,9 @@ This repository currently contains the first executable vertical slice:
   command output;
 - hard work-item landing dependencies, immutable deterministic refolds, one
   leased integration lane per ref, exact argv-only manual Git plans, and
-  nonce-bound receipts that conservatively invalidate every remaining sibling
-  after a base advance without storing a Git-host credential;
+  nonce-bound receipts that either confirm the unchanged base or truthfully
+  advance an out-of-band observed ref and conservatively invalidate every
+  remaining sibling without storing a Git-host credential;
 - a durable attempt ledger and bounded structured handoff that let a clean
   replacement worker resume the same run from its pinned commit without a
   transcript or inherited mutable sandbox;

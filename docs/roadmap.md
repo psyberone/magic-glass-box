@@ -557,7 +557,7 @@ The credential scan was clean and direct worker networking remained denied.
 
 ## Post-Milestone 7 external-audit stabilization
 
-**Status: in progress — R1 and R2 complete**
+**Status: in progress — R1, R2, and R3 complete**
 
 Three independent cold promise audits follow M7. This is a correctness and
 boundary-hardening sequence, not a compressed feature milestone. Repairs are
@@ -572,9 +572,11 @@ grouped by invariant so overlapping findings produce one coherent change:
    collisions and alias-composed symlink escapes fail at hostile capture and
    target apply boundaries; one-for-one parent-directory case renames remain
    supported, and private retained state is not treated as adversarial.
-3. **R3 — ownership and landing recovery:** close integration/attempt lease
-   takeover holes and provide a truthful recovery path when an issued landing
-   plan encounters out-of-band ref drift.
+3. **R3 — ownership and landing recovery (complete):** live integration claims
+   are untakeable; expired attempt takeover advances versioned, audited owner
+   authority and fences stale transition writers; a truthful third-revision
+   `not_landed` receipt advances the observed ref and requires refold. Schema
+   v18 preserves prior attempt events while adding the owner-change event.
 4. **R4 — operational boundary resilience:** redaction, non-UTF-8 runtime
    output, read-only workspace cleanup, and sidecar connection/socket
    lifecycle.

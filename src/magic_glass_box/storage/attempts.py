@@ -224,7 +224,8 @@ class AttemptStorage:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 attempt = connection.execute(
-                    "SELECT state, lease_expires_at FROM run_attempts WHERE id = ?",
+                    "SELECT state, version, owner_id, lease_expires_at "
+                    "FROM run_attempts WHERE id = ?",
                     (attempt_id,),
                 ).fetchone()
                 if attempt is None:
@@ -241,19 +242,57 @@ class AttemptStorage:
                     and attempt["lease_expires_at"] > now
                 ):
                     raise ConflictError("run attempt lease has not expired")
+                version = attempt["version"] + 1
                 changed = connection.execute(
                     "UPDATE run_attempts SET owner_id = ?, heartbeat_at = ?, "
-                    "lease_expires_at = ? WHERE id = ? "
+                    "lease_expires_at = ?, version = ? WHERE id = ? AND version = ? "
                     "AND state IN ('preparing', 'running') "
                     "AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
-                    (owner_id, now, expires_at, attempt_id, now),
+                    (
+                        owner_id,
+                        now,
+                        expires_at,
+                        version,
+                        attempt_id,
+                        attempt["version"],
+                        now,
+                    ),
                 ).rowcount
                 if changed != 1:
                     raise ConcurrentUpdateError(
                         "run attempt lease changed concurrently"
                     )
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 "
+                    "FROM run_attempt_events WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO run_attempt_events "
+                    "(attempt_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) VALUES (?, ?, "
+                    "'attempt.owner_changed', ?, ?, ?, ?)",
+                    (
+                        attempt_id,
+                        sequence,
+                        attempt["state"],
+                        attempt["state"],
+                        canonical_json(
+                            {
+                                "new_owner_id": owner_id,
+                                "previous_owner_id": attempt["owner_id"],
+                            }
+                        ),
+                        now,
+                    ),
+                )
                 connection.commit()
-            except (NotFoundError, ConflictError, ValidationError):
+            except (
+                ConcurrentUpdateError,
+                NotFoundError,
+                ConflictError,
+                ValidationError,
+            ):
                 connection.rollback()
                 raise
             except sqlite3.IntegrityError as exc:
@@ -276,6 +315,7 @@ class AttemptStorage:
         self,
         attempt_id: str,
         *,
+        owner_id: str,
         expected_attempt_version: int,
         expected_run_version: int,
         source_revision: str,
@@ -286,6 +326,7 @@ class AttemptStorage:
         """Record a worker start and the resolved source revision atomically."""
 
         attempt_id = require_string(attempt_id, field="attempt_id", max_bytes=64)
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
         for value, field, maximum in (
             (source_revision, "source_revision", 512),
             (container_id, "container_id", 512),
@@ -304,8 +345,8 @@ class AttemptStorage:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 attempt = connection.execute(
-                    "SELECT ra.run_id, ra.state, ra.version, r.state AS run_state, "
-                    "r.version AS run_version, r.started_at "
+                    "SELECT ra.run_id, ra.state, ra.version, ra.owner_id, "
+                    "r.state AS run_state, r.version AS run_version, r.started_at "
                     "FROM run_attempts ra JOIN runs r ON r.id = ra.run_id "
                     "WHERE ra.id = ?",
                     (attempt_id,),
@@ -317,6 +358,8 @@ class AttemptStorage:
                         f"attempt version is {attempt['version']}, "
                         f"expected {expected_attempt_version}"
                     )
+                if attempt["owner_id"] != owner_id:
+                    raise ConflictError("run attempt is owned by another orchestrator")
                 if attempt["state"] != AttemptState.PREPARING.value:
                     raise ConflictError(
                         f"run attempt is not preparing: {attempt['state']}"
@@ -331,7 +374,8 @@ class AttemptStorage:
                 attempt_changed = connection.execute(
                     "UPDATE run_attempts SET state = 'running', version = version + 1, "
                     "source_revision = ?, container_id = ?, container_name = ?, "
-                    "image_id = ?, started_at = ? WHERE id = ? AND version = ?",
+                    "image_id = ?, started_at = ? WHERE id = ? AND version = ? "
+                    "AND owner_id = ?",
                     (
                         source_revision,
                         container_id,
@@ -340,6 +384,7 @@ class AttemptStorage:
                         now,
                         attempt_id,
                         expected_attempt_version,
+                        owner_id,
                     ),
                 ).rowcount
                 if attempt_changed != 1:
@@ -367,12 +412,17 @@ class AttemptStorage:
                         "source_revision": source_revision,
                     }
                 )
+                event_sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 "
+                    "FROM run_attempt_events WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()[0]
                 connection.execute(
                     "INSERT INTO run_attempt_events "
                     "(attempt_id, sequence, kind, from_state, to_state, "
-                    "metadata_json, created_at) VALUES (?, 2, 'attempt.started', "
+                    "metadata_json, created_at) VALUES (?, ?, 'attempt.started', "
                     "'preparing', 'running', ?, ?)",
-                    (attempt_id, metadata, now),
+                    (attempt_id, event_sequence, metadata, now),
                 )
                 connection.execute(
                     "INSERT INTO run_events "
@@ -399,6 +449,7 @@ class AttemptStorage:
         self,
         attempt_id: str,
         *,
+        owner_id: str,
         expected_attempt_version: int,
         exit_code: int,
         image_id: str,
@@ -406,6 +457,7 @@ class AttemptStorage:
         """Close one worker attempt and, when appropriate, its durable run."""
 
         attempt_id = require_string(attempt_id, field="attempt_id", max_bytes=64)
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
         image_id = require_string(image_id, field="image_id", max_bytes=512)
         if (
             isinstance(expected_attempt_version, bool)
@@ -425,6 +477,7 @@ class AttemptStorage:
                 connection.execute("BEGIN IMMEDIATE")
                 attempt = connection.execute(
                     "SELECT ra.run_id, ra.state, ra.version, ra.image_id, "
+                    "ra.owner_id, "
                     "ra.cancel_requested_at, ra.cancel_requested_by, "
                     "ra.cancel_reason, "
                     "r.state AS run_state, r.version AS run_version "
@@ -439,6 +492,8 @@ class AttemptStorage:
                         f"attempt version is {attempt['version']}, "
                         f"expected {expected_attempt_version}"
                     )
+                if attempt["owner_id"] != owner_id:
+                    raise ConflictError("run attempt is owned by another orchestrator")
                 if attempt["state"] != AttemptState.RUNNING.value:
                     raise ConflictError(
                         f"run attempt is not running: {attempt['state']}"
@@ -593,7 +648,7 @@ class AttemptStorage:
                 changed = connection.execute(
                     "UPDATE run_attempts SET state = ?, version = version + 1, "
                     "exit_code = ?, reason = ?, finished_at = ? "
-                    "WHERE id = ? AND version = ?",
+                    "WHERE id = ? AND version = ? AND owner_id = ?",
                     (
                         outcome.value,
                         exit_code,
@@ -601,6 +656,7 @@ class AttemptStorage:
                         now,
                         attempt_id,
                         expected_attempt_version,
+                        owner_id,
                     ),
                 ).rowcount
                 if changed != 1:
@@ -648,6 +704,7 @@ class AttemptStorage:
         self,
         attempt_id: str,
         *,
+        owner_id: str,
         expected_attempt_version: int,
         reason: str,
         interrupted: bool = False,
@@ -655,6 +712,7 @@ class AttemptStorage:
         """Close an active attempt after cleanup, preserving durable waits."""
 
         attempt_id = require_string(attempt_id, field="attempt_id", max_bytes=64)
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
         reason = require_string(reason, field="reason", max_bytes=4096)
         if (
             isinstance(expected_attempt_version, bool)
@@ -670,6 +728,7 @@ class AttemptStorage:
                 connection.execute("BEGIN IMMEDIATE")
                 attempt = connection.execute(
                     "SELECT ra.run_id, ra.state, ra.version, r.state AS run_state, "
+                    "ra.owner_id, "
                     "ra.cancel_requested_at, ra.cancel_requested_by, "
                     "ra.cancel_reason, "
                     "r.version AS run_version FROM run_attempts ra "
@@ -683,6 +742,8 @@ class AttemptStorage:
                         f"attempt version is {attempt['version']}, "
                         f"expected {expected_attempt_version}"
                     )
+                if attempt["owner_id"] != owner_id:
+                    raise ConflictError("run attempt is owned by another orchestrator")
                 if attempt["state"] not in {
                     AttemptState.PREPARING.value,
                     AttemptState.RUNNING.value,
@@ -768,13 +829,15 @@ class AttemptStorage:
                     )
                 changed = connection.execute(
                     "UPDATE run_attempts SET state = ?, version = version + 1, "
-                    "reason = ?, finished_at = ? WHERE id = ? AND version = ?",
+                    "reason = ?, finished_at = ? WHERE id = ? AND version = ? "
+                    "AND owner_id = ?",
                     (
                         outcome.value,
                         reason,
                         now,
                         attempt_id,
                         expected_attempt_version,
+                        owner_id,
                     ),
                 ).rowcount
                 if changed != 1:

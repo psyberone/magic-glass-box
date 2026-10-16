@@ -227,6 +227,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         )
         self.database.start_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-inference-test",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision="abc123",

@@ -463,6 +463,7 @@ class GateLedgerTests(unittest.TestCase):
         )
         attempt = self.database.start_run_attempt(
             preparing["id"],
+            owner_id="gate-test",
             expected_attempt_version=preparing["version"],
             expected_run_version=preparing["run_version"],
             source_revision=source_revision,
@@ -484,6 +485,7 @@ class GateLedgerTests(unittest.TestCase):
         self.database.record_attempt_result(attempt["id"], captured.manifest)
         return self.database.complete_run_attempt(
             attempt["id"],
+            owner_id="gate-test",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id="sha256:" + digit * 64,

@@ -721,6 +721,7 @@ class RunCoordinatorTests(unittest.TestCase):
         )
         running = self.database.start_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-crashed",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision=COMMIT,
@@ -1121,6 +1122,7 @@ class RunCoordinatorTests(unittest.TestCase):
         )
         self.database.start_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-live",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision=COMMIT,
@@ -1147,6 +1149,7 @@ class RunCoordinatorTests(unittest.TestCase):
         )
         running = self.database.start_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-crashed",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision=COMMIT,

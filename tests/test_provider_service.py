@@ -210,6 +210,7 @@ class ProviderServiceTests(unittest.TestCase):
             )
             self.database.start_run_attempt(
                 str(attempt["id"]),
+                owner_id="orchestrator-provider-test",
                 expected_attempt_version=int(attempt["version"]),
                 expected_run_version=int(attempt["run_version"]),
                 source_revision="abc123",
@@ -391,6 +392,7 @@ class ProviderServiceTests(unittest.TestCase):
         )
         self.database.start_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-provider-test",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision="abc123",
@@ -665,6 +667,7 @@ class ProviderServiceTests(unittest.TestCase):
         )
         running = self.database.start_run_attempt(
             str(attempt["id"]),
+            owner_id="orchestrator-provider-test",
             expected_attempt_version=int(attempt["version"]),
             expected_run_version=int(attempt["run_version"]),
             source_revision="abc123",

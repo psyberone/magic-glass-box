@@ -24,6 +24,7 @@ from magic_glass_box.domain import (
 )
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import FileState, ResultChange, ResultManifest
+from magic_glass_box.storage.schema import ATTEMPT_OWNER_AUDIT_SCHEMA
 
 OWNER_ID = "orchestrator-test-owner"
 IMAGE_ID = "sha256:" + "c" * 64
@@ -115,6 +116,7 @@ class RunAttemptTests(unittest.TestCase):
         )
         running = self.database.start_run_attempt(
             attempt["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision="a" * 40,
@@ -126,6 +128,7 @@ class RunAttemptTests(unittest.TestCase):
 
     def test_start_attempt_validates_boundaries_and_records_exact_audit(self) -> None:
         defaults = {
+            "owner_id": OWNER_ID,
             "expected_attempt_version": 1,
             "expected_run_version": 2,
             "source_revision": "a" * 40,
@@ -270,6 +273,7 @@ class RunAttemptTests(unittest.TestCase):
         self.record_result(running["id"])
         finished_attempt = self.database.complete_run_attempt(
             running["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=running["version"],
             exit_code=0,
             image_id=IMAGE_ID,
@@ -346,6 +350,7 @@ class RunAttemptTests(unittest.TestCase):
         self.record_result(running["id"])
         finished = self.database.complete_run_attempt(
             running["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=running["version"],
             exit_code=0,
             image_id=IMAGE_ID,
@@ -378,6 +383,7 @@ class RunAttemptTests(unittest.TestCase):
         result = self.record_result(running["id"])
         completed = self.database.complete_run_attempt(
             running["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=running["version"],
             exit_code=0,
             image_id=IMAGE_ID,
@@ -411,6 +417,7 @@ class RunAttemptTests(unittest.TestCase):
 
         failed = self.database.fail_run_attempt(
             attempt["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=attempt["version"],
             reason="workspace preparation failed",
         )
@@ -435,6 +442,7 @@ class RunAttemptTests(unittest.TestCase):
 
     def test_fail_attempt_validates_boundaries_and_records_interruption(self) -> None:
         defaults = {
+            "owner_id": OWNER_ID,
             "expected_attempt_version": 1,
             "reason": "cleanup failed",
         }
@@ -503,6 +511,7 @@ class RunAttemptTests(unittest.TestCase):
         )
         interrupted = self.database.fail_run_attempt(
             attempt["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=1,
             reason="x" * 4096,
             interrupted=True,
@@ -529,6 +538,7 @@ class RunAttemptTests(unittest.TestCase):
 
         completed = self.database.complete_run_attempt(
             running["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=running["version"],
             exit_code=0,
             image_id=IMAGE_ID,
@@ -559,6 +569,7 @@ class RunAttemptTests(unittest.TestCase):
 
     def test_attempt_completion_validates_exact_input_boundaries(self) -> None:
         arguments = {
+            "owner_id": OWNER_ID,
             "expected_attempt_version": 1,
             "exit_code": 0,
             "image_id": IMAGE_ID,
@@ -619,6 +630,7 @@ class RunAttemptTests(unittest.TestCase):
         with self.assertRaisesRegex(ConflictError, "not running"):
             self.database.complete_run_attempt(
                 preparing["id"],
+                owner_id=OWNER_ID,
                 expected_attempt_version=1,
                 exit_code=0,
                 image_id=IMAGE_ID,
@@ -638,6 +650,7 @@ class RunAttemptTests(unittest.TestCase):
         result = self.record_result(running["id"])
         completed = self.database.complete_run_attempt(
             running["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=running["version"],
             exit_code=-(1 << 31),
             image_id=IMAGE_ID,
@@ -662,6 +675,7 @@ class RunAttemptTests(unittest.TestCase):
         with self.assertRaises(ConflictError) as raised:
             self.database.complete_run_attempt(
                 running["id"],
+                owner_id=OWNER_ID,
                 expected_attempt_version=running["version"],
                 exit_code=0,
                 image_id=IMAGE_ID,
@@ -737,6 +751,31 @@ class RunAttemptTests(unittest.TestCase):
             attempt["id"], owner_id="orchestrator-other", lease_seconds=60
         )
         self.assertEqual(claimed["owner_id"], "orchestrator-other")
+        self.assertEqual(claimed["version"], attempt["version"] + 1)
+        self.assertEqual(claimed["events"][-1]["kind"], "attempt.owner_changed")
+        self.assertEqual(claimed["events"][-1]["from_state"], "preparing")
+        self.assertEqual(claimed["events"][-1]["to_state"], "preparing")
+        self.assertEqual(
+            claimed["events"][-1]["metadata"],
+            {
+                "new_owner_id": "orchestrator-other",
+                "previous_owner_id": OWNER_ID,
+            },
+        )
+        start = {
+            "expected_attempt_version": claimed["version"],
+            "expected_run_version": claimed["run_version"],
+            "source_revision": "a" * 40,
+            "container_id": "b" * 64,
+            "container_name": "magic-glass-box-test",
+            "image_id": IMAGE_ID,
+        }
+        with self.assertRaisesRegex(ConflictError, "owned by another orchestrator"):
+            self.database.start_run_attempt(claimed["id"], owner_id=OWNER_ID, **start)
+        started = self.database.start_run_attempt(
+            claimed["id"], owner_id="orchestrator-other", **start
+        )
+        self.assertEqual(started["state"], "running")
 
     def test_cancel_request_is_audited_then_terminal_only_after_worker_exit(
         self,
@@ -770,6 +809,7 @@ class RunAttemptTests(unittest.TestCase):
         result = self.record_result(running["id"])
         completed = self.database.complete_run_attempt(
             running["id"],
+            owner_id=OWNER_ID,
             expected_attempt_version=running["version"],
             exit_code=143,
             image_id=IMAGE_ID,
@@ -801,6 +841,48 @@ class RunAttemptTests(unittest.TestCase):
         self.assertIsNotNone(cancelled_interaction["resolved_at"])
         self.assertEqual(
             cancelled_interaction["events"][-1]["kind"], "interaction.cancelled"
+        )
+
+    def test_running_takeover_fences_stale_owner_terminal_writes(self) -> None:
+        _, running = self.running_attempt()
+        self.record_result(running["id"])
+        with closing(self.database.connect()) as connection:
+            connection.execute(
+                "UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00.000000+00:00", running["id"]),
+            )
+            connection.commit()
+        claimed = self.database.claim_expired_run_attempt(
+            running["id"], owner_id="orchestrator-other", lease_seconds=60
+        )
+
+        with self.assertRaisesRegex(ConflictError, "owned by another orchestrator"):
+            self.database.complete_run_attempt(
+                claimed["id"],
+                owner_id=OWNER_ID,
+                expected_attempt_version=claimed["version"],
+                exit_code=0,
+                image_id=IMAGE_ID,
+            )
+        with self.assertRaisesRegex(ConflictError, "owned by another orchestrator"):
+            self.database.fail_run_attempt(
+                claimed["id"],
+                owner_id=OWNER_ID,
+                expected_attempt_version=claimed["version"],
+                reason="stale owner attempted cleanup",
+            )
+
+        completed = self.database.complete_run_attempt(
+            claimed["id"],
+            owner_id="orchestrator-other",
+            expected_attempt_version=claimed["version"],
+            exit_code=0,
+            image_id=IMAGE_ID,
+        )
+        self.assertEqual(completed["state"], "succeeded")
+        self.assertEqual(
+            [event["kind"] for event in completed["events"][-2:]],
+            ["attempt.owner_changed", "attempt.completed"],
         )
 
     def test_attempt_event_and_handoff_records_are_immutable(self) -> None:
@@ -837,6 +919,122 @@ class RunAttemptTests(unittest.TestCase):
 
 
 class AttemptMigrationTests(unittest.TestCase):
+    def test_schema_seventeen_preserves_attempt_events_and_immutability(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "schema-seventeen.db"
+            self.assertTrue(SCHEMA.endswith(ATTEMPT_OWNER_AUDIT_SCHEMA))
+            with closing(sqlite3.connect(path)) as connection:
+                connection.executescript(SCHEMA[: -len(ATTEMPT_OWNER_AUDIT_SCHEMA)])
+                connection.execute("PRAGMA user_version = 17")
+                connection.commit()
+            os.chmod(path, 0o600)
+
+            database = Database(path)
+            user = database.create_user("operator", "Operator")
+            instance = database.create_krab_instance(
+                "Local Krab", "http://127.0.0.1:8765"
+            )
+            identity = database.store_krab_identity(
+                instance["id"],
+                KrabIdentity("usr_" + "1" * 32, "agent_one", 1),
+                "file:/private/agent.token",
+                user_id=user["id"],
+            )
+            database.create_project(
+                instance_id=instance["id"],
+                krab_project_id="prj_" + "2" * 32,
+                krab_project_key="migration-project",
+                display_name="Migration Project",
+                context=ProjectContext.from_mapping(
+                    {"purpose": "Preserve attempt audit events"}
+                ),
+                created_by=user["id"],
+            )
+            item = database.import_work_item(
+                project_key="migration-project",
+                envelope=WorkItemEnvelope.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "source": "manual",
+                        "external_id": "migration-item",
+                        "source_updated_at": "2026-10-16T12:00:00Z",
+                        "title": "Migrate attempt events",
+                        "brief": "Prove the v17 audit stream survives v18.",
+                    }
+                ),
+                imported_by=user["id"],
+            )
+            database.create_agent_profile(
+                name="Worker",
+                spec=AgentProfileSpec.from_mapping(
+                    {"image": "agent:local", "command": ["agent", "run"]}
+                ),
+                krab_identity_id=identity["id"],
+                created_by=user["id"],
+            )
+            run = database.create_run(
+                project_key="migration-project",
+                profile_name="Worker",
+                work_item_id=item["id"],
+                requested_by=user["id"],
+                source_revision="a" * 40,
+            )
+            preparing = database.begin_run_attempt(
+                run["id"],
+                runtime_adapter="docker",
+                owner_id=OWNER_ID,
+                expected_run_version=run["version"],
+            )
+            running = database.start_run_attempt(
+                preparing["id"],
+                owner_id=OWNER_ID,
+                expected_attempt_version=preparing["version"],
+                expected_run_version=preparing["run_version"],
+                source_revision="a" * 40,
+                container_id="b" * 64,
+                container_name="migration-worker",
+                image_id=IMAGE_ID,
+            )
+            with closing(database.connect()) as connection:
+                before = [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT id, attempt_id, sequence, kind, from_state, "
+                        "to_state, metadata_json, created_at "
+                        "FROM run_attempt_events ORDER BY id"
+                    )
+                ]
+
+            first = database.initialize()
+            second = database.initialize()
+
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(second, first)
+            self.assertEqual(
+                database.get_run_attempt(running["id"])["state"], "running"
+            )
+            with closing(database.connect()) as connection:
+                after = [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT id, attempt_id, sequence, kind, from_state, "
+                        "to_state, metadata_json, created_at "
+                        "FROM run_attempt_events ORDER BY id"
+                    )
+                ]
+                table_sql = connection.execute(
+                    "SELECT sql FROM sqlite_schema "
+                    "WHERE type = 'table' AND name = 'run_attempt_events'"
+                ).fetchone()[0]
+                self.assertIn("attempt.owner_changed", table_sql)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "UPDATE run_attempt_events SET metadata_json = '{}' "
+                        "WHERE attempt_id = ?",
+                        (running["id"],),
+                    )
+            self.assertEqual(after, before)
+
     def test_schema_four_migrates_once_without_losing_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-four.db"

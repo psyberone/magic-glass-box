@@ -29,6 +29,10 @@ Schema v17 adds a durable `dispatching` state that is committed before the
 connector call and may be finalized exactly once, preserving uncertainty when
 post-dispatch persistence fails.
 
+Control-plane schema v18 adds immutable attempt-owner takeover events and
+increments optimistic attempt authority on every expired-lease claim. This is
+an internal SQLite transition contract, not a new portable JSON document.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

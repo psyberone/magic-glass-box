@@ -400,6 +400,7 @@ def main() -> int:
                 def before_start(plan: SandboxPlan, container_id: str) -> None:
                     database.start_run_attempt(
                         attempt["id"],
+                        owner_id="live-provider-proof",
                         expected_attempt_version=attempt["version"],
                         expected_run_version=attempt["run_version"],
                         source_revision="live-proof",

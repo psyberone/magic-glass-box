@@ -386,6 +386,7 @@ class RunCoordinator:
                     started_container = (plan, container_id)
                     running_attempt = self.database.start_run_attempt(
                         attempt["id"],
+                        owner_id=self.orchestrator_id,
                         expected_attempt_version=attempt["version"],
                         expected_run_version=attempt["run_version"],
                         source_revision=prepared.revision,
@@ -496,6 +497,7 @@ class RunCoordinator:
                 current_attempt = self.database.get_run_attempt(running_attempt["id"])
                 self.database.complete_run_attempt(
                     running_attempt["id"],
+                    owner_id=self.orchestrator_id,
                     expected_attempt_version=current_attempt["version"],
                     exit_code=completion.exit_code,
                     image_id=result.image_id,
@@ -599,6 +601,7 @@ class RunCoordinator:
             return attempt
         return self.database.fail_run_attempt(
             attempt_id,
+            owner_id=self.orchestrator_id,
             expected_attempt_version=attempt["version"],
             reason="result capture failed; workspace retained for manual recovery",
             interrupted=interrupted,
@@ -654,6 +657,7 @@ class RunCoordinator:
             try:
                 self.database.fail_run_attempt(
                     attempt_id,
+                    owner_id=self.orchestrator_id,
                     expected_attempt_version=attempt["version"],
                     reason=f"execution failed: {type(cause).__name__}",
                 )
@@ -719,6 +723,7 @@ class RunCoordinator:
                 refreshed = self.database.get_run_attempt(active_attempt["id"])
                 self.database.fail_run_attempt(
                     refreshed["id"],
+                    owner_id=self.orchestrator_id,
                     expected_attempt_version=refreshed["version"],
                     reason="orchestrator ownership lease expired",
                     interrupted=True,

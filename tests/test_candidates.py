@@ -939,6 +939,7 @@ class CandidateServiceTests(unittest.TestCase):
         )
         self.attempt = self.database.start_run_attempt(
             preparing["id"],
+            owner_id="candidate-test",
             expected_attempt_version=preparing["version"],
             expected_run_version=preparing["run_version"],
             source_revision=self.base,
@@ -960,6 +961,7 @@ class CandidateServiceTests(unittest.TestCase):
         self.database.record_attempt_result(self.attempt["id"], captured.manifest)
         self.database.complete_run_attempt(
             self.attempt["id"],
+            owner_id="candidate-test",
             expected_attempt_version=self.attempt["version"],
             exit_code=0,
             image_id="sha256:" + "b" * 64,

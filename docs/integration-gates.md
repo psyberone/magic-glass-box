@@ -249,10 +249,15 @@ Provider-confirmed closed work references may be attached after a
 credential-bearing connector reads them; they are never inferred from proposed
 change-body prose.
 
-The generic Git actuator accepts only `landed` when the observed ref is the
-planned head, or `not_landed` when it remains the expected base. An unknown or
-drifted outcome stays pending; it is not silently converted into failure or
-success. Future provider actuators may add bounded asynchronous reconciliation.
+The generic Git actuator accepts `landed` only when the observed ref is the
+planned head. A `not_landed` receipt must report a valid object ID in the
+plan's object format and must not report the planned head. When it reports the
+expected base, the item returns to `queued` without advancing the ref. When it
+reports a third revision, MGB records that revision as the newly observed
+integration baseline and moves the item and every queued sibling to
+`refold_required`. The receipt therefore resolves issued authority truthfully
+without calling drift either success or an unchanged failure. Future provider
+actuators may add bounded asynchronous reconciliation.
 
 ## Deliberate deferrals
 

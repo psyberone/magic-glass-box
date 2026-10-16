@@ -55,6 +55,7 @@ class ProofCoordinator:
         )
         self.database.fail_run_attempt(
             attempt["id"],
+            owner_id="proof-worker",
             expected_attempt_version=attempt["version"],
             reason="deterministic proof worker exited",
         )
@@ -76,6 +77,7 @@ class ProofCoordinator:
             )
             self.database.fail_run_attempt(
                 claimed["id"],
+                owner_id="proof-recovery",
                 expected_attempt_version=claimed["version"],
                 reason="deterministic expired-owner recovery",
                 interrupted=True,
@@ -213,6 +215,7 @@ def _create_fixture(
     )
     answered_attempt = database.start_run_attempt(
         answered_attempt["id"],
+        owner_id="answered-owner",
         expected_attempt_version=answered_attempt["version"],
         expected_run_version=answered_attempt["run_version"],
         source_revision="a" * 40,
@@ -229,6 +232,7 @@ def _create_fixture(
     )
     database.fail_run_attempt(
         answered_attempt["id"],
+        owner_id="answered-owner",
         expected_attempt_version=answered_attempt["version"],
         reason="proof worker handed back control",
         interrupted=True,
@@ -262,6 +266,7 @@ def _create_fixture(
     )
     stalled_attempt = database.start_run_attempt(
         stalled_attempt["id"],
+        owner_id="stalled-owner",
         expected_attempt_version=stalled_attempt["version"],
         expected_run_version=stalled_attempt["run_version"],
         source_revision="d" * 40,

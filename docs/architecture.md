@@ -145,8 +145,11 @@ project-activity projection.
 - The requested source revision is resolved to a full Git commit and persisted
   in the transition to `running`.
 - Each active attempt has one orchestrator owner, heartbeat, and expiring
-  lease. Reconciliation may take over only after that lease expires; invoking
-  recovery cannot tear down a live attempt owned by another process.
+  lease. Reconciliation may take over only after that lease expires. A
+  takeover increments the attempt version and appends an immutable owner-change
+  event; start, completion, and failure require both the current version and
+  current owner. Invoking recovery therefore cannot tear down a live attempt
+  or let a stale owner close work after takeover.
 - A cancellation request is durable and audited. The owning coordinator polls
   it through the lease heartbeat, stops the labeled container, captures any
   bounded result, cleans resources, and only then records terminal
@@ -243,7 +246,8 @@ integration queue and manual landing ledger advanced it to schema v14.
 Inference-connector registrations and grant bindings advance it to schema v15;
 exclusive connector dispatch and its invocation authority ledger advance it to
 schema v16. Durable pre-dispatch invocation intent and one-way finalization
-advance it to schema v17.
+advance it to schema v17. Audited attempt-owner takeover and stale-owner
+transition fencing advance it to schema v18.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted

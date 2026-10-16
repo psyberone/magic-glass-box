@@ -264,6 +264,7 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
         )
         running = self.database.start_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-work-memory-test",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision="a" * 40,
@@ -324,6 +325,7 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
         before = self.database.get_work_memory_for_run(coordinator["id"])
         self.database.complete_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-work-memory-test",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id=attempt["image_id"],
@@ -461,6 +463,7 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
         ready = self.database.get_work_memory_for_run(coordinator["id"])
         self.database.complete_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-work-memory-test",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id=attempt["image_id"],
@@ -506,6 +509,7 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
         ready = self.database.get_work_memory_for_run(coordinator["id"])
         self.database.complete_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-work-memory-test",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id=attempt["image_id"],
@@ -644,6 +648,7 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
         ready = self.database.get_work_memory_for_run(coordinator["id"])
         self.database.complete_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-work-memory-test",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id=attempt["image_id"],

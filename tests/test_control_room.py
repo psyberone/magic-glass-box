@@ -211,6 +211,7 @@ class ControlRoomTests(unittest.TestCase):
         )
         running = self.database.start_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-primary",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision="a" * 40,
@@ -1569,6 +1570,7 @@ class ControlRoomTests(unittest.TestCase):
         )
         attempt = database.start_run_attempt(
             attempt["id"],
+            owner_id="result-owner",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
             source_revision="e" * 40,
@@ -1640,6 +1642,7 @@ class ControlRoomTests(unittest.TestCase):
         )
         self.database.complete_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-primary",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id="sha256:" + "c" * 64,
@@ -1699,6 +1702,7 @@ class ControlRoomTests(unittest.TestCase):
         )
         self.database.complete_run_attempt(
             attempt["id"],
+            owner_id="orchestrator-primary",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id="sha256:" + "c" * 64,

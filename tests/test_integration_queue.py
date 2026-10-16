@@ -304,6 +304,21 @@ class IntegrationContractTests(unittest.TestCase):
             plan=plan,
         )
         self.assertEqual(not_landed.assurance, LandingAssurance.OPERATOR_ATTESTED)
+        drifted_not_landed = LandingReceipt.from_request(
+            LandingReceiptRequest.from_mapping(
+                {
+                    "schema_version": 1,
+                    "plan_id": plan_id,
+                    "request_sha256": plan.digest,
+                    "nonce": nonce,
+                    "outcome": "not_landed",
+                    "observed_revision": "a" * 40,
+                }
+            ),
+            plan_id=plan_id,
+            plan=plan,
+        )
+        self.assertEqual(drifted_not_landed.observed_revision, "a" * 40)
 
     def test_receipt_rejects_wrong_plan_digest_nonce_shape_and_revision(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -328,6 +343,21 @@ class IntegrationContractTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(IntegrationError):
                 parsed = LandingReceiptRequest.from_mapping(request)
                 LandingReceipt.from_request(parsed, plan_id=plan_id, plan=plan)
+        for observed_revision in (plan.head_revision, "a" * 64):
+            request = {
+                **valid,
+                "outcome": "not_landed",
+                "observed_revision": observed_revision,
+            }
+            with (
+                self.subTest(not_landed_revision=observed_revision),
+                self.assertRaisesRegex(IntegrationError, "observed revision"),
+            ):
+                LandingReceipt.from_request(
+                    LandingReceiptRequest.from_mapping(request),
+                    plan_id=plan_id,
+                    plan=plan,
+                )
 
 
 class IntegrationMigrationTests(unittest.TestCase):
@@ -340,8 +370,8 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 17)
-        self.assertEqual(status["schema_version"], 17)
+        self.assertEqual(SCHEMA_VERSION, 18)
+        self.assertEqual(status["schema_version"], 18)
         with closing(database.connect()) as connection:
             objects = {
                 (row["type"], row["name"])
@@ -385,8 +415,8 @@ class IntegrationMigrationTests(unittest.TestCase):
         first = database.initialize()
         second = database.initialize()
 
-        self.assertEqual(first["schema_version"], 17)
-        self.assertEqual(second["schema_version"], 17)
+        self.assertEqual(first["schema_version"], 18)
+        self.assertEqual(second["schema_version"], 18)
         with closing(database.connect()) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_schema "
@@ -476,6 +506,7 @@ class IntegrationLedgerTests(unittest.TestCase):
         )
         attempt = self.database.start_run_attempt(
             preparing["id"],
+            owner_id=f"integration-{label}",
             expected_attempt_version=preparing["version"],
             expected_run_version=preparing["run_version"],
             source_revision=self.base,
@@ -492,6 +523,7 @@ class IntegrationLedgerTests(unittest.TestCase):
         result = self.database.record_attempt_result(attempt["id"], captured.manifest)
         finished = self.database.complete_run_attempt(
             attempt["id"],
+            owner_id=f"integration-{label}",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id="sha256:" + head_digit * 64,
@@ -1113,6 +1145,13 @@ class IntegrationLedgerTests(unittest.TestCase):
             expected_version=queue_a["version"],
             lease_seconds=30,
         )
+        with self.assertRaisesRegex(ConflictError, "already claimed"):
+            self.database.claim_integration_item(
+                queue_a["id"],
+                owner_id="supervisor-b",
+                expected_version=claimed_a["version"],
+                lease_seconds=30,
+            )
         with self.assertRaisesRegex(ConflictError, "claimed"):
             self.database.claim_integration_item(
                 queue_b["id"],
@@ -1528,6 +1567,88 @@ class IntegrationLedgerTests(unittest.TestCase):
         )
         self.assertEqual(dependency["state"], "active")
 
+    def test_not_landed_at_a_drifted_ref_advances_base_and_requires_refold(
+        self,
+    ) -> None:
+        queue = self.database.enqueue_integration(
+            self._policy(self.candidate_a)["id"], created_by=self.user["id"]
+        )
+        sibling_queue = self.database.enqueue_integration(
+            self._policy(self.candidate_b)["id"], created_by=self.user["id"]
+        )
+        claimed = self.database.claim_integration_item(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=queue["version"],
+            lease_seconds=30,
+        )
+        issued = self.database.issue_landing_plan(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=claimed["version"],
+            candidate_repository=self.root / "repository.git",
+            remote="origin",
+            issued_by=self.user["id"],
+        )
+        plan = LandingPlan.from_mapping(issued["plan"])
+        drifted_revision = "8" * 40
+        awaiting = self.database.get_integration_queue_item(queue["id"])
+
+        result = self.database.record_landing_receipt(
+            LandingReceiptRequest(
+                1,
+                issued["id"],
+                plan.digest,
+                issued["nonce"],
+                LandingOutcome.NOT_LANDED,
+                drifted_revision,
+            ),
+            recorded_by=self.user["id"],
+        )
+
+        refold = result["queue_item"]
+        self.assertEqual(refold["state"], "refold_required")
+        self.assertIsNone(refold["current_fold_id"])
+        self.assertEqual(refold["version"], awaiting["version"] + 1)
+        self.assertEqual(
+            result["integration_ref"]["current_revision"], drifted_revision
+        )
+        self.assertEqual(
+            result["integration_ref"]["version"],
+            awaiting["integration_ref_version"] + 1,
+        )
+        self._assert_last_queue_event(
+            refold,
+            sequence=refold["event_sequence"],
+            kind="queue.refold_required",
+            from_state="awaiting_receipt",
+            to_state="refold_required",
+            actor=self.user["id"],
+            metadata={
+                "new_base_revision": drifted_revision,
+                "plan_id": issued["id"],
+                "receipt_id": result["receipt"]["id"],
+            },
+        )
+        self.assertEqual(result["receipt"]["outcome"], "not_landed")
+        self.assertEqual(result["receipt"]["observed_revision"], drifted_revision)
+        sibling = self.database.get_integration_queue_item(sibling_queue["id"])
+        self.assertEqual(sibling["state"], "refold_required")
+        self.assertIsNone(sibling["current_fold_id"])
+        self.assertEqual(sibling["version"], sibling_queue["version"] + 1)
+        self._assert_last_queue_event(
+            sibling,
+            sequence=sibling["event_sequence"],
+            kind="queue.refold_required",
+            from_state="queued",
+            to_state="refold_required",
+            actor="system",
+            metadata={
+                "drifted_queue_item_id": queue["id"],
+                "new_base_revision": drifted_revision,
+            },
+        )
+
     def test_receipt_rejects_each_stale_queue_authority_member(self) -> None:
         policy = self._policy(self.candidate_a)
         queue = self.database.enqueue_integration(
@@ -1737,6 +1858,7 @@ class IntegrationGoldenPathTests(unittest.TestCase):
         )
         attempt = self.database.start_run_attempt(
             preparing["id"],
+            owner_id=f"golden-{label}",
             expected_attempt_version=preparing["version"],
             expected_run_version=preparing["run_version"],
             source_revision=self.base,
@@ -1755,6 +1877,7 @@ class IntegrationGoldenPathTests(unittest.TestCase):
         self.database.record_attempt_result(attempt["id"], captured.manifest)
         finished = self.database.complete_run_attempt(
             attempt["id"],
+            owner_id=f"golden-{label}",
             expected_attempt_version=attempt["version"],
             exit_code=0,
             image_id="sha256:" + digit * 64,

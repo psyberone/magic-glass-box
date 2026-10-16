@@ -483,6 +483,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             )
             running = self.database.start_run_attempt(
                 attempt["id"],
+                owner_id="live-owner",
                 expected_attempt_version=attempt["version"],
                 expected_run_version=attempt["run_version"],
                 source_revision="a" * 40,
@@ -622,6 +623,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             )
             running = self.database.start_run_attempt(
                 attempt["id"],
+                owner_id="live-owner",
                 expected_attempt_version=attempt["version"],
                 expected_run_version=attempt["run_version"],
                 source_revision="a" * 40,
@@ -688,6 +690,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             )
             attempt = self.database.start_run_attempt(
                 attempt["id"],
+                owner_id="live-owner",
                 expected_attempt_version=attempt["version"],
                 expected_run_version=attempt["run_version"],
                 source_revision="a" * 40,
@@ -1179,6 +1182,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             )
             running = self.database.start_run_attempt(
                 answered_attempt["id"],
+                owner_id="finished-owner",
                 expected_attempt_version=answered_attempt["version"],
                 expected_run_version=answered_attempt["run_version"],
                 source_revision="a" * 40,
@@ -1196,6 +1200,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             active = self.database.get_run_attempt(answered_attempt["id"])
             self.database.fail_run_attempt(
                 active["id"],
+                owner_id="finished-owner",
                 expected_attempt_version=active["version"],
                 reason="worker handed control back",
                 interrupted=True,
@@ -1272,6 +1277,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             )
             running = self.database.start_run_attempt(
                 attempt["id"],
+                owner_id="live-owner",
                 expected_attempt_version=attempt["version"],
                 expected_run_version=attempt["run_version"],
                 source_revision="a" * 40,
@@ -1333,6 +1339,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             )
             running = self.database.start_run_attempt(
                 attempt["id"],
+                owner_id="live-owner",
                 expected_attempt_version=attempt["version"],
                 expected_run_version=attempt["run_version"],
                 source_revision="a" * 40,
@@ -1401,6 +1408,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             )
             running = self.database.start_run_attempt(
                 attempt["id"],
+                owner_id="live-owner",
                 expected_attempt_version=attempt["version"],
                 expected_run_version=attempt["run_version"],
                 source_revision="a" * 40,

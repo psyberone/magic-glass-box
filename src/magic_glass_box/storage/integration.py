@@ -667,6 +667,8 @@ class IntegrationStorage:
                 self._expire_ref_claims(connection, row["integration_ref_id"], now=now)
                 row = self._queue_row(connection, queue_item_id)
                 assert row is not None
+                if row["state"] == "claimed":
+                    raise ConflictError("integration item is already claimed")
                 self._assert_queue_authority_ready(connection, row)
                 version = row["version"] + 1
                 sequence = row["event_sequence"] + 1
@@ -1368,22 +1370,101 @@ class IntegrationStorage:
                 version = queue["version"] + 1
                 sequence = queue["event_sequence"] + 1
                 if receipt.outcome is LandingOutcome.NOT_LANDED:
-                    connection.execute(
-                        "UPDATE integration_queue_items SET state = 'queued', "
-                        "version = ?, event_sequence = ?, updated_at = ? WHERE id = ?",
-                        (version, sequence, now, queue["id"]),
-                    )
-                    self._queue_event(
-                        connection,
-                        queue_item_id=queue["id"],
-                        sequence=sequence,
-                        kind="queue.not_landed",
-                        from_state="awaiting_receipt",
-                        to_state="queued",
-                        actor=recorded_by,
-                        metadata={"plan_id": plan_row["id"], "receipt_id": receipt_id},
-                        created_at=now,
-                    )
+                    if receipt.observed_revision == plan.expected_base_revision:
+                        connection.execute(
+                            "UPDATE integration_queue_items SET state = 'queued', "
+                            "version = ?, event_sequence = ?, updated_at = ? "
+                            "WHERE id = ?",
+                            (version, sequence, now, queue["id"]),
+                        )
+                        self._queue_event(
+                            connection,
+                            queue_item_id=queue["id"],
+                            sequence=sequence,
+                            kind="queue.not_landed",
+                            from_state="awaiting_receipt",
+                            to_state="queued",
+                            actor=recorded_by,
+                            metadata={
+                                "plan_id": plan_row["id"],
+                                "receipt_id": receipt_id,
+                            },
+                            created_at=now,
+                        )
+                    else:
+                        updated_ref = connection.execute(
+                            "UPDATE integration_refs SET current_revision = ?, "
+                            "version = version + 1, updated_at = ? WHERE id = ? "
+                            "AND current_revision = ? AND version = ?",
+                            (
+                                receipt.observed_revision,
+                                now,
+                                queue["integration_ref_id"],
+                                plan.expected_base_revision,
+                                queue["integration_ref_version"],
+                            ),
+                        )
+                        if updated_ref.rowcount != 1:
+                            raise ConcurrentUpdateError("integration ref changed")
+                        connection.execute(
+                            "UPDATE integration_queue_items SET "
+                            "state = 'refold_required', current_fold_id = NULL, "
+                            "version = ?, event_sequence = ?, updated_at = ? "
+                            "WHERE id = ?",
+                            (version, sequence, now, queue["id"]),
+                        )
+                        self._queue_event(
+                            connection,
+                            queue_item_id=queue["id"],
+                            sequence=sequence,
+                            kind="queue.refold_required",
+                            from_state="awaiting_receipt",
+                            to_state="refold_required",
+                            actor=recorded_by,
+                            metadata={
+                                "new_base_revision": receipt.observed_revision,
+                                "plan_id": plan_row["id"],
+                                "receipt_id": receipt_id,
+                            },
+                            created_at=now,
+                        )
+                        siblings = connection.execute(
+                            "SELECT id FROM integration_queue_items "
+                            "WHERE integration_ref_id = ? AND id != ? "
+                            "AND state IN ('queued', 'refold_required')",
+                            (queue["integration_ref_id"], queue["id"]),
+                        ).fetchall()
+                        for sibling_id in siblings:
+                            sibling = self._queue_row(connection, sibling_id["id"])
+                            assert sibling is not None
+                            sibling_version = sibling["version"] + 1
+                            sibling_sequence = sibling["event_sequence"] + 1
+                            connection.execute(
+                                "UPDATE integration_queue_items SET "
+                                "state = 'refold_required', current_fold_id = NULL, "
+                                "version = ?, event_sequence = ?, updated_at = ? "
+                                "WHERE id = ?",
+                                (
+                                    sibling_version,
+                                    sibling_sequence,
+                                    now,
+                                    sibling["id"],
+                                ),
+                            )
+                            self._queue_event(
+                                connection,
+                                queue_item_id=sibling["id"],
+                                sequence=sibling_sequence,
+                                kind="queue.refold_required",
+                                from_state=sibling["state"],
+                                to_state="refold_required",
+                                actor="system",
+                                metadata={
+                                    "drifted_queue_item_id": queue["id"],
+                                    "new_base_revision": receipt.observed_revision,
+                                },
+                                created_at=now,
+                            )
                 else:
                     updated_ref = connection.execute(
                         "UPDATE integration_refs SET current_revision = ?, "
