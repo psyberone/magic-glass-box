@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import socket
 import struct
 import tempfile
@@ -23,7 +24,11 @@ from magic_glass_box.inference import (
     InferenceInvocationResponse,
     UnixInferenceConnectorClient,
 )
-from magic_glass_box.provider import ProviderUpstreamError
+from magic_glass_box.provider import (
+    ProviderAmbiguousError,
+    ProviderInvocationResult,
+    ProviderUpstreamError,
+)
 from scripts.reference_inference_connector import _invoke, _Route
 
 
@@ -250,6 +255,8 @@ class InferenceContractTests(unittest.TestCase):
             ({"model": " \n "}, "model"),
             ({"request_limit_bytes": 1}, "request"),
             ({"deadline": "not-a-time"}, "deadline"),
+            ({"deadline": "2026-W42-5T12:00:00+00:00"}, "deadline"),
+            ({"deadline": "2026-10-16 12:00:00+00:00"}, "deadline"),
             ({"request": {"input": float("nan")}}, "finite JSON"),
         ):
             candidate = request_mapping()
@@ -334,6 +341,8 @@ class ReferenceConnectorAccountingTests(unittest.TestCase):
             }
         )
         route = _Route(
+            connector_id=request.connector_id,
+            deployment_sha256=request.deployment_sha256,
             name=request.route,
             credential_scope_sha256=request.credential_scope_sha256,
             policy=policy,
@@ -357,6 +366,125 @@ class ReferenceConnectorAccountingTests(unittest.TestCase):
 
         self.assertEqual(response["request_bytes"], request.request_limit_bytes)
         self.assertEqual(response["response_bytes"], request.response_limit_bytes)
+
+    def test_reference_connector_enforces_complete_authority_and_deadline(self) -> None:
+        request = InferenceInvocationRequest.from_mapping(request_mapping())
+        policy_value = {
+            "provider": "openai",
+            "adapter": "openai_responses",
+            "destination": "https://api.openai.com/v1/responses",
+            "method": "POST",
+            "model": "gpt-test",
+            "credential_header": "Authorization",
+            "credential_prefix": "Bearer ",
+            "static_headers": {},
+            "request_bytes": request.request_limit_bytes * 2,
+            "response_bytes": request.response_limit_bytes * 2,
+            "timeout_ms": 10000,
+            "max_concurrency": 1,
+        }
+        route = _Route(
+            connector_id=request.connector_id,
+            deployment_sha256=request.deployment_sha256,
+            name=request.route,
+            credential_scope_sha256=request.credential_scope_sha256,
+            policy=ProviderGrantSpec.from_mapping(policy_value),
+            credential="test-secret",
+        )
+
+        class RecordingBroker:
+            def __init__(self) -> None:
+                self.specs: list[ProviderGrantSpec] = []
+
+            def invoke(self, *, spec: ProviderGrantSpec, **_kwargs: object):
+                self.specs.append(spec)
+                return ProviderInvocationResult(200, 12, 18, {"ok": True})
+
+        broker = RecordingBroker()
+        succeeded = _invoke(
+            request,
+            routes={request.route: route},
+            broker=broker,  # type: ignore[arg-type]
+        )
+        self.assertEqual(succeeded["outcome"], "succeeded")
+        self.assertEqual(broker.specs[0].request_bytes, request.request_limit_bytes)
+        self.assertEqual(broker.specs[0].response_bytes, request.response_limit_bytes)
+
+        for override in (
+            {"connector_id": "ifc_" + "f" * 32},
+            {"deployment_sha256": "f" * 64},
+        ):
+            mismatched = InferenceInvocationRequest.from_mapping(
+                {**request.to_dict(), **override}
+            )
+            before = len(broker.specs)
+            denied = _invoke(
+                mismatched,
+                routes={request.route: route},
+                broker=broker,  # type: ignore[arg-type]
+            )
+            self.assertEqual(denied["error_code"], "authority_mismatch")
+            self.assertEqual(len(broker.specs), before)
+
+        expired = InferenceInvocationRequest.from_mapping(
+            {
+                **request.to_dict(),
+                "deadline": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+            }
+        )
+        expired_response = _invoke(
+            expired,
+            routes={request.route: route},
+            broker=broker,  # type: ignore[arg-type]
+        )
+        self.assertEqual(expired_response["error_code"], "deadline_expired")
+
+    def test_reference_connector_preserves_ambiguous_provider_outcomes(self) -> None:
+        request = InferenceInvocationRequest.from_mapping(request_mapping())
+        policy = ProviderGrantSpec.from_mapping(
+            {
+                "provider": "openai",
+                "adapter": "openai_responses",
+                "destination": "https://api.openai.com/v1/responses",
+                "method": "POST",
+                "model": "gpt-test",
+                "credential_header": "Authorization",
+                "credential_prefix": "Bearer ",
+                "static_headers": {},
+                "request_bytes": request.request_limit_bytes,
+                "response_bytes": request.response_limit_bytes,
+                "timeout_ms": 10000,
+                "max_concurrency": 1,
+            }
+        )
+        route = _Route(
+            connector_id=request.connector_id,
+            deployment_sha256=request.deployment_sha256,
+            name=request.route,
+            credential_scope_sha256=request.credential_scope_sha256,
+            policy=policy,
+            credential="test-secret",
+        )
+
+        class AmbiguousBroker:
+            def invoke(self, **_kwargs: object) -> None:
+                raise ProviderAmbiguousError(
+                    "reply lost",
+                    status_code=None,
+                    request_bytes=7,
+                    response_bytes=3,
+                )
+
+        response = _invoke(
+            request,
+            routes={request.route: route},
+            broker=AmbiguousBroker(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(response["outcome"], "ambiguous")
+        self.assertEqual(response["error_code"], "upstream_ambiguous")
+        self.assertEqual(response["request_bytes"], 7)
+        self.assertEqual(response["response_bytes"], 3)
 
 
 class UnixInferenceConnectorClientTests(unittest.TestCase):
@@ -463,6 +591,7 @@ class UnixInferenceConnectorClientTests(unittest.TestCase):
             mock.patch(
                 "magic_glass_box.inference.socket.socket", return_value=before_send
             ),
+            mock.patch("magic_glass_box.inference._validate_unix_socket"),
             self.assertRaises(InferenceConnectorUnavailableError),
         ):
             client.invoke(self.request)
@@ -524,6 +653,18 @@ class UnixInferenceConnectorClientTests(unittest.TestCase):
         with self.assertRaisesRegex(InferenceConnectorError, "absolute"):
             UnixInferenceConnectorClient(Path("relative.sock"))
 
+    def test_symlinked_unix_socket_is_rejected_before_dispatch(self) -> None:
+        target = Path(self.temporary.name) / "target.sock"
+        link = Path(self.temporary.name) / "connector.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(target))
+            os.symlink(target, link)
+
+            with self.assertRaisesRegex(
+                InferenceConnectorUnavailableError, "safe Unix socket"
+            ):
+                UnixInferenceConnectorClient(link).invoke(self.request)
+
     def test_each_transport_operation_uses_the_remaining_absolute_deadline(
         self,
     ) -> None:
@@ -578,6 +719,7 @@ class UnixInferenceConnectorClientTests(unittest.TestCase):
             mock.patch(
                 "magic_glass_box.inference.socket.socket", return_value=connection
             ),
+            mock.patch("magic_glass_box.inference._validate_unix_socket"),
             mock.patch("magic_glass_box.inference.datetime", SteppingDateTime),
         ):
             response = UnixInferenceConnectorClient(self.socket_path).invoke(

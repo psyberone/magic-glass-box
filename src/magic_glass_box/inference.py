@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
+import stat
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,6 +16,7 @@ from .domain import (
     ValidationError,
     canonical_json,
     content_sha256,
+    parse_rfc3339_timestamp,
     require_string,
     validate_provider_name,
 )
@@ -154,13 +157,7 @@ def _max_concurrency(value: object) -> int:
 
 
 def _timestamp(value: object, *, field: str) -> str:
-    text = require_string(value, field=field, max_bytes=64)
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise ValidationError(f"{field} must be a valid RFC 3339 timestamp") from exc
-    if parsed.tzinfo is None:
-        raise ValidationError(f"{field} must include a timezone")
+    parsed = parse_rfc3339_timestamp(value, field=field)
     return parsed.astimezone(UTC).isoformat(timespec="microseconds")
 
 
@@ -769,6 +766,23 @@ def _recv_exact(connection: socket.socket, length: int, *, deadline: datetime) -
     return b"".join(chunks)
 
 
+def _validate_unix_socket(path: str) -> None:
+    try:
+        info = Path(path).lstat()
+    except OSError as exc:
+        raise InferenceConnectorUnavailableError(
+            "inference connector is unavailable"
+        ) from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISSOCK(info.st_mode):
+        raise InferenceConnectorUnavailableError(
+            "inference connector path is not a safe Unix socket"
+        )
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise InferenceConnectorUnavailableError(
+            "inference connector path is not a safe Unix socket"
+        )
+
+
 class UnixInferenceConnectorClient:
     """Send one bounded invocation over one operator-selected Unix socket."""
 
@@ -805,6 +819,7 @@ class UnixInferenceConnectorClient:
                 "inference connector is unavailable"
             ) from exc
         try:
+            _validate_unix_socket(self.socket_path)
             try:
                 connection.settimeout(remaining)
                 connection.connect(self.socket_path)

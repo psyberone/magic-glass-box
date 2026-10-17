@@ -151,8 +151,16 @@ class WorkItemEnvelopeTests(unittest.TestCase):
             ({**base, "external_id": ""}, "external_id must not be empty"),
             ({**base, "source_updated_at": "not-a-date"}, "valid RFC 3339"),
             (
+                {**base, "source_updated_at": "2026-W42-5T12:00:00+00:00"},
+                "valid RFC 3339",
+            ),
+            (
+                {**base, "source_updated_at": "2026-10-16 12:00:00+00:00"},
+                "valid RFC 3339",
+            ),
+            (
                 {**base, "source_updated_at": "2026-10-09T12:00:00"},
-                "include a timezone",
+                "valid RFC 3339",
             ),
             ({**base, "title": " \n\t"}, "title must not be blank"),
             ({**base, "brief": "  "}, "brief must not be blank"),
@@ -565,7 +573,7 @@ class WorkItemDatabaseTests(unittest.TestCase):
 
 
 class WorkItemMigrationTests(unittest.TestCase):
-    def test_schema_two_migrates_once_without_losing_existing_state(self) -> None:
+    def test_schema_two_migrates_existing_work_items(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-two.db"
             connection = sqlite3.connect(path)

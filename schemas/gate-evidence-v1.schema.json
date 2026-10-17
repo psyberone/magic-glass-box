@@ -30,7 +30,7 @@
         "head_revision": { "$ref": "#/$defs/objectId" },
         "integration_ref": {
           "type": "string",
-          "pattern": "^refs/heads/[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$",
+          "pattern": "^refs/heads/(?!@$)(?!\\.)(?!.*\\/\\.)(?!.*(?:\\.\\.|@\\{|//|\\.lock(?:/|$)))(?!.*[/.]$)[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$",
           "maxLength": 512
         },
         "object_format": { "enum": ["sha1", "sha256"] },

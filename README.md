@@ -114,7 +114,9 @@ closed. The retired `krab_only` mode continues to fail closed.
 
 The control plane has no Python runtime dependencies beyond Python 3.11 or
 newer. Executing agents also requires the Git and Docker CLIs plus a reachable
-Docker engine.
+Docker engine. The local `init`, user, and status commands work without Krab;
+project registration, identity verification, interactions, and live metadata
+require a reachable `imitation-krab` instance and an appropriate user token.
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box init
@@ -164,6 +166,9 @@ The browser callback binds only to `127.0.0.1`. Use `login --no-browser` when
 the URL must be opened deliberately on the same host. The connector stores its
 registration and renewable OAuth session in the private profile; MGB receives
 only the resulting non-secret scope fingerprint and exact model binding. The
+`login --callback-timeout SECONDS` option bounds the complete callback wait;
+idle clients are dropped independently and a callback with the wrong OAuth
+state is ignored. The
 explicit, quota-consuming end-to-end proof is documented separately and never
 runs from the ordinary test or CI targets.
 

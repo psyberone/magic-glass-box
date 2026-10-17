@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -1046,6 +1047,23 @@ class RealGitSnapshotterTests(unittest.TestCase):
         self.assertEqual(
             (self.destination / "file-049").read_text(), "body 49\n" * 1024
         )
+
+    def test_production_batch_validates_every_blob_before_destination_writes(self):
+        self.initialize()
+        (self.repository / "file").write_bytes(b"raw")
+        self.git("add", ".")
+        self.git("commit", "-qm", "corrupt source")
+        object_id = self.git("rev-parse", "HEAD:file").decode().strip()
+        loose_object = (
+            self.repository / ".git" / "objects" / object_id[:2] / object_id[2:]
+        )
+        loose_object.chmod(0o600)
+        loose_object.write_bytes(zlib.compress(b"blob 3\0bad"))
+
+        with self.assertRaisesRegex(WorkspaceError, "blob size or hash"):
+            GitSnapshotter().snapshot(self.repository, None, self.destination)
+
+        self.assertEqual(list(self.destination.iterdir()), [])
 
     def test_sha256_raw_snapshot_executable_symlink_and_gitlink(self):
         self.initialize(sha256=True)

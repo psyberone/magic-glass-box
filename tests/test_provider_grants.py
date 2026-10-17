@@ -293,7 +293,7 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
 
 
 class ProviderGrantMigrationTests(unittest.TestCase):
-    def test_schema_three_migrates_once_without_losing_state(self) -> None:
+    def test_schema_three_migrates_existing_provider_grants(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-three.db"
             connection = sqlite3.connect(path)

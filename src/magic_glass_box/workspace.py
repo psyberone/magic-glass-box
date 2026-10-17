@@ -419,7 +419,7 @@ class GitSnapshotter:
         object_format: str,
     ) -> None:
         command = self._command(["-C", str(repository), "cat-file", "--batch"])
-        with tempfile.TemporaryFile() as error_file:
+        with tempfile.TemporaryFile() as error_file, tempfile.TemporaryFile() as spool:
             try:
                 process = subprocess.Popen(  # noqa: S603 - absolute configured Git
                     command,
@@ -435,6 +435,7 @@ class GitSnapshotter:
             reader = _BatchReader(process.stdout, time.monotonic() + self.timeout)
             try:
                 links: dict[PurePosixPath, str] = {}
+                spooled: dict[PurePosixPath, tuple[int, int]] = {}
                 for entry in entries:
                     if entry.mode != "120000":
                         continue
@@ -455,32 +456,18 @@ class GitSnapshotter:
                 except UnsafeSymlinkError as exc:
                     raise WorkspaceError("Git contains an unsafe symlink") from exc
 
-                directories = [e for e in entries if e.mode in {"040000", "160000"}]
-                for entry in sorted(directories, key=lambda e: len(e.path.parts)):
-                    directory = destination.joinpath(*entry.path.parts)
-                    directory.mkdir(mode=0o755)
-                    if entry.mode == "160000":
-                        directory.chmod(0o555)
                 for entry in entries:
                     if entry.mode not in {"100644", "100755"}:
                         continue
-                    target = destination.joinpath(*entry.path.parts)
-                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-                    descriptor = os.open(target, flags, 0o600)
-                    with os.fdopen(descriptor, "wb") as output:
-                        self._read_batch_blob(
-                            process,
-                            reader,
-                            entry,
-                            object_format=object_format,
-                            output=output,
-                        )
-                        os.fchmod(
-                            output.fileno(),
-                            0o755 if entry.mode == "100755" else 0o644,
-                        )
-                for path, target in links.items():
-                    destination.joinpath(*path.parts).symlink_to(target)
+                    offset = spool.tell()
+                    self._read_batch_blob(
+                        process,
+                        reader,
+                        entry,
+                        object_format=object_format,
+                        output=spool,
+                    )
+                    spooled[entry.path] = (offset, entry.size)
                 assert process.stdin is not None
                 process.stdin.close()
                 remaining = reader.deadline - time.monotonic()
@@ -495,6 +482,37 @@ class GitSnapshotter:
                     detail = stderr.decode("utf-8", "replace").strip()
                     suffix = f": {detail[:4096]}" if detail else ""
                     raise WorkspaceError(f"Git cannot read source blobs{suffix}")
+
+                # The hostile Git boundary is fully validated before the first
+                # destination mutation. Regular blobs spool to a private
+                # temporary file so this remains disk-backed and bounded by the
+                # aggregate tree-size ceiling rather than process memory.
+                directories = [e for e in entries if e.mode in {"040000", "160000"}]
+                for entry in sorted(directories, key=lambda e: len(e.path.parts)):
+                    directory = destination.joinpath(*entry.path.parts)
+                    directory.mkdir(mode=0o755)
+                    if entry.mode == "160000":
+                        directory.chmod(0o555)
+                for entry in entries:
+                    if entry.mode not in {"100644", "100755"}:
+                        continue
+                    target = destination.joinpath(*entry.path.parts)
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    descriptor = os.open(target, flags, 0o600)
+                    with os.fdopen(descriptor, "wb") as output:
+                        offset, remaining_bytes = spooled[entry.path]
+                        spool.seek(offset)
+                        while remaining_bytes:
+                            chunk = spool.read(min(64 * 1024, remaining_bytes))
+                            if not chunk or output.write(chunk) != len(chunk):
+                                raise WorkspaceError("cannot write source blob")
+                            remaining_bytes -= len(chunk)
+                        os.fchmod(
+                            output.fileno(),
+                            0o755 if entry.mode == "100755" else 0o644,
+                        )
+                for path, target in links.items():
+                    destination.joinpath(*path.parts).symlink_to(target)
             except subprocess.TimeoutExpired:
                 self._stop_batch(process)
                 raise WorkspaceError("Git read source blobs timed out") from None

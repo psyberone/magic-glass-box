@@ -442,7 +442,7 @@ class IntegrationStorage:
                     if ref["object_format"] != policy.object_format:
                         raise ConflictError("integration ref object format changed")
                 existing = connection.execute(
-                    "SELECT id, current_policy_id FROM integration_queue_items "
+                    "SELECT id, current_policy_id, state FROM integration_queue_items "
                     "WHERE integration_ref_id = ? AND candidate_id = ?",
                     (integration_ref_id, policy.candidate_id),
                 ).fetchone()
@@ -451,6 +451,10 @@ class IntegrationStorage:
                         raise ConflictError(
                             "integration candidate is already queued with another "
                             "policy"
+                        )
+                    if existing["state"] == "cancelled":
+                        raise ConflictError(
+                            "cancelled integration candidate cannot be re-enqueued"
                         )
                     row = self._queue_row(connection, existing["id"])
                     connection.commit()
@@ -902,6 +906,29 @@ class IntegrationStorage:
                     raise ConflictError(
                         "integration fold does not match the current ref"
                     )
+                equivalent = connection.execute(
+                    "SELECT id FROM integration_folds WHERE candidate_id = ? "
+                    "AND integration_ref = ? AND base_revision = ? "
+                    "AND head_revision = ?",
+                    (
+                        manifest.candidate_id,
+                        manifest.integration_ref,
+                        manifest.base_revision,
+                        manifest.head_revision,
+                    ),
+                ).fetchone()
+                if equivalent is not None:
+                    row = self._fold_row(connection, equivalent["id"])
+                    assert row is not None
+                    record = self._fold_record(row)
+                    recorded_manifest = dict(record["manifest"])
+                    proposed_manifest = manifest.to_dict()
+                    recorded_manifest.pop("generation")
+                    proposed_manifest.pop("generation")
+                    if recorded_manifest != proposed_manifest:
+                        raise ConflictError("integration fold identity conflicts")
+                    connection.commit()
+                    return record
                 existing = connection.execute(
                     "SELECT id FROM integration_folds WHERE queue_item_id = ? "
                     "AND content_sha256 = ?",

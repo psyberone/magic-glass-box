@@ -230,8 +230,10 @@ class DatabaseCore:
         self._validate_file_info(info)
 
     def _validate_file_info(self, info: os.stat_result) -> None:
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise StorageError("database must be a regular file, not a symlink")
+        if stat.S_ISLNK(info.st_mode):
+            raise StorageError("database must not be a symlink")
+        if not stat.S_ISREG(info.st_mode):
+            raise StorageError("database must be a regular file")
         if info.st_nlink != 1:
             raise StorageError("database must not be hard-linked")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():

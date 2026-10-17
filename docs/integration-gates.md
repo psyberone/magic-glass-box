@@ -225,8 +225,10 @@ contains the evidence/request digest and every revision known at authorization
 time. Its issuance response carries a separate one-time nonce; only the nonce
 hash is retained.
 
-The imported receipt must bind that nonce and report what was actually done.
-The control plane records the assurance that the actuator established:
+The imported receipt must bind that nonce and report what the actuator says it
+did. MGB validates the receipt against the issued authority and records the
+reported assurance level; without a dedicated actuator integration, it does
+not independently observe the remote forge. The available levels are:
 
 - **base-and-head enforced** — the actuator atomically required both expected
   values;

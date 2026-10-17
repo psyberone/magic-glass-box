@@ -403,7 +403,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         ):
             self.assertIn(("index", index), objects)
 
-    def test_schema_thirteen_migrates_once_to_integration_queue(self) -> None:
+    def test_schema_thirteen_migrates_existing_integration_state(self) -> None:
         schema_thirteen = SCHEMA[: SCHEMA.index(INTEGRATION_SCHEMA)]
         with closing(sqlite3.connect(self.path)) as connection:
             connection.executescript(schema_thirteen)
@@ -1415,6 +1415,10 @@ class IntegrationLedgerTests(unittest.TestCase):
             actor=self.user["id"],
             metadata={},
         )
+        with self.assertRaisesRegex(ConflictError, "cancelled"):
+            self.database.enqueue_integration(
+                cancelled_a["current_policy_id"], created_by=self.user["id"]
+            )
         with self.assertRaisesRegex(ConflictError, "cannot be cancelled"):
             self.database.cancel_integration_item(
                 queue_a["id"],
@@ -2024,6 +2028,14 @@ class IntegrationGoldenPathTests(unittest.TestCase):
             result_store=self.results,
             candidate_store=self.candidates,
         )
+        replayed_fold_b = self.control.refold_integration_item(
+            stale_b["id"],
+            expected_version=stale_b["version"],
+            created_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        self.assertEqual(replayed_fold_b, fold_b)
         policy_b_folded = self._policy(self.candidate_b, fold=fold_b)
         ready_b = self.control.activate_integration_fold(
             stale_b["id"],

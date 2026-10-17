@@ -223,7 +223,7 @@ class ControlRoomTests(unittest.TestCase):
         )
         return run, running
 
-    def test_snapshot_is_one_consistent_redacted_operational_view(self) -> None:
+    def test_snapshot_redacts_private_fields_present_in_the_fixture(self) -> None:
         run, attempt = self.start_run()
         assignment = self.database.create_work_assignment(
             run["id"],
@@ -742,13 +742,10 @@ class ControlRoomTests(unittest.TestCase):
         encoded = json.dumps(snapshot, sort_keys=True)
         for forbidden in (
             "credential-super-secret",
-            "provider-super-secret",
             "private work item brief",
             "assignment objective secret",
             "blocker private detail",
             "--secret-command-arg",
-            "header-secret",
-            "destination-secret",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, encoded)

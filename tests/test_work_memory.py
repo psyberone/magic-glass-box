@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from magic_glass_box.db import (
     ATTEMPT_SCHEMA,
@@ -1022,6 +1024,33 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
         self.assertEqual(
             [event["kind"] for event in reclaimed["events"]],
             ["assignment.created", "assignment.claimed", "assignment.reclaimed"],
+        )
+
+    def test_assignment_lease_uses_the_injected_database_clock(self) -> None:
+        coordinator, _ = self.running_run("Coordinator")
+        task = self.create_assignment(
+            coordinator["id"],
+            "Claude Worker",
+            key="assign:clock",
+            title="Check the clock",
+        )
+        worker, _ = self.running_run("Claude Worker")
+        now = "2037-01-02T03:04:05.000000+00:00"
+
+        with mock.patch.object(self.database, "now", return_value=now):
+            claimed = self.database.claim_work_assignment(
+                worker["id"],
+                task["id"],
+                expected_assignment_version=task["version"],
+                lease_seconds=600,
+            )
+
+        expected = (datetime.fromisoformat(now) + timedelta(seconds=600)).astimezone(
+            UTC
+        )
+        self.assertEqual(
+            claimed["lease_expires_at"],
+            expected.isoformat(timespec="microseconds"),
         )
 
     def test_assignment_retry_survives_a_target_profile_revision(self) -> None:

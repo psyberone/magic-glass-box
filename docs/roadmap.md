@@ -557,11 +557,11 @@ The credential scan was clean and direct worker networking remained denied.
 
 ## Post-Milestone 7 external-audit stabilization
 
-**Status: in progress — R1 through R5 complete**
+**Status: completed 2026-10-17 — R1 through R6 complete**
 
-Three independent cold promise audits follow M7. This is a correctness and
-boundary-hardening sequence, not a compressed feature milestone. Repairs are
-grouped by invariant so overlapping findings produce one coherent change:
+Three independent cold promise audits followed M7. This was a correctness and
+boundary-hardening sequence, not a compressed feature milestone. Repairs were
+grouped by invariant so overlapping findings produced one coherent change:
 
 1. **R1 — dispatch ambiguity and bounded subprocesses (complete):** schema v17
    records provider-dispatch intent before the connector call and permits one
@@ -591,14 +591,29 @@ grouped by invariant so overlapping findings produce one coherent change:
    admits only text-bearing local-tool history. OAuth refresh, SSE parsing,
    raw-byte accounting, JSON frame expansion, and candidate blob/symlink
    identity collisions have matching regression proofs.
-6. **R6 — lower-risk contract cleanup and final proof:** remaining bounded
-   Docker/CLI reads, strict timestamp and schema-checker alignment, CLI/UI and
-   documentation cleanup, focused repros, full mutation, deterministic live
-   proofs, and the internal promise audit.
+6. **R6 — lower-risk contract cleanup and final proof (complete):** remaining
+   bounded Docker/CLI reads, strict timestamp and schema-checker alignment,
+   CLI/UI and documentation cleanup, focused repros, full mutation,
+   deterministic live proofs, and the internal promise audit.
 
-Each checkpoint is RED-first with happy and sad paths. The completed boundary
-must repeat the test, branch-coverage, mutation, deterministic live, and
-explicitly authorized real-account proofs before M8 begins.
+Each checkpoint was RED-first with happy and sad paths. The completed boundary
+passed all 773 tests, Ruff formatting and lint, 86% branch coverage, and a
+clean-from-scratch 83.18% mutation score (31,103/37,393). All mutants were
+classified: 6,227 survived, 27 timed out, 36 had no selected tests, and none
+were suspicious, skipped, interrupted, or crashed. Mutmut's timeout-checker
+thread lost a process-exit race at the tail; its three verified overdue
+children received the same `SIGXCPU` it had intended and were recorded as
+timeouts.
+
+The supervisor, live Krab transport, committed-file gateway, provider gateway,
+and rebuilt Codex/Claude runtime proofs passed. The first real-account repeat
+made exactly one successful upstream call, then failed closed locally on a
+new bounded Codex assistant `phase` field; no rejected continuation reached the
+provider. After a RED-first allowlist repair, the single authorized retry
+passed with one attempt, five `gpt-6.1-sol` connector invocations, one exact
+retained result path, an exact-revision candidate, a passing validation gate,
+denied direct worker networking, no credential exposure outside the connector
+profile, and two landing commands issued but not executed.
 
 ## Milestone 8A: provider usage and budget authority
 

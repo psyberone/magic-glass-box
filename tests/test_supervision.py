@@ -1574,7 +1574,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
 
 
 class SupervisionMigrationTests(unittest.TestCase):
-    def test_schema_nine_migrates_once_and_defaults_existing_runs_to_manual(
+    def test_schema_nine_migrates_existing_runs_with_manual_defaults(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:

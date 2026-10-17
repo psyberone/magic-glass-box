@@ -123,6 +123,17 @@ class RuntimeAdapterContractTests(unittest.TestCase):
         self.assertEqual(codex, RuntimeCompletion(exit_code=0))
         self.assertEqual(claude, RuntimeCompletion(exit_code=0))
 
+    def test_codex_jsonl_preserves_unicode_line_and_paragraph_separators(self) -> None:
+        stdout = (
+            '{"type":"item.completed","text":"before\u2028middle\u2029after"}\n'
+            '{"type":"turn.completed"}\n'
+        )
+
+        self.assertEqual(
+            self.registry.complete("codex", exit_code=0, stdout=stdout),
+            RuntimeCompletion(exit_code=0),
+        )
+
     def test_nonzero_exit_is_preserved_without_parsing_private_output(self) -> None:
         for name in self.registry.names:
             with self.subTest(name=name):

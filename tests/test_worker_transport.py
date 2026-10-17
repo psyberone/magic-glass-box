@@ -23,6 +23,7 @@ from magic_glass_box.worker_transport import (
     FileGatewayClient,
     ProviderHTTPTransport,
     WorkerTransportError,
+    _strict_json,
     main,
 )
 
@@ -55,6 +56,14 @@ class ProviderControl:
 
 
 class FileGatewayClientTests(unittest.TestCase):
+    def test_strict_json_rejects_nonfinite_exponent_numbers(self) -> None:
+        for raw in (b'{"value":1e999}', b'{"value":-1e999}'):
+            with (
+                self.subTest(raw=raw),
+                self.assertRaisesRegex(WorkerTransportError, "invalid JSON"),
+            ):
+                _strict_json(raw, subject="gateway payload JSON", limit=1024)
+
     def test_exchange_commits_and_verifies_multiple_mailbox_requests(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
             root = Path(temporary) / "gateway"

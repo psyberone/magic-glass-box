@@ -235,7 +235,7 @@ class CodexRuntimeAdapter:
         completion = RuntimeCompletion(exit_code)
         if exit_code != 0:
             return completion
-        lines = [line for line in stdout.splitlines() if line.strip()]
+        lines = [line for line in stdout.split("\n") if line.strip()]
         if not lines:
             raise RuntimeAdapterError("codex produced incomplete JSONL output")
         events = [_strict_json(line, runtime=self.name) for line in lines]

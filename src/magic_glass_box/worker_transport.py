@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -83,11 +84,18 @@ def _strict_json(raw: bytes, *, subject: str, limit: int) -> Any:
     def reject_constant(_value: str) -> None:
         raise WorkerTransportError(f"{subject} is invalid JSON")
 
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise WorkerTransportError(f"{subject} is invalid JSON")
+        return parsed
+
     try:
         return json.loads(
             text,
             object_pairs_hook=unique_object,
             parse_constant=reject_constant,
+            parse_float=finite_float,
         )
     except WorkerTransportError:
         raise

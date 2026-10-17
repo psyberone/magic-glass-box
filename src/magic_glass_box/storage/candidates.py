@@ -234,6 +234,7 @@ class CandidateStorage:
                     "project_id": source["project_id"],
                     "context_version_id": source["context_version_id"],
                     "work_thread_id": source["work_thread_id"],
+                    "base_revision": source["result"].source_revision,
                 }
                 values = manifest.to_dict()
                 if any(values[key] != value for key, value in expected.items()):

@@ -803,6 +803,15 @@ class RunStorage:
                     )
                 source = RunState(row["state"])
                 validate_transition(source, target)
+                active_attempt = connection.execute(
+                    "SELECT 1 FROM run_attempts WHERE run_id = ? "
+                    "AND state IN ('preparing', 'running') LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                if active_attempt is not None:
+                    raise ConflictError(
+                        "run transition is controlled by its active attempt"
+                    )
                 open_interactions = connection.execute(
                     "SELECT id, version FROM interactions "
                     "WHERE run_id = ? AND state = 'open'",

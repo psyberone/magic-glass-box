@@ -771,6 +771,26 @@ def _strict_marker(raw: bytes) -> _MailboxMarker:
     return _MailboxMarker(sequence, size, digest)
 
 
+def _marker_sequence_hint(raw: bytes, last_sequence: int) -> int:
+    """Recover only the response correlation field from an invalid marker."""
+
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
+        value = None
+    if isinstance(value, dict):
+        sequence = value.get("sequence")
+        if (
+            not isinstance(sequence, bool)
+            and isinstance(sequence, int)
+            and last_sequence < sequence <= MAX_GATEWAY_SEQUENCE
+        ):
+            return sequence
+    if last_sequence < MAX_GATEWAY_SEQUENCE:
+        return last_sequence + 1
+    return last_sequence
+
+
 def _read_bounded(path: Path, limit: int) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -881,15 +901,37 @@ class _FileGatewayChannel:
                 try:
                     marker_raw = _read_bounded(
                         self.directory / GATEWAY_REQUEST_READY_NAME,
-                        MAX_GATEWAY_MARKER_BYTES + 1,
+                        MAX_GATEWAY_MARKER_BYTES,
                     )
-                except _RequestFailure:
+                except FileNotFoundError:
+                    pending_marker = b""
+                    pending_since = 0.0
                     continue
+                except _RequestFailure as exc:
+                    marker_raw = b"<oversized-marker>"
+                    marker_failure = exc
+                else:
+                    marker_failure = None
                 if not marker_raw or marker_raw == last_marker:
                     continue
                 try:
+                    if marker_failure is not None:
+                        raise marker_failure
                     marker = _strict_marker(marker_raw)
-                except _RequestFailure:
+                except _RequestFailure as exc:
+                    now = time.monotonic()
+                    if pending_marker != marker_raw:
+                        pending_marker = marker_raw
+                        pending_since = now
+                    elif now - pending_since >= self.request_timeout:
+                        sequence = _marker_sequence_hint(marker_raw, last_sequence)
+                        self._publish(
+                            sequence,
+                            self.gateway._failure(None, exc.code, str(exc)),
+                        )
+                        last_sequence = sequence
+                        last_marker = marker_raw
+                        pending_marker = b""
                     continue
                 if marker.sequence <= last_sequence:
                     self._publish(
@@ -905,8 +947,10 @@ class _FileGatewayChannel:
                 try:
                     request_raw = _read_bounded(
                         self.directory / GATEWAY_REQUEST_NAME,
-                        MAX_GATEWAY_REQUEST_BYTES + 1,
+                        MAX_GATEWAY_REQUEST_BYTES,
                     )
+                except FileNotFoundError:
+                    request_raw = b""
                 except _RequestFailure as exc:
                     self._publish(
                         marker.sequence,

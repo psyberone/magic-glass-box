@@ -152,6 +152,34 @@ class PublishedSchemaContractTests(unittest.TestCase):
         for candidate in (unsafe_item, invalid_timestamp, duplicate_labels):
             self.assert_rejected_by_both(validator, factory, candidate)
 
+    def test_portable_path_spelling_guards_are_shared_with_runtime(self) -> None:
+        cases = (
+            ("handoff", "artifacts"),
+            ("work-log-entry", "artifacts"),
+            ("work-memory-checkpoint", "artifacts"),
+        )
+        for name, field in cases:
+            validator, example, factory = self.load(name)
+            for path in ("nested//file.txt", "nested/"):
+                candidate = copy.deepcopy(example)
+                candidate[field][0]["path"] = path
+                with self.subTest(name=name, path=path):
+                    self.assert_rejected_by_both(validator, factory, candidate)
+
+        validator, example, factory = self.load("work-assignment")
+        for path in ("nested//file.txt", "nested/"):
+            candidate = copy.deepcopy(example)
+            candidate["scope_paths"] = [path]
+            with self.subTest(name="work-assignment", path=path):
+                self.assert_rejected_by_both(validator, factory, candidate)
+
+        validator, example, factory = self.load("work-item")
+        for path in ("nested//file.txt", "nested/"):
+            candidate = copy.deepcopy(example)
+            candidate["context"] = [{"type": "workspace_path", "value": path}]
+            with self.subTest(name="work-item", path=path):
+                self.assert_rejected_by_both(validator, factory, candidate)
+
     def test_runtime_semantic_guards_extend_portable_json_schema(self) -> None:
         validator, example, factory = self.load("handoff")
         duplicate_path = copy.deepcopy(example)
@@ -188,7 +216,10 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             (self.repository / "examples" / f"{name}.json").read_text()
         )
         Draft202012Validator.check_schema(schema)
-        return Draft202012Validator(schema), example
+        return (
+            Draft202012Validator(schema, format_checker=FormatChecker()),
+            example,
+        )
 
     def test_result_and_candidate_examples_match_runtime_contracts(self) -> None:
         result_validator, result = self.load("result")
@@ -326,6 +357,19 @@ class ArtifactSchemaContractTests(unittest.TestCase):
         with self.assertRaises(GateError):
             GatePolicyManifest.from_mapping(mutable)
 
+        for integration_ref in (
+            "refs/heads/..",
+            "refs/heads/a//b",
+            "refs/heads/a.lock",
+        ):
+            invalid_ref = copy.deepcopy(policy)
+            invalid_ref["integration_ref"] = integration_ref
+            with self.subTest(schema="gate-policy", integration_ref=integration_ref):
+                with self.assertRaises(SchemaValidationError):
+                    policy_validator.validate(invalid_ref)
+                with self.assertRaises(GateError):
+                    GatePolicyManifest.from_mapping(invalid_ref)
+
         evidence_schema = json.loads(
             (self.repository / "schemas/gate-evidence-v1.schema.json").read_text()
         )
@@ -338,6 +382,21 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             evidence_validator.validate(validation)
         with self.assertRaises(GateError):
             parse_gate_evidence(validation)
+
+        for integration_ref in (
+            "refs/heads/..",
+            "refs/heads/a//b",
+            "refs/heads/a.lock",
+        ):
+            invalid_ref = json.loads(
+                (self.repository / "examples/gate-review-evidence.json").read_text()
+            )
+            invalid_ref["inputs"]["integration_ref"] = integration_ref
+            with self.subTest(schema="gate-evidence", integration_ref=integration_ref):
+                with self.assertRaises(SchemaValidationError):
+                    evidence_validator.validate(invalid_ref)
+                with self.assertRaises(GateError):
+                    parse_gate_evidence(invalid_ref)
 
     def test_integration_examples_match_runtime_contracts(self) -> None:
         factories = {
@@ -369,6 +428,24 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             validator.validate(credentialed_remote)
         with self.assertRaises(IntegrationError):
             LandingPlan.from_mapping(credentialed_remote)
+
+        for name, factory in (
+            ("integration-fold", FoldManifest.from_mapping),
+            ("landing-plan", LandingPlan.from_mapping),
+        ):
+            ref_validator, document = self.load(name)
+            for integration_ref in (
+                "refs/heads/..",
+                "refs/heads/a//b",
+                "refs/heads/a.lock",
+            ):
+                invalid_ref = copy.deepcopy(document)
+                invalid_ref["integration_ref"] = integration_ref
+                with self.subTest(schema=name, integration_ref=integration_ref):
+                    with self.assertRaises(SchemaValidationError):
+                        ref_validator.validate(invalid_ref)
+                    with self.assertRaises(IntegrationError):
+                        factory(invalid_ref)
 
         validator, receipt = self.load("landing-receipt")
         false_assurance = copy.deepcopy(receipt)
@@ -417,10 +494,13 @@ class ArtifactSchemaContractTests(unittest.TestCase):
         request_validator, request = self.load("inference-invocation-request")
         oversized = copy.deepcopy(request)
         oversized["request_limit_bytes"] = 0
-        with self.assertRaises(SchemaValidationError):
-            request_validator.validate(oversized)
-        with self.assertRaises(ValidationError):
-            InferenceInvocationRequest.from_mapping(oversized)
+        invalid_deadline = copy.deepcopy(request)
+        invalid_deadline["deadline"] = "2026-10-16 12:00:00+00:00"
+        for candidate in (oversized, invalid_deadline):
+            with self.assertRaises(SchemaValidationError):
+                request_validator.validate(candidate)
+            with self.assertRaises(ValidationError):
+                InferenceInvocationRequest.from_mapping(candidate)
 
         response_validator, response = self.load("inference-invocation-response")
         inconsistent = copy.deepcopy(response)

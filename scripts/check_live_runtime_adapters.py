@@ -40,7 +40,12 @@ from magic_glass_box.executor import (
 )
 from magic_glass_box.gateway import FileGatewayManager
 from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
-from magic_glass_box.krab import KrabIdentity, KrabUserRef, SessionItem
+from magic_glass_box.krab import (
+    KrabIdentity,
+    KrabUserRef,
+    SessionItem,
+    SessionItemHistoryEvent,
+)
 from magic_glass_box.orchestration import RunCoordinator
 from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
@@ -351,6 +356,7 @@ def _session_item(
     title: str,
     body: str,
 ) -> SessionItem:
+    created_sequence = 7 if item_id == REQUEST_ITEM_ID else 8
     return SessionItem(
         item_id=item_id,
         project_key="runtime-proof",
@@ -366,7 +372,18 @@ def _session_item(
         untrusted_title=title,
         untrusted_body=body,
         content_risk_flags=("untrusted_text",),
-        history=(),
+        history=(
+            SessionItemHistoryEvent(
+                event_seq=created_sequence,
+                kind="item.created",
+                actor=creator,
+                from_status=None,
+                to_status="open.pending",
+                created_at="2026-10-11T12:00:00Z",
+                untrusted_note=None,
+                content_risk_flags=(),
+            ),
+        ),
     )
 
 
@@ -406,13 +423,13 @@ class _RuntimeProofKrabClient:
     def get_session_item(
         self, project_key: str, session_id: str, item_id: str
     ) -> SessionItem:
-        if (
-            project_key != "runtime-proof"
-            or session_id != SESSION_ID
-            or item_id != RESPONSE_ITEM_ID
-        ):
+        if project_key != "runtime-proof" or session_id != SESSION_ID:
             raise RuntimeError("runtime proof read an unexpected interaction")
-        return self.response_item
+        if item_id == REQUEST_ITEM_ID:
+            return self.request_item
+        if item_id == RESPONSE_ITEM_ID:
+            return self.response_item
+        raise RuntimeError("runtime proof read an unexpected interaction")
 
 
 @dataclass(frozen=True)
@@ -984,9 +1001,36 @@ def main(argv: list[str] | None = None) -> int:
                 connector_directory, "anthropic", anthropic_secret
             )
             connector_config = connector_directory / "config.json"
+            repository = _create_repository(root)
+            database = Database(root / "control-plane.db")
+            resolver = PrivateFileCredentialResolver()
+            krab_client = _RuntimeProofKrabClient()
+
+            def client_factory(_base_url: str, token: str) -> Any:
+                if token != AGENT_TOKEN:
+                    raise RuntimeError(
+                        "runtime proof resolved an unexpected Krab token"
+                    )
+                return krab_client
+
+            control = ControlPlane(
+                database,
+                credential_resolver=resolver,
+                client_factory=client_factory,
+            )
+            runs = _prepare_runs(
+                control,
+                repository=repository,
+                image=args.image,
+                connector_socket=connector_socket,
+                credential_directory=credential_directory,
+            )
+            connector = database.get_inference_connector("runtime-sidecar")
             connector_config.write_text(
                 json.dumps(
                     {
+                        "connector_id": connector["id"],
+                        "deployment_sha256": connector["deployment_sha256"],
                         "routes": [
                             {
                                 "name": "openai-proof",
@@ -1004,7 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
                                 ).to_dict(),
                                 "credential_file": str(anthropic_credential),
                             },
-                        ]
+                        ],
                     },
                     separators=(",", ":"),
                     sort_keys=True,
@@ -1045,30 +1089,6 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError(
                     f"runtime inference connector did not start: {stdout}{stderr}"
                 )
-            repository = _create_repository(root)
-            database = Database(root / "control-plane.db")
-            resolver = PrivateFileCredentialResolver()
-            krab_client = _RuntimeProofKrabClient()
-
-            def client_factory(_base_url: str, token: str) -> Any:
-                if token != AGENT_TOKEN:
-                    raise RuntimeError(
-                        "runtime proof resolved an unexpected Krab token"
-                    )
-                return krab_client
-
-            control = ControlPlane(
-                database,
-                credential_resolver=resolver,
-                client_factory=client_factory,
-            )
-            runs = _prepare_runs(
-                control,
-                repository=repository,
-                image=args.image,
-                connector_socket=connector_socket,
-                credential_directory=credential_directory,
-            )
             docker_engine = _RecordingDockerEngine(
                 DockerCLI(
                     command_timeout=args.docker_timeout,

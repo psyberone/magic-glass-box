@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import signal
+import sqlite3
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -35,8 +36,12 @@ from .executor import (
     ExecutionError,
 )
 from .gates import GateError
-from .gateway import FileGatewayManager, default_gateway_root
-from .inference import InferenceConnectorSpec, InferenceGrantSpec
+from .gateway import FileGatewayManager, GatewayError, default_gateway_root
+from .inference import (
+    InferenceConnectorError,
+    InferenceConnectorSpec,
+    InferenceGrantSpec,
+)
 from .integration import IntegrationError
 from .krab import KrabError
 from .orchestration import (
@@ -49,6 +54,7 @@ from .results import ResultError, WorkspaceResultStore, default_result_root
 from .runtime import RuntimeAdapterError
 from .service import ControlPlane, activity_to_dict
 from .supervision import Supervisor, SupervisorError
+from .worker_transport import WorkerTransportError
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
 
@@ -156,7 +162,8 @@ def _integration_lease_seconds(value: str) -> int:
 
 def _json_file(path: Path) -> dict[str, Any]:
     try:
-        raw = path.read_bytes()
+        with path.open(mode="rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
     except OSError as exc:
         raise InputError(f"cannot read JSON file {path}: {exc}") from exc
     if not raw or len(raw) > 1024 * 1024:
@@ -1359,7 +1366,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         CredentialError,
         ExecutionError,
         GateError,
+        GatewayError,
         InputError,
+        InferenceConnectorError,
         IntegrationError,
         KrabError,
         ProviderError,
@@ -1369,10 +1378,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         SupervisorError,
         StorageError,
         ValidationError,
+        WorkerTransportError,
         WorkspaceError,
     ) as exc:
         _emit(
             {"error": {"type": type(exc).__name__, "message": str(exc)}},
+            stream=sys.stderr,
+        )
+        return 2
+    except sqlite3.Error as exc:
+        _emit(
+            {
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": "database operation failed",
+                }
+            },
+            stream=sys.stderr,
+        )
+        return 2
+    except UnicodeError as exc:
+        _emit(
+            {
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": "text decoding failed",
+                }
+            },
             stream=sys.stderr,
         )
         return 2

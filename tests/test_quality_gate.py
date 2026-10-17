@@ -56,8 +56,15 @@ class MutationScoreGateTests(unittest.TestCase):
 
         self.assertNotIn("PYTHONPATH=src $(PYTHON)", makefile)
         self.assertNotIn("\n\t$(PYTHON) scripts/check_mutation_score.py", makefile)
+        self.assertNotIn("MUTMUT ?= $(PYTHON)", makefile)
+        self.assertNotIn("\n\t$(MUTMUT) ", makefile)
         self.assertIn('PYTHONPATH=src "$(PYTHON)"', makefile)
         self.assertIn('\n\t"$(PYTHON)" scripts/check_mutation_score.py', makefile)
+        self.assertIn(
+            '\n\tPYTHONDONTWRITEBYTECODE=1 "$(PYTHON)" -m mutmut run',
+            makefile,
+        )
+        self.assertIn('\n\t"$(PYTHON)" -m mutmut export-cicd-stats', makefile)
 
 
 if __name__ == "__main__":

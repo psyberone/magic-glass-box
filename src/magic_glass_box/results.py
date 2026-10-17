@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import hashlib
 import json
 import os
@@ -1159,7 +1160,9 @@ class WorkspaceResultStore:
             )
             try:
                 temporary.rename(final)
-            except FileExistsError:
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
                 existing = self.inspect(attempt_id)
                 if existing.digest != manifest.digest:
                     raise ResultError(

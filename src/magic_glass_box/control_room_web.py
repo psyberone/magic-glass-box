@@ -327,11 +327,6 @@ def _render_control_room(
     ]
     profile_names = [str(row.get("name", "")) for row in profiles if row.get("name")]
     operator = _operator_select(handles)
-    profile_options = "".join(
-        f'<option value="{_escape(name)}">{_escape(name)}</option>'
-        for name in profile_names
-    )
-    profile_select = f'<select name="profile_name" required>{profile_options}</select>'
 
     run_rows: list[tuple[object, ...]] = []
     for run in snapshot.get("runs", []):
@@ -369,7 +364,17 @@ def _render_control_room(
                     "Retry",
                 )
             )
-            if profile_names:
+            reassign_profiles = [
+                name for name in profile_names if name != run.get("profile_name")
+            ]
+            if reassign_profiles:
+                profile_options = "".join(
+                    f'<option value="{_escape(name)}">{_escape(name)}</option>'
+                    for name in reassign_profiles
+                )
+                profile_select = (
+                    f'<select name="profile_name" required>{profile_options}</select>'
+                )
                 controls.append(
                     _action_form(
                         root,

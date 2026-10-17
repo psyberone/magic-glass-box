@@ -95,6 +95,15 @@ class DatabaseTests(unittest.TestCase):
             timedelta(0),
         )
 
+    def test_database_directory_error_does_not_misidentify_a_symlink(self) -> None:
+        directory = Path(self.temporary.name) / "not-a-database"
+        directory.mkdir()
+
+        with self.assertRaises(StorageError) as raised:
+            Database(directory).initialize()
+
+        self.assertEqual(str(raised.exception), "database must be a regular file")
+
     def test_database_rows_require_exact_column_names(self) -> None:
         connection = self.database.connect()
         self.addCleanup(connection.close)

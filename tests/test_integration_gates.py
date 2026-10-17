@@ -1072,7 +1072,7 @@ class GateLedgerTests(unittest.TestCase):
 
         self.assertEqual(self.database.get_run(run["id"])["state"], "failed")
 
-    def test_local_validation_runs_exact_tree_without_network_and_discards_output(
+    def test_local_validation_requests_exact_networkless_sandbox_and_discards_output(
         self,
     ) -> None:
         policy = self.create_policy()
@@ -1218,7 +1218,7 @@ class GateLedgerTests(unittest.TestCase):
 
 
 class GateMigrationTests(unittest.TestCase):
-    def test_schema_twelve_migrates_once_to_the_gate_ledger(self) -> None:
+    def test_schema_twelve_migrates_existing_gate_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "control-plane.db"
             connection = sqlite3.connect(path)

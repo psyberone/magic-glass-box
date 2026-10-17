@@ -78,7 +78,7 @@
   "$defs": {
     "integrationRef": {
       "type": "string",
-      "pattern": "^refs/heads/[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$",
+      "pattern": "^refs/heads/(?!@$)(?!\\.)(?!.*\\/\\.)(?!.*(?:\\.\\.|@\\{|//|\\.lock(?:/|$)))(?!.*[/.]$)[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$",
       "maxLength": 512
     },
     "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },

@@ -31,7 +31,8 @@ reconciler.
 
 Creation accepts one retained result from a succeeded, zero-exit attempt pinned
 to a durable work-item thread and project context. The storage transaction
-checks that authority when inserting the candidate. Later candidate reads trust
+checks that authority, including that the candidate base is the result's pinned
+source revision, when inserting the candidate. Later candidate reads trust
 the immutable ledger instead of replaying the attempt's complete history on
 every query.
 

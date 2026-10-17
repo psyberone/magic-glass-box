@@ -1,5 +1,4 @@
 PYTHON ?= .venv/bin/python
-MUTMUT ?= $(PYTHON) -m mutmut
 MUTMUT_RUN_ARGS ?=
 
 .PHONY: test lint coverage mutation mutation-clean quality candidate-test gate-test integration-test live-supervisor
@@ -17,8 +16,8 @@ coverage:
 	"$(PYTHON)" -m coverage report
 
 mutation:
-	PYTHONDONTWRITEBYTECODE=1 $(MUTMUT) run $(MUTMUT_RUN_ARGS)
-	$(MUTMUT) export-cicd-stats
+	PYTHONDONTWRITEBYTECODE=1 "$(PYTHON)" -m mutmut run $(MUTMUT_RUN_ARGS)
+	"$(PYTHON)" -m mutmut export-cicd-stats
 	"$(PYTHON)" scripts/check_mutation_score.py \
 		--stats mutants/mutmut-cicd-stats.json --minimum 80
 

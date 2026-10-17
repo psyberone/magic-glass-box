@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..domain import (
@@ -749,7 +749,7 @@ class WorkStorage:
             raise ValidationError("lease_seconds must be between 30 and 86400")
         now = self.now()
         lease_expires_at = (
-            datetime.now(UTC) + timedelta(seconds=lease_seconds)
+            datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)
         ).isoformat(timespec="microseconds")
         with self._connection() as connection:
             try:

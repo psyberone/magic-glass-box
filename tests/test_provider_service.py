@@ -544,7 +544,7 @@ class ProviderServiceTests(unittest.TestCase):
             ["busy", "succeeded"],
         )
 
-    def test_live_provider_dispatch_renews_its_cross_process_slot(self) -> None:
+    def test_slow_provider_dispatch_renews_its_durable_slot(self) -> None:
         run = self.create_run()
         connector = BlockingConnector()
         control = ControlPlane(

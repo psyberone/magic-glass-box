@@ -8,14 +8,20 @@ import json
 import socket
 import struct
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.domain import ProviderGrantSpec, ValidationError, canonical_json
-from magic_glass_box.inference import InferenceInvocationRequest
+from magic_glass_box.inference import (
+    CONNECTOR_ID_RE,
+    SHA256_RE,
+    InferenceInvocationRequest,
+)
 from magic_glass_box.provider import (
+    ProviderAmbiguousError,
     ProviderBroker,
     ProviderError,
     ProviderUpstreamError,
@@ -28,6 +34,8 @@ MAX_REQUEST_FRAME_BYTES = 2 * 1024 * 1024 + 64 * 1024
 
 @dataclass(frozen=True)
 class _Route:
+    connector_id: str
+    deployment_sha256: str
     name: str
     credential_scope_sha256: str
     policy: ProviderGrantSpec
@@ -80,15 +88,29 @@ def _load_routes(path: Path) -> dict[str, _Route]:
     if not path.is_absolute():
         raise SystemExit("--config must be absolute")
     try:
-        raw = path.read_bytes()
+        with path.open(mode="rb") as stream:
+            raw = stream.read(MAX_CONFIG_BYTES + 1)
     except OSError as exc:
         raise SystemExit("connector configuration is unavailable") from exc
     if not raw or len(raw) > MAX_CONFIG_BYTES:
         raise SystemExit("connector configuration is empty or oversized")
     try:
         value = _strict_object(raw, subject="connector configuration")
-        if set(value) != {"routes"} or not isinstance(value["routes"], list):
+        if set(value) != {
+            "connector_id",
+            "deployment_sha256",
+            "routes",
+        } or not isinstance(value["routes"], list):
             raise ValidationError("connector configuration has an invalid shape")
+        connector_id = value["connector_id"]
+        deployment_sha256 = value["deployment_sha256"]
+        if (
+            not isinstance(connector_id, str)
+            or CONNECTOR_ID_RE.fullmatch(connector_id) is None
+            or not isinstance(deployment_sha256, str)
+            or SHA256_RE.fullmatch(deployment_sha256) is None
+        ):
+            raise ValidationError("connector configuration authority is invalid")
         resolver = PrivateFileCredentialResolver()
         routes: dict[str, _Route] = {}
         for raw_route in value["routes"]:
@@ -115,6 +137,8 @@ def _load_routes(path: Path) -> dict[str, _Route]:
             credential_path = Path(credential_file)
             reference = resolver.secret_reference(credential_path)
             routes[name] = _Route(
+                connector_id=connector_id,
+                deployment_sha256=deployment_sha256,
                 name=name,
                 credential_scope_sha256=scope,
                 policy=ProviderGrantSpec.from_mapping(raw_route["policy"]),
@@ -167,11 +191,14 @@ def _invoke(
     authority = _response_authority(request)
     if (
         route is None
+        or route.connector_id != request.connector_id
+        or route.deployment_sha256 != request.deployment_sha256
+        or route.name != request.route
         or route.credential_scope_sha256 != request.credential_scope_sha256
         or route.policy.provider != request.provider
         or route.policy.model != request.model
-        or route.policy.request_bytes != request.request_limit_bytes
-        or route.policy.response_bytes != request.response_limit_bytes
+        or route.policy.request_bytes < request.request_limit_bytes
+        or route.policy.response_bytes < request.response_limit_bytes
     ):
         return {
             **authority,
@@ -180,6 +207,18 @@ def _invoke(
             "request_bytes": 0,
             "response_bytes": 0,
             "error_code": "authority_mismatch",
+            "response": None,
+        }
+    deadline = datetime.fromisoformat(request.deadline)
+    remaining_ms = int((deadline - datetime.now(UTC)).total_seconds() * 1000)
+    if remaining_ms < 100:
+        return {
+            **authority,
+            "outcome": "failed",
+            "provider_status": None,
+            "request_bytes": 0,
+            "response_bytes": 0,
+            "error_code": "deadline_expired",
             "response": None,
         }
     expected_adapter = {
@@ -196,13 +235,29 @@ def _invoke(
             "error_code": "protocol_mismatch",
             "response": None,
         }
+    effective_policy = replace(
+        route.policy,
+        request_bytes=request.request_limit_bytes,
+        response_bytes=request.response_limit_bytes,
+        timeout_ms=min(route.policy.timeout_ms, remaining_ms),
+    )
     try:
         result = broker.invoke(
             grant_id=request.grant_id,
-            spec=route.policy,
+            spec=effective_policy,
             credential=route.credential,
             request=request.request,
         )
+    except ProviderAmbiguousError as exc:
+        return {
+            **authority,
+            "outcome": "ambiguous",
+            "provider_status": exc.status_code,
+            "request_bytes": min(exc.request_bytes, request.request_limit_bytes),
+            "response_bytes": min(exc.response_bytes, request.response_limit_bytes),
+            "error_code": "upstream_ambiguous",
+            "response": None,
+        }
     except ProviderUpstreamError as exc:
         return {
             **authority,

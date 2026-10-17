@@ -355,7 +355,7 @@ class ChatGPTSession:
             _exact_fields(value, expected=expected, subject="ChatGPT session")
         except ChatGPTConnectorError as exc:
             raise ChatGPTAuthenticationError(str(exc)) from exc
-        if value["schema_version"] != 1:
+        if isinstance(value["schema_version"], bool) or value["schema_version"] != 1:
             raise ChatGPTAuthenticationError("ChatGPT session version is invalid")
         client_id = _client_id(value["client_id"])
         host_id = _host_id(value["ext_agent_host_id"])
@@ -560,6 +560,7 @@ class ChatGPTProfileStore:
             return host_id
         if (
             set(value) != {"ext_agent_host_id", "schema_version"}
+            or isinstance(value.get("schema_version"), bool)
             or value.get("schema_version") != 1
         ):
             raise ChatGPTAuthenticationError("host profile is invalid")
@@ -571,6 +572,7 @@ class ChatGPTProfileStore:
             return None
         if (
             set(value) != {"client_id", "schema_version"}
+            or isinstance(value.get("schema_version"), bool)
             or value.get("schema_version") != 1
         ):
             raise ChatGPTAuthenticationError("registration profile is invalid")
@@ -763,7 +765,6 @@ class ChatGPTOAuth:
                 callback_client, client_id
             ):
                 raise ChatGPTAuthenticationError("OAuth callback client_id changed")
-        self.store.save_registration(client_id)
         body = urlencode(
             {
                 "grant_type": "authorization_code",
@@ -807,6 +808,7 @@ class ChatGPTOAuth:
         )
         if not session.sharing:
             raise ChatGPTAuthenticationError("ChatGPT plan usage was not granted")
+        self.store.save_registration(client_id)
         self.store.save_session(session)
         return session
 
@@ -1363,10 +1365,20 @@ class OpenAIResponsesClient:
                 )
             item_type = item.get("type", "message" if "role" in item else None)
             if item_type == "message":
+                phase = item.get("phase")
                 if (
-                    not set(item).issubset({"type", "role", "content", "id", "status"})
+                    not set(item).issubset(
+                        {"type", "role", "content", "id", "status", "phase"}
+                    )
                     or item.get("role") not in {"user", "assistant", "developer"}
                     or "content" not in item
+                    or (
+                        "phase" in item
+                        and (
+                            item.get("role") != "assistant"
+                            or phase not in {"commentary", "final_answer"}
+                        )
+                    )
                 ):
                     message = (
                         "provider request contains an unsupported system message"
@@ -1760,7 +1772,7 @@ class OpenAIConnectorConfig:
             },
             subject="connector configuration",
         )
-        if value["schema_version"] != 1:
+        if isinstance(value["schema_version"], bool) or value["schema_version"] != 1:
             raise ChatGPTConnectorError("connector configuration version is invalid")
         connector_id = value["connector_id"]
         if (

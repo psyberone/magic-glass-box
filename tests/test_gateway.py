@@ -1061,6 +1061,41 @@ class FileGatewayManagerTests(unittest.TestCase):
         self.assertFalse(replayed["ok"])
         self.assertIn("not increasing", replayed["error"]["message"])
 
+    def test_persistent_malformed_marker_times_out_as_invalid_request(self) -> None:
+        endpoint = self.manager.open(
+            RUN_ID,
+            capabilities=(GatewayCapability.RUN_DESCRIBE,),
+            credential_names=("krab",),
+        )
+        marker = {"sequence": 1, "sha256": "not-a-digest", "size": 1}
+        (endpoint.directory / GATEWAY_REQUEST_READY_NAME).write_text(
+            canonical_json(marker) + "\n", encoding="ascii"
+        )
+
+        response = self.wait_response(endpoint.directory, 1)
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertIn("marker", response["error"]["message"])
+
+    def test_transient_missing_request_marker_does_not_kill_the_channel(self) -> None:
+        endpoint = self.manager.open(
+            RUN_ID,
+            capabilities=(GatewayCapability.RUN_DESCRIBE,),
+            credential_names=("krab",),
+        )
+        marker_path = endpoint.directory / GATEWAY_REQUEST_READY_NAME
+        marker_path.unlink()
+        time.sleep(0.05)
+        marker_path.touch(mode=0o600)
+
+        response = self.exchange(
+            endpoint.directory,
+            (json.dumps(request("run.describe")) + "\n").encode(),
+        )
+
+        self.assertTrue(response["ok"])
+
     def test_duplicate_or_unsafe_endpoint_state_is_rejected(self) -> None:
         self.manager.open(
             RUN_ID,

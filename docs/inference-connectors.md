@@ -34,6 +34,8 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --policy examples/inference-grant.json --created-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box \
   inference-connector list
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  inference-connector show openai-personal
 ```
 
 There is no credential-file argument on either authority path. Connector
@@ -48,6 +50,42 @@ only that process receives provider credentials or a provider-native
 configuration directory. `scripts/reference_inference_connector.py` is a
 proof/reference implementation for API-key-backed protocol adapters, not a
 built-in credential service or an automatically managed daemon.
+
+Its private configuration is intentionally distinct from the public
+registration document. It binds the assigned connector identity and deployment
+digest before listing credential-owning routes:
+
+```json
+{
+  "connector_id": "ifc_<32 lowercase hex characters>",
+  "deployment_sha256": "<64 lowercase hex characters>",
+  "routes": [
+    {
+      "name": "openai-main",
+      "credential_scope_sha256": "<64 lowercase hex characters>",
+      "policy": {
+        "provider": "openai",
+        "adapter": "openai_responses",
+        "destination": "https://api.openai.com/v1/responses",
+        "method": "POST",
+        "model": "gpt-example",
+        "credential_header": "Authorization",
+        "credential_prefix": "Bearer ",
+        "static_headers": {},
+        "request_bytes": 32768,
+        "response_bytes": 65536,
+        "timeout_ms": 30000,
+        "max_concurrency": 1
+      },
+      "credential_file": "/absolute/private/provider-token"
+    }
+  ]
+}
+```
+
+Obtain `connector_id` and the pinned deployment digest from
+`inference-connector show`. The config and credential files remain private
+sidecar state and are never passed to MGB or a worker.
 
 The scope fingerprint identifies an operator-defined non-secret account and
 permission scope. It must be derived from canonical non-secret metadata or an
@@ -82,7 +120,10 @@ has a 30-second I/O timeout. Truncated, malformed, oversized, abandoned, or
 broken-pipe clients are isolated to that connection and do not consume a
 successful invocation slot. A controlled `SIGTERM` unwinds the listener and
 removes its socket before exit, so an operator can restart the sidecar without
-manual stale-path cleanup.
+manual stale-path cleanup. Immediately before connecting, MGB requires the
+configured path itself—not a symlink—to be a Unix socket owned by the current
+operator. This is a boundary admission check, not continuous surveillance of a
+machine already controlled by the same user.
 
 ## Ownership boundary
 
@@ -197,7 +238,9 @@ PYTHONPATH=src python3.11 scripts/openai_chatgpt_connector.py \
 
 `login` opens the system browser and listens only on an ephemeral
 `127.0.0.1` callback. `--no-browser` prints the one-use authorization URL for
-deliberate opening on that same host. The profile directory must be owned by
+deliberate opening on that same host. `--callback-timeout` bounds the complete
+wait, idle TCP clients are dropped, and only a callback carrying the expected
+OAuth state can complete the attempt. The profile directory must be owned by
 the current user with mode `0700`; its host, registration, session, and refresh
 lock records are private. `status` returns account metadata and the non-secret
 credential-scope fingerprint but never a token. `models` obtains the current

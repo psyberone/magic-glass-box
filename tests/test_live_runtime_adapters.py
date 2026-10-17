@@ -10,6 +10,8 @@ from scripts.check_live_runtime_adapters import (
     ANTHROPIC_MODEL,
     CODEX_MODEL,
     PROOF_TEXT,
+    REQUEST_ITEM_ID,
+    RESPONSE_ITEM_ID,
     ProviderObservation,
     _anthropic_sse,
     _assert_observations,
@@ -20,6 +22,7 @@ from scripts.check_live_runtime_adapters import (
     _openai_sse,
     _openai_tool_sse,
     _provider_policy,
+    _RuntimeProofKrabClient,
 )
 
 
@@ -39,6 +42,24 @@ def _events(raw: bytes) -> list[tuple[str | None, object]]:
 
 
 class LiveRuntimeProofContractTests(unittest.TestCase):
+    def test_runtime_proof_krab_fixture_exposes_ordered_request_and_response(
+        self,
+    ) -> None:
+        client = _RuntimeProofKrabClient()
+
+        request = client.get_session_item(
+            "runtime-proof", client.request_item.session_id, REQUEST_ITEM_ID
+        )
+        response = client.get_session_item(
+            "runtime-proof", client.response_item.session_id, RESPONSE_ITEM_ID
+        )
+
+        self.assertEqual(request.item_id, REQUEST_ITEM_ID)
+        self.assertEqual(response.item_id, RESPONSE_ITEM_ID)
+        self.assertEqual(request.history[0].kind, "item.created")
+        self.assertEqual(response.history[0].kind, "item.created")
+        self.assertLess(request.history[0].event_seq, response.history[0].event_seq)
+
     def test_live_proofs_do_not_shortcut_the_operator_answer_surface(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         for relative in (

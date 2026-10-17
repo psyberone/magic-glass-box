@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1113,7 +1115,9 @@ class DockerCLITests(unittest.TestCase):
                 with self.assertRaises(ExecutionError):
                     self.client.inspect_image("agent:local")
 
-    def test_cli_bounds_output_and_uses_redacted_fallback_errors(self) -> None:
+    def test_injected_runner_rejects_oversize_output_and_redacts_fallback_errors(
+        self,
+    ) -> None:
         self.runner.return_value = self.completed("x" * (1024 * 1024 + 1))
         with self.assertRaisesRegex(ExecutionError, "size limit"):
             self.client.inspect_image("agent:local")
@@ -1126,6 +1130,35 @@ class DockerCLITests(unittest.TestCase):
                 self.runner.return_value = completed
                 with self.assertRaisesRegex(ExecutionError, expected):
                     self.client.start(CONTAINER_ID)
+
+    def test_production_reader_stops_stdout_and_stderr_at_the_byte_limit(self) -> None:
+        for descriptor in (1, 2):
+            with (
+                self.subTest(descriptor=descriptor),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                marker = root / "completed"
+                executable = root / "fake-docker"
+                script = (
+                    "import os\n"
+                    "chunk = b'x' * 65536\n"
+                    "for _ in range(64):\n"
+                    f"    os.write({descriptor}, chunk)\n"
+                    f"open({str(marker)!r}, 'wb').close()\n"
+                )
+                executable.write_text(
+                    "#!/bin/sh\n"
+                    f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}\n",
+                    encoding="utf-8",
+                )
+                executable.chmod(0o700)
+                client = DockerCLI(binary=executable, command_timeout=5)
+
+                with self.assertRaisesRegex(ExecutionError, "size limit"):
+                    client._run(("ignored",), max_output_bytes=1024 * 1024)
+
+                self.assertFalse(marker.exists())
 
     def test_verbose_container_logs_use_the_separate_rotated_log_limit(self) -> None:
         verbose = "x" * (2 * 1024 * 1024)

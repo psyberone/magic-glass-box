@@ -398,6 +398,7 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
         self,
     ) -> None:
         with _CallbackServer() as server:
+            server.expected_state = "state"
             thread = threading.Thread(target=server.handle_request)
             thread.start()
             connection = http.client.HTTPConnection(*server.server_address, timeout=2)
@@ -412,6 +413,17 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
             thread = threading.Thread(target=server.handle_request)
             thread.start()
             connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            connection.request("GET", "/auth/callback?code=abc&state=wrong-state")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            response.read()
+            connection.close()
+            thread.join(2)
+            self.assertIsNone(server.result)
+
+            thread = threading.Thread(target=server.handle_request)
+            thread.start()
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
             connection.request("GET", "/auth/callback?code=abc&state=state")
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
@@ -419,6 +431,18 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
             connection.close()
             thread.join(2)
             self.assertEqual(server.result, {"code": "abc", "state": "state"})
+
+    def test_loopback_callback_server_drops_an_idle_client(self) -> None:
+        with _CallbackServer() as server:
+            thread = threading.Thread(target=server.handle_request)
+            thread.start()
+            idle = socket.create_connection(server.server_address, timeout=2)
+
+            thread.join(2)
+            idle.close()
+
+            self.assertFalse(thread.is_alive())
+            self.assertIsNone(server.result)
 
     def test_login_prints_only_the_authorization_url_when_browser_is_disabled(
         self,
@@ -615,7 +639,8 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
                 main(["status", "--profile-dir", str(self.store.directory)]),
                 2,
             )
-        self.assertIn("bounded failure", stderr.getvalue())
+        self.assertIn("operation failed", stderr.getvalue())
+        self.assertNotIn("bounded failure", stderr.getvalue())
 
 
 if __name__ == "__main__":

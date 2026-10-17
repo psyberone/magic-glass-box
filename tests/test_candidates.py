@@ -1150,6 +1150,11 @@ class CandidateServiceTests(unittest.TestCase):
                 replace(manifest, producer_run_id="run_" + "f" * 32),
                 created_by=self.user["id"],
             )
+        with self.assertRaisesRegex(ConflictError, "provenance"):
+            self.database.create_candidate(
+                replace(manifest, base_revision="f" * 40),
+                created_by=self.user["id"],
+            )
         with closing(self.database.connect()) as connection, connection:
             connection.execute(
                 "UPDATE run_attempts SET state = 'failed', exit_code = 1 WHERE id = ?",
@@ -1184,7 +1189,9 @@ class CandidateServiceTests(unittest.TestCase):
 
 
 class CandidateMigrationTests(unittest.TestCase):
-    def test_schema_ten_migrates_once_through_current_schema(self) -> None:
+    def test_schema_ten_migrates_existing_candidates_through_current_schema(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "control-plane.db"
             connection = sqlite3.connect(path)

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -32,7 +33,10 @@ from magic_glass_box.domain import (
     SupervisionPolicy,
     WorkItemEnvelope,
 )
+from magic_glass_box.gateway import GatewayError
+from magic_glass_box.inference import InferenceConnectorError
 from magic_glass_box.krab import ActivityPage
+from magic_glass_box.worker_transport import WorkerTransportError
 
 
 class FakeDatabase:
@@ -800,6 +804,32 @@ class CLITests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("error", error)
         self.assertIn("ValidationError", stderr)
+
+    def test_boundary_exceptions_are_structured_without_a_traceback(self) -> None:
+        self.invoke("init")
+        cases = (
+            (GatewayError("safe gateway failure"), "safe gateway failure"),
+            (WorkerTransportError("safe transport failure"), "safe transport failure"),
+            (
+                InferenceConnectorError("safe connector failure"),
+                "safe connector failure",
+            ),
+            (sqlite3.DatabaseError("PRIVATE SQL DETAIL"), "database operation failed"),
+            (
+                UnicodeDecodeError("utf-8", b"\xff", 0, 1, "PRIVATE BYTE DETAIL"),
+                "text decoding failed",
+            ),
+        )
+        for error, public_message in cases:
+            with (
+                self.subTest(error=type(error).__name__),
+                mock.patch("magic_glass_box.cli._dispatch", side_effect=error),
+            ):
+                status, payload, stderr = self.invoke("status")
+                self.assertEqual(status, 2)
+                self.assertEqual(payload["error"]["message"], public_message)
+                self.assertNotIn("Traceback", stderr)
+                self.assertNotIn("PRIVATE", stderr)
 
     def test_all_administrative_routes_dispatch(self) -> None:
         context = Path(self.temporary.name) / "context.json"
@@ -2834,6 +2864,21 @@ class CLITests(unittest.TestCase):
         self.assertTrue(value["value"].startswith("å"))
         self.assertEqual(len(raw), 1024 * 1024)
 
+    def test_json_input_reads_at_most_one_byte_past_the_limit(self) -> None:
+        path = Path(self.temporary.name) / "input.json"
+        reader = mock.MagicMock()
+        reader.__enter__.return_value = reader
+        reader.read.return_value = b" " * (1024 * 1024 + 1)
+
+        with (
+            mock.patch.object(Path, "open", return_value=reader) as opened,
+            self.assertRaisesRegex(InputError, "1 MiB"),
+        ):
+            _json_file(path)
+
+        opened.assert_called_once_with(mode="rb")
+        reader.read.assert_called_once_with(1024 * 1024 + 1)
+
     def test_json_input_rejects_missing_and_oversized_files(self) -> None:
         missing = Path(self.temporary.name) / "missing.json"
         with self.assertRaisesRegex(InputError, "cannot read"):
@@ -2930,6 +2975,12 @@ class CLITests(unittest.TestCase):
         status, connectors, error = self.invoke("inference-connector", "list")
         self.assertEqual((status, error), (0, ""))
         self.assertEqual([item["name"] for item in connectors], ["openai-personal"])
+
+        status, shown, error = self.invoke(
+            "inference-connector", "show", "openai-personal"
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(shown, connector)
 
         status, revoked, error = self.invoke(
             "inference-connector",

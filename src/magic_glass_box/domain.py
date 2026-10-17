@@ -22,6 +22,10 @@ KRAB_PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]{2,31}$")
 KRAB_OBJECT_ID_RE = re.compile(r"^(?:usr|prj|ses|itm|clm)_[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 WORK_ITEM_SOURCE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
 WORK_ITEM_SCHEMA_VERSION = 1
 MAX_WORK_ITEM_CONTENT_BYTES = 256 * 1024
 HANDOFF_SCHEMA_VERSION = 1
@@ -56,6 +60,20 @@ def require_string(
     if len(encoded) > max_bytes:
         raise ValidationError(f"{field} exceeds {max_bytes} UTF-8 bytes")
     return value
+
+
+def parse_rfc3339_timestamp(value: object, *, field: str) -> datetime:
+    text = require_string(value, field=field, max_bytes=64)
+    if RFC3339_RE.fullmatch(text) is None:
+        raise ValidationError(f"{field} must be a valid RFC 3339 timestamp")
+    normalized = text[:-1] + "+00:00" if text[-1] in {"Z", "z"} else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except (ValueError, OverflowError) as exc:
+        raise ValidationError(f"{field} must be a valid RFC 3339 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValidationError(f"{field} must be a valid RFC 3339 timestamp")
+    return parsed
 
 
 def validate_handle(value: object) -> str:
@@ -305,15 +323,7 @@ class WorkItemEnvelope:
 
     @staticmethod
     def _timestamp(value: object) -> str:
-        text = require_string(value, field="source_updated_at", max_bytes=64)
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except (ValueError, OverflowError) as exc:
-            raise ValidationError(
-                "source_updated_at must be a valid RFC 3339 timestamp"
-            ) from exc
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValidationError("source_updated_at must include a timezone")
+        parsed = parse_rfc3339_timestamp(value, field="source_updated_at")
         return (
             parsed.astimezone(UTC)
             .isoformat(timespec="microseconds")

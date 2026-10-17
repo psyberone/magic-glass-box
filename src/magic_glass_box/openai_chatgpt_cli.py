@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import socket
@@ -36,6 +37,7 @@ from .sidecar import (
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_REQUEST_FRAME_BYTES = 2 * 1024 * 1024 + 64 * 1024
 MAX_CALLBACK_SECONDS = 15 * 60
+CALLBACK_CLIENT_TIMEOUT_SECONDS = 0.5
 
 
 class Connector(Protocol):
@@ -145,10 +147,17 @@ def _normalize_callback_target(target: str) -> dict[str, str]:
 
 class _CallbackServer(HTTPServer):
     result: dict[str, str] | None
+    expected_state: str | None
 
     def __init__(self) -> None:
         self.result = None
+        self.expected_state = None
         super().__init__(("127.0.0.1", 0), _CallbackHandler)
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        connection, address = super().get_request()
+        connection.settimeout(CALLBACK_CLIENT_TIMEOUT_SECONDS)
+        return connection, address
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -158,6 +167,12 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         try:
             callback = _normalize_callback_target(self.path)
         except ChatGPTAuthenticationError:
+            self._reply(400, "The authorization callback was invalid.")
+            return
+        expected_state = self.server.expected_state
+        if expected_state is None or not hmac.compare_digest(
+            callback["state"], expected_state
+        ):
             self._reply(400, "The authorization callback was invalid.")
             return
         self.server.result = callback
@@ -190,6 +205,7 @@ def _login(
         host, port = callback_server.server_address
         redirect_uri = f"http://{host}:{port}/auth/callback"
         attempt = oauth.begin(redirect_uri)
+        callback_server.expected_state = attempt.state
         opened = False if no_browser else webbrowser.open(attempt.authorization_url)
         if not opened:
             print(
@@ -375,8 +391,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         else:
             result = _serve(args)
-    except (ChatGPTConnectorError, OSError) as exc:
+    except ChatGPTConnectorError as exc:
         print(f"magic-glass-box-openai-connector: {exc}", file=sys.stderr)
+        return 2
+    except OSError:
+        print("magic-glass-box-openai-connector: operation failed", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

@@ -68,7 +68,20 @@ class WorkspaceResultStoreTests(unittest.TestCase):
         inspected = self.results.inspect(ATTEMPT_ID)
         self.assertEqual(inspected.digest, captured.manifest.digest)
 
-    def test_load_bundle_verifies_manifest_and_blobs_in_one_pass(self) -> None:
+    def test_concurrent_capture_loser_reuses_the_identical_published_bundle(
+        self,
+    ) -> None:
+        self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
+        (self.workspace / "modify.txt").write_text("after\n", encoding="utf-8")
+        first = self.results.capture(ATTEMPT_ID, self.workspace)
+
+        with mock.patch.object(Path, "exists", return_value=False):
+            replayed = self.results.capture(ATTEMPT_ID, self.workspace)
+
+        self.assertEqual(replayed.manifest.digest, first.manifest.digest)
+        self.assertEqual(replayed.directory, first.directory)
+
+    def test_load_bundle_returns_the_verified_manifest_and_blob_map(self) -> None:
         self.results.stage(ATTEMPT_ID, self.workspace, COMMIT)
         (self.workspace / "modify.txt").write_text("after\n", encoding="utf-8")
         captured = self.results.capture(ATTEMPT_ID, self.workspace)

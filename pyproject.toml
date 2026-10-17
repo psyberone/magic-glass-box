@@ -19,6 +19,7 @@ development = [
     "mutmut==3.6.0",
     "PyJWT[crypto]>=2.10,<3",
     "pytest",
+    "rfc3339-validator>=0.1.4,<0.2",
     "ruff",
 ]
 openai-connector = ["PyJWT[crypto]>=2.10,<3"]

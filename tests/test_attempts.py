@@ -19,6 +19,7 @@ from magic_glass_box.domain import (
     HandoffEnvelope,
     InteractionKind,
     ProjectContext,
+    RunState,
     ValidationError,
     WorkItemEnvelope,
 )
@@ -125,6 +126,27 @@ class RunAttemptTests(unittest.TestCase):
             image_id=IMAGE_ID,
         )
         return run, running
+
+    def test_generic_run_transition_cannot_bypass_active_attempt_authority(
+        self,
+    ) -> None:
+        for target in (
+            RunState.WAITING_FOR_INPUT,
+            RunState.SUCCEEDED,
+            RunState.FAILED,
+            RunState.CANCELLED,
+        ):
+            run, _attempt = self.running_attempt()
+            current = self.database.get_run(run["id"])
+            with (
+                self.subTest(target=target),
+                self.assertRaisesRegex(ConflictError, "active attempt"),
+            ):
+                self.database.transition_run(
+                    run["id"],
+                    target=target,
+                    expected_version=current["version"],
+                )
 
     def test_start_attempt_validates_boundaries_and_records_exact_audit(self) -> None:
         defaults = {
@@ -1035,7 +1057,7 @@ class AttemptMigrationTests(unittest.TestCase):
                     )
             self.assertEqual(after, before)
 
-    def test_schema_four_migrates_once_without_losing_state(self) -> None:
+    def test_schema_four_migrates_existing_attempt_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-four.db"
             connection = sqlite3.connect(path)

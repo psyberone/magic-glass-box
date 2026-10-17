@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
+import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -461,7 +465,7 @@ class DockerCLI:
             ):
                 raise ExecutionError(f"{label} must be positive")
         self.binary = Path(binary)
-        self.runner = runner or subprocess.run
+        self.runner = runner
         self.command_timeout = float(command_timeout)
         self.run_timeout = float(
             DEFAULT_RUN_TIMEOUT_SECONDS if run_timeout is None else run_timeout
@@ -477,28 +481,107 @@ class DockerCLI:
     ) -> str:
         effective_timeout = self.command_timeout if use_command_timeout else timeout
         try:
-            completed = self.runner(
-                [str(self.binary), *args],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=effective_timeout,
-                check=False,
-            )
+            command = [str(self.binary), *args]
+            if self.runner is None:
+                completed = self._bounded_process(
+                    command,
+                    timeout=effective_timeout,
+                    max_output_bytes=max_output_bytes,
+                )
+            else:
+                completed = self.runner(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=effective_timeout,
+                    check=False,
+                )
         except subprocess.TimeoutExpired:
             raise ExecutionError("Docker command timed out") from None
         except OSError:
             raise ExecutionError("cannot execute Docker CLI") from None
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        if len(stdout.encode("utf-8")) + len(stderr.encode("utf-8")) > max_output_bytes:
+            raise ExecutionError("Docker command output exceeds the size limit")
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout).strip()
+            detail = (stderr or stdout).strip()
             if not detail:
                 detail = "unknown daemon error"
             raise ExecutionError(f"Docker command failed: {detail[:4096]}")
-        if len(completed.stdout.encode("utf-8")) > max_output_bytes:
-            raise ExecutionError("Docker command output exceeds the size limit")
-        return completed.stdout
+        return stdout
+
+    @staticmethod
+    def _stop_process(process: subprocess.Popen[bytes]) -> None:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=1)
+
+    def _bounded_process(
+        self,
+        command: list[str],
+        *,
+        timeout: float | None,
+        max_output_bytes: int,
+    ) -> subprocess.CompletedProcess[str]:
+        if timeout is None:
+            raise ExecutionError("Docker command timeout is unavailable")
+        process = subprocess.Popen(  # noqa: S603 - configured absolute Docker binary
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        deadline = time.monotonic() + timeout
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            try:
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    events = selector.select(remaining)
+                    if not events:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    for key, _ in events:
+                        chunk = os.read(key.fd, 64 * 1024)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                            continue
+                        if (
+                            len(buffers["stdout"]) + len(buffers["stderr"]) + len(chunk)
+                            > max_output_bytes
+                        ):
+                            raise ExecutionError(
+                                "Docker command output exceeds the size limit"
+                            )
+                        buffers[key.data].extend(chunk)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                returncode = process.wait(timeout=remaining)
+            except BaseException:
+                self._stop_process(process)
+                raise
+            finally:
+                for stream in (process.stdout, process.stderr):
+                    if not stream.closed:
+                        stream.close()
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout=bytes(buffers["stdout"]).decode("utf-8", "replace"),
+            stderr=bytes(buffers["stderr"]).decode("utf-8", "replace"),
+        )
 
     def inspect_image(self, reference: str) -> DockerImage:
         raw = self._run(("image", "inspect", reference))

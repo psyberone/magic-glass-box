@@ -513,7 +513,7 @@ class InteractionMigrationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
 
-    def test_schema_one_migrates_once_without_losing_existing_state(self) -> None:
+    def test_schema_one_migrates_existing_interactions(self) -> None:
         path = Path(self.temporary.name) / "legacy.db"
         connection = sqlite3.connect(path)
         connection.executescript(SCHEMA_V1)

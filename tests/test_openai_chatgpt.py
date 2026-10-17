@@ -480,6 +480,35 @@ class ChatGPTProfileStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ChatGPTAuthenticationError, "invalid"):
             self.store.session()
 
+    def test_store_rejects_boolean_profile_record_versions(self) -> None:
+        self.profile.mkdir(mode=0o700)
+        host = self.profile / "host.json"
+        host.write_text(
+            json.dumps(
+                {
+                    "ext_agent_host_id": (
+                        "urn:uuid:11111111-1111-4111-8111-111111111111"
+                    ),
+                    "schema_version": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        host.chmod(0o600)
+        with self.assertRaisesRegex(ChatGPTAuthenticationError, "host profile"):
+            self.store.host_id()
+
+        host.unlink()
+        self.store.host_id()
+        registration = self.profile / "registration.json"
+        registration.write_text(
+            json.dumps({"client_id": CLIENT_ID, "schema_version": True}),
+            encoding="utf-8",
+        )
+        registration.chmod(0o600)
+        with self.assertRaisesRegex(ChatGPTAuthenticationError, "registration profile"):
+            self.store.registration()
+
     def test_clear_session_retains_registration_for_reauthorization(self) -> None:
         host_id = self.store.host_id()
         self.store.save_registration(CLIENT_ID)
@@ -507,6 +536,7 @@ class ChatGPTProfileStoreTests(unittest.TestCase):
             ([], "session"),
             (missing_subject, "shape"),
             (session_mapping(schema_version=2), "version"),
+            (session_mapping(schema_version=True), "version"),
             (session_mapping(client_id="not-a-client"), "client_id"),
             (session_mapping(ext_agent_host_id="not-a-host"), "host"),
             (session_mapping(issuer="https://example.com"), "issuer"),
@@ -621,7 +651,7 @@ class ChatGPTOAuthTests(unittest.TestCase):
         self.assertEqual(returning_query["client_id"], [CLIENT_ID])
         self.assertNotIn("agent_name_hint", returning_query)
 
-    def test_complete_saves_registration_before_exchange_and_session_after_validation(
+    def test_complete_saves_registration_and_session_after_validation(
         self,
     ) -> None:
         http = FakeHTTPClient(token_response())
@@ -650,7 +680,9 @@ class ChatGPTOAuthTests(unittest.TestCase):
         self.assertEqual(form["code_verifier"], [attempt.code_verifier])
         self.assertNotIn("client_secret", form)
 
-    def test_registration_survives_failed_code_exchange(self) -> None:
+    def test_failed_code_exchange_does_not_persist_unverified_registration(
+        self,
+    ) -> None:
         http = FakeHTTPClient(HTTPTransportError("private detail", ambiguous=False))
         oauth = self.oauth(http)
         attempt = oauth.begin("http://127.0.0.1:54321/auth/callback")
@@ -665,7 +697,7 @@ class ChatGPTOAuthTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(self.store.registration(), CLIENT_ID)
+        self.assertIsNone(self.store.registration())
         self.assertIsNone(self.store.session())
 
     def test_callback_state_client_and_direct_permission_fail_closed(self) -> None:
@@ -1299,6 +1331,52 @@ class OpenAIResponsesClientTests(unittest.TestCase):
 
         self.assertEqual(result.status_code, 200)
 
+    def test_prior_assistant_phase_metadata_is_supported_and_bounded(self) -> None:
+        raw = completed_sse()
+        for phase in ("commentary", "final_answer"):
+            http = FakeHTTPClient(
+                HTTPResponse(200, "text/event-stream", raw, "req_phase")
+            )
+            request = self.request(
+                input=[
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "continuing"}],
+                        "phase": phase,
+                    }
+                ]
+            )
+
+            with self.subTest(phase=phase):
+                result = self.invoke(http, request)
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(
+                    json.loads(http.requests[0]["body"])["input"],
+                    request["body"]["input"],
+                )
+
+        for phase in ("future_phase", True):
+            http = FakeHTTPClient()
+            with (
+                self.subTest(phase=phase),
+                self.assertRaisesRegex(ChatGPTResponseFailure, "input"),
+            ):
+                self.invoke(
+                    http,
+                    self.request(
+                        input=[
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": "continuing",
+                                "phase": phase,
+                            }
+                        ]
+                    ),
+                )
+            self.assertEqual(http.requests, [])
+
     def test_hosted_capabilities_and_unbound_local_calls_fail_before_http(self) -> None:
         invalid = (
             self.request(tool_choice={"type": "web_search_preview"}),
@@ -1838,6 +1916,7 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
             [],
             {**value(), "extra": True},
             {**value(), "schema_version": 2},
+            {**value(), "schema_version": True},
             {**value(), "connector_id": "wrong"},
             {**value(), "deployment_sha256": "wrong"},
             {**value(), "routes": []},
