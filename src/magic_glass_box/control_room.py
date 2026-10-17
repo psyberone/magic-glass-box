@@ -912,7 +912,8 @@ class ControlRoom:
             run_ids,
             "SELECT rpg.run_id, rpg.authority_name, pg.id AS grant_id, "
             "pg.name, pg.state, pg.grant_kind, pg.expires_at, pg.revoked_at, "
-            "c.state AS connector_state "
+            "rpg.created_at AS authority_created_at, "
+            "c.state AS connector_state, c.revoked_at AS connector_revoked_at "
             "FROM run_provider_grants rpg JOIN provider_grants pg "
             "ON pg.id = rpg.provider_grant_id "
             "LEFT JOIN provider_connector_bindings pcb "
@@ -931,6 +932,21 @@ class ControlRoom:
             authority = dict(row)
             authority.pop("grant_kind")
             authority.pop("connector_state")
+            connector_revoked_at = authority.pop("connector_revoked_at")
+            authority_created_at = authority.pop("authority_created_at")
+            unavailable_times: list[str] = []
+            if row["state"] != "active" and row["revoked_at"] is not None:
+                unavailable_times.append(row["revoked_at"])
+            if expired:
+                unavailable_times.append(row["expires_at"])
+            if row["grant_kind"] != "connector":
+                authority["state"] = "unsupported"
+                unavailable_times.append(authority_created_at)
+            elif row["connector_state"] != "active":
+                if row["state"] == "active":
+                    authority["state"] = row["connector_state"] or "unavailable"
+                    authority["revoked_at"] = connector_revoked_at
+                unavailable_times.append(connector_revoked_at or authority_created_at)
             authority.update(
                 {
                     "expired": expired,
@@ -939,6 +955,9 @@ class ControlRoom:
                         and row["grant_kind"] == "connector"
                         and row["connector_state"] == "active"
                         and not expired
+                    ),
+                    "unavailable_since": (
+                        min(unavailable_times) if unavailable_times else None
                     ),
                 }
             )
@@ -1381,9 +1400,7 @@ class ControlRoom:
                 )
         for authority in authorities:
             if authority["run_id"] in active_runs and not authority["available"]:
-                age_started_at = authority.get("revoked_at") or authority.get(
-                    "expires_at"
-                )
+                age_started_at = authority.get("unavailable_since")
                 if age_started_at is None:
                     age_started_at = generated_at
                 add(

@@ -778,6 +778,73 @@ class CandidateKernelTests(unittest.TestCase):
                 {hashlib.sha256(after).hexdigest(): after},
             )
 
+    def test_base_symlink_identity_survives_same_blob_as_changed_regular_file(
+        self,
+    ) -> None:
+        repository = self.root / "blob-identity-source"
+        repository.mkdir()
+        git(self.git_binary, "init", "--quiet", cwd=repository)
+        (repository / "target.txt").write_text("target\n", encoding="utf-8")
+        (repository / "a-link").symlink_to("target.txt")
+        (repository / "z-collision.txt").write_text("target.txt", encoding="utf-8")
+        git(self.git_binary, "add", ".", cwd=repository)
+        git(
+            self.git_binary,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "shared blob identity",
+            cwd=repository,
+        )
+        base = git(self.git_binary, "rev-parse", "HEAD", cwd=repository)
+        workspace = self.root / "blob-identity-workspace"
+        workspace.mkdir()
+        GitSnapshotter(binary=self.git_binary).snapshot(repository, base, workspace)
+        results = WorkspaceResultStore(
+            self.root / "blob-identity-results", git_binary=self.git_binary
+        )
+        attempt_id = "att_" + "d" * 32
+        results.stage(attempt_id, workspace, base)
+        (workspace / "z-collision.txt").write_text("changed\n", encoding="utf-8")
+        captured = results.capture(attempt_id, workspace)
+        result, blobs = results.load_bundle(
+            attempt_id, expected_digest=captured.manifest.digest
+        )
+
+        materialized = self.store.materialize(
+            "boxp_" + "e" * 32, repository, result, blobs
+        )
+        candidate_repository = (
+            self.store.root
+            / "projects"
+            / hashlib.sha256(("boxp_" + "e" * 32).encode()).hexdigest()
+            / materialized.object_format
+            / "repository.git"
+        )
+
+        self.assertEqual(
+            git(
+                self.git_binary,
+                f"--git-dir={candidate_repository}",
+                "show",
+                f"{materialized.head_revision}:a-link",
+            ),
+            "target.txt",
+        )
+        self.assertEqual(
+            git(
+                self.git_binary,
+                f"--git-dir={candidate_repository}",
+                "show",
+                f"{materialized.head_revision}:z-collision.txt",
+            ),
+            "changed",
+        )
+
     def test_concurrent_materialization_is_idempotent(self) -> None:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [

@@ -1430,15 +1430,15 @@ class GitCandidateStore:
                 bare=True,
             )
             changed_paths = {change.path for change in result.changes}
-            needed = {
-                entry.object_id: entry
+            needed = [
+                entry
                 for entry in entries.values()
                 if entry.kind == "blob"
                 and (entry.mode == "120000" or entry.path in changed_paths)
-            }
+            ]
             base_object_states = self._read_base_objects(
                 store,
-                list(needed.values()),
+                needed,
                 object_format=object_format,
                 operation=operation,
             )

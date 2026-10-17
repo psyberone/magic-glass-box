@@ -60,7 +60,7 @@ eight entries and is bounded to 30 days. Its fields are:
 | `interaction_escalation_seconds` | Ages at which an open interaction receives an idempotent Krab reminder. |
 | `attempt_idle_escalation_seconds` | Ages since the latest owner heartbeat that become control-room escalation records. |
 | `attempt_lease_expired_escalation_seconds` | Ages since lease expiry that become control-room escalation records. |
-| `other_attention_escalation_seconds` | Ages for orphaned active runs, waiting runs without an interaction, and unavailable provider authority. |
+| `other_attention_escalation_seconds` | Ages for orphaned active runs, waiting runs without an interaction, and unavailable provider authority. Authority age begins at its first real revocation, expiry, missing/revoked connector, or unsupported historical-direct condition. |
 
 A threshold of zero means “on the first pass at or after the condition begins.”
 Schedules are evaluated against the database's UTC clock. Policy is immutable

@@ -208,8 +208,8 @@ def _invoke(
             **authority,
             "outcome": "failed",
             "provider_status": exc.status_code,
-            "request_bytes": exc.request_bytes,
-            "response_bytes": exc.response_bytes,
+            "request_bytes": min(exc.request_bytes, request.request_limit_bytes),
+            "response_bytes": min(exc.response_bytes, request.response_limit_bytes),
             "error_code": "upstream_error",
             "response": None,
         }

@@ -26,6 +26,7 @@ from magic_glass_box.domain import (
     SupervisionPolicy,
     WorkItemEnvelope,
 )
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity
 
 
@@ -731,6 +732,109 @@ class SupervisionDatabaseTests(unittest.TestCase):
         self.assertEqual(
             idle[0]["age_started_at"],
             (start + timedelta(seconds=500)).isoformat(timespec="microseconds"),
+        )
+
+    def test_revoked_connector_escalation_ages_from_connector_revocation(self) -> None:
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            connector = self.database.register_inference_connector(
+                name="supervised-sidecar",
+                spec=InferenceConnectorSpec.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "connector_protocol_version": 1,
+                        "deployment_sha256": "a" * 64,
+                        "transport": {
+                            "kind": "unix",
+                            "socket_path": str(
+                                Path(self.temporary.name) / "supervised.sock"
+                            ),
+                        },
+                        "routes": [
+                            {
+                                "name": "responses-main",
+                                "provider": "openai",
+                                "protocol": "openai-responses",
+                                "models": ["gpt-test"],
+                                "credential_scope_sha256": "b" * 64,
+                            }
+                        ],
+                        "request_bytes": 32768,
+                        "response_bytes": 65536,
+                        "timeout_ms": 30000,
+                        "max_concurrency": 1,
+                    }
+                ),
+                created_by=self.user["id"],
+            )
+            grant = self.database.create_connector_provider_grant(
+                name="supervised-provider",
+                spec=InferenceGrantSpec.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "connector_name": connector["name"],
+                        "deployment_sha256": "a" * 64,
+                        "route": "responses-main",
+                        "credential_scope_sha256": "b" * 64,
+                        "provider": "openai",
+                        "protocol": "openai-responses",
+                        "model": "gpt-test",
+                        "request_bytes": 32768,
+                        "response_bytes": 65536,
+                        "timeout_ms": 30000,
+                        "max_concurrency": 1,
+                    }
+                ),
+                expires_at=None,
+                created_by=self.user["id"],
+            )
+            run = self.create_run(self.automatic_policy())
+            with self.database.connect() as connection:
+                connection.execute(
+                    "INSERT INTO run_provider_grants "
+                    "(run_id, authority_name, provider_grant_id, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (run["id"], grant["name"], grant["id"], start.isoformat()),
+                )
+
+        revoked_at = start + timedelta(seconds=100)
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=revoked_at.isoformat(timespec="microseconds"),
+        ):
+            self.database.revoke_inference_connector(
+                connector["name"],
+                expected_version=connector["version"],
+                revoked_by=self.user["id"],
+            )
+
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=(revoked_at + timedelta(seconds=299)).isoformat(
+                timespec="microseconds"
+            ),
+        ):
+            self.assertEqual(self.database.create_due_supervisor_escalations(), [])
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=(revoked_at + timedelta(seconds=300)).isoformat(
+                timespec="microseconds"
+            ),
+        ):
+            escalations = self.database.create_due_supervisor_escalations()
+
+        authority = [
+            item for item in escalations if item["kind"] == "authority.unavailable"
+        ]
+        self.assertEqual(len(authority), 1)
+        self.assertEqual(
+            authority[0]["age_started_at"],
+            revoked_at.isoformat(timespec="microseconds"),
         )
 
     def identity_id(self) -> str:

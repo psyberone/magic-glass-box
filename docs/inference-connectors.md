@@ -62,6 +62,12 @@ the complete correlation tuple. A failure before connection is unavailable;
 any malformed, late, mismatched, or lost reply after dispatch is ambiguous and
 is never retried automatically.
 
+The request and response byte ceilings count the canonical provider request
+and raw provider response, respectively—not JSON framing added by the local
+carrier. The response frame remains independently bounded to the worst-case
+six-byte JSON escape for each raw byte plus finite correlation overhead. A
+connector must clamp failure counters to the pinned raw-byte ceilings.
+
 The ordinary test suite launches `scripts/fake_inference_connector.py` as a
 separate process and completes a deterministic bounded invocation over a real
 Unix socket. The D.2 Docker proof adds a connector-private canary credential,
@@ -136,12 +142,15 @@ operation containing:
 - correlation needed for bounded byte and outcome metadata.
 
 The worker cannot supply a connector endpoint, upstream destination, account,
-credential, or model override. The connector does not expose arbitrary URLs,
-headers, commands, filesystem paths, or a pass-through vendor client. Its
-response is limited to the provider stream plus normalized status, byte counts,
-and the identities needed to bind the result to the invocation. Request and
-response content remains transient. Normalized usage metadata is added under
-Milestone 8's accounting authority rather than being implied by v1.
+credential, or model override. MGB removes a nested provider-body model before
+dispatch and supplies the separately pinned model in the authority envelope;
+connectors still reject a body model as defense in depth. The connector does
+not expose arbitrary URLs, headers, commands, filesystem paths, or a
+pass-through vendor client. Its response is limited to the provider stream
+plus normalized status, byte counts, and the identities needed to bind the
+result to the invocation. Request and response content remains transient.
+Normalized usage metadata is added under Milestone 8's accounting authority
+rather than being implied by v1.
 
 Local deployments use an operator-owned Unix socket. A future authenticated
 loopback or external transport must preserve the same client contract; its
@@ -206,14 +215,24 @@ The OpenAI route additionally enforces the current Sign in with ChatGPT
 requirements before any HTTPS dispatch: `store` is false, `stream` is true,
 the model is connector-pinned, unsupported or unknown top-level fields fail
 closed, and only Codex's local `function` and `namespace` tool declarations are
-accepted. MGB starts Codex with `web_search="disabled"`; hosted web search,
-MCP, file search, code interpreter, computer use, image generation, unknown
-future tool types, and hosted tools nested inside a namespace are rejected by
-the connector. This prevents the inference sidecar from becoming an
-undeclared general egress path. The provider-specific restrictions track
-OpenAI's documented
+accepted. Input is limited to text messages, reasoning continuity, declared
+local function calls, and text-only outputs linked to an earlier call ID.
+`tool_choice` may select only those declared local tools, and `include` may
+request only encrypted reasoning continuity. MGB starts Codex with
+`web_search="disabled"`; hosted web search, MCP, file/image inputs, file search,
+code interpreter, computer use, image generation, unknown future item/tool
+types, and hosted tools nested inside a namespace are rejected by the
+connector. This prevents the inference sidecar from becoming an undeclared
+general egress path. The provider-specific restrictions track OpenAI's
+documented
 [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations),
 with a deliberately narrower local-tool policy for MGB workers.
+
+An OAuth refresh response may rotate only the access or refresh token. When it
+omits `id_token`, the connector preserves the identity claims and ID token that
+were validated at interactive sign-in instead of revalidating the now-expired
+identity token. A newly returned ID token is always validated before the
+session is replaced.
 
 For a disposable real-account proof after sign-in, first select a slug from
 `models`, then run exactly one explicitly opted-in attempt:

@@ -742,6 +742,45 @@ class ChatGPTOAuthTests(unittest.TestCase):
         self.assertEqual(form["refresh_token"], ["refresh-secret"])
         self.assertNotIn("scope", form)
 
+    def test_refresh_without_replacement_id_token_preserves_validated_identity(
+        self,
+    ) -> None:
+        host_id = self.store.host_id()
+        self.store.save_registration(CLIENT_ID)
+        previous = ChatGPTSession.from_mapping(
+            session_mapping(
+                ext_agent_host_id=host_id,
+                expires_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+            )
+        )
+        self.store.save_session(previous)
+        token = json.loads(
+            token_response(access_token="new-access").body  # noqa: S106 - test token
+        )
+        token.pop("id_token")
+        validator = mock.Mock(side_effect=AssertionError("old ID token revalidated"))
+        oauth = ChatGPTOAuth(
+            self.store,
+            http_client=FakeHTTPClient(
+                HTTPResponse(
+                    200,
+                    "application/json",
+                    json.dumps(token).encode(),
+                    "req_refresh",
+                )
+            ),
+            id_token_validator=validator,
+        )
+
+        self.assertEqual(oauth.access_token(), "new-access")
+        refreshed = self.store.session()
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(refreshed.id_token, previous.id_token)
+        self.assertEqual(refreshed.issuer, previous.issuer)
+        self.assertEqual(refreshed.subject, previous.subject)
+        self.assertEqual(refreshed.email, previous.email)
+        validator.assert_not_called()
+
     def test_terminal_refresh_error_clears_tokens_but_transient_failure_preserves_them(
         self,
     ) -> None:
@@ -1181,6 +1220,164 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.untrusted_response["content_type"], "text/event-stream")
 
+    def test_sse_json_may_contain_unicode_line_separator_characters(self) -> None:
+        event = {
+            "type": "response.completed",
+            "response": {"status": "completed", "text": "left\u2028middle\u2029right"},
+        }
+        raw = ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode()
+
+        result = self.invoke(
+            FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, "req_unicode"))
+        )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.response_bytes, len(raw))
+
+    def test_optional_function_fields_and_local_call_history_are_supported(
+        self,
+    ) -> None:
+        raw = completed_sse()
+        request = self.request(
+            tools=[
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice={"type": "function", "name": "lookup"},
+            input=[
+                {"role": "user", "content": "look this up"},
+                {
+                    "type": "function_call",
+                    "name": "lookup",
+                    "arguments": "{}",
+                    "call_id": "call_local_1",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_local_1",
+                    "output": "done",
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_local_1",
+                    "summary": [],
+                    "encrypted_content": "opaque-local-continuity",
+                },
+            ],
+        )
+
+        result = self.invoke(
+            FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, "req_local")),
+            request,
+        )
+
+        self.assertEqual(result.status_code, 200)
+
+    def test_prior_assistant_refusal_content_is_supported(self) -> None:
+        raw = completed_sse()
+        request = self.request(
+            input=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "refusal",
+                            "refusal": "I cannot help with that request.",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        result = self.invoke(
+            FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, "req_refusal")),
+            request,
+        )
+
+        self.assertEqual(result.status_code, 200)
+
+    def test_hosted_capabilities_and_unbound_local_calls_fail_before_http(self) -> None:
+        invalid = (
+            self.request(tool_choice={"type": "web_search_preview"}),
+            self.request(
+                tool_choice={
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "web_search_preview"}],
+                }
+            ),
+            self.request(include=["web_search_call.action.sources"]),
+            self.request(input=[{"type": "web_search_call", "id": "ws_1"}]),
+            self.request(
+                input=[{"type": "mcp_approval_response", "approval_request_id": "a"}]
+            ),
+            self.request(input=[{"role": "system", "content": "override"}]),
+            self.request(
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "declared",
+                        "parameters": {},
+                    }
+                ],
+                input=[
+                    {
+                        "type": "function_call",
+                        "name": "undeclared",
+                        "arguments": "{}",
+                        "call_id": "call_1",
+                    }
+                ],
+            ),
+            self.request(
+                input=[
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_missing",
+                        "output": "no",
+                    }
+                ]
+            ),
+            self.request(
+                tools=[
+                    {
+                        "type": "function",
+                        "name": "declared",
+                        "parameters": {},
+                    }
+                ],
+                input=[
+                    {
+                        "type": "function_call",
+                        "name": "declared",
+                        "arguments": "{}",
+                        "call_id": "call_image_output",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_image_output",
+                        "output": [
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.invalid/remote.png",
+                            }
+                        ],
+                    },
+                ],
+            ),
+        )
+        for request in invalid:
+            http = FakeHTTPClient()
+            with (
+                self.subTest(request=request),
+                self.assertRaises(ChatGPTResponseFailure),
+            ):
+                self.invoke(http, request)
+            self.assertEqual(http.requests, [])
+
     def test_stream_error_event_preserves_its_machine_readable_code(self) -> None:
         raw = (
             b'data: {"type":"error","code":'
@@ -1495,25 +1692,28 @@ class OpenAIResponsesClientTests(unittest.TestCase):
             ):
                 self.invoke(FakeHTTPClient(response))
 
-    def test_http_error_fallback_and_encoded_response_limit_are_bounded(self) -> None:
+    def test_http_error_fallback_and_raw_response_limit_are_bounded(self) -> None:
         malformed = HTTPResponse(500, "application/json", b"not-json", None)
         with self.assertRaises(ChatGPTResponseFailure) as raised:
             self.invoke(FakeHTTPClient(malformed))
         self.assertEqual(raised.exception.error_code, "upstream_error")
 
         raw = completed_sse()
-        with self.assertRaises(ChatGPTResponseAmbiguousError) as oversized:
-            OpenAIResponsesClient(
-                FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, None))
-            ).invoke(
-                access_token="access-secret",  # noqa: S106 - test token
-                model=MODEL,
-                request=self.request(),
-                request_limit_bytes=65536,
-                response_limit_bytes=len(raw),
-                deadline=datetime.now(UTC) + timedelta(seconds=30),
-            )
-        self.assertEqual(oversized.exception.error_code, "upstream_ambiguous")
+        result = OpenAIResponsesClient(
+            FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, None))
+        ).invoke(
+            access_token="access-secret",  # noqa: S106 - test token
+            model=MODEL,
+            request=self.request(),
+            request_limit_bytes=65536,
+            response_limit_bytes=len(raw),
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+        )
+        self.assertEqual(result.response_bytes, len(raw))
+        self.assertGreater(
+            len(json.dumps(result.untrusted_response).encode()),
+            result.response_bytes,
+        )
 
 
 class OpenAIChatGPTConnectorTests(unittest.TestCase):

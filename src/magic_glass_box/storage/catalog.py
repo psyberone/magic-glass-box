@@ -160,6 +160,7 @@ class CatalogStorage:
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="provider grant creator")
                 connection.execute(
                     "INSERT INTO provider_grants "
                     "(id, name, state, version, policy_json, content_sha256, "
@@ -211,6 +212,7 @@ class CatalogStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, revoked_by, role="provider grant revoker")
                 current = connection.execute(
                     "SELECT id, state, version FROM provider_grants WHERE name = ?",
                     (name,),
@@ -295,6 +297,8 @@ class CatalogStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                if user_id is not None:
+                    self._active_user(connection, user_id, role="identity owner")
                 existing = connection.execute(
                     "SELECT id FROM krab_identities "
                     "WHERE krab_instance_id = ? AND krab_user_id = ?",
@@ -396,6 +400,7 @@ class CatalogStorage:
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="project creator")
                 connection.execute(
                     "INSERT INTO projects "
                     "(id, krab_instance_id, krab_project_id, krab_project_key, "
@@ -458,6 +463,7 @@ class CatalogStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="context creator")
                 project = connection.execute(
                     "SELECT id FROM projects WHERE krab_project_key = ?",
                     (project_key,),
@@ -545,6 +551,7 @@ class CatalogStorage:
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="profile creator")
                 self._available_provider_grants(connection, spec)
                 connection.execute(
                     "INSERT INTO agent_profiles "
@@ -606,6 +613,7 @@ class CatalogStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="profile creator")
                 profile = connection.execute(
                     "SELECT id FROM agent_profiles WHERE name = ?", (name,)
                 ).fetchone()

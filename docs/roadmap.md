@@ -557,7 +557,7 @@ The credential scan was clean and direct worker networking remained denied.
 
 ## Post-Milestone 7 external-audit stabilization
 
-**Status: in progress — R1 through R4 complete**
+**Status: in progress — R1 through R5 complete**
 
 Three independent cold promise audits follow M7. This is a correctness and
 boundary-hardening sequence, not a compressed feature milestone. Repairs are
@@ -583,10 +583,18 @@ grouped by invariant so overlapping findings produce one coherent change:
    shipped Unix sidecars isolate malformed and idle clients and clean their
    sockets on controlled termination; queued cancellation stays independent of
    Docker construction.
-5. **R5/R6 — authority, protocol, and contract closure:** revoked-authority
-   retry/supervision, user and interaction binding, connector capability
-   allowlists, OAuth/SSE edge cases, remaining bounded reads, and documentation
-   alignment.
+5. **R5 — authority and protocol closure (complete):** retries, supervision,
+   and the control room now account for the complete live connector authority;
+   inactive local users cannot author control-plane mutations; interaction
+   answers require a pristine post-question item from the bound active user;
+   nested model overrides are removed centrally; and the OpenAI connector
+   admits only text-bearing local-tool history. OAuth refresh, SSE parsing,
+   raw-byte accounting, JSON frame expansion, and candidate blob/symlink
+   identity collisions have matching regression proofs.
+6. **R6 — lower-risk contract cleanup and final proof:** remaining bounded
+   Docker/CLI reads, strict timestamp and schema-checker alignment, CLI/UI and
+   documentation cleanup, focused repros, full mutation, deterministic live
+   proofs, and the internal promise audit.
 
 Each checkpoint is RED-first with happy and sad paths. The completed boundary
 must repeat the test, branch-coverage, mutation, deterministic live, and

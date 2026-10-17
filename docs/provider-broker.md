@@ -73,10 +73,12 @@ destination, session, client-metadata, telemetry, and arbitrary worker headers
 are discarded. Connector-private static headers are applied afterward.
 
 The worker cannot select a destination, method, credential, connector endpoint,
-account, or top-level model. MGB sends one strict authorized inference envelope;
-the connector validates that envelope against its private route before adapting
-the transient request. Redirects are not followed. Provider output remains
-untrusted agent input and request/response bodies are not made durable.
+account, or model. MGB strips a model nested in the provider body before any
+third-party connector receives the request, then sends one strict authorized
+inference envelope with the separately pinned model. The connector validates
+that envelope against its private route before adapting the transient request.
+Redirects are not followed. Provider output remains untrusted agent input and
+request/response bodies are not made durable.
 
 ## Durable audit boundary
 

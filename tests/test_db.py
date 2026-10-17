@@ -21,6 +21,7 @@ from magic_glass_box.db import (
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
+    ProviderGrantSpec,
     RunState,
     ValidationError,
     WorkItemEnvelope,
@@ -658,6 +659,102 @@ class DatabaseTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(NotFoundError, "active agent profile not found"):
             self.create_run()
+
+    def test_inactive_users_cannot_author_control_plane_mutations(self) -> None:
+        provider_spec = ProviderGrantSpec.from_mapping(
+            {
+                "provider": "openai",
+                "adapter": "json_http",
+                "destination": "https://api.openai.com/v1/responses",
+                "method": "POST",
+                "model": "gpt-test",
+                "credential_header": "Authorization",
+                "credential_prefix": "Bearer ",
+                "static_headers": {},
+                "request_bytes": 16384,
+                "response_bytes": 32768,
+                "timeout_ms": 10000,
+                "max_concurrency": 1,
+            }
+        )
+        existing_grant = self.database.create_provider_grant(
+            name="existing-direct",
+            spec=provider_spec,
+            credential_ref="env:OPENAI_API_KEY",
+            expires_at=None,
+            created_by=self.user["id"],
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE users SET active = 0 WHERE id = ?", (self.user["id"],)
+            )
+
+        operations = {
+            "provider grant creation": lambda: self.database.create_provider_grant(
+                name="inactive-direct",
+                spec=provider_spec,
+                credential_ref="env:OPENAI_API_KEY",
+                expires_at=None,
+                created_by=self.user["id"],
+            ),
+            "provider grant revocation": lambda: self.database.revoke_provider_grant(
+                existing_grant["name"],
+                expected_version=existing_grant["version"],
+                revoked_by=self.user["id"],
+            ),
+            "identity binding": lambda: self.database.store_krab_identity(
+                self.instance["id"],
+                KrabIdentity("usr_" + "9" * 32, "other_agent", 1),
+                "file:/private/other-agent",
+                user_id=self.user["id"],
+            ),
+            "project creation": lambda: self.database.create_project(
+                instance_id=self.instance["id"],
+                krab_project_id="prj_" + "9" * 32,
+                krab_project_key="inactive-project",
+                display_name="Inactive Project",
+                context=self.context,
+                created_by=self.user["id"],
+            ),
+            "project context": lambda: self.database.add_project_context(
+                "box-project",
+                ProjectContext.from_mapping({"purpose": "Inactive mutation"}),
+                self.user["id"],
+            ),
+            "profile creation": lambda: self.database.create_agent_profile(
+                name="Inactive Worker",
+                spec=self.spec,
+                krab_identity_id=self.identity["id"],
+                created_by=self.user["id"],
+            ),
+            "profile version": lambda: self.database.add_agent_profile_version(
+                name="Codex Worker",
+                spec=self.spec,
+                krab_identity_id=self.identity["id"],
+                created_by=self.user["id"],
+            ),
+            "work-item import": lambda: self.database.import_work_item(
+                project_key="box-project",
+                envelope=WorkItemEnvelope.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "source": "manual",
+                        "external_id": "inactive-import",
+                        "source_updated_at": "2026-10-10T12:00:00Z",
+                        "title": "Inactive import",
+                        "brief": "This mutation must be rejected.",
+                    }
+                ),
+                imported_by=self.user["id"],
+            ),
+            "run creation": self.create_run,
+        }
+        for label, operation in operations.items():
+            with (
+                self.subTest(operation=label),
+                self.assertRaisesRegex(ConflictError, "inactive"),
+            ):
+                operation()
 
     def test_revision_and_event_rows_are_immutable(self) -> None:
         run = self.create_run()

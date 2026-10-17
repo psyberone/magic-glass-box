@@ -23,11 +23,20 @@ INFERENCE_CONNECTOR_PROTOCOL_VERSION = 1
 MAX_CONNECTOR_ROUTES = 32
 MAX_ROUTE_MODELS = 64
 MAX_CONNECTOR_FRAME_OVERHEAD = 64 * 1024
+# JSON may encode one raw control byte as a six-byte ``\u00xx`` escape.
+MAX_CONNECTOR_RESPONSE_EXPANSION = 6
 MAX_UNIX_SOCKET_PATH_BYTES = 100
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 CONNECTOR_ID_RE = re.compile(r"^ifc_[0-9a-f]{32}$")
 PROVIDER_GRANT_ID_RE = re.compile(r"^pgr_[0-9a-f]{32}$")
 PROVIDER_INVOCATION_ID_RE = re.compile(r"^pinv_[0-9a-f]{32}$")
+
+
+def _response_frame_limit(response_limit_bytes: int) -> int:
+    return (
+        response_limit_bytes * MAX_CONNECTOR_RESPONSE_EXPANSION
+        + MAX_CONNECTOR_FRAME_OVERHEAD
+    )
 
 
 class InferenceConnectorError(RuntimeError):
@@ -647,12 +656,11 @@ class InferenceInvocationResponse:
         response_canonical = None
         if response is not None:
             response_canonical = canonical_json(response)
-            if (
-                len(response_canonical.encode("utf-8"))
-                > authority["response_limit_bytes"]
+            if len(response_canonical.encode("utf-8")) > _response_frame_limit(
+                authority["response_limit_bytes"]
             ):
                 raise ValidationError(
-                    "inference invocation response exceeds response limit"
+                    "inference invocation response envelope is oversized"
                 )
         if outcome == "succeeded":
             if (
@@ -814,7 +822,7 @@ class UnixInferenceConnectorClient:
                 connection.sendall(frame)
                 raw_length = _recv_exact(connection, 4, deadline=deadline)
                 length = struct.unpack("!I", raw_length)[0]
-                maximum = request.response_limit_bytes + MAX_CONNECTOR_FRAME_OVERHEAD
+                maximum = _response_frame_limit(request.response_limit_bytes)
                 if not 1 <= length <= maximum:
                     raise ValidationError("connector response frame is oversized")
                 raw_response = _recv_exact(connection, length, deadline=deadline)

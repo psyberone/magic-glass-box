@@ -444,15 +444,12 @@ class WorkItemDatabaseTests(unittest.TestCase):
         connection.execute(
             "UPDATE projects SET active = 1 WHERE id = ?", (self.project["id"],)
         )
-        with self.assertRaises(ConflictError) as unauthorized_import:
+        with self.assertRaisesRegex(NotFoundError, "user not found"):
             self.database.import_work_item(
                 project_key="box-project",
                 envelope=envelope(external_id="new-item"),
                 imported_by="boxu_" + "f" * 32,
             )
-        self.assertEqual(
-            str(unauthorized_import.exception), "work item could not be imported"
-        )
         with self.assertRaisesRegex(ValidationError, "WorkItemEnvelope"):
             self.database.import_work_item(
                 project_key="box-project",

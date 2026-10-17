@@ -74,6 +74,7 @@ class InferenceStorage:
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="connector creator")
                 connection.execute(
                     "INSERT INTO inference_connectors "
                     "(id, name, state, version, schema_version, "
@@ -147,6 +148,7 @@ class InferenceStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, revoked_by, role="connector revoker")
                 current = connection.execute(
                     "SELECT id, state, version FROM inference_connectors "
                     "WHERE name = ?",
@@ -204,6 +206,7 @@ class InferenceStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="provider grant creator")
                 connector_row = connection.execute(
                     "SELECT id, state, spec_json, content_sha256 "
                     "FROM inference_connectors WHERE name = ?",

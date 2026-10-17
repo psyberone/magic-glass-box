@@ -20,6 +20,7 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
     ProjectContext,
+    ProviderGrantSpec,
     ValidationError,
     WorkItemEnvelope,
 )
@@ -110,6 +111,74 @@ class OperatorRunActionTests(unittest.TestCase):
             expected_run_version=run["version"],
             reason="Prepare a terminal source run",
         )
+
+    def configure_connector_authority(
+        self,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        connector = self.database.register_inference_connector(
+            name="provider-sidecar-extra",
+            spec=InferenceConnectorSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "connector_protocol_version": 1,
+                    "deployment_sha256": "c" * 64,
+                    "transport": {
+                        "kind": "unix",
+                        "socket_path": str(
+                            Path(self.temporary.name) / "provider-extra.sock"
+                        ),
+                    },
+                    "routes": [
+                        {
+                            "name": "responses-extra",
+                            "provider": "openai",
+                            "protocol": "openai-responses",
+                            "models": ["gpt-test"],
+                            "credential_scope_sha256": "d" * 64,
+                        }
+                    ],
+                    "request_bytes": 32768,
+                    "response_bytes": 1048576,
+                    "timeout_ms": 30000,
+                    "max_concurrency": 1,
+                }
+            ),
+            created_by=self.operator["id"],
+        )
+        grant = self.database.create_connector_provider_grant(
+            name="provider-extra",
+            spec=InferenceGrantSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "connector_name": connector["name"],
+                    "deployment_sha256": "c" * 64,
+                    "route": "responses-extra",
+                    "credential_scope_sha256": "d" * 64,
+                    "provider": "openai",
+                    "protocol": "openai-responses",
+                    "model": "gpt-test",
+                    "request_bytes": 32768,
+                    "response_bytes": 1048576,
+                    "timeout_ms": 30000,
+                    "max_concurrency": 1,
+                }
+            ),
+            expires_at=None,
+            created_by=self.operator["id"],
+        )
+        worker = self.database.get_agent_profile("Worker")
+        self.database.add_agent_profile_version(
+            name="Worker",
+            spec=AgentProfileSpec.create(
+                image="worker@sha256:connector-extra",
+                command=["worker", "run"],
+                credential_names=[grant["name"]],
+                gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
+            ),
+            krab_identity_id=worker["krab_identity_id"],
+            created_by=self.operator["id"],
+        )
+        return connector, grant
 
     def test_retry_creates_an_audited_successor_with_identical_pins(self) -> None:
         source = self.terminal_run()
@@ -331,6 +400,73 @@ class OperatorRunActionTests(unittest.TestCase):
         unchanged = self.database.get_run(source["id"])
         self.assertEqual(unchanged["version"], source["version"])
         self.assertEqual(unchanged["events"], source["events"])
+
+    def test_retry_refuses_authority_whose_connector_was_revoked(self) -> None:
+        connector, _grant = self.configure_connector_authority()
+        source = self.terminal_run()
+        self.database.revoke_inference_connector(
+            connector["name"],
+            expected_version=connector["version"],
+            revoked_by=self.operator["id"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "pinned provider grant"):
+            self.control.retry_run(
+                source["id"],
+                requested_by_handle="operator",
+                expected_run_version=source["version"],
+            )
+
+        unchanged = self.database.get_run(source["id"])
+        self.assertEqual(unchanged["version"], source["version"])
+        self.assertEqual(unchanged["events"], source["events"])
+
+    def test_retry_refuses_historical_direct_provider_authority(self) -> None:
+        direct = self.database.create_provider_grant(
+            name="historical-direct",
+            spec=ProviderGrantSpec.from_mapping(
+                {
+                    "provider": "openai",
+                    "adapter": "json_http",
+                    "destination": "https://api.openai.com/v1/responses",
+                    "method": "POST",
+                    "model": "gpt-test",
+                    "credential_header": "Authorization",
+                    "credential_prefix": "Bearer ",
+                    "static_headers": {},
+                    "request_bytes": 16384,
+                    "response_bytes": 32768,
+                    "timeout_ms": 10000,
+                    "max_concurrency": 1,
+                }
+            ),
+            credential_ref="env:OPENAI_API_KEY",
+            expires_at=None,
+            created_by=self.operator["id"],
+        )
+        source = self.terminal_run()
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO run_provider_grants "
+                "(run_id, authority_name, provider_grant_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    source["id"],
+                    direct["name"],
+                    direct["id"],
+                    source["updated_at"],
+                ),
+            )
+
+        with self.assertRaisesRegex(ConflictError, "pinned provider grant"):
+            self.control.retry_run(
+                source["id"],
+                requested_by_handle="operator",
+                expected_run_version=source["version"],
+            )
+
+        unchanged = self.database.get_run(source["id"])
+        self.assertEqual(unchanged["version"], source["version"])
 
     def test_replacement_rejects_inactive_boundaries_and_same_profile(self) -> None:
         source = self.terminal_run()

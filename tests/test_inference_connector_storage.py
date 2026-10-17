@@ -274,6 +274,38 @@ class InferenceConnectorStorageTests(unittest.TestCase):
                 revoked_by=self.user["id"],
             )
 
+    def test_inactive_users_cannot_manage_connectors_or_connector_grants(self) -> None:
+        connector = self.register()
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE users SET active = 0 WHERE id = ?", (self.user["id"],)
+            )
+
+        operations = {
+            "register": lambda: self.database.register_inference_connector(
+                name="other-connector",
+                spec=connector_spec(self.root / "other.sock"),
+                created_by=self.user["id"],
+            ),
+            "revoke": lambda: self.database.revoke_inference_connector(
+                connector["name"],
+                expected_version=connector["version"],
+                revoked_by=self.user["id"],
+            ),
+            "grant": lambda: self.database.create_connector_provider_grant(
+                name="inactive-grant",
+                spec=grant_spec(),
+                expires_at=None,
+                created_by=self.user["id"],
+            ),
+        }
+        for label, operation in operations.items():
+            with (
+                self.subTest(operation=label),
+                self.assertRaisesRegex(ConflictError, "inactive"),
+            ):
+                operation()
+
     def test_rotation_creates_new_identity_and_does_not_rebind_old_grant(self) -> None:
         old = self.register()
         old_grant = self.database.create_connector_provider_grant(

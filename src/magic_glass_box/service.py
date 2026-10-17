@@ -44,6 +44,7 @@ from .domain import (
     WorkLogEntry,
     WorkMemoryCheckpoint,
     WorkspaceMode,
+    canonical_json,
     validate_krab_id,
 )
 from .gates import (
@@ -898,6 +899,12 @@ class ControlPlane:
         grant_name: str,
         request: dict[str, Any],
     ) -> AcceptedProviderResponse:
+        request = dict(request)
+        body = request.get("body")
+        if isinstance(body, dict) and "model" in body:
+            request["body"] = {
+                key: value for key, value in body.items() if key != "model"
+            }
         route = self.database.get_run_transport(run_id)
         live_attempt_has_authority = (
             route["state"] in (RunState.RUNNING.value, RunState.WAITING_FOR_INPUT.value)
@@ -940,6 +947,33 @@ class ControlPlane:
             "response_bytes": spec.response_bytes,
             "timeout_ms": spec.timeout_ms,
         }
+        try:
+            request_bytes = len(canonical_json(request).encode("utf-8"))
+        except ValidationError:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="denied",
+                error_code="invalid_request",
+                started_at=started_at,
+                authority=pinned_authority,
+                deadline=deadline,
+            )
+            raise
+        if request_bytes > spec.request_bytes:
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="denied",
+                error_code="request_too_large",
+                started_at=started_at,
+                request_bytes=request_bytes,
+                authority=pinned_authority,
+                deadline=deadline,
+            )
+            raise ValidationError("provider request exceeds its size limit")
         try:
             reservation = self.database.reserve_provider_dispatch(
                 run_id,
@@ -1701,11 +1735,30 @@ class ControlPlane:
             raise ConflictError(
                 "interaction run is not waiting for input: " + interaction["run_state"]
             )
+        recipient = self.database.get_user(
+            interaction["recipient"]["local_user_handle"]
+        )
+        if recipient["active"] != 1:
+            raise ConflictError("interaction recipient is inactive")
         route = self.database.get_run_transport(interaction["run_id"])
         if route["krab_session_id"] is None:
             raise ConflictError("run has no Krab session")
         _, agent, client = self._authenticated_client(
             route["krab_instance_name"], route["agent_krab_handle"]
+        )
+        request_item = client.get_session_item(
+            route["project_key"],
+            route["krab_session_id"],
+            interaction["request_item_id"],
+        )
+        self._verify_interaction_item(
+            request_item,
+            project_key=route["project_key"],
+            session_id=route["krab_session_id"],
+            creator_user_id=agent["krab_user_id"],
+            recipient_user_id=interaction["recipient"]["krab_user_id"],
+            item_id=interaction["request_item_id"],
+            created=False,
         )
         item = client.get_session_item(
             route["project_key"], route["krab_session_id"], response_item_id
@@ -1718,7 +1771,12 @@ class ControlPlane:
             recipient_user_id=agent["krab_user_id"],
             item_id=response_item_id,
             created=False,
+            answer_eligible=True,
         )
+        request_sequence = self._interaction_item_creation_sequence(request_item)
+        response_sequence = self._interaction_item_creation_sequence(item)
+        if response_sequence <= request_sequence:
+            raise KrabError("interaction response was not created after the request")
         answered = self.database.answer_interaction(
             interaction_id,
             response_item_id=response_item_id,
@@ -1827,6 +1885,7 @@ class ControlPlane:
         recipient_user_id: str,
         item_id: str | None,
         created: bool,
+        answer_eligible: bool = False,
     ) -> None:
         if item.project_key != project_key:
             raise KrabError("interaction item belongs to another project")
@@ -1847,6 +1906,24 @@ class ControlPlane:
                 raise KrabError("interaction request has no event sequence")
         elif not item.status.startswith("open."):
             raise KrabError("interaction response item is not open")
+        elif answer_eligible and item.status != "open.pending":
+            raise KrabError("interaction response item is not pending")
+        elif answer_eligible and item.version != 1:
+            raise KrabError("interaction response item has an unexpected version")
+
+    @staticmethod
+    def _interaction_item_creation_sequence(item: SessionItem) -> int:
+        created = [event for event in item.history if event.kind == "item.created"]
+        if len(created) != 1:
+            raise KrabError("interaction item has invalid creation history")
+        event = created[0]
+        if (
+            event.actor.user_id != item.creator.user_id
+            or event.from_status is not None
+            or event.to_status != "open.pending"
+        ):
+            raise KrabError("interaction item has invalid creation history")
+        return event.event_seq
 
 
 def activity_to_dict(page: ActivityPage) -> dict[str, Any]:

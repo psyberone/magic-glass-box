@@ -63,6 +63,7 @@ class RunStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, requested_by, role="run requester")
                 project = connection.execute(
                     "SELECT id, active, krab_instance_id FROM projects "
                     "WHERE krab_project_key = ?",
@@ -394,9 +395,17 @@ class RunStorage:
                         raise ConflictError("run profile is not active")
                     profile_version_id = source["profile_version_id"]
                     authority_rows = connection.execute(
-                        "SELECT rpg.authority_name, pg.id, pg.state, pg.expires_at "
+                        "SELECT rpg.authority_name, pg.id, pg.state, "
+                        "pg.grant_kind, pg.expires_at, "
+                        "pcb.inference_connector_id, "
+                        "ic.state AS connector_state "
                         "FROM run_provider_grants rpg JOIN provider_grants pg "
-                        "ON pg.id = rpg.provider_grant_id WHERE rpg.run_id = ? "
+                        "ON pg.id = rpg.provider_grant_id "
+                        "LEFT JOIN provider_connector_bindings pcb "
+                        "ON pcb.provider_grant_id = pg.id "
+                        "LEFT JOIN inference_connectors ic "
+                        "ON ic.id = pcb.inference_connector_id "
+                        "WHERE rpg.run_id = ? "
                         "ORDER BY rpg.authority_name",
                         (run_id,),
                     ).fetchall()
@@ -405,6 +414,9 @@ class RunStorage:
                             row["authority_name"]
                             for row in authority_rows
                             if row["state"] != "active"
+                            or row["grant_kind"] != "connector"
+                            or row["inference_connector_id"] is None
+                            or row["connector_state"] != "active"
                             or (
                                 row["expires_at"] is not None
                                 and row["expires_at"] <= now

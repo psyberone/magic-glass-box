@@ -16,6 +16,7 @@ from magic_glass_box.domain import (
     GatewayCapability,
     ProjectContext,
     ProviderGrantSpec,
+    ValidationError,
     WorkItemEnvelope,
     canonical_json,
 )
@@ -277,6 +278,62 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         durable = self.database.path.read_bytes()
         self.assertNotIn(b"hello", durable)
         self.assertNotIn(b"done", durable)
+
+    def test_nested_model_override_is_removed_before_connector_dispatch(self) -> None:
+        run = self.create_run()
+
+        self.control.invoke_provider(
+            run["id"],
+            grant_name="example-main",
+            request={
+                "protocol": "example-json",
+                "body": {"model": "worker-selected", "input": "hello"},
+                "headers": {},
+            },
+        )
+
+        self.assertEqual(
+            self.client.calls[0].request,
+            {
+                "protocol": "example-json",
+                "body": {"input": "hello"},
+                "headers": {},
+            },
+        )
+
+    def test_oversized_request_is_audited_as_request_error_with_actual_bytes(
+        self,
+    ) -> None:
+        run = self.create_run()
+        request = {"input": "x" * 3000}
+        expected_bytes = len(canonical_json(request).encode("utf-8"))
+
+        with self.assertRaisesRegex(ValidationError, "size limit"):
+            self.control.invoke_provider(
+                run["id"], grant_name="example-main", request=request
+            )
+
+        self.assertEqual(self.client.calls, [])
+        invocation = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(invocation["outcome"], "denied")
+        self.assertEqual(invocation["error_code"], "request_too_large")
+        self.assertEqual(invocation["request_bytes"], expected_bytes)
+
+    def test_nonfinite_request_is_audited_before_connector_dispatch(self) -> None:
+        run = self.create_run()
+
+        with self.assertRaisesRegex(ValidationError, "finite JSON"):
+            self.control.invoke_provider(
+                run["id"],
+                grant_name="example-main",
+                request={"input": float("nan")},
+            )
+
+        self.assertEqual(self.client.calls, [])
+        invocation = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(invocation["outcome"], "denied")
+        self.assertEqual(invocation["error_code"], "invalid_request")
+        self.assertEqual(invocation["request_bytes"], 0)
 
     def test_pre_dispatch_unavailable_and_post_dispatch_ambiguity_are_distinct(
         self,

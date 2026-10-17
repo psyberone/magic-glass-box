@@ -310,6 +310,7 @@ class WorkItemStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, imported_by, role="work-item importer")
                 project = connection.execute(
                     "SELECT id FROM projects WHERE krab_project_key = ? AND active = 1",
                     (project_key,),

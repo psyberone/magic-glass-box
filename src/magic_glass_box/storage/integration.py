@@ -50,18 +50,6 @@ class IntegrationStorage:
         return value
 
     @staticmethod
-    def _active_user(
-        connection: sqlite3.Connection, user_id: str, *, role: str
-    ) -> None:
-        row = connection.execute(
-            "SELECT active FROM users WHERE id = ?", (user_id,)
-        ).fetchone()
-        if row is None:
-            raise NotFoundError(f"user not found: {user_id}")
-        if row["active"] != 1:
-            raise ConflictError(f"{role} is inactive")
-
-    @staticmethod
     def _dependency_record(
         connection: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, Any]:

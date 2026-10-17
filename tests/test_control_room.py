@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -722,6 +723,7 @@ class ControlRoomTests(unittest.TestCase):
                 "state",
                 "expires_at",
                 "revoked_at",
+                "unavailable_since",
                 "expired",
                 "available",
             },
@@ -750,6 +752,114 @@ class ControlRoomTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, encoded)
+
+    def test_revoked_connector_is_projected_with_real_unavailable_age(self) -> None:
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            run = self.create_run()
+        revoked_at = start + timedelta(seconds=60)
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=revoked_at.isoformat(timespec="microseconds"),
+        ):
+            self.database.revoke_inference_connector(
+                self.connector["name"],
+                expected_version=self.connector["version"],
+                revoked_by=self.user["id"],
+            )
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=(revoked_at + timedelta(seconds=300)).isoformat(
+                timespec="microseconds"
+            ),
+        ):
+            snapshot = ControlRoom(self.database).snapshot()
+
+        authority = snapshot["run_authorities"][0]
+        self.assertEqual(authority["run_id"], run["id"])
+        self.assertFalse(authority["available"])
+        self.assertEqual(authority["state"], "revoked")
+        self.assertEqual(
+            authority["revoked_at"],
+            revoked_at.isoformat(timespec="microseconds"),
+        )
+        self.assertEqual(authority["unavailable_since"], authority["revoked_at"])
+        attention = next(
+            item
+            for item in snapshot["attention"]
+            if item["kind"] == "authority.unavailable"
+        )
+        self.assertEqual(attention["age_seconds"], 300)
+
+    def test_historical_direct_authority_has_a_stable_unavailable_age(self) -> None:
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            direct = self.database.create_provider_grant(
+                name="historical-direct",
+                spec=ProviderGrantSpec.from_mapping(
+                    {
+                        "provider": "openai",
+                        "adapter": "json_http",
+                        "destination": "https://api.openai.com/v1/responses",
+                        "method": "POST",
+                        "model": "gpt-test",
+                        "credential_header": "Authorization",
+                        "credential_prefix": "Bearer ",
+                        "static_headers": {},
+                        "request_bytes": 16384,
+                        "response_bytes": 32768,
+                        "timeout_ms": 10000,
+                        "max_concurrency": 1,
+                    }
+                ),
+                credential_ref="env:OPENAI_API_KEY",
+                expires_at=None,
+                created_by=self.user["id"],
+            )
+            run = self.create_run()
+            with self.database.connect() as connection:
+                connection.execute(
+                    "INSERT INTO run_provider_grants "
+                    "(run_id, authority_name, provider_grant_id, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        run["id"],
+                        direct["name"],
+                        direct["id"],
+                        start.isoformat(timespec="microseconds"),
+                    ),
+                )
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=(start + timedelta(seconds=300)).isoformat(
+                timespec="microseconds"
+            ),
+        ):
+            snapshot = ControlRoom(self.database).snapshot()
+
+        authority = next(
+            item
+            for item in snapshot["run_authorities"]
+            if item["grant_id"] == direct["id"]
+        )
+        self.assertEqual(authority["state"], "unsupported")
+        self.assertEqual(
+            authority["unavailable_since"], start.isoformat(timespec="microseconds")
+        )
+        attention = next(
+            item
+            for item in snapshot["attention"]
+            if item["kind"] == "authority.unavailable"
+            and item["subject_id"] == direct["id"]
+        )
+        self.assertEqual(attention["age_seconds"], 300)
 
     def test_active_runs_are_never_hidden_by_terminal_history_limit(self) -> None:
         terminal_ids: list[str] = []

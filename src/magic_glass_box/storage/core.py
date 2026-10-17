@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .errors import StorageError
+from .errors import ConflictError, NotFoundError, StorageError
 from .schema import (
     DATABASE_FILENAME,
     LEGACY_DATABASE_FILENAME,
@@ -95,6 +95,18 @@ class DatabaseCore:
     @staticmethod
     def new_id(prefix: str) -> str:
         return f"{prefix}_{secrets.token_hex(16)}"
+
+    @staticmethod
+    def _active_user(
+        connection: sqlite3.Connection, user_id: str, *, role: str
+    ) -> None:
+        row = connection.execute(
+            "SELECT active FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"user not found: {user_id}")
+        if row["active"] != 1:
+            raise ConflictError(f"{role} is inactive")
 
     def initialize(self) -> dict[str, Any]:
         self._prepare_file()

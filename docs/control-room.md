@@ -33,7 +33,9 @@ contains:
   execution-policy metadata;
 - connector-bound provider grants with lifecycle state, grant kind, redacted
   policy metadata, and redacted connector identity/state; historical direct
-  grants remain visible but unavailable for dispatch;
+  grants remain visible but unavailable for dispatch. Each run authority has a
+  stable `unavailable_since` timestamp derived from the first grant,
+  expiration, connector, or unsupported-authority condition;
 - current work-item generations and visible, explicitly untrusted titles;
 - local profile-pinned assignments and their visible, untrusted titles;
 - all active runs plus a bounded number of recent terminal runs;
@@ -126,9 +128,9 @@ the URL.
 
 | Action | Contract |
 | --- | --- |
-| Answer | Binds one operator-selected Krab response item to an open interaction under optimistic concurrency. The item is re-fetched and verified against the pinned project, session, human sender, and agent recipient; its title and body are neither rendered nor retained. |
+| Answer | Binds one operator-selected Krab response item to an open interaction under optimistic concurrency. The bound local user must still be active. The item is re-fetched and verified as a version-one `open.pending` item created after the question in the pinned project/session by the human sender for the agent recipient; its title and body are neither rendered nor retained. |
 | Cancel | Records an optimistic cancellation request. A queued or waiting run becomes terminal immediately without constructing a Docker runtime; an owned attempt lazily opens the coordinator and stops through its heartbeat path. |
-| Retry | Creates one queued successor to a terminal run with the same immutable context, profile, work-item version, work thread, source revision, Krab route, and exact provider grants. Unavailable pinned authority fails closed. |
+| Retry | Creates one queued successor to a terminal run with the same immutable context, profile, work-item version, work thread, source revision, Krab route, and exact provider grants. Revoked/expired grants, revoked/missing connectors, and historical direct authority all fail closed. |
 | Reassign | Creates a queued successor to a terminal run with the same work identity and source but an explicitly selected profile's latest revision and current provider grants. |
 | Revoke | Revokes an active provider grant under optimistic concurrency; already-pinned runs observe the live kill switch. |
 | Reconcile | Recovers only expired or orphaned execution ownership using the existing lease-aware coordinator path. |

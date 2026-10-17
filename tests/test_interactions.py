@@ -226,6 +226,26 @@ class InteractionDatabaseTests(unittest.TestCase):
             [interaction["id"]],
         )
 
+    def test_inactive_bound_user_cannot_win_answer_race_at_storage_boundary(
+        self,
+    ) -> None:
+        run = self.running_run()
+        interaction = self.open_interaction(run)
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE users SET active = 0 WHERE id = ?", (self.reviewer["id"],)
+            )
+
+        with self.assertRaisesRegex(ConflictError, "inactive"):
+            self.database.answer_interaction(
+                interaction["id"],
+                response_item_id="itm_" + "6" * 32,
+                expected_version=interaction["version"],
+            )
+
+        current = self.database.get_interaction(interaction["id"])
+        self.assertEqual((current["state"], current["version"]), ("open", 1))
+
     def test_open_requires_current_running_run_session_and_bound_recipient(
         self,
     ) -> None:

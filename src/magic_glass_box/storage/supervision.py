@@ -590,12 +590,22 @@ class SupervisionStorage:
 
                 unavailable = connection.execute(
                     "SELECT r.id AS run_id, r.updated_at, r.supervision_policy_json, "
-                    "rpg.authority_name, pg.id AS grant_id, pg.state, pg.expires_at, "
-                    "pg.revoked_at FROM runs r JOIN run_provider_grants rpg "
+                    "rpg.authority_name, pg.id AS grant_id, pg.state, "
+                    "pg.grant_kind, pg.expires_at, pg.revoked_at, "
+                    "rpg.created_at AS authority_created_at, "
+                    "pcb.inference_connector_id, c.state AS connector_state, "
+                    "c.revoked_at AS connector_revoked_at "
+                    "FROM runs r JOIN run_provider_grants rpg "
                     "ON rpg.run_id = r.id JOIN provider_grants pg "
-                    "ON pg.id = rpg.provider_grant_id WHERE r.state IN "
+                    "ON pg.id = rpg.provider_grant_id "
+                    "LEFT JOIN provider_connector_bindings pcb "
+                    "ON pcb.provider_grant_id = pg.id "
+                    "LEFT JOIN inference_connectors c "
+                    "ON c.id = pcb.inference_connector_id WHERE r.state IN "
                     "('queued', 'preparing', 'running', 'waiting_for_input') "
-                    "AND (pg.state != 'active' OR "
+                    "AND (pg.grant_kind != 'connector' OR pg.state != 'active' OR "
+                    "pcb.inference_connector_id IS NULL OR c.state IS NULL OR "
+                    "c.state != 'active' OR "
                     "(pg.expires_at IS NOT NULL AND pg.expires_at <= ?)) "
                     "ORDER BY r.updated_at, r.id, rpg.authority_name",
                     (now,),
@@ -604,8 +614,21 @@ class SupervisionStorage:
                     policy = self._stored_supervision_policy(
                         row["supervision_policy_json"]
                     )
+                    unavailable_times: list[str] = []
+                    if row["state"] != "active" and row["revoked_at"] is not None:
+                        unavailable_times.append(row["revoked_at"])
+                    if row["expires_at"] is not None and row["expires_at"] <= now:
+                        unavailable_times.append(row["expires_at"])
+                    if row["grant_kind"] != "connector":
+                        unavailable_times.append(row["authority_created_at"])
+                    elif row["connector_state"] != "active":
+                        unavailable_times.append(
+                            row["connector_revoked_at"] or row["authority_created_at"]
+                        )
                     age_started_at = (
-                        row["revoked_at"] or row["expires_at"] or row["updated_at"]
+                        min(unavailable_times)
+                        if unavailable_times
+                        else row["updated_at"]
                     )
                     inserted.extend(
                         self._insert_due_escalations(

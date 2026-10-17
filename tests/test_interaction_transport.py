@@ -28,6 +28,7 @@ from magic_glass_box.krab import (
     KrabIdentity,
     KrabUserRef,
     SessionItem,
+    SessionItemHistoryEvent,
     SessionItemReminder,
     WorkClaimRef,
 )
@@ -52,6 +53,7 @@ def session_item(
     title: str,
     body: str,
 ) -> SessionItem:
+    created_sequence = 7 if item_id == REQUEST_ITEM_ID else 8
     return SessionItem(
         item_id=item_id,
         project_key="box-project",
@@ -67,7 +69,18 @@ def session_item(
         untrusted_title=title,
         untrusted_body=body,
         content_risk_flags=("instruction_override",),
-        history=(),
+        history=(
+            SessionItemHistoryEvent(
+                event_seq=created_sequence,
+                kind="item.created",
+                actor=creator,
+                from_status=None,
+                to_status="open.pending",
+                created_at="2026-10-09T12:00:00Z",
+                untrusted_note=None,
+                content_risk_flags=(),
+            ),
+        ),
     )
 
 
@@ -112,7 +125,7 @@ class FakeInteractionClient:
         self, project_key: str, session_id: str, item_id: str
     ) -> SessionItem:
         self.get_calls.append((project_key, session_id, item_id))
-        return self.response_item
+        return self.request_item if item_id == REQUEST_ITEM_ID else self.response_item
 
     def remind_session_item(
         self,
@@ -287,7 +300,10 @@ class InteractionTransportTests(unittest.TestCase):
         )
         self.assertEqual(
             self.client.get_calls,
-            [("box-project", SESSION_ID, RESPONSE_ITEM_ID)],
+            [
+                ("box-project", SESSION_ID, REQUEST_ITEM_ID),
+                ("box-project", SESSION_ID, RESPONSE_ITEM_ID),
+            ],
         )
         reread = self.control.read_interaction_response(run["id"], opened["id"])
         self.assertEqual(reread.untrusted_body, "SECRET HUMAN RESPONSE")
@@ -296,6 +312,7 @@ class InteractionTransportTests(unittest.TestCase):
         self.assertEqual(
             self.client.get_calls,
             [
+                ("box-project", SESSION_ID, REQUEST_ITEM_ID),
                 ("box-project", SESSION_ID, RESPONSE_ITEM_ID),
                 ("box-project", SESSION_ID, RESPONSE_ITEM_ID),
             ],
@@ -431,6 +448,15 @@ class InteractionTransportTests(unittest.TestCase):
             (replace(original, session_id="ses_" + "7" * 32), "session"),
             (replace(original, item_id="itm_" + "7" * 32), "item"),
             (replace(original, status="closed.rejected"), "open"),
+            (replace(original, status="open.in_progress"), "pending"),
+            (replace(original, version=2), "version"),
+            (
+                replace(
+                    original,
+                    history=(replace(original.history[0], event_seq=7),),
+                ),
+                "after the request",
+            ),
         )
         for candidate, message in cases:
             with (
@@ -447,6 +473,24 @@ class InteractionTransportTests(unittest.TestCase):
             self.assertEqual((current["state"], current["version"]), ("open", 1))
             self.assertEqual(current["run_state"], "waiting_for_input")
         self.client.response_item = original
+
+    def test_inactive_bound_user_cannot_answer_an_interaction(self) -> None:
+        run = self.running_run()
+        opened = self.open_interaction(run)
+        with closing(self.database.connect()) as connection:
+            connection.execute(
+                "UPDATE users SET active = 0 WHERE id = ?", (self.reviewer["id"],)
+            )
+
+        with self.assertRaisesRegex(ConflictError, "inactive"):
+            self.control.accept_interaction_response(
+                opened["id"],
+                response_item_id=RESPONSE_ITEM_ID,
+                expected_version=opened["version"],
+            )
+
+        self.assertEqual(self.client.get_calls, [])
+        self.assertEqual(self.database.get_interaction(opened["id"])["state"], "open")
 
     def test_preflight_rejects_stale_run_and_unbound_recipient_without_sending(
         self,
@@ -612,7 +656,7 @@ class InteractionTransportTests(unittest.TestCase):
                 response_item_id="itm_" + "8" * 32,
                 expected_version=2,
             )
-        self.assertEqual(len(self.client.get_calls), 1)
+        self.assertEqual(len(self.client.get_calls), 2)
 
     def test_missing_run_fails_before_transport(self) -> None:
         with self.assertRaisesRegex(NotFoundError, "run not found"):

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from magic_glass_box.domain import ValidationError
+from magic_glass_box.domain import ProviderGrantSpec, ValidationError
 from magic_glass_box.inference import (
     InferenceConnectorAmbiguousError,
     InferenceConnectorError,
@@ -23,6 +23,8 @@ from magic_glass_box.inference import (
     InferenceInvocationResponse,
     UnixInferenceConnectorClient,
 )
+from magic_glass_box.provider import ProviderUpstreamError
+from scripts.reference_inference_connector import _invoke, _Route
 
 
 def connector_mapping(socket_path: Path) -> dict[str, Any]:
@@ -298,6 +300,64 @@ class InferenceContractTests(unittest.TestCase):
         self.assertEqual(response.untrusted_response, {"output_text": "done"})
         self.assertEqual(response.to_dict()["response"], {"output_text": "done"})
 
+    def test_response_limit_accounts_for_provider_bytes_not_json_envelope(self) -> None:
+        request_value = request_mapping()
+        request_value["response_limit_bytes"] = 100_000
+        request = InferenceInvocationRequest.from_mapping(request_value)
+        response = response_for(request)
+        response["response_bytes"] = 100_000
+        response["response"] = {"body": "\x00" * 100_000}
+
+        accepted = InferenceInvocationResponse.from_mapping(response)
+
+        self.assertEqual(accepted.response_bytes, 100_000)
+        self.assertEqual(accepted.untrusted_response, {"body": "\x00" * 100_000})
+
+
+class ReferenceConnectorAccountingTests(unittest.TestCase):
+    def test_oversized_provider_counters_are_capped_to_protocol_limits(self) -> None:
+        request = InferenceInvocationRequest.from_mapping(request_mapping())
+        policy = ProviderGrantSpec.from_mapping(
+            {
+                "provider": "openai",
+                "adapter": "openai_responses",
+                "destination": "https://api.openai.com/v1/responses",
+                "method": "POST",
+                "model": "gpt-test",
+                "credential_header": "Authorization",
+                "credential_prefix": "Bearer ",
+                "static_headers": {},
+                "request_bytes": request.request_limit_bytes,
+                "response_bytes": request.response_limit_bytes,
+                "timeout_ms": 10000,
+                "max_concurrency": 1,
+            }
+        )
+        route = _Route(
+            name=request.route,
+            credential_scope_sha256=request.credential_scope_sha256,
+            policy=policy,
+            credential="test-secret",
+        )
+
+        class OversizedBroker:
+            def invoke(self, **_kwargs: object) -> None:
+                raise ProviderUpstreamError(
+                    "too large",
+                    status_code=413,
+                    request_bytes=request.request_limit_bytes + 1,
+                    response_bytes=request.response_limit_bytes + 1,
+                )
+
+        response = _invoke(
+            request,
+            routes={request.route: route},
+            broker=OversizedBroker(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(response["request_bytes"], request.request_limit_bytes)
+        self.assertEqual(response["response_bytes"], request.response_limit_bytes)
+
 
 class UnixInferenceConnectorClientTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -342,6 +402,25 @@ class UnixInferenceConnectorClientTests(unittest.TestCase):
         serialized = json.dumps(seen)
         for forbidden in ("api_key", "access_token", "credential_ref", "secret"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_response_frame_allows_bounded_json_string_expansion(self) -> None:
+        request_value = request_mapping()
+        request_value["response_limit_bytes"] = 100_000
+        request = InferenceInvocationRequest.from_mapping(request_value)
+
+        def respond(connection: socket.socket) -> None:
+            read_frame(connection)
+            response = response_for(request)
+            response["response_bytes"] = 100_000
+            response["response"] = {"body": "\n" * 100_000}
+            write_frame(connection, response)
+
+        thread, _ = self.start_server(respond)
+        response = UnixInferenceConnectorClient(self.socket_path).invoke(request)
+        thread.join(1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(response.response_bytes, 100_000)
 
     def test_unavailable_before_connect_is_distinct_from_ambiguous_after_send(
         self,

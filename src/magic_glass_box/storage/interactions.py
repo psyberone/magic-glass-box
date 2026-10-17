@@ -189,10 +189,16 @@ class InteractionStorage:
                 interaction = connection.execute(
                     "SELECT i.state, i.version, i.request_item_id, i.run_id, "
                     "r.state AS run_state, r.version AS run_version, "
+                    "u.active AS recipient_active, "
                     "EXISTS (SELECT 1 FROM run_attempts ra "
                     "WHERE ra.run_id = r.id "
                     "AND ra.state IN ('preparing', 'running')) AS active_attempt "
                     "FROM interactions i JOIN runs r ON r.id = i.run_id "
+                    "JOIN krab_identities ki "
+                    "ON ki.id = i.recipient_krab_identity_id "
+                    "JOIN user_krab_bindings ub "
+                    "ON ub.krab_identity_id = ki.id "
+                    "JOIN users u ON u.id = ub.user_id "
                     "WHERE i.id = ?",
                     (interaction_id,),
                 ).fetchone()
@@ -207,6 +213,8 @@ class InteractionStorage:
                     raise ConflictError(
                         f"interaction is not open: {interaction['state']}"
                     )
+                if interaction["recipient_active"] != 1:
+                    raise ConflictError("interaction recipient is inactive")
                 if response_item_id == interaction["request_item_id"]:
                     raise ValidationError(
                         "response item must differ from the request item"

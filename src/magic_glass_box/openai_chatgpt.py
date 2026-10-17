@@ -855,15 +855,23 @@ class ChatGPTOAuth:
             raise ChatGPTAuthenticationError("token response scopes are invalid")
         if not scopes or len(set(scopes)) != len(scopes):
             raise ChatGPTAuthenticationError("token response scopes are invalid")
-        try:
-            claims = self.id_token_validator(id_token, client_id, nonce)
-        except ChatGPTAuthenticationError:
-            raise
-        except Exception as exc:
-            raise ChatGPTAuthenticationError("ID token validation failed") from exc
-        issuer = claims.get("iss")
-        subject = claims.get("sub")
-        email = claims.get("email")
+        reuse_validated_identity = (
+            id_token_value is None and previous is not None and nonce is None
+        )
+        if reuse_validated_identity:
+            issuer = previous.issuer
+            subject = previous.subject
+            email = previous.email
+        else:
+            try:
+                claims = self.id_token_validator(id_token, client_id, nonce)
+            except ChatGPTAuthenticationError:
+                raise
+            except Exception as exc:
+                raise ChatGPTAuthenticationError("ID token validation failed") from exc
+            issuer = claims.get("iss")
+            subject = claims.get("sub")
+            email = claims.get("email")
         if issuer != CHATGPT_ISSUER or not isinstance(subject, str) or not subject:
             raise ChatGPTAuthenticationError("ID token identity is invalid")
         if email is not None and not isinstance(email, str):
@@ -1122,7 +1130,7 @@ def _http_error_code(raw: bytes) -> str:
 
 def _sse_terminal(raw: bytes) -> tuple[str, str | None]:
     try:
-        text = raw.decode("utf-8", "strict").replace("\r\n", "\n")
+        text = raw.decode("utf-8", "strict").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError as exc:
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
@@ -1133,7 +1141,7 @@ def _sse_terminal(raw: bytes) -> tuple[str, str | None]:
     for frame in text.split("\n\n"):
         data_lines = [
             line.removeprefix("data:").lstrip()
-            for line in frame.splitlines()
+            for line in frame.split("\n")
             if line.startswith("data:")
         ]
         if not data_lines:
@@ -1208,10 +1216,227 @@ class OpenAIResponsesClient:
     FUNCTION_TOOL_FIELDS = frozenset(
         {"description", "name", "parameters", "strict", "type"}
     )
+    FUNCTION_TOOL_REQUIRED_FIELDS = frozenset({"name", "parameters", "type"})
     NAMESPACE_TOOL_FIELDS = frozenset({"description", "name", "tools", "type"})
+    NAMESPACE_TOOL_REQUIRED_FIELDS = frozenset({"name", "tools", "type"})
 
     def __init__(self, http_client: HTTPClient | None = None):
         self.http = http_client or BoundedHTTPSClient()
+
+    @staticmethod
+    def _local_name(value: object) -> str | None:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value.encode("utf-8")) > 256
+            or any(ord(character) < 0x20 for character in value)
+        ):
+            return None
+        return value
+
+    @classmethod
+    def _function_tool_name(cls, tool: object, *, namespace: str | None = None) -> str:
+        if (
+            not isinstance(tool, dict)
+            or tool.get("type") != "function"
+            or not cls.FUNCTION_TOOL_REQUIRED_FIELDS.issubset(tool)
+            or not set(tool).issubset(cls.FUNCTION_TOOL_FIELDS)
+            or cls._local_name(tool.get("name")) is None
+            or not isinstance(tool.get("parameters"), dict)
+            or ("description" in tool and not isinstance(tool["description"], str))
+            or ("strict" in tool and not isinstance(tool["strict"], bool))
+        ):
+            raise ChatGPTResponseFailure(
+                "provider request contains an unsupported tool",
+                error_code="unsupported_capability",
+            )
+        name = tool["name"]
+        return name if namespace is None else f"{namespace}.{name}"
+
+    @classmethod
+    def _local_tools(cls, tools: object) -> tuple[set[str], set[str]]:
+        if not isinstance(tools, list) or len(tools) > 256:
+            raise ChatGPTResponseFailure(
+                "provider request tools are invalid", error_code="invalid_request"
+            )
+        names: set[str] = set()
+        namespaces: set[str] = set()
+        for tool in tools:
+            if isinstance(tool, dict) and tool.get("type") == "function":
+                names.add(cls._function_tool_name(tool))
+                continue
+            if (
+                not isinstance(tool, dict)
+                or tool.get("type") != "namespace"
+                or not cls.NAMESPACE_TOOL_REQUIRED_FIELDS.issubset(tool)
+                or not set(tool).issubset(cls.NAMESPACE_TOOL_FIELDS)
+                or cls._local_name(tool.get("name")) is None
+                or ("description" in tool and not isinstance(tool["description"], str))
+                or not isinstance(tool.get("tools"), list)
+                or not 1 <= len(tool["tools"]) <= 128
+            ):
+                raise ChatGPTResponseFailure(
+                    "provider request contains an unsupported tool",
+                    error_code="unsupported_capability",
+                )
+            namespace = tool["name"]
+            namespaces.add(namespace)
+            for nested in tool["tools"]:
+                names.add(cls._function_tool_name(nested, namespace=namespace))
+        return names, namespaces
+
+    @classmethod
+    def _validate_tool_choice(
+        cls,
+        choice: object,
+        *,
+        tool_names: set[str],
+        namespace_names: set[str],
+    ) -> None:
+        if choice is None or (
+            isinstance(choice, str) and choice in {"auto", "none", "required"}
+        ):
+            return
+        if not isinstance(choice, dict):
+            raise ChatGPTResponseFailure(
+                "provider request tool choice is invalid",
+                error_code="invalid_request",
+            )
+        choice_type = choice.get("type")
+        name = cls._local_name(choice.get("name"))
+        namespace = cls._local_name(choice.get("namespace"))
+        if choice_type == "function" and set(choice).issubset(
+            {"type", "name", "namespace"}
+        ):
+            selected = f"{namespace}.{name}" if namespace is not None else name
+            if name is not None and selected in tool_names:
+                return
+        elif (
+            choice_type == "namespace"
+            and set(choice) == {"type", "name"}
+            and name in namespace_names
+        ):
+            return
+        raise ChatGPTResponseFailure(
+            "provider request contains an unsupported tool choice",
+            error_code="unsupported_capability",
+        )
+
+    @classmethod
+    def _validate_message_content(cls, content: object) -> None:
+        if isinstance(content, str):
+            return
+        if not isinstance(content, list) or len(content) > 1024:
+            raise ChatGPTResponseFailure(
+                "provider request input is invalid", error_code="invalid_request"
+            )
+        for part in content:
+            if not isinstance(part, dict):
+                raise ChatGPTResponseFailure(
+                    "provider request contains unsupported input content",
+                    error_code="unsupported_capability",
+                )
+            part_type = part.get("type")
+            valid_text = (
+                part_type in {"input_text", "output_text"}
+                and isinstance(part.get("text"), str)
+                and set(part).issubset({"type", "text", "annotations", "logprobs"})
+            )
+            valid_refusal = (
+                part_type == "refusal"
+                and isinstance(part.get("refusal"), str)
+                and set(part) == {"type", "refusal"}
+            )
+            if not (valid_text or valid_refusal):
+                raise ChatGPTResponseFailure(
+                    "provider request contains unsupported input content",
+                    error_code="unsupported_capability",
+                )
+
+    @classmethod
+    def _validate_inputs(cls, inputs: list[object], *, tool_names: set[str]) -> None:
+        call_ids: set[str] = set()
+        for item in inputs:
+            if not isinstance(item, dict):
+                raise ChatGPTResponseFailure(
+                    "provider request input is invalid", error_code="invalid_request"
+                )
+            item_type = item.get("type", "message" if "role" in item else None)
+            if item_type == "message":
+                if (
+                    not set(item).issubset({"type", "role", "content", "id", "status"})
+                    or item.get("role") not in {"user", "assistant", "developer"}
+                    or "content" not in item
+                ):
+                    message = (
+                        "provider request contains an unsupported system message"
+                        if item.get("role") == "system"
+                        else "provider request input is invalid"
+                    )
+                    code = (
+                        "unsupported_capability"
+                        if item.get("role") == "system"
+                        else "invalid_request"
+                    )
+                    raise ChatGPTResponseFailure(message, error_code=code)
+                cls._validate_message_content(item["content"])
+                continue
+            if item_type == "reasoning":
+                if not set(item).issubset(
+                    {"type", "id", "summary", "encrypted_content", "status"}
+                ):
+                    raise ChatGPTResponseFailure(
+                        "provider request input is invalid",
+                        error_code="invalid_request",
+                    )
+                continue
+            if item_type == "function_call":
+                name = cls._local_name(item.get("name"))
+                namespace = cls._local_name(item.get("namespace"))
+                selected = f"{namespace}.{name}" if namespace is not None else name
+                call_id = cls._local_name(item.get("call_id"))
+                if (
+                    not set(item).issubset(
+                        {
+                            "type",
+                            "id",
+                            "call_id",
+                            "name",
+                            "namespace",
+                            "arguments",
+                            "status",
+                        }
+                    )
+                    or name is None
+                    or selected not in tool_names
+                    or call_id is None
+                    or call_id in call_ids
+                    or not isinstance(item.get("arguments"), str)
+                ):
+                    raise ChatGPTResponseFailure(
+                        "provider request contains an unbound local tool call",
+                        error_code="unsupported_capability",
+                    )
+                call_ids.add(call_id)
+                continue
+            if item_type == "function_call_output":
+                call_id = cls._local_name(item.get("call_id"))
+                if (
+                    not set(item).issubset(
+                        {"type", "id", "call_id", "output", "status"}
+                    )
+                    or call_id not in call_ids
+                    or not isinstance(item.get("output"), str)
+                ):
+                    raise ChatGPTResponseFailure(
+                        "provider request contains an unbound local tool output",
+                        error_code="unsupported_capability",
+                    )
+                continue
+            raise ChatGPTResponseFailure(
+                "provider request contains an unsupported input item",
+                error_code="unsupported_capability",
+            )
 
     @classmethod
     def _body_and_headers(
@@ -1265,55 +1490,24 @@ class OpenAIResponsesClient:
                 "provider request contains an unsupported field",
                 error_code="unsupported_capability",
             )
-        for item in inputs:
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "message"
-                and item.get("role") == "system"
-            ):
-                raise ChatGPTResponseFailure(
-                    "provider request contains an unsupported system message",
-                    error_code="unsupported_capability",
-                )
-        tools = provider_body.get("tools", [])
-        if not isinstance(tools, list) or len(tools) > 256:
+        include = provider_body.get("include")
+        if include is not None and (
+            not isinstance(include, list)
+            or any(not isinstance(item, str) for item in include)
+            or len(include) != len(set(include))
+            or any(item != "reasoning.encrypted_content" for item in include)
+        ):
             raise ChatGPTResponseFailure(
-                "provider request tools are invalid", error_code="invalid_request"
-            )
-        local_tools_only = True
-        for tool in tools:
-            if not isinstance(tool, dict):
-                local_tools_only = False
-                break
-            tool_type = tool.get("type")
-            if tool_type == "function":
-                if set(tool) != cls.FUNCTION_TOOL_FIELDS:
-                    local_tools_only = False
-                    break
-                continue
-            if tool_type == "namespace":
-                nested = tool.get("tools")
-                if (
-                    set(tool) != cls.NAMESPACE_TOOL_FIELDS
-                    or not isinstance(nested, list)
-                    or not 1 <= len(nested) <= 128
-                    or any(
-                        not isinstance(item, dict)
-                        or item.get("type") != "function"
-                        or set(item) != cls.FUNCTION_TOOL_FIELDS
-                        for item in nested
-                    )
-                ):
-                    local_tools_only = False
-                    break
-                continue
-            local_tools_only = False
-            break
-        if not local_tools_only:
-            raise ChatGPTResponseFailure(
-                "provider request contains an unsupported tool",
+                "provider request contains an unsupported include",
                 error_code="unsupported_capability",
             )
+        tool_names, namespace_names = cls._local_tools(provider_body.get("tools", []))
+        cls._validate_tool_choice(
+            provider_body.get("tool_choice"),
+            tool_names=tool_names,
+            namespace_names=namespace_names,
+        )
+        cls._validate_inputs(inputs, tool_names=tool_names)
         raw_headers = request["headers"]
         if not isinstance(raw_headers, dict) or len(raw_headers) > len(
             cls.ALLOWED_HEADERS
@@ -1460,8 +1654,7 @@ class OpenAIResponsesClient:
                 "content_type": content_type or "text/event-stream",
                 "protocol": "openai-responses",
             }
-            encoded_response = canonical_json(untrusted).encode("utf-8")
-        except (UnicodeDecodeError, ValidationError) as exc:
+        except UnicodeDecodeError as exc:
             raise ChatGPTResponseAmbiguousError(
                 "provider invocation outcome is ambiguous",
                 error_code="upstream_ambiguous",
@@ -1469,14 +1662,6 @@ class OpenAIResponsesClient:
                 request_bytes=len(body),
                 response_bytes=len(response.body),
             ) from exc
-        if len(encoded_response) > response_limit_bytes:
-            raise ChatGPTResponseAmbiguousError(
-                "provider invocation outcome is ambiguous",
-                error_code="upstream_ambiguous",
-                status_code=response.status_code,
-                request_bytes=len(body),
-                response_bytes=len(response.body),
-            )
         return OpenAIResponseResult(
             status_code=response.status_code,
             request_bytes=len(body),
