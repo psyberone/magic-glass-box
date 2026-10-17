@@ -36,6 +36,11 @@ contains:
   grants remain visible but unavailable for dispatch. Each run authority has a
   stable `unavailable_since` timestamp derived from the first grant,
   expiration, connector, or unsupported-authority condition;
+- protocol-v2 provider-budget authorities with policy account, revision and
+  digest, normalized token totals, reported estimates, finalized accounting,
+  active reservation amount, policy consumption, scope ceilings, and remaining
+  run/grant/project allowance. No prompt, response, or transcript content is
+  part of this projection;
 - current work-item generations and visible, explicitly untrusted titles;
 - local profile-pinned assignments and their visible, untrusted titles;
 - all active runs plus a bounded number of recent terminal runs;

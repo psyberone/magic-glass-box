@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1734,7 +1734,7 @@ CREATE TABLE inference_connectors (
     version INTEGER NOT NULL CHECK (version >= 1),
     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
     connector_protocol_version INTEGER NOT NULL
-        CHECK (connector_protocol_version = 1),
+        CHECK (connector_protocol_version IN (1, 2)),
     spec_json TEXT NOT NULL,
     content_sha256 TEXT NOT NULL UNIQUE,
     deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
@@ -2151,6 +2151,394 @@ BEGIN
 END;
 """
 
+PROVIDER_BUDGET_SCHEMA = """
+DROP TRIGGER provider_invocation_immutable_update;
+DROP TRIGGER provider_invocation_immutable_delete;
+DROP INDEX provider_invocation_run;
+DROP INDEX provider_invocation_connector;
+DROP TRIGGER inference_connector_identity_immutable;
+DROP TRIGGER inference_connector_immutable_delete;
+DROP TRIGGER inference_connector_event_immutable_update;
+DROP TRIGGER inference_connector_event_immutable_delete;
+DROP TRIGGER provider_connector_binding_requires_connector_grant;
+DROP TRIGGER provider_connector_binding_immutable_update;
+DROP TRIGGER provider_connector_binding_immutable_delete;
+DROP INDEX inference_connector_state;
+DROP INDEX inference_connector_event_stream;
+DROP INDEX provider_connector_connector;
+
+ALTER TABLE provider_invocations RENAME TO provider_invocations_v18;
+ALTER TABLE provider_connector_bindings
+    RENAME TO provider_connector_bindings_v18;
+ALTER TABLE inference_connector_events RENAME TO inference_connector_events_v18;
+ALTER TABLE inference_connectors RENAME TO inference_connectors_v18;
+
+CREATE TABLE inference_connectors (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    connector_protocol_version INTEGER NOT NULL
+        CHECK (connector_protocol_version IN (1, 2)),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    transport_kind TEXT NOT NULL CHECK (transport_kind = 'unix'),
+    socket_path TEXT NOT NULL,
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 1),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 1),
+    timeout_ms INTEGER NOT NULL CHECK (timeout_ms >= 100),
+    max_concurrency INTEGER NOT NULL CHECK (max_concurrency >= 1),
+    revoked_at TEXT,
+    revoked_by TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (revoked_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND revoked_at IS NULL AND revoked_by IS NULL)
+        OR (state = 'revoked' AND revoked_at IS NOT NULL AND revoked_by IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE inference_connector_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inference_connector_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('inference_connector.created', 'inference_connector.revoked')
+    ),
+    actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (inference_connector_id, sequence),
+    FOREIGN KEY (inference_connector_id)
+        REFERENCES inference_connectors(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE provider_connector_bindings (
+    provider_grant_id TEXT PRIMARY KEY,
+    inference_connector_id TEXT NOT NULL,
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    route TEXT NOT NULL,
+    credential_scope_sha256 TEXT NOT NULL
+        CHECK (length(credential_scope_sha256) = 64),
+    provider TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (inference_connector_id)
+        REFERENCES inference_connectors(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO inference_connectors (
+    id, name, state, version, schema_version, connector_protocol_version,
+    spec_json, content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency, revoked_at,
+    revoked_by, created_by, created_at, updated_at
+)
+SELECT
+    id, name, state, version, schema_version, connector_protocol_version,
+    spec_json, content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency, revoked_at,
+    revoked_by, created_by, created_at, updated_at
+FROM inference_connectors_v18;
+
+INSERT INTO inference_connector_events (
+    id, inference_connector_id, sequence, kind, actor_id, created_at
+)
+SELECT id, inference_connector_id, sequence, kind, actor_id, created_at
+FROM inference_connector_events_v18;
+
+INSERT INTO provider_connector_bindings (
+    provider_grant_id, inference_connector_id, deployment_sha256, route,
+    credential_scope_sha256, provider, protocol, model, created_at
+)
+SELECT
+    provider_grant_id, inference_connector_id, deployment_sha256, route,
+    credential_scope_sha256, provider, protocol, model, created_at
+FROM provider_connector_bindings_v18;
+
+CREATE TABLE provider_invocations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    provider_grant_id TEXT NOT NULL,
+    dispatch_kind TEXT NOT NULL CHECK (
+        dispatch_kind IN ('direct', 'connector')
+    ),
+    inference_connector_id TEXT,
+    connector_protocol_version INTEGER,
+    deployment_sha256 TEXT,
+    route TEXT,
+    policy_sha256 TEXT,
+    credential_scope_sha256 TEXT,
+    provider TEXT,
+    protocol TEXT,
+    model TEXT,
+    deadline TEXT,
+    outcome TEXT NOT NULL CHECK (
+        outcome IN (
+            'dispatching', 'succeeded', 'failed', 'denied', 'busy', 'ambiguous'
+        )
+    ),
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 0),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+    http_status INTEGER CHECK (http_status BETWEEN 100 AND 599),
+    error_code TEXT,
+    budget_account TEXT,
+    budget_revision TEXT,
+    budget_policy_sha256 TEXT,
+    budget_currency TEXT,
+    budget_policy_json TEXT,
+    reserved_microusd INTEGER CHECK (reserved_microusd >= 1),
+    accounted_microusd INTEGER CHECK (accounted_microusd >= 0),
+    estimated_microusd INTEGER CHECK (estimated_microusd >= 0),
+    accounting_status TEXT CHECK (
+        accounting_status IN ('reserved', 'reported', 'released', 'conservative')
+    ),
+    input_tokens INTEGER CHECK (input_tokens >= 0),
+    cached_input_tokens INTEGER CHECK (cached_input_tokens >= 0),
+    output_tokens INTEGER CHECK (output_tokens >= 0),
+    reasoning_output_tokens INTEGER CHECK (reasoning_output_tokens >= 0),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (inference_connector_id)
+        REFERENCES inference_connectors(id) ON DELETE RESTRICT,
+    CHECK (
+        (dispatch_kind = 'direct'
+            AND inference_connector_id IS NULL
+            AND connector_protocol_version IS NULL
+            AND deployment_sha256 IS NULL
+            AND route IS NULL
+            AND policy_sha256 IS NULL
+            AND credential_scope_sha256 IS NULL
+            AND provider IS NULL
+            AND protocol IS NULL
+            AND model IS NULL
+            AND deadline IS NULL)
+        OR
+        (dispatch_kind = 'connector'
+            AND inference_connector_id IS NOT NULL
+            AND connector_protocol_version IN (1, 2)
+            AND length(deployment_sha256) = 64
+            AND route IS NOT NULL
+            AND length(policy_sha256) = 64
+            AND length(credential_scope_sha256) = 64
+            AND provider IS NOT NULL
+            AND protocol IS NOT NULL
+            AND model IS NOT NULL
+            AND deadline IS NOT NULL)
+    ),
+    CHECK (
+        (outcome = 'dispatching'
+            AND dispatch_kind = 'connector'
+            AND request_bytes = 0
+            AND response_bytes = 0
+            AND http_status IS NULL
+            AND error_code IS NULL
+            AND finished_at IS NULL)
+        OR
+        (outcome = 'succeeded'
+            AND http_status BETWEEN 200 AND 299
+            AND error_code IS NULL
+            AND finished_at IS NOT NULL)
+        OR
+        (outcome IN ('failed', 'denied', 'busy', 'ambiguous')
+            AND error_code IS NOT NULL
+            AND finished_at IS NOT NULL)
+    ),
+    CHECK (
+        (budget_account IS NULL
+            AND budget_revision IS NULL
+            AND budget_policy_sha256 IS NULL
+            AND budget_currency IS NULL
+            AND budget_policy_json IS NULL
+            AND reserved_microusd IS NULL
+            AND accounted_microusd IS NULL
+            AND estimated_microusd IS NULL
+            AND accounting_status IS NULL
+            AND input_tokens IS NULL
+            AND cached_input_tokens IS NULL
+            AND output_tokens IS NULL
+            AND reasoning_output_tokens IS NULL)
+        OR
+        (dispatch_kind = 'connector'
+            AND connector_protocol_version = 2
+            AND budget_account IS NOT NULL
+            AND budget_revision IS NOT NULL
+            AND length(budget_policy_sha256) = 64
+            AND budget_currency = 'USD'
+            AND budget_policy_json IS NOT NULL
+            AND reserved_microusd IS NOT NULL
+            AND (
+                (outcome = 'dispatching'
+                    AND accounting_status = 'reserved'
+                    AND accounted_microusd IS NULL
+                    AND estimated_microusd IS NULL
+                    AND input_tokens IS NULL
+                    AND cached_input_tokens IS NULL
+                    AND output_tokens IS NULL
+                    AND reasoning_output_tokens IS NULL)
+                OR
+                (outcome != 'dispatching'
+                    AND accounting_status = 'reported'
+                    AND accounted_microusd = estimated_microusd
+                    AND accounted_microusd <= reserved_microusd
+                    AND input_tokens IS NOT NULL
+                    AND cached_input_tokens IS NOT NULL
+                    AND cached_input_tokens <= input_tokens
+                    AND output_tokens IS NOT NULL
+                    AND reasoning_output_tokens IS NOT NULL
+                    AND reasoning_output_tokens <= output_tokens)
+                OR
+                (outcome != 'dispatching'
+                    AND accounting_status = 'released'
+                    AND accounted_microusd = 0
+                    AND estimated_microusd IS NULL
+                    AND input_tokens IS NULL
+                    AND cached_input_tokens IS NULL
+                    AND output_tokens IS NULL
+                    AND reasoning_output_tokens IS NULL)
+                OR
+                (outcome != 'dispatching'
+                    AND accounting_status = 'conservative'
+                    AND accounted_microusd = reserved_microusd
+                    AND estimated_microusd IS NULL
+                    AND input_tokens IS NULL
+                    AND cached_input_tokens IS NULL
+                    AND output_tokens IS NULL
+                    AND reasoning_output_tokens IS NULL)
+            ))
+    )
+) STRICT;
+
+INSERT INTO provider_invocations (
+    id, run_id, provider_grant_id, dispatch_kind,
+    inference_connector_id, connector_protocol_version, deployment_sha256,
+    route, policy_sha256, credential_scope_sha256, provider, protocol, model,
+    deadline, outcome, request_bytes, response_bytes, http_status, error_code,
+    started_at, finished_at
+)
+SELECT
+    id, run_id, provider_grant_id, dispatch_kind,
+    inference_connector_id, connector_protocol_version, deployment_sha256,
+    route, policy_sha256, credential_scope_sha256, provider, protocol, model,
+    deadline, outcome, request_bytes, response_bytes, http_status, error_code,
+    started_at, finished_at
+FROM provider_invocations_v18;
+
+DROP TABLE provider_invocations_v18;
+DROP TABLE provider_connector_bindings_v18;
+DROP TABLE inference_connector_events_v18;
+DROP TABLE inference_connectors_v18;
+
+CREATE INDEX provider_invocation_run
+    ON provider_invocations(run_id, started_at, id);
+CREATE INDEX provider_invocation_connector
+    ON provider_invocations(inference_connector_id, started_at, id)
+    WHERE inference_connector_id IS NOT NULL;
+CREATE INDEX provider_invocation_budget_account
+    ON provider_invocations(budget_account, outcome)
+    WHERE budget_account IS NOT NULL;
+CREATE INDEX provider_invocation_budget_grant
+    ON provider_invocations(provider_grant_id, budget_account)
+    WHERE budget_account IS NOT NULL;
+CREATE INDEX inference_connector_state
+    ON inference_connectors(state, created_at, id);
+CREATE INDEX inference_connector_event_stream
+    ON inference_connector_events(inference_connector_id, sequence);
+CREATE INDEX provider_connector_connector
+    ON provider_connector_bindings(inference_connector_id, provider_grant_id);
+
+CREATE TRIGGER inference_connector_identity_immutable
+BEFORE UPDATE OF
+    id, name, schema_version, connector_protocol_version, spec_json,
+    content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency,
+    created_by, created_at
+ON inference_connectors
+BEGIN
+    SELECT RAISE(ABORT, 'inference connector identity is immutable');
+END;
+CREATE TRIGGER inference_connector_immutable_delete
+BEFORE DELETE ON inference_connectors
+BEGIN
+    SELECT RAISE(ABORT, 'inference connectors cannot be deleted');
+END;
+CREATE TRIGGER inference_connector_event_immutable_update
+BEFORE UPDATE ON inference_connector_events
+BEGIN
+    SELECT RAISE(ABORT, 'inference connector events are immutable');
+END;
+CREATE TRIGGER inference_connector_event_immutable_delete
+BEFORE DELETE ON inference_connector_events
+BEGIN
+    SELECT RAISE(ABORT, 'inference connector events cannot be deleted');
+END;
+CREATE TRIGGER provider_connector_binding_requires_connector_grant
+BEFORE INSERT ON provider_connector_bindings
+WHEN COALESCE(
+    (SELECT grant_kind FROM provider_grants WHERE id = NEW.provider_grant_id),
+    ''
+) <> 'connector'
+BEGIN
+    SELECT RAISE(ABORT, 'connector binding requires a connector grant');
+END;
+CREATE TRIGGER provider_connector_binding_immutable_update
+BEFORE UPDATE ON provider_connector_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'provider connector bindings are immutable');
+END;
+CREATE TRIGGER provider_connector_binding_immutable_delete
+BEFORE DELETE ON provider_connector_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'provider connector bindings cannot be deleted');
+END;
+
+CREATE TRIGGER provider_invocation_immutable_update
+BEFORE UPDATE ON provider_invocations
+WHEN
+    OLD.outcome != 'dispatching'
+    OR NEW.outcome = 'dispatching'
+    OR NEW.finished_at IS NULL
+    OR NEW.id IS NOT OLD.id
+    OR NEW.run_id IS NOT OLD.run_id
+    OR NEW.provider_grant_id IS NOT OLD.provider_grant_id
+    OR NEW.dispatch_kind IS NOT OLD.dispatch_kind
+    OR NEW.inference_connector_id IS NOT OLD.inference_connector_id
+    OR NEW.connector_protocol_version IS NOT OLD.connector_protocol_version
+    OR NEW.deployment_sha256 IS NOT OLD.deployment_sha256
+    OR NEW.route IS NOT OLD.route
+    OR NEW.policy_sha256 IS NOT OLD.policy_sha256
+    OR NEW.credential_scope_sha256 IS NOT OLD.credential_scope_sha256
+    OR NEW.provider IS NOT OLD.provider
+    OR NEW.protocol IS NOT OLD.protocol
+    OR NEW.model IS NOT OLD.model
+    OR NEW.deadline IS NOT OLD.deadline
+    OR NEW.budget_account IS NOT OLD.budget_account
+    OR NEW.budget_revision IS NOT OLD.budget_revision
+    OR NEW.budget_policy_sha256 IS NOT OLD.budget_policy_sha256
+    OR NEW.budget_currency IS NOT OLD.budget_currency
+    OR NEW.budget_policy_json IS NOT OLD.budget_policy_json
+    OR NEW.reserved_microusd IS NOT OLD.reserved_microusd
+    OR NEW.started_at IS NOT OLD.started_at
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+CREATE TRIGGER provider_invocation_immutable_delete
+BEFORE DELETE ON provider_invocations
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -2170,6 +2558,7 @@ SCHEMA = (
     + INFERENCE_DISPATCH_SCHEMA
     + PROVIDER_INVOCATION_LIFECYCLE_SCHEMA
     + ATTEMPT_OWNER_AUDIT_SCHEMA
+    + PROVIDER_BUDGET_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -2189,4 +2578,5 @@ MIGRATIONS = {
     15: INFERENCE_DISPATCH_SCHEMA,
     16: PROVIDER_INVOCATION_LIFECYCLE_SCHEMA,
     17: ATTEMPT_OWNER_AUDIT_SCHEMA,
+    18: PROVIDER_BUDGET_SCHEMA,
 }

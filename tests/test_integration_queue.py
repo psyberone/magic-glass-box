@@ -370,8 +370,8 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 18)
-        self.assertEqual(status["schema_version"], 18)
+        self.assertEqual(SCHEMA_VERSION, 19)
+        self.assertEqual(status["schema_version"], 19)
         with closing(database.connect()) as connection:
             objects = {
                 (row["type"], row["name"])
@@ -415,8 +415,8 @@ class IntegrationMigrationTests(unittest.TestCase):
         first = database.initialize()
         second = database.initialize()
 
-        self.assertEqual(first["schema_version"], 18)
-        self.assertEqual(second["schema_version"], 18)
+        self.assertEqual(first["schema_version"], 19)
+        self.assertEqual(second["schema_version"], 19)
         with closing(database.connect()) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_schema "

@@ -34,6 +34,7 @@ from .krab import (
 )
 from .provider import (
     ProviderAmbiguousError,
+    ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
     ProviderUpstreamError,
@@ -350,6 +351,10 @@ class RunGateway:
             return self._failure(
                 request_id, "busy", "provider concurrency limit is reached"
             )
+        except ProviderBudgetError:
+            return self._failure(
+                request_id, "budget_exhausted", "provider budget is exhausted"
+            )
         except ProviderAmbiguousError:
             return self._failure(
                 request_id,
@@ -517,7 +522,11 @@ class RunGateway:
             grant_name=grant,
             request=provider_request,
         )
-        return asdict(accepted)
+        result = asdict(accepted)
+        # Accounting is operator metadata; keep the worker-facing carrier stable.
+        result.pop("usage", None)
+        result.pop("estimated_microusd", None)
+        return result
 
     def _read_work(self, payload: object) -> dict[str, Any]:
         item = _exact_payload(payload, {"after_sequence", "limit"})

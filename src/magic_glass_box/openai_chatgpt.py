@@ -25,6 +25,7 @@ from .inference import (
     CONNECTOR_ID_RE,
     InferenceInvocationRequest,
     InferenceInvocationResponse,
+    InferenceUsage,
 )
 
 CHATGPT_ISSUER = "https://auth.openai.com"
@@ -1110,6 +1111,7 @@ class OpenAIResponseResult:
     request_bytes: int
     response_bytes: int
     untrusted_response: dict[str, Any]
+    usage: InferenceUsage | None = None
 
 
 def _safe_error_code(value: object, *, fallback: str) -> str:
@@ -1130,7 +1132,52 @@ def _http_error_code(raw: bytes) -> str:
     return _safe_error_code(error, fallback="upstream_error")
 
 
-def _sse_terminal(raw: bytes) -> tuple[str, str | None]:
+def _response_usage(response: Mapping[str, Any]) -> InferenceUsage | None:
+    raw_usage = response.get("usage")
+    if raw_usage is None:
+        return None
+    if not isinstance(raw_usage, dict):
+        raise ChatGPTResponseAmbiguousError(
+            "provider invocation outcome is ambiguous",
+            error_code="upstream_ambiguous",
+        )
+    input_details = raw_usage.get("input_tokens_details", {})
+    output_details = raw_usage.get("output_tokens_details", {})
+    if not isinstance(input_details, dict) or not isinstance(output_details, dict):
+        raise ChatGPTResponseAmbiguousError(
+            "provider invocation outcome is ambiguous",
+            error_code="upstream_ambiguous",
+        )
+    try:
+        usage = InferenceUsage.from_mapping(
+            {
+                "input_tokens": raw_usage["input_tokens"],
+                "cached_input_tokens": input_details.get("cached_tokens", 0),
+                "output_tokens": raw_usage["output_tokens"],
+                "reasoning_output_tokens": output_details.get("reasoning_tokens", 0),
+            }
+        )
+    except (KeyError, ValidationError) as exc:
+        raise ChatGPTResponseAmbiguousError(
+            "provider invocation outcome is ambiguous",
+            error_code="upstream_ambiguous",
+        ) from exc
+    total = raw_usage.get("total_tokens")
+    if total is not None and (
+        isinstance(total, bool)
+        or not isinstance(total, int)
+        or total != usage.total_tokens
+    ):
+        raise ChatGPTResponseAmbiguousError(
+            "provider invocation outcome is ambiguous",
+            error_code="upstream_ambiguous",
+        )
+    return usage
+
+
+def _sse_terminal(
+    raw: bytes,
+) -> tuple[str, str | None, InferenceUsage | None]:
     try:
         text = raw.decode("utf-8", "strict").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError as exc:
@@ -1138,7 +1185,7 @@ def _sse_terminal(raw: bytes) -> tuple[str, str | None]:
             "provider invocation outcome is ambiguous",
             error_code="upstream_ambiguous",
         ) from exc
-    terminals: list[tuple[str, str | None]] = []
+    terminals: list[tuple[str, str | None, InferenceUsage | None]] = []
     saw_json_event = False
     for frame in text.split("\n\n"):
         data_lines = [
@@ -1169,23 +1216,31 @@ def _sse_terminal(raw: bytes) -> tuple[str, str | None]:
                     "provider invocation outcome is ambiguous",
                     error_code="upstream_ambiguous",
                 )
-            terminals.append(("completed", None))
+            terminals.append(("completed", None, _response_usage(response)))
         elif event_type == "response.failed":
             response = event.get("response")
             error = response.get("error") if isinstance(response, dict) else None
             code = error.get("code") if isinstance(error, dict) else None
             terminals.append(
-                ("failed", _safe_error_code(code, fallback="response_failed"))
+                (
+                    "failed",
+                    _safe_error_code(code, fallback="response_failed"),
+                    None,
+                )
             )
         elif event_type == "response.incomplete":
-            terminals.append(("failed", "response_incomplete"))
+            terminals.append(("failed", "response_incomplete", None))
         elif event_type == "error":
             code = event.get("code")
             if code is None:
                 error = event.get("error")
                 code = error.get("code") if isinstance(error, dict) else None
             terminals.append(
-                ("failed", _safe_error_code(code, fallback="response_failed"))
+                (
+                    "failed",
+                    _safe_error_code(code, fallback="response_failed"),
+                    None,
+                )
             )
     if not saw_json_event or len(terminals) != 1:
         raise ChatGPTResponseAmbiguousError(
@@ -1457,6 +1512,7 @@ class OpenAIResponsesClient:
         *,
         model: str,
         request_limit_bytes: int,
+        max_output_tokens: int | None,
     ) -> tuple[bytes, dict[str, str]]:
         if not isinstance(request, dict) or set(request) != {
             "protocol",
@@ -1551,7 +1607,19 @@ class OpenAIResponsesClient:
                 )
             forwarded[name] = raw_value
         try:
-            body = canonical_json({**provider_body, "model": model}).encode("utf-8")
+            outbound_body = {**provider_body, "model": model}
+            if max_output_tokens is not None:
+                if (
+                    isinstance(max_output_tokens, bool)
+                    or not isinstance(max_output_tokens, int)
+                    or not 1 <= max_output_tokens <= 1_000_000
+                ):
+                    raise ChatGPTResponseFailure(
+                        "provider output token bound is invalid",
+                        error_code="invalid_request",
+                    )
+                outbound_body["max_output_tokens"] = max_output_tokens
+            body = canonical_json(outbound_body).encode("utf-8")
         except ValidationError as exc:
             raise ChatGPTResponseFailure(
                 "provider request JSON is invalid", error_code="invalid_request"
@@ -1572,6 +1640,7 @@ class OpenAIResponsesClient:
         request_limit_bytes: int,
         response_limit_bytes: int,
         deadline: datetime,
+        max_output_tokens: int | None = None,
     ) -> OpenAIResponseResult:
         if not isinstance(access_token, str) or not access_token:
             raise ChatGPTResponseFailure(
@@ -1583,6 +1652,7 @@ class OpenAIResponsesClient:
             request,
             model=model,
             request_limit_bytes=request_limit_bytes,
+            max_output_tokens=max_output_tokens,
         )
         remaining = (deadline.astimezone(UTC) - datetime.now(UTC)).total_seconds()
         if remaining <= 0:
@@ -1642,7 +1712,7 @@ class OpenAIResponsesClient:
                 response_bytes=len(response.body),
             )
         try:
-            outcome, error_code = _sse_terminal(response.body)
+            outcome, error_code, usage = _sse_terminal(response.body)
         except ChatGPTResponseAmbiguousError as exc:
             raise ChatGPTResponseAmbiguousError(
                 "provider invocation outcome is ambiguous",
@@ -1679,6 +1749,7 @@ class OpenAIResponsesClient:
             request_bytes=len(body),
             response_bytes=len(response.body),
             untrusted_response=untrusted,
+            usage=usage,
         )
 
 
@@ -1831,17 +1902,18 @@ class OpenAIChatGPTConnector:
         response_bytes: int = 0,
         outcome: str = "failed",
     ) -> InferenceInvocationResponse:
-        return InferenceInvocationResponse.from_mapping(
-            {
-                **_response_authority(request),
-                "outcome": outcome,
-                "provider_status": status_code,
-                "request_bytes": min(request_bytes, request.request_limit_bytes),
-                "response_bytes": min(response_bytes, request.response_limit_bytes),
-                "error_code": _safe_error_code(error_code, fallback="connector_error"),
-                "response": None,
-            }
-        )
+        value: dict[str, Any] = {
+            **_response_authority(request),
+            "outcome": outcome,
+            "provider_status": status_code,
+            "request_bytes": min(request_bytes, request.request_limit_bytes),
+            "response_bytes": min(response_bytes, request.response_limit_bytes),
+            "error_code": _safe_error_code(error_code, fallback="connector_error"),
+            "response": None,
+        }
+        if request.connector_protocol_version == 2:
+            value["usage"] = None
+        return InferenceInvocationResponse.from_mapping(value)
 
     def _authority_error(
         self,
@@ -1901,6 +1973,9 @@ class OpenAIChatGPTConnector:
                 request_limit_bytes=request.request_limit_bytes,
                 response_limit_bytes=request.response_limit_bytes,
                 deadline=datetime.fromisoformat(request.deadline),
+                max_output_tokens=(
+                    None if request.budget is None else request.budget.max_output_tokens
+                ),
             )
         except ChatGPTResponseAmbiguousError as exc:
             return self._failed(
@@ -1919,14 +1994,35 @@ class OpenAIChatGPTConnector:
                 request_bytes=exc.request_bytes,
                 response_bytes=exc.response_bytes,
             )
-        return InferenceInvocationResponse.from_mapping(
-            {
-                **_response_authority(request),
-                "outcome": "succeeded",
-                "provider_status": result.status_code,
-                "request_bytes": result.request_bytes,
-                "response_bytes": result.response_bytes,
-                "error_code": None,
-                "response": result.untrusted_response,
-            }
-        )
+        if request.connector_protocol_version == 2:
+            budget = request.budget
+            assert budget is not None
+            if (
+                result.usage is None
+                or budget.estimate_microusd(result.usage) > budget.reservation_microusd
+            ):
+                return self._failed(
+                    request,
+                    error_code=(
+                        "usage_unavailable"
+                        if result.usage is None
+                        else "usage_exceeds_budget"
+                    ),
+                    status_code=result.status_code,
+                    request_bytes=result.request_bytes,
+                    response_bytes=result.response_bytes,
+                    outcome="ambiguous",
+                )
+        value: dict[str, Any] = {
+            **_response_authority(request),
+            "outcome": "succeeded",
+            "provider_status": result.status_code,
+            "request_bytes": result.request_bytes,
+            "response_bytes": result.response_bytes,
+            "error_code": None,
+            "response": result.untrusted_response,
+        }
+        if request.connector_protocol_version == 2:
+            assert result.usage is not None
+            value["usage"] = result.usage.to_dict()
+        return InferenceInvocationResponse.from_mapping(value)

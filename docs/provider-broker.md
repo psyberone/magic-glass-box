@@ -56,6 +56,10 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
 The connector's private route must independently match the registered route,
 provider, semantic protocol, exact model, scope fingerprint, and byte ceilings.
 A mismatch fails inside the connector rather than widening authority.
+The reference adapter intentionally implements only protocol v1 because its
+generic provider broker does not normalize vendor usage. It rejects protocol
+v2 before provider dispatch. The built-in OpenAI connector and deterministic
+fake connector implement the budgeted v2 contract.
 
 ## Protocol adapters
 
@@ -84,14 +88,18 @@ request/response bodies are not made durable.
 
 MGB stores the exact connector, deployment, route, policy digest, scope
 fingerprint, provider, protocol, model, deadline, outcome, byte counts, status,
-error category, and timestamps. It does not store the connector's private
-adapter policy, destination, credential path or value, provider request body,
-provider response body, or transcript.
+error category, and timestamps. For protocol v2 it additionally stores the
+versioned budget identity, reservation/accounting state, integer USD-micro
+estimate, and normalized token counters. It does not store the connector's
+private adapter policy, destination, credential path or value, provider request
+body, provider response body, or transcript.
 
-The connector returns `succeeded`, `failed`, or `ambiguous` through the strict
-v1 response. A lost or invalid post-dispatch reply is durably ambiguous and is
-never replayed automatically. Connector-local adapter errors cannot grant new
-authority or cause MGB to fall back to the historical direct path.
+The connector returns `succeeded`, `failed`, or `ambiguous` through a strict v1
+or v2 response. V2 successes require normalized usage and echo the exact budget
+authority. A lost or invalid post-dispatch reply is durably ambiguous, consumes
+the full reserved allowance conservatively, and is never replayed
+automatically. Connector-local adapter errors cannot grant new authority or
+cause MGB to fall back to the historical direct path.
 
 Run the deterministic isolation proof with a real Docker worker and a separate
 fake connector:

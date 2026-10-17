@@ -7,9 +7,13 @@ from tempfile import TemporaryDirectory
 from magic_glass_box.executor import SandboxPlan
 from magic_glass_box.openai_chatgpt import ChatGPTProfileStore
 from scripts.check_live_openai_chatgpt import (
+    BUDGET_CEILING_MICROUSD,
+    BUDGET_MAX_OUTPUT_TOKENS,
     MAX_DIAGNOSTIC_LOG_CHARACTERS,
     _assert_sandbox_boundaries,
+    _connector_spec,
     _failure_diagnostic,
+    _grant_spec,
     _serialize_sandbox_plans,
     _session_secrets,
     _verified_failure_diagnostic,
@@ -17,6 +21,33 @@ from scripts.check_live_openai_chatgpt import (
 
 
 class LiveOpenAIChatGPTProofContractTests(unittest.TestCase):
+    def test_live_proof_uses_v2_with_a_five_dollar_hard_ceiling(self) -> None:
+        self.assertEqual(BUDGET_CEILING_MICROUSD, 5_000_000)
+        connector = _connector_spec(
+            socket_path=Path("/private/openai.sock"),
+            deployment_sha256="a" * 64,
+            scope_sha256="b" * 64,
+            model="gpt-test",
+        )
+        grant = _grant_spec(
+            deployment_sha256="a" * 64,
+            scope_sha256="b" * 64,
+            model="gpt-test",
+        )
+
+        self.assertEqual(connector.connector_protocol_version, 2)
+        self.assertIsNotNone(grant.budget)
+        assert grant.budget is not None
+        self.assertEqual(grant.budget.max_output_tokens, BUDGET_MAX_OUTPUT_TOKENS)
+        self.assertEqual(grant.budget.run_microusd, BUDGET_CEILING_MICROUSD)
+        self.assertEqual(grant.budget.project_microusd, BUDGET_CEILING_MICROUSD)
+        self.assertEqual(grant.budget.grant_microusd, BUDGET_CEILING_MICROUSD)
+        self.assertLessEqual(
+            grant.budget.maximum_invocation_microusd(grant.request_bytes),
+            grant.budget.invocation_microusd,
+        )
+        connector.validate_grant("openai-chatgpt", grant)
+
     def test_session_secrets_can_tolerate_a_terminally_cleared_session(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             store = ChatGPTProfileStore(Path(temporary_directory) / "profile")
@@ -50,6 +81,15 @@ class LiveOpenAIChatGPTProofContractTests(unittest.TestCase):
                     "model": "gpt-test",
                     "route": "openai-chatgpt",
                     "protocol": "openai-responses",
+                    "connector_protocol_version": 2,
+                    "accounting_status": "reported",
+                    "accounted_microusd": 7,
+                    "estimated_microusd": 7,
+                    "reserved_microusd": 1000000,
+                    "input_tokens": 3,
+                    "cached_input_tokens": 1,
+                    "output_tokens": 2,
+                    "reasoning_output_tokens": 1,
                     "request": "do not expose",
                     "response": "do not expose",
                 }
@@ -85,12 +125,21 @@ class LiveOpenAIChatGPTProofContractTests(unittest.TestCase):
             report["provider_invocations"],
             [
                 {
+                    "accounted_microusd": 7,
+                    "accounting_status": "reported",
+                    "cached_input_tokens": 1,
+                    "connector_protocol_version": 2,
                     "error_code": "subscription_sharing_unsupported_capability",
+                    "estimated_microusd": 7,
                     "http_status": 200,
+                    "input_tokens": 3,
                     "model": "gpt-test",
                     "outcome": "failed",
+                    "output_tokens": 2,
                     "protocol": "openai-responses",
+                    "reasoning_output_tokens": 1,
                     "request_bytes": 123,
+                    "reserved_microusd": 1000000,
                     "response_bytes": 456,
                     "route": "openai-chatgpt",
                 }

@@ -47,12 +47,22 @@ revision are authorized.
 Milestone 7D extracts AI-provider authentication and transport into a
 credential-isolated inference connector. M7D.2 makes this the exclusive normal
 dispatch path. The core authorizes the exact run, grant, connector deployment,
-route, semantic protocol, model, limits, concurrency, and later budget. The v1
-local sidecar owns API keys or OAuth tokens, refresh, and upstream networking;
-the transport-neutral client seam preserves a future authenticated external
-carrier. It exposes a bounded inference contract, not a raw provider CLI or
-arbitrary HTTP proxy. See
+route, semantic protocol, model, limits, concurrency, and budget. The v1 or v2
+local sidecar owns API keys or OAuth tokens, refresh, and upstream networking.
+Protocol v2 additionally carries a pinned invocation allowance,
+provider-enforced output bound, and normalized usage counters; the core
+atomically enforces versioned run, project, and grant ceilings without gaining
+the provider credential. The transport-neutral client seam preserves a future
+authenticated external carrier. It exposes a bounded inference contract, not a
+raw provider CLI or arbitrary HTTP proxy. See
 [inference-connectors.md](inference-connectors.md).
+
+The local connector's mode-`0700` directory and mode-`0600` Unix socket are its
+client-authentication boundary and are never mounted into a worker. MGB owns
+grant lifecycle and reservation; the credential sidecar owns route and
+provider enforcement and intentionally cannot read or mirror the MGB database.
+An external connector transport must add a revocable client capability rather
+than treating public reachability as equivalent to that private socket.
 
 ## Threat-model rule: outside scary, inside safe
 
@@ -114,8 +124,11 @@ project-activity projection.
   credentials.
 - An inference grant is an immutable, content-addressed binding to a registered
   connector deployment, route, semantic protocol, exact model, limits, and
-  credential-scope fingerprint. Creation and revocation are audited; expiry is
-  enforced without storing or locating the provider secret.
+  credential-scope fingerprint. A protocol-v2 grant also pins one versioned,
+  content-addressed budget policy, integer USD-micro rates, a per-invocation
+  reservation and output bound, and run/project/grant ceilings. Creation and
+  revocation are audited; expiry and budget admission are enforced without
+  storing or locating the provider secret.
 - Project context revisions are append-only and content-addressed.
 - Forge-neutral work-item imports are keyed by project, source, and external
   ID. Changed content appends an immutable version; identical imports are
@@ -190,6 +203,11 @@ project-activity projection.
   and permits one terminal finalization. A process or storage failure after the
   external boundary therefore leaves durable uncertainty instead of erasing
   evidence and making the call appear safely retryable.
+- Schema v19 adds protocol-v2 budget authority and content-free normalized
+  usage. One `BEGIN IMMEDIATE` transaction checks every applicable ceiling and
+  records the allowance before dispatch; exact provider counters release the
+  unused allowance, known pre-dispatch failure releases it all, and uncertainty
+  conservatively consumes the full reservation.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -247,7 +265,8 @@ Inference-connector registrations and grant bindings advance it to schema v15;
 exclusive connector dispatch and its invocation authority ledger advance it to
 schema v16. Durable pre-dispatch invocation intent and one-way finalization
 advance it to schema v17. Audited attempt-owner takeover and stale-owner
-transition fencing advance it to schema v18.
+transition fencing advance it to schema v18. Provider budget reservations and
+normalized usage accounting advance it to schema v19.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -394,11 +413,11 @@ completion, execution integrity, the redacted interactive control room, and the
 storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
 autonomous supervision, and aging escalation are complete. Trusted candidate
 materialization, exact-input gates, dependency/refold queue, and manual landing
-flow are implemented. The credential-isolated inference connector's D.1
-authority/carrier and D.2 exclusive-dispatch/containment checkpoints are
-implemented; the optional real-account proof is the remaining Milestone 7
-slice. Optional provider-neutral
-service sidecars follow the budget and destructive-continuity phases. See
+flow are implemented. The credential-isolated inference connector, its
+real-account proof, and provider usage/budget authority are implemented.
+Quota-aware recovery remains the next inference checkpoint. Optional
+provider-neutral service sidecars follow the budget and destructive-continuity
+phases. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),

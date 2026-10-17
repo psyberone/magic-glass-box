@@ -617,7 +617,7 @@ profile, and two landing commands issued but not executed.
 
 ## Milestone 8A: provider usage and budget authority
 
-**Status: planned**
+**Status: completed 2026-10-17**
 
 - Retain bounded normalized token and usage metadata from provider responses
   without retaining prompts, responses, or transcripts.
@@ -627,9 +627,22 @@ profile, and two landing commands issued but not executed.
 - Surface reconciled usage, spend estimates, and remaining policy budget in the
   control room.
 
-**Exit proof:** concurrent invocations cannot exceed a pinned budget, usage
-totals reconcile with audited provider calls, and no private request or response
-content enters the accounting ledger.
+**Exit proof:** concurrent reservations fail closed at invocation, run, grant,
+and project ceilings; account consumption survives new runs and policy
+revisions; exact reported usage releases unused allowance; and ambiguous usage
+consumes the full reservation without retaining prompts or responses.
+
+Schema v19 and connector protocol v2 passed 792 tests, Ruff format and lint,
+86% branch coverage, and a clean-from-scratch 82.82% mutation score
+(31,619/38,180). All mutants were classified: 6,497 survived, 28 timed out, 36
+had no selected tests, and none were suspicious, skipped, interrupted, or
+crashed. A single authorized real-account proof used one worker attempt and
+five `gpt-6.1-sol` connector calls, reconciled 39,997 tokens to 23,877 µUSD of
+operator-pinned estimated accounting under a hard $5 ceiling, retained one
+exact result, passed its validation gate, denied direct worker networking,
+kept credentials inside the connector profile, and issued two landing commands
+without executing them. The estimate is policy accounting, not a provider
+invoice or a promise about external quota enforcement.
 
 ## Milestone 8B: quota-aware recovery
 

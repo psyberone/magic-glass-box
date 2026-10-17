@@ -20,6 +20,7 @@
   ],
   "properties": {
     "schema_version": { "const": 1 },
+    "budget": { "$ref": "#/$defs/budget" },
     "connector_name": { "$ref": "#/$defs/name" },
     "deployment_sha256": { "$ref": "#/$defs/sha256" },
     "route": { "$ref": "#/$defs/name" },
@@ -38,9 +39,62 @@
     "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 16 }
   },
   "$defs": {
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "cached_input_microusd_per_million_tokens",
+        "currency",
+        "grant_microusd",
+        "input_microusd_per_million_tokens",
+        "invocation_microusd",
+        "max_output_tokens",
+        "output_microusd_per_million_tokens",
+        "project_microusd",
+        "revision",
+        "run_microusd",
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "account": { "$ref": "#/$defs/name" },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": ".*\\S.*"
+        },
+        "currency": { "const": "USD" },
+        "invocation_microusd": { "$ref": "#/$defs/positiveMicrousd" },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "run_microusd": { "$ref": "#/$defs/positiveMicrousd" },
+        "project_microusd": { "$ref": "#/$defs/positiveMicrousd" },
+        "grant_microusd": { "$ref": "#/$defs/positiveMicrousd" },
+        "input_microusd_per_million_tokens": { "$ref": "#/$defs/microusd" },
+        "cached_input_microusd_per_million_tokens": {
+          "$ref": "#/$defs/microusd"
+        },
+        "output_microusd_per_million_tokens": { "$ref": "#/$defs/microusd" }
+      }
+    },
+    "microusd": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000000000
+    },
     "name": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "positiveMicrousd": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000
     },
     "sha256": {
       "type": "string",

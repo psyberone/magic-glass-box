@@ -43,10 +43,18 @@ RUNTIME_IMAGE = "magic-glass-box/runtime-proof:local"
 ROUTE_NAME = "openai-chatgpt"
 GRANT_NAME = "openai-chatgpt"
 CONNECTOR_NAME = "openai-chatgpt"
-REQUEST_BYTES = 2 * 1024 * 1024
+REQUEST_BYTES = 256 * 1024
 RESPONSE_BYTES = 4 * 1024 * 1024
 PROVIDER_TIMEOUT_MS = 120_000
 MAX_DIAGNOSTIC_LOG_CHARACTERS = 4096
+BUDGET_ACCOUNT = "openai-golden"
+BUDGET_REVISION = "m8a-v1"
+BUDGET_INVOCATION_MICROUSD = 1_000_000
+BUDGET_CEILING_MICROUSD = 5_000_000
+BUDGET_MAX_OUTPUT_TOKENS = 32_768
+BUDGET_INPUT_MICROUSD_PER_MILLION_TOKENS = 500_000
+BUDGET_CACHED_INPUT_MICROUSD_PER_MILLION_TOKENS = 250_000
+BUDGET_OUTPUT_MICROUSD_PER_MILLION_TOKENS = 10_000_000
 
 
 class _RecordingDockerEngine:
@@ -215,7 +223,7 @@ def _connector_spec(
     return InferenceConnectorSpec.from_mapping(
         {
             "schema_version": 1,
-            "connector_protocol_version": 1,
+            "connector_protocol_version": 2,
             "deployment_sha256": deployment_sha256,
             "transport": {"kind": "unix", "socket_path": str(socket_path)},
             "routes": [
@@ -252,6 +260,26 @@ def _grant_spec(
             "response_bytes": RESPONSE_BYTES,
             "timeout_ms": PROVIDER_TIMEOUT_MS,
             "max_concurrency": 1,
+            "budget": {
+                "schema_version": 1,
+                "account": BUDGET_ACCOUNT,
+                "revision": BUDGET_REVISION,
+                "currency": "USD",
+                "invocation_microusd": BUDGET_INVOCATION_MICROUSD,
+                "max_output_tokens": BUDGET_MAX_OUTPUT_TOKENS,
+                "run_microusd": BUDGET_CEILING_MICROUSD,
+                "project_microusd": BUDGET_CEILING_MICROUSD,
+                "grant_microusd": BUDGET_CEILING_MICROUSD,
+                "input_microusd_per_million_tokens": (
+                    BUDGET_INPUT_MICROUSD_PER_MILLION_TOKENS
+                ),
+                "cached_input_microusd_per_million_tokens": (
+                    BUDGET_CACHED_INPUT_MICROUSD_PER_MILLION_TOKENS
+                ),
+                "output_microusd_per_million_tokens": (
+                    BUDGET_OUTPUT_MICROUSD_PER_MILLION_TOKENS
+                ),
+            },
         }
     )
 
@@ -537,12 +565,21 @@ def _failure_diagnostic(
                 }
             )
     invocation_fields = (
+        "accounted_microusd",
+        "accounting_status",
+        "cached_input_tokens",
+        "connector_protocol_version",
         "error_code",
+        "estimated_microusd",
         "http_status",
+        "input_tokens",
         "model",
         "outcome",
+        "output_tokens",
         "protocol",
+        "reasoning_output_tokens",
         "request_bytes",
+        "reserved_microusd",
         "response_bytes",
         "route",
     )
@@ -736,13 +773,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         if any(
             invocation["outcome"] != "succeeded"
             or invocation["dispatch_kind"] != "connector"
+            or invocation["connector_protocol_version"] != 2
             or invocation["provider"] != "openai"
             or invocation["protocol"] != "openai-responses"
             or invocation["model"] != args.model
             or invocation["route"] != ROUTE_NAME
+            or invocation["accounting_status"] != "reported"
+            or invocation["estimated_microusd"] is None
+            or invocation["accounted_microusd"] != invocation["estimated_microusd"]
+            or invocation["input_tokens"] is None
+            or invocation["cached_input_tokens"] is None
+            or invocation["output_tokens"] is None
+            or invocation["reasoning_output_tokens"] is None
             for invocation in invocations
         ):
             raise RuntimeError("live provider audit evidence is incomplete")
+        usage_totals = {
+            field: sum(int(invocation[field]) for invocation in invocations)
+            for field in (
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+            )
+        }
+        usage_totals["total_tokens"] = (
+            usage_totals["input_tokens"] + usage_totals["output_tokens"]
+        )
+        estimated_microusd = sum(
+            int(invocation["estimated_microusd"]) for invocation in invocations
+        )
+        accounted_microusd = sum(
+            int(invocation["accounted_microusd"]) for invocation in invocations
+        )
+        budget_snapshot = control.control_room_snapshot()
+        budget_rows = [
+            row
+            for row in budget_snapshot["provider_budgets"]
+            if row["run_id"] == run_id and row["account"] == BUDGET_ACCOUNT
+        ]
+        if len(budget_rows) != 1:
+            raise RuntimeError("live provider budget projection is incomplete")
+        budget_evidence = budget_rows[0]
+        if (
+            budget_evidence["usage"] != usage_totals
+            or budget_evidence["estimated_microusd"] != estimated_microusd
+            or budget_evidence["accounted_microusd"] != accounted_microusd
+            or budget_evidence["reserved_microusd"] != 0
+            or budget_evidence["active_reservations"] != 0
+            or budget_evidence["conservative_invocations"] != 0
+            or not budget_evidence["reconciled"]
+        ):
+            raise RuntimeError("live provider budget projection did not reconcile")
         candidate = control.create_candidate(
             attempt["id"],
             created_by_handle="operator",
@@ -831,7 +913,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
         report = {
+            "accounted_microusd": accounted_microusd,
             "attempts": 1,
+            "budget_ceiling_microusd": BUDGET_CEILING_MICROUSD,
             "candidate_head": candidate["head_revision"],
             "connector_invocations": len(invocations),
             "credential_exposure": "none outside connector profile",
@@ -842,6 +926,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "model": args.model,
             "result_paths": [PROOF_PATH],
             "status": "passed",
+            "usage": usage_totals,
         }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

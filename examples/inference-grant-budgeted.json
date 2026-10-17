@@ -1,0 +1,28 @@
+{
+  "budget": {
+    "account": "personal-openai",
+    "cached_input_microusd_per_million_tokens": 125000,
+    "currency": "USD",
+    "grant_microusd": 1000000,
+    "input_microusd_per_million_tokens": 1250000,
+    "invocation_microusd": 100000,
+    "max_output_tokens": 1000,
+    "output_microusd_per_million_tokens": 10000000,
+    "project_microusd": 2000000,
+    "revision": "2026-10-17",
+    "run_microusd": 500000,
+    "schema_version": 1
+  },
+  "connector_name": "openai-personal",
+  "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "max_concurrency": 1,
+  "model": "gpt-test",
+  "protocol": "openai-responses",
+  "provider": "openai",
+  "request_bytes": 16384,
+  "response_bytes": 32768,
+  "route": "chatgpt-main",
+  "schema_version": 1,
+  "timeout_ms": 10000
+}

@@ -15,3 +15,7 @@ class ConflictError(StorageError):
 
 class ConcurrentUpdateError(ConflictError):
     pass
+
+
+class BudgetExceededError(ConflictError):
+    """A durable reservation would exceed pinned provider budget authority."""

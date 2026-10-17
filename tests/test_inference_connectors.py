@@ -15,6 +15,7 @@ from unittest import mock
 
 from magic_glass_box.domain import ProviderGrantSpec, ValidationError
 from magic_glass_box.inference import (
+    InferenceBudgetPolicy,
     InferenceConnectorAmbiguousError,
     InferenceConnectorError,
     InferenceConnectorSpec,
@@ -22,6 +23,7 @@ from magic_glass_box.inference import (
     InferenceGrantSpec,
     InferenceInvocationRequest,
     InferenceInvocationResponse,
+    InferenceUsage,
     UnixInferenceConnectorClient,
 )
 from magic_glass_box.provider import (
@@ -68,6 +70,23 @@ def grant_mapping() -> dict[str, Any]:
         "response_bytes": 32768,
         "timeout_ms": 10000,
         "max_concurrency": 1,
+    }
+
+
+def budget_mapping() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "account": "personal-openai",
+        "revision": "2026-10-17",
+        "currency": "USD",
+        "invocation_microusd": 100_000,
+        "max_output_tokens": 1_000,
+        "run_microusd": 500_000,
+        "project_microusd": 2_000_000,
+        "grant_microusd": 1_000_000,
+        "input_microusd_per_million_tokens": 1_250_000,
+        "cached_input_microusd_per_million_tokens": 125_000,
+        "output_microusd_per_million_tokens": 10_000_000,
     }
 
 
@@ -122,6 +141,8 @@ def response_for(
             "response_limit_bytes",
         )
     }
+    if request.budget is not None:
+        value["budget"] = request.budget.to_dict()
     value.update(
         {
             "outcome": outcome,
@@ -187,7 +208,7 @@ class InferenceContractTests(unittest.TestCase):
     ) -> None:
         connector_cases = (
             ({"extra": True}, "unknown fields"),
-            ({"connector_protocol_version": 2}, "protocol_version"),
+            ({"connector_protocol_version": 3}, "protocol_version"),
             ({"deployment_sha256": "not-a-digest"}, "deployment"),
             (
                 {"transport": {"kind": "unix", "socket_path": "relative.sock"}},
@@ -285,6 +306,92 @@ class InferenceContractTests(unittest.TestCase):
                 InferenceInvocationRequest.from_mapping(different)
             )
 
+    def test_v2_budget_and_usage_are_strict_bounded_and_correlated(self) -> None:
+        budget = InferenceBudgetPolicy.from_mapping(budget_mapping())
+        usage = InferenceUsage.from_mapping(
+            {
+                "input_tokens": 1_000,
+                "cached_input_tokens": 250,
+                "output_tokens": 100,
+                "reasoning_output_tokens": 25,
+            }
+        )
+        self.assertEqual(budget.estimate_microusd(usage), 1_969)
+        self.assertEqual(usage.total_tokens, 1_100)
+
+        connector_value = connector_mapping(self.socket_path)
+        connector_value["connector_protocol_version"] = 2
+        grant_value = grant_mapping()
+        grant_value["budget"] = budget_mapping()
+        connector = InferenceConnectorSpec.from_mapping(connector_value)
+        grant = InferenceGrantSpec.from_mapping(grant_value)
+        connector.validate_grant("openai-personal", grant)
+
+        request_value = request_mapping()
+        request_value["connector_protocol_version"] = 2
+        request_value["budget"] = budget.invocation_authority().to_dict()
+        request = InferenceInvocationRequest.from_mapping(request_value)
+        response_value = response_for(request)
+        response_value["usage"] = usage.to_dict()
+        response = InferenceInvocationResponse.from_mapping(response_value)
+        response.validate_correlation(request)
+        self.assertEqual(response.usage, usage)
+
+        over_budget = copy.deepcopy(response_value)
+        over_budget["usage"]["output_tokens"] = 20_000
+        with self.assertRaisesRegex(ValidationError, "output token bound"):
+            InferenceInvocationResponse.from_mapping(over_budget)
+
+        over_input_bound = copy.deepcopy(response_value)
+        over_input_bound["usage"]["input_tokens"] = 65_537
+        over_input_bound["usage"]["cached_input_tokens"] = 0
+        with self.assertRaisesRegex(ValidationError, "request token bound"):
+            InferenceInvocationResponse.from_mapping(over_input_bound)
+
+        bad_usage = usage.to_dict()
+        bad_usage["cached_input_tokens"] = 1_001
+        with self.assertRaisesRegex(ValidationError, "cached_input_tokens"):
+            InferenceUsage.from_mapping(bad_usage)
+
+        mismatched = copy.deepcopy(response_value)
+        mismatched["budget"]["reservation_microusd"] += 1
+        with self.assertRaisesRegex(ValidationError, "correlation"):
+            InferenceInvocationResponse.from_mapping(mismatched).validate_correlation(
+                request
+            )
+
+        underfunded_request = copy.deepcopy(request_value)
+        underfunded_request["budget"]["reservation_microusd"] = 91_919
+        with self.assertRaisesRegex(ValidationError, "cannot cover"):
+            InferenceInvocationRequest.from_mapping(underfunded_request)
+
+    def test_budget_requires_v2_and_v2_requires_budget(self) -> None:
+        v1_connector = InferenceConnectorSpec.from_mapping(
+            connector_mapping(self.socket_path)
+        )
+        budgeted_grant = grant_mapping()
+        budgeted_grant["budget"] = budget_mapping()
+        with self.assertRaisesRegex(ValidationError, "protocol version 2"):
+            v1_connector.validate_grant(
+                "openai-personal",
+                InferenceGrantSpec.from_mapping(budgeted_grant),
+            )
+
+        v2_mapping = connector_mapping(self.socket_path)
+        v2_mapping["connector_protocol_version"] = 2
+        v2_connector = InferenceConnectorSpec.from_mapping(v2_mapping)
+        with self.assertRaisesRegex(ValidationError, "budget"):
+            v2_connector.validate_grant(
+                "openai-personal", InferenceGrantSpec.from_mapping(grant_mapping())
+            )
+
+        underfunded = copy.deepcopy(budgeted_grant)
+        underfunded["budget"]["invocation_microusd"] = 91_919
+        with self.assertRaisesRegex(ValidationError, "worst-case token bounds"):
+            v2_connector.validate_grant(
+                "openai-personal", InferenceGrantSpec.from_mapping(underfunded)
+            )
+
     def test_invocation_envelopes_do_not_share_mutable_content(self) -> None:
         request_value = request_mapping()
         request = InferenceInvocationRequest.from_mapping(request_value)
@@ -322,6 +429,31 @@ class InferenceContractTests(unittest.TestCase):
 
 
 class ReferenceConnectorAccountingTests(unittest.TestCase):
+    def test_reference_connector_rejects_v2_before_provider_dispatch(self) -> None:
+        value = request_mapping()
+        value["connector_protocol_version"] = 2
+        value["budget"] = (
+            InferenceBudgetPolicy.from_mapping(budget_mapping())
+            .invocation_authority()
+            .to_dict()
+        )
+        request = InferenceInvocationRequest.from_mapping(value)
+
+        class ExplodingBroker:
+            def invoke(self, **_kwargs: object) -> None:
+                raise AssertionError("v2 request reached the unmetered broker")
+
+        response = _invoke(
+            request,
+            routes={},
+            broker=ExplodingBroker(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(response["outcome"], "failed")
+        self.assertEqual(response["error_code"], "usage_accounting_unsupported")
+        self.assertIsNone(response["usage"])
+        InferenceInvocationResponse.from_mapping(response)
+
     def test_oversized_provider_counters_are_capped_to_protocol_limits(self) -> None:
         request = InferenceInvocationRequest.from_mapping(request_mapping())
         policy = ProviderGrantSpec.from_mapping(

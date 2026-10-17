@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -25,7 +26,10 @@ from magic_glass_box.domain import (
 )
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import FileState, ResultChange, ResultManifest
-from magic_glass_box.storage.schema import ATTEMPT_OWNER_AUDIT_SCHEMA
+from magic_glass_box.storage.schema import (
+    ATTEMPT_OWNER_AUDIT_SCHEMA,
+    PROVIDER_BUDGET_SCHEMA,
+)
 
 OWNER_ID = "orchestrator-test-owner"
 IMAGE_ID = "sha256:" + "c" * 64
@@ -944,9 +948,15 @@ class AttemptMigrationTests(unittest.TestCase):
     def test_schema_seventeen_preserves_attempt_events_and_immutability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-seventeen.db"
-            self.assertTrue(SCHEMA.endswith(ATTEMPT_OWNER_AUDIT_SCHEMA))
+            tail = ATTEMPT_OWNER_AUDIT_SCHEMA + PROVIDER_BUDGET_SCHEMA
+            self.assertTrue(SCHEMA.endswith(tail))
+            historical_schema = SCHEMA[: -len(tail)]
+            self.assertEqual(
+                hashlib.sha256(historical_schema.encode()).hexdigest(),
+                "d60985b6a8aa69e910c330a8399b4f2e728ae213c94ae017eb648a50b5bfbb3f",
+            )
             with closing(sqlite3.connect(path)) as connection:
-                connection.executescript(SCHEMA[: -len(ATTEMPT_OWNER_AUDIT_SCHEMA)])
+                connection.executescript(historical_schema)
                 connection.execute("PRAGMA user_version = 17")
                 connection.commit()
             os.chmod(path, 0o600)
@@ -1056,6 +1066,46 @@ class AttemptMigrationTests(unittest.TestCase):
                         (running["id"],),
                     )
             self.assertEqual(after, before)
+
+    def test_schema_eighteen_fixture_is_pinned_and_migrates_budget_schema(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "schema-eighteen.db"
+            self.assertTrue(SCHEMA.endswith(PROVIDER_BUDGET_SCHEMA))
+            historical_schema = SCHEMA[: -len(PROVIDER_BUDGET_SCHEMA)]
+            self.assertEqual(
+                hashlib.sha256(historical_schema.encode()).hexdigest(),
+                "3aadec58ec078154cda90837b38cac335fd1d82d400a3cfa5d6bbd8612f211e4",
+            )
+            with closing(sqlite3.connect(path)) as connection:
+                connection.executescript(historical_schema)
+                connection.execute("PRAGMA user_version = 18")
+                connection.commit()
+            os.chmod(path, 0o600)
+
+            database = Database(path)
+            first = database.initialize()
+            second = database.initialize()
+
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(second, first)
+            with closing(database.connect()) as connection:
+                columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(provider_invocations)"
+                    )
+                }
+                indexes = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA index_list(provider_invocations)"
+                    )
+                }
+            self.assertIn("budget_policy_sha256", columns)
+            self.assertIn("accounted_microusd", columns)
+            self.assertIn("provider_invocation_budget_grant", indexes)
 
     def test_schema_four_migrates_existing_attempt_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

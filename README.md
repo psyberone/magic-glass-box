@@ -41,6 +41,10 @@ This repository currently contains the first executable vertical slice:
   connector dispatch, strict request/response envelopes, durable pre-dispatch
   intent and ambiguous outcomes, and a bounded Unix-socket carrier that
   isolates bad clients and removes its socket on controlled termination;
+- schema-v19 provider-budget authority with normalized content-free usage,
+  versioned USD-micro pricing and run/project/grant ceilings, atomic
+  pre-dispatch allowance reservations, conservative ambiguity accounting, and
+  reconciled control-room totals;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;
@@ -136,19 +140,21 @@ then register only its credential-free authority and a connector-bound grant:
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
   inference-connector register openai-personal \
-  --spec examples/inference-connector.json --created-by operator
+  --spec examples/inference-connector-v2.json --created-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box \
   provider connector-add openai-main-sidecar \
-  --policy examples/inference-grant.json --created-by operator
+  --policy examples/inference-grant-budgeted.json --created-by operator
 ```
 
 MGB does not launch a provider CLI, read the connector's credential store, or
 perform the upstream provider request. Normal provider execution is exclusive
-to the v1 local sidecar; the transport-neutral client seam preserves a later
-authenticated external-integration carrier. Historical direct grants remain
-readable and revocable for migration, but cannot be created through the
-operator surface or dispatched. The boundary and current checkpoint are
-documented in
+to the local sidecar. Protocol v2 carries a pinned reservation and normalized
+usage; protocol v1 remains readable and dispatchable for legacy unmetered
+connectors but has no MGB-enforced spend ceiling. The transport-neutral client
+seam preserves a later authenticated external-integration carrier. Historical
+direct grants remain readable and revocable for migration, but cannot be
+created through the operator surface or dispatched. The boundary and current
+checkpoint are documented in
 [docs/inference-connectors.md](docs/inference-connectors.md).
 
 The optional OpenAI connector owns its own Sign in with ChatGPT profile. Keep

@@ -156,12 +156,34 @@ class ControlRoom:
             connection, history_limit, generated_at
         )
         authorities = self._run_authorities(connection, run_ids, generated_at)
+        provider_budgets = self._provider_budgets(connection, run_ids)
         supervisor_actions = self._supervisor_actions(connection, run_ids)
         escalations = self._escalations(connection, run_ids)
         self._attach_run_counts(
             runs, attempts, interactions, retained_results, candidates, authorities
         )
         summary = self._summary(connection, provider_grants, attempts)
+        summary["provider_budgets"] = {
+            "authorities": len(provider_budgets),
+            "policy_consumed_microusd": sum(
+                item["policy_consumed_microusd"] for item in provider_budgets
+            ),
+            "accounted_microusd": sum(
+                item["accounted_microusd"] for item in provider_budgets
+            ),
+            "reserved_microusd": sum(
+                item["reserved_microusd"] for item in provider_budgets
+            ),
+            "estimated_microusd": sum(
+                item["estimated_microusd"] for item in provider_budgets
+            ),
+            "active_reservations": sum(
+                item["active_reservations"] for item in provider_budgets
+            ),
+            "conservative_invocations": sum(
+                item["conservative_invocations"] for item in provider_budgets
+            ),
+        }
         attention = self._attention(
             work_items,
             assignments,
@@ -203,6 +225,7 @@ class ControlRoom:
                 "landing_dependencies": landing_dependencies,
                 "integration_queue": integration_queue,
                 "run_authorities": authorities,
+                "provider_budgets": provider_budgets,
                 "supervisor_actions": supervisor_actions,
                 "escalations": escalations,
             },
@@ -963,6 +986,197 @@ class ControlRoom:
             )
             authorities.append(authority)
         return authorities
+
+    @classmethod
+    def _provider_budgets(
+        cls,
+        connection: sqlite3.Connection,
+        run_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """Project bounded accounting metadata for displayed run authorities."""
+
+        authority_rows = cls._for_runs(
+            connection,
+            run_ids,
+            "SELECT rpg.run_id, rpg.authority_name, rpg.provider_grant_id, "
+            "r.project_id, p.krab_project_key AS project_key, pg.name AS grant_name, "
+            "pg.policy_json, pg.content_sha256 FROM run_provider_grants rpg "
+            "JOIN runs r ON r.id = rpg.run_id "
+            "JOIN projects p ON p.id = r.project_id "
+            "JOIN provider_grants pg ON pg.id = rpg.provider_grant_id "
+            "WHERE rpg.run_id IN ({run_ids}) AND pg.grant_kind = 'connector' "
+            "ORDER BY rpg.run_id, rpg.authority_name",
+        )
+        parsed_authorities: list[tuple[sqlite3.Row, Any]] = []
+        for row in authority_rows:
+            try:
+                spec = InferenceGrantSpec.from_mapping(json.loads(row["policy_json"]))
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError("stored provider grant policy is invalid") from exc
+            if spec.digest != row["content_sha256"]:
+                raise StorageError("stored provider grant policy digest does not match")
+            if spec.budget is not None:
+                parsed_authorities.append((row, spec.budget))
+        if not parsed_authorities:
+            return []
+
+        placeholders = ", ".join("?" for _ in run_ids)
+        amount = (
+            "CASE WHEN pi.outcome = 'dispatching' THEN pi.reserved_microusd "
+            "ELSE pi.accounted_microusd END"
+        )
+        exact_rows = connection.execute(
+            "SELECT pi.run_id, pi.provider_grant_id, pi.budget_account, "  # noqa: S608 - only generated placeholders and controller-owned SQL fragments
+            "COUNT(*) AS invocations, "
+            "SUM(pi.accounting_status = 'reported') AS reported, "
+            "SUM(pi.accounting_status = 'conservative') AS conservative, "
+            "SUM(pi.accounting_status = 'reserved') AS active, "
+            f"SUM({amount}) AS consumed, "
+            "SUM(COALESCE(pi.accounted_microusd, 0)) AS accounted, "
+            "SUM(CASE WHEN pi.accounting_status = 'reserved' "
+            "THEN pi.reserved_microusd ELSE 0 END) AS reserved, "
+            "SUM(COALESCE(pi.estimated_microusd, 0)) AS estimated, "
+            "SUM(COALESCE(pi.input_tokens, 0)) AS input, "
+            "SUM(COALESCE(pi.cached_input_tokens, 0)) AS cached, "
+            "SUM(COALESCE(pi.output_tokens, 0)) AS output, "
+            "SUM(COALESCE(pi.reasoning_output_tokens, 0)) AS reasoning "
+            "FROM provider_invocations pi "
+            f"WHERE pi.run_id IN ({placeholders}) "
+            "AND pi.budget_account IS NOT NULL "
+            "GROUP BY pi.run_id, pi.provider_grant_id, pi.budget_account",
+            run_ids,
+        ).fetchall()
+        exact = {
+            (row["run_id"], row["provider_grant_id"], row["budget_account"]): {
+                field: int(row[field])
+                for field in (
+                    "invocations",
+                    "reported",
+                    "conservative",
+                    "active",
+                    "consumed",
+                    "accounted",
+                    "reserved",
+                    "estimated",
+                    "input",
+                    "cached",
+                    "output",
+                    "reasoning",
+                )
+            }
+            for row in exact_rows
+        }
+        scope_rows = connection.execute(
+            "WITH selected_runs AS ("  # noqa: S608 - only generated placeholders and controller-owned SQL fragments
+            "SELECT id, project_id FROM runs "
+            f"WHERE id IN ({placeholders})"
+            "), selected_grants AS ("
+            "SELECT DISTINCT rpg.provider_grant_id AS id "
+            "FROM run_provider_grants rpg "
+            "JOIN selected_runs sr ON sr.id = rpg.run_id"
+            "), selected_projects AS ("
+            "SELECT DISTINCT project_id AS id FROM selected_runs"
+            ") "
+            "SELECT 'run' AS scope, pi.run_id AS scope_id, "
+            f"pi.budget_account, SUM({amount}) AS consumed "
+            "FROM provider_invocations pi "
+            "JOIN selected_runs sr ON sr.id = pi.run_id "
+            "WHERE pi.budget_account IS NOT NULL "
+            "GROUP BY pi.run_id, pi.budget_account "
+            "UNION ALL "
+            "SELECT 'grant' AS scope, pi.provider_grant_id AS scope_id, "
+            f"pi.budget_account, SUM({amount}) AS consumed "
+            "FROM provider_invocations pi "
+            "JOIN selected_grants sg ON sg.id = pi.provider_grant_id "
+            "WHERE pi.budget_account IS NOT NULL "
+            "GROUP BY pi.provider_grant_id, pi.budget_account "
+            "UNION ALL "
+            "SELECT 'project' AS scope, r.project_id AS scope_id, "
+            f"pi.budget_account, SUM({amount}) AS consumed "
+            "FROM provider_invocations pi "
+            "JOIN runs r ON r.id = pi.run_id "
+            "JOIN selected_projects sp ON sp.id = r.project_id "
+            "WHERE pi.budget_account IS NOT NULL "
+            "GROUP BY r.project_id, pi.budget_account",
+            run_ids,
+        ).fetchall()
+        scope_totals = {
+            (row["scope"], row["scope_id"], row["budget_account"]): int(row["consumed"])
+            for row in scope_rows
+        }
+
+        budgets: list[dict[str, Any]] = []
+        empty = {
+            "invocations": 0,
+            "reported": 0,
+            "conservative": 0,
+            "active": 0,
+            "consumed": 0,
+            "accounted": 0,
+            "reserved": 0,
+            "estimated": 0,
+            "input": 0,
+            "cached": 0,
+            "output": 0,
+            "reasoning": 0,
+        }
+        for row, policy in parsed_authorities:
+            metrics = exact.get(
+                (row["run_id"], row["provider_grant_id"], policy.account), empty
+            )
+            scope_consumed = {
+                "run": scope_totals.get(("run", row["run_id"], policy.account), 0),
+                "grant": scope_totals.get(
+                    ("grant", row["provider_grant_id"], policy.account), 0
+                ),
+                "project": scope_totals.get(
+                    ("project", row["project_id"], policy.account), 0
+                ),
+            }
+            ceilings = {
+                "run": policy.run_microusd,
+                "grant": policy.grant_microusd,
+                "project": policy.project_microusd,
+            }
+            budgets.append(
+                {
+                    "run_id": row["run_id"],
+                    "project_key": row["project_key"],
+                    "authority_name": row["authority_name"],
+                    "grant_id": row["provider_grant_id"],
+                    "grant_name": row["grant_name"],
+                    "account": policy.account,
+                    "revision": policy.revision,
+                    "policy_sha256": policy.digest,
+                    "currency": policy.currency,
+                    "invocation_microusd": policy.invocation_microusd,
+                    "ceilings_microusd": ceilings,
+                    "scope_consumed_microusd": scope_consumed,
+                    "remaining_microusd": {
+                        scope: max(0, ceilings[scope] - scope_consumed[scope])
+                        for scope in ("run", "grant", "project")
+                    },
+                    "invocations": metrics["invocations"],
+                    "reported_invocations": metrics["reported"],
+                    "conservative_invocations": metrics["conservative"],
+                    "active_reservations": metrics["active"],
+                    "policy_consumed_microusd": metrics["consumed"],
+                    "accounted_microusd": metrics["accounted"],
+                    "reserved_microusd": metrics["reserved"],
+                    "estimated_microusd": metrics["estimated"],
+                    "usage": {
+                        "input_tokens": metrics["input"],
+                        "cached_input_tokens": metrics["cached"],
+                        "output_tokens": metrics["output"],
+                        "reasoning_output_tokens": metrics["reasoning"],
+                        "total_tokens": metrics["input"] + metrics["output"],
+                    },
+                    "reconciled": (
+                        metrics["active"] == 0 and metrics["conservative"] == 0
+                    ),
+                }
+            )
+        return budgets
 
     @staticmethod
     def _landing_dependencies(

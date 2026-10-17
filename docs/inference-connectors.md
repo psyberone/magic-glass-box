@@ -10,9 +10,15 @@
 > and proof-diagnostics defect; both received RED-first fixes. A separately
 > authorized second attempt then passed the complete result, candidate, gate,
 > and manual-landing path without exposing credentials or worker networking.
+>
+> **M8A IMPLEMENTED:** Schema v19 adds protocol-v2 budget authority. MGB
+> reserves an operator-priced invocation allowance atomically against pinned
+> run, project, and grant ceilings, retains only normalized token counters and
+> integer USD-micro accounting, and exposes reconciled totals in the control
+> room. Prompt, response, and transcript content remain outside the ledger.
 
 An inference connector is a narrow API server that performs an already
-authorized model invocation. The implemented v1 carrier is a local
+authorized model invocation. The implemented v1/v2 carrier is a local
 operator-owned Unix socket suitable for a sidecar. The client seam and strict
 envelopes are transport-neutral so an operator-managed external integration can
 be added without changing worker authority, but MGB does not yet ship a native
@@ -28,10 +34,10 @@ semantic protocol, model, and set of limits:
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
   inference-connector register openai-personal \
-  --spec examples/inference-connector.json --created-by operator
+  --spec examples/inference-connector-v2.json --created-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box \
   provider connector-add openai-main \
-  --policy examples/inference-grant.json --created-by operator
+  --policy examples/inference-grant-budgeted.json --created-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box \
   inference-connector list
 PYTHONPATH=src python3.11 -m magic_glass_box \
@@ -48,8 +54,10 @@ Connector lifecycle is deliberately external to MGB. The operator starts a
 local sidecar or configures an external integration at the registered endpoint;
 only that process receives provider credentials or a provider-native
 configuration directory. `scripts/reference_inference_connector.py` is a
-proof/reference implementation for API-key-backed protocol adapters, not a
-built-in credential service or an automatically managed daemon.
+protocol-v1 proof/reference implementation for API-key-backed adapters, not a
+built-in credential service or an automatically managed daemon. It rejects v2
+before provider dispatch because the generic adapter does not normalize vendor
+usage. The built-in OpenAI connector and deterministic fake implement v2.
 
 Its private configuration is intentionally distinct from the public
 registration document. It binds the assigned connector identity and deployment
@@ -92,13 +100,14 @@ permission scope. It must be derived from canonical non-secret metadata or an
 opaque random scope ID, never by hashing an API key, access token, refresh
 token, or other bearer material.
 
-The four public Draft 2020-12 contracts live in `schemas/` and have matching
-examples in `examples/`: connector registration, connector-bound grant,
-invocation request, and invocation response. The carrier uses one four-byte
-big-endian length followed by strict finite UTF-8 JSON. Every response repeats
-the complete correlation tuple. A failure before connection is unavailable;
-any malformed, late, mismatched, or lost reply after dispatch is ambiguous and
-is never retried automatically.
+The public Draft 2020-12 contracts live in `schemas/` and have matching examples
+in `examples/`: connector registration, connector-bound grant, the legacy v1
+invocation request/response, and the budgeted v2 invocation request/response.
+The carrier uses one four-byte big-endian length followed by strict finite
+UTF-8 JSON. Every response repeats the complete correlation tuple, including
+the exact v2 budget authority. A failure before connection is unavailable; any
+malformed, late, mismatched, or lost reply after dispatch is ambiguous and is
+never retried automatically.
 
 The request and response byte ceilings count the canonical provider request
 and raw provider response, respectively—not JSON framing added by the local
@@ -131,8 +140,8 @@ Magic Glass Box owns:
 
 - the immutable run-to-grant binding;
 - the selected semantic protocol, exact model, and request/response ceilings;
-- revocation, expiry, deadlines, concurrency reservations, and later budget
-  reservations;
+- revocation, expiry, deadlines, concurrency reservations, versioned budget
+  policy, and atomic allowance reservations;
 - authorization before dispatch and bounded metadata after completion; and
 - the worker-facing `provider.invoke` capability.
 
@@ -180,7 +189,9 @@ operation containing:
 - a unique invocation ID and immutable grant/policy digest;
 - the selected semantic protocol and exact configured model;
 - the request byte stream, deadline, and response ceiling; and
-- correlation needed for bounded byte and outcome metadata.
+- correlation needed for bounded byte and outcome metadata;
+- for v2, the budget-policy digest, per-call allowance, output-token ceiling,
+  and integer token rates needed to normalize the result independently.
 
 The worker cannot supply a connector endpoint, upstream destination, account,
 credential, or model override. MGB removes a nested provider-body model before
@@ -190,14 +201,78 @@ not expose arbitrary URLs, headers, commands, filesystem paths, or a
 pass-through vendor client. Its response is limited to the provider stream
 plus normalized status, byte counts, and the identities needed to bind the
 result to the invocation. Request and response content remains transient.
-Normalized usage metadata is added under Milestone 8's accounting authority
-rather than being implied by v1.
+V2 adds only `input_tokens`, `cached_input_tokens`, `output_tokens`, and
+`reasoning_output_tokens`; the subset counters are not charged twice. V1
+remains available for legacy unmetered connectors and carries no MGB-enforced
+spend authority.
+
+## Budget and accounting authority
+
+A v2 grant embeds one immutable budget policy. `account` is the stable logical
+spend pool, `revision` is its operator-visible policy revision, and the policy
+digest binds every rate and ceiling. All monetary values are non-floating-point
+integer micro-USD. They are operator-pinned estimates, not a claim that MGB can
+read a provider invoice or subscription balance.
+
+The policy supplies:
+
+- one allowance reserved for every invocation;
+- a maximum output-token count and input/cached-input/output rates per million
+  tokens;
+- lifetime ceilings for that account within the run, immutable grant, and
+  project ledger.
+
+Changing a policy means creating a new immutable grant. Project and run
+consumption is aggregated by stable account across revisions, so changing a
+revision does not erase prior spend. A deliberately new account starts a new
+budget epoch and is therefore an explicit operator authority change.
+
+Before a v2 grant can be registered, its invocation allowance must cover a
+conservative worst case: four input tokens for every permitted request byte,
+plus the maximum output tokens at the pinned rates. The v2 request repeats that
+authority. The OpenAI connector injects `max_output_tokens` after validating
+the worker body, so the worker cannot remove or raise the provider-side bound.
+Other v2 connectors must enforce an equivalent output bound for their provider.
+
+Immediately before dispatch, one SQLite `BEGIN IMMEDIATE` transaction totals
+existing consumption and active reservations for all three scopes. It either
+records the new `dispatching` row and full allowance or denies the call before
+the sidecar sees it. Concurrent control-plane processes therefore cannot each
+observe the same remaining allowance and collectively overspend it.
+
+A verified provider usage report replaces the reservation with its rounded-up
+estimate and releases the remainder. A known pre-connector failure releases the
+allowance. Missing, malformed, or lost post-dispatch accounting consumes the
+full reservation conservatively. The control room separates reported estimate,
+finalized accounting, active reservation, total policy consumption, and
+remaining run/grant/project allowance. `reconciled` is false while a
+reservation is active or any invocation remains conservatively accounted.
 
 Local deployments use an operator-owned Unix socket. A future authenticated
 loopback or external transport must preserve the same client contract; its
 endpoint and identity remain operator configuration rather than worker input.
 An external transport credential, if required, is a revocable connector
 capability—not an upstream provider credential.
+
+For the local transport, the mode-`0700` operator-owned socket directory and
+mode-`0600` socket are the connector's client-authentication boundary. The
+socket is never mounted into a worker. Grant lifecycle, run authority, atomic
+reservation, and policy-digest selection remain MGB responsibilities; the
+credential sidecar deliberately has no MGB database or duplicate grant store
+from which it could independently re-authorize a grant ID. It validates the
+pinned route, deployment, provider protocol, model, credential scope, byte and
+time ceilings, and v2 budget envelope as defense in depth. Grant IDs and
+digests are correlation fields, not bearer credentials. A hostile process
+already running as the operator could also read connector-owned profile state
+and is outside MGB's local-host threat boundary. Any future loopback or remote
+carrier must replace the private-socket assumption with an explicit revocable
+client capability.
+
+The control room computes run, grant, and project consumption with grouped SQL
+aggregates; it does not materialize the lifetime invocation ledger in Python.
+Run-detail projections return at most the newest 1,000 invocation records in
+chronological order, while the complete immutable ledger and all-scope totals
+remain durable in SQLite.
 
 ## OAuth and subscription-backed runtimes
 
@@ -250,9 +325,11 @@ Serving requires a private connector configuration that exactly matches the
 credential-free MGB registration: connector ID, deployment digest, route,
 scope fingerprint, model set, byte ceilings, and timeout. The service binds a
 mode-`0600` Unix socket in an operator-owned mode-`0700` directory. It accepts
-the same strict framed v1 invocation contract as the reference connector; it
-does not expose OAuth, arbitrary URLs, raw HTTP, or a provider CLI over that
-socket.
+the strict framed v1 and v2 invocation contracts; it does not expose OAuth,
+arbitrary URLs, raw HTTP, or a provider CLI over that socket. V2 completed
+Responses streams must contain structurally valid usage. The connector reduces
+that provider object to the four normalized counters and fails closed if usage
+is absent or exceeds the pinned request/output/reservation bounds.
 
 The OpenAI route additionally enforces the current Sign in with ChatGPT
 requirements before any HTTPS dispatch: `store` is false, `stream` is true,
@@ -290,9 +367,11 @@ PYTHONPATH=src python3.11 scripts/check_live_openai_chatgpt.py \
 The proof refuses to start without the opt-in flag. It builds the pinned
 runtime, allows one run attempt with no automatic provider replay, requires
 both the worker and exact-input gate containers to use `--network none`, and
-stops at an issued landing plan without executing it. `--max-invocations`
-bounds the agent loop but is not a dollar budget. Until Milestone 8A, configure
-the app's usage limit in ChatGPT settings as the spend/quota backstop.
+stops at an issued landing plan without executing it. The harness pins protocol
+v2 to a $1 estimated maximum per call and a $5 run/project/grant ceiling;
+`--max-invocations` bounds the agent loop independently. An account-side app
+usage limit remains the final provider-owned backstop because MGB's integer
+rates are a local estimate, not the provider's billing ledger.
 
 A local connector may receive an explicitly approved, dedicated
 provider-native configuration directory and run the provider's supported CLI
@@ -300,13 +379,13 @@ or service process against it. Only the connector gets that mount. MGB neither
 parses the provider's private credential format nor treats another tool's
 incidental on-disk layout as its own API.
 
-For the first Codex golden proof, quota consumption is treated like one bounded
-subagent invocation because it uses the operator's existing ChatGPT-plan pool:
+For the first Codex golden proof, quota consumption was treated like one bounded
+subagent invocation because it used the operator's existing ChatGPT-plan pool:
 one tiny disposable task, one attempt, a hard wall-clock limit, and no automatic
-retry. This is a quota guard, not a claim that MGB can enforce a dollar budget;
-that authority arrives in Milestone 8A. The proof uses MGB's own connector
-registration and OAuth session; it does not borrow the interactive Codex CLI's
-credential record.
+retry. M8A adds a separately pinned local dollar estimate and hard dispatch
+ceiling; it still does not claim access to the subscription's provider-side
+quota or invoice. The proof uses MGB's own connector registration and OAuth
+session; it does not borrow the interactive Codex CLI's credential record.
 
 ## Failure and retry semantics
 
@@ -314,7 +393,8 @@ An invocation whose response is lost may already have consumed quota. Before
 crossing the connector boundary, the core durably records a `dispatching`
 invocation. It finalizes that record exactly once after a verified response.
 A stranded `dispatching` record is conservative evidence of an uncertain call;
-the core does not automatically replay it.
+the core does not automatically replay it. For v2 it also remains a full active
+allowance until finalized.
 A failure before connection is recorded as unavailable/failed; a malformed,
 late, mismatched, or lost reply after dispatch is ambiguous. Connector
 operation IDs provide correlation, not a false promise that every provider
@@ -322,9 +402,10 @@ deduplicates inference. The worker's loopback provider bridge is permanently
 poisoned after an explicit ambiguous result, a committed mailbox timeout, or a
 malformed post-dispatch reply, so even a vendor CLI retry fails locally without
 another gateway or provider dispatch. The bounded dispatch reservation is not
-released until terminal ledger finalization succeeds. Milestone 8 adds
-normalized usage accounting, budget authority, and quota-aware recovery on top
-of this boundary.
+released until terminal ledger finalization succeeds. V2 reported usage
+reconciles that allowance; ambiguous or missing accounting consumes it in full.
+Quota/rate-limit classification, durable pause, and supervisor wake-up remain
+Milestone 8B rather than being smuggled into accounting.
 
 ## Migration and proof
 
@@ -337,9 +418,11 @@ credential reference. Krab and other non-inference credential paths are not
 silently migrated into this contract.
 
 The deterministic exit proof now passes with a fake connector and canary
-credential. Wrong connector identities, protocols, models, grant digests, and
-limits fail closed; the canary stays absent from the worker container, MGB
-state and SQLite, retained results, runtime output, and connector logs. The
+credential. Wrong connector identities, protocols, models, response
+correlation, and limits fail closed; MGB alone selects the pinned grant and
+policy digests before entering the private transport. The canary stays absent
+from the worker container, MGB state and SQLite, retained results, runtime
+output, and connector logs. The
 separate two-runtime Docker proof also drives the real Codex and Claude Code
 CLIs through a reference connector to a host-only deterministic upstream.
 

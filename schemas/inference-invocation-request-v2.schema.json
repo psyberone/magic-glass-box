@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:inference-invocation-request:v2",
+  "title": "Magic Glass Box Inference Invocation Request v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "budget",
+    "connector_id",
+    "connector_protocol_version",
+    "credential_scope_sha256",
+    "deadline",
+    "deployment_sha256",
+    "grant_id",
+    "invocation_id",
+    "model",
+    "policy_sha256",
+    "protocol",
+    "provider",
+    "request",
+    "request_limit_bytes",
+    "response_limit_bytes",
+    "route",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "connector_protocol_version": { "const": 2 },
+    "invocation_id": { "type": "string", "pattern": "^pinv_[0-9a-f]{32}$" },
+    "connector_id": { "type": "string", "pattern": "^ifc_[0-9a-f]{32}$" },
+    "deployment_sha256": { "$ref": "#/$defs/sha256" },
+    "route": { "$ref": "#/$defs/name" },
+    "grant_id": { "type": "string", "pattern": "^pgr_[0-9a-f]{32}$" },
+    "policy_sha256": { "$ref": "#/$defs/sha256" },
+    "credential_scope_sha256": { "$ref": "#/$defs/sha256" },
+    "provider": { "$ref": "#/$defs/name" },
+    "protocol": { "$ref": "#/$defs/name" },
+    "model": { "$ref": "#/$defs/model" },
+    "deadline": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "request_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2097152
+    },
+    "response_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4194304
+    },
+    "budget": { "$ref": "#/$defs/budget" },
+    "request": { "type": "object" }
+  },
+  "$defs": {
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cached_input_microusd_per_million_tokens",
+        "currency",
+        "input_microusd_per_million_tokens",
+        "max_output_tokens",
+        "output_microusd_per_million_tokens",
+        "policy_sha256",
+        "reservation_microusd"
+      ],
+      "properties": {
+        "policy_sha256": { "$ref": "#/$defs/sha256" },
+        "currency": { "const": "USD" },
+        "reservation_microusd": { "$ref": "#/$defs/positiveMicrousd" },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "input_microusd_per_million_tokens": { "$ref": "#/$defs/microusd" },
+        "cached_input_microusd_per_million_tokens": {
+          "$ref": "#/$defs/microusd"
+        },
+        "output_microusd_per_million_tokens": { "$ref": "#/$defs/microusd" }
+      }
+    },
+    "microusd": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000000000
+    },
+    "positiveMicrousd": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000000000
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": ".*\\S.*"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

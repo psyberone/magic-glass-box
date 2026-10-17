@@ -394,6 +394,23 @@ def completed_sse() -> bytes:
     )
 
 
+def completed_sse_with_usage() -> bytes:
+    event = {
+        "type": "response.completed",
+        "response": {
+            "status": "completed",
+            "usage": {
+                "input_tokens": 120,
+                "input_tokens_details": {"cached_tokens": 20},
+                "output_tokens": 30,
+                "output_tokens_details": {"reasoning_tokens": 10},
+                "total_tokens": 150,
+            },
+        },
+    }
+    return ("data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n").encode()
+
+
 def invocation_request(
     scope: str,
     *,
@@ -1848,6 +1865,49 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
             response.untrusted_response["protocol"],  # type: ignore[index]
             "openai-responses",
         )
+
+    def test_v2_connector_normalizes_usage_and_fails_closed_when_missing(self) -> None:
+        budget = {
+            "policy_sha256": "8" * 64,
+            "currency": "USD",
+            "reservation_microusd": 300_000,
+            "max_output_tokens": 1_000,
+            "input_microusd_per_million_tokens": 1_000_000,
+            "cached_input_microusd_per_million_tokens": 500_000,
+            "output_microusd_per_million_tokens": 2_000_000,
+        }
+        request = invocation_request(
+            self.scope,
+            connector_protocol_version=2,
+            budget=budget,
+        )
+        response = self.connector(
+            http := FakeHTTPClient(
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    completed_sse_with_usage(),
+                    "req_usage",
+                )
+            )
+        ).invoke(request)
+
+        assert response.usage is not None
+        self.assertEqual(response.usage.input_tokens, 120)
+        self.assertEqual(response.usage.cached_input_tokens, 20)
+        self.assertEqual(response.usage.output_tokens, 30)
+        self.assertEqual(response.usage.reasoning_output_tokens, 10)
+        sent = json.loads(http.requests[0]["body"])
+        self.assertEqual(sent["max_output_tokens"], 1_000)
+
+        missing = self.connector(
+            FakeHTTPClient(
+                HTTPResponse(200, "text/event-stream", completed_sse(), "req_missing")
+            )
+        ).invoke(request)
+        self.assertEqual(missing.outcome, "ambiguous")
+        self.assertEqual(missing.error_code, "usage_unavailable")
+        self.assertIsNone(missing.usage)
 
     def test_connector_rejects_wrong_authority_before_provider_transport(self) -> None:
         cases = (

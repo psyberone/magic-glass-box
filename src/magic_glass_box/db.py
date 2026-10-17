@@ -6,6 +6,7 @@ from .storage.candidates import CandidateStorage
 from .storage.catalog import CatalogStorage
 from .storage.core import DatabaseCore, default_db_path
 from .storage.errors import (
+    BudgetExceededError,
     ConcurrentUpdateError,
     ConflictError,
     NotFoundError,
@@ -38,6 +39,7 @@ from .storage.schema import (
     MAX_WORK_ASSIGNMENTS_PER_THREAD,
     MIGRATIONS,
     MIN_ATTEMPT_LEASE_SECONDS,
+    PROVIDER_BUDGET_SCHEMA,
     PROVIDER_DISPATCH_SCHEMA,
     PROVIDER_SCHEMA,
     RUN_REPLACEMENT_SCHEMA,
@@ -57,6 +59,7 @@ from .storage.work_items import WorkItemStorage
 __all__ = [
     "ATTEMPT_SCHEMA",
     "CANDIDATE_SCHEMA",
+    "BudgetExceededError",
     "ConcurrentUpdateError",
     "ConflictError",
     "DATABASE_FILENAME",
@@ -78,6 +81,7 @@ __all__ = [
     "MIN_INTEGRATION_LEASE_SECONDS",
     "NotFoundError",
     "PROVIDER_SCHEMA",
+    "PROVIDER_BUDGET_SCHEMA",
     "PROVIDER_DISPATCH_SCHEMA",
     "RUN_REPLACEMENT_SCHEMA",
     "SCHEMA",

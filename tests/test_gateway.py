@@ -36,6 +36,7 @@ from magic_glass_box.gateway import (
 from magic_glass_box.krab import KrabError
 from magic_glass_box.provider import (
     ProviderAmbiguousError,
+    ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
     ProviderUpstreamError,
@@ -723,6 +724,7 @@ class RunGatewayTests(unittest.TestCase):
 
         failures = (
             (ProviderBusyError("SECRET busy"), "busy"),
+            (ProviderBudgetError("SECRET budget"), "budget_exhausted"),
             (ProviderAmbiguousError("SECRET ambiguous"), "ambiguous"),
             (ProviderUpstreamError("SECRET upstream"), "upstream_error"),
             (ProviderError("SECRET denied"), "forbidden"),

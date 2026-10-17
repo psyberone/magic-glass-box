@@ -19,13 +19,16 @@ from ..domain import (
 )
 from ..inference import (
     CONNECTOR_ID_RE,
-    INFERENCE_CONNECTOR_PROTOCOL_VERSION,
     PROVIDER_INVOCATION_ID_RE,
     SHA256_RE,
+    SUPPORTED_INFERENCE_CONNECTOR_PROTOCOL_VERSIONS,
+    InferenceBudgetPolicy,
     InferenceConnectorSpec,
     InferenceGrantSpec,
+    InferenceUsage,
 )
 from .errors import (
+    BudgetExceededError,
     ConcurrentUpdateError,
     ConflictError,
     NotFoundError,
@@ -35,6 +38,7 @@ from .errors import (
 RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 PROVIDER_GRANT_ID_RE = re.compile(r"^pgr_[0-9a-f]{32}$")
 PROVIDER_DISPATCH_ID_RE = re.compile(r"^pdr_[0-9a-f]{32}$")
+MAX_PROVIDER_INVOCATION_HISTORY = 1000
 
 
 class InteractionStorage:
@@ -753,6 +757,7 @@ class InteractionStorage:
         http_status: int | None,
         error_code: str | None,
         started_at: str,
+        budget: InferenceBudgetPolicy | None = None,
     ) -> dict[str, Any]:
         if outcome not in {
             "dispatching",
@@ -816,7 +821,10 @@ class InteractionStorage:
                 or CONNECTOR_ID_RE.fullmatch(inference_connector_id) is None
             ):
                 raise ValidationError("invalid inference connector identifier")
-            if connector_protocol_version != INFERENCE_CONNECTOR_PROTOCOL_VERSION:
+            if (
+                connector_protocol_version
+                not in SUPPORTED_INFERENCE_CONNECTOR_PROTOCOL_VERSIONS
+            ):
                 raise ValidationError("invalid inference connector protocol version")
             for field, value in (
                 ("deployment_sha256", deployment_sha256),
@@ -838,6 +846,15 @@ class InteractionStorage:
             if not model.strip():
                 raise ValidationError("provider invocation model must not be blank")
             deadline = self._timestamp(deadline, field="deadline")
+        if budget is not None and not isinstance(budget, InferenceBudgetPolicy):
+            raise ValidationError("budget must be an InferenceBudgetPolicy")
+        if dispatch_kind == "direct" and budget is not None:
+            raise ValidationError("direct provider invocation cannot contain a budget")
+        if outcome == "dispatching":
+            if connector_protocol_version == 2 and budget is None:
+                raise ValidationError("protocol version 2 dispatch requires a budget")
+            if connector_protocol_version == 1 and budget is not None:
+                raise ValidationError("protocol version 1 cannot contain a budget")
         started_at = self._timestamp(started_at, field="started_at")
         if invocation_id is None:
             invocation_id = self.new_id("pinv")
@@ -851,14 +868,19 @@ class InteractionStorage:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 authority = connection.execute(
-                    "SELECT pg.grant_kind, pg.content_sha256, "
+                    "SELECT pg.grant_kind, pg.content_sha256, pg.policy_json, "
+                    "r.project_id, "
                     "pcb.inference_connector_id, "
                     "pcb.deployment_sha256, pcb.route, "
                     "pcb.credential_scope_sha256, pcb.provider, pcb.protocol, "
-                    "pcb.model FROM run_provider_grants rpg "
+                    "pcb.model, ic.connector_protocol_version "
+                    "FROM run_provider_grants rpg "
+                    "JOIN runs r ON r.id = rpg.run_id "
                     "JOIN provider_grants pg ON pg.id = rpg.provider_grant_id "
                     "LEFT JOIN provider_connector_bindings pcb "
                     "ON pcb.provider_grant_id = pg.id "
+                    "LEFT JOIN inference_connectors ic "
+                    "ON ic.id = pcb.inference_connector_id "
                     "WHERE rpg.run_id = ? AND rpg.provider_grant_id = ?",
                     (run_id, provider_grant_id),
                 ).fetchone()
@@ -873,6 +895,7 @@ class InteractionStorage:
                 if dispatch_kind == "connector" and (
                     authority["content_sha256"],
                     authority["inference_connector_id"],
+                    authority["connector_protocol_version"],
                     authority["deployment_sha256"],
                     authority["route"],
                     authority["credential_scope_sha256"],
@@ -882,6 +905,7 @@ class InteractionStorage:
                 ) != (
                     policy_sha256,
                     inference_connector_id,
+                    connector_protocol_version,
                     deployment_sha256,
                     route,
                     credential_scope_sha256,
@@ -892,6 +916,84 @@ class InteractionStorage:
                     raise ConflictError(
                         "provider invocation authority does not match its grant"
                     )
+                budget_values: tuple[Any, ...] = (None,) * 9
+                if budget is not None:
+                    try:
+                        stored_spec = InferenceGrantSpec.from_mapping(
+                            json.loads(authority["policy_json"])
+                        )
+                    except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                        raise StorageError(
+                            "stored inference grant budget is invalid"
+                        ) from exc
+                    if (
+                        stored_spec.digest != authority["content_sha256"]
+                        or stored_spec.budget != budget
+                    ):
+                        raise ConflictError(
+                            "provider invocation budget does not match its grant"
+                        )
+                    mismatched_currency = connection.execute(
+                        "SELECT 1 FROM provider_invocations WHERE budget_account = ? "
+                        "AND budget_currency != ? LIMIT 1",
+                        (budget.account, budget.currency),
+                    ).fetchone()
+                    if mismatched_currency is not None:
+                        raise StorageError(
+                            "provider budget account currency is inconsistent"
+                        )
+                    scope_queries = (
+                        (
+                            "run",
+                            budget.run_microusd,
+                            "SELECT COALESCE(SUM(CASE "
+                            "WHEN outcome = 'dispatching' THEN reserved_microusd "
+                            "ELSE accounted_microusd END), 0) "
+                            "FROM provider_invocations "
+                            "WHERE run_id = ? AND budget_account = ?",
+                            (run_id, budget.account),
+                        ),
+                        (
+                            "grant",
+                            budget.grant_microusd,
+                            "SELECT COALESCE(SUM(CASE "
+                            "WHEN outcome = 'dispatching' THEN reserved_microusd "
+                            "ELSE accounted_microusd END), 0) "
+                            "FROM provider_invocations "
+                            "WHERE provider_grant_id = ? AND budget_account = ?",
+                            (provider_grant_id, budget.account),
+                        ),
+                        (
+                            "project",
+                            budget.project_microusd,
+                            "SELECT COALESCE(SUM(CASE "
+                            "WHEN outcome = 'dispatching' THEN reserved_microusd "
+                            "ELSE accounted_microusd END), 0) "
+                            "FROM provider_invocations pi "
+                            "JOIN runs r ON r.id = pi.run_id "
+                            "WHERE r.project_id = ? AND pi.budget_account = ?",
+                            (authority["project_id"], budget.account),
+                        ),
+                    )
+                    for scope, ceiling, query, parameters in scope_queries:
+                        consumed = int(
+                            connection.execute(query, parameters).fetchone()[0]
+                        )
+                        if consumed + budget.invocation_microusd > ceiling:
+                            raise BudgetExceededError(
+                                f"{scope} provider budget is exhausted"
+                            )
+                    budget_values = (
+                        budget.account,
+                        budget.revision,
+                        budget.digest,
+                        budget.currency,
+                        budget.canonical,
+                        budget.invocation_microusd,
+                        None,
+                        None,
+                        "reserved",
+                    )
                 connection.execute(
                     "INSERT INTO provider_invocations "
                     "(id, run_id, provider_grant_id, dispatch_kind, "
@@ -899,9 +1001,13 @@ class InteractionStorage:
                     "deployment_sha256, route, policy_sha256, "
                     "credential_scope_sha256, provider, protocol, model, deadline, "
                     "outcome, request_bytes, response_bytes, http_status, "
-                    "error_code, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                    "?, ?, ?, ?)",
+                    "error_code, budget_account, budget_revision, "
+                    "budget_policy_sha256, budget_currency, budget_policy_json, "
+                    "reserved_microusd, accounted_microusd, estimated_microusd, "
+                    "accounting_status, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         invocation_id,
                         run_id,
@@ -922,12 +1028,13 @@ class InteractionStorage:
                         response_bytes,
                         http_status,
                         error_code,
+                        *budget_values,
                         started_at,
                         finished_at,
                     ),
                 )
                 connection.commit()
-            except ConflictError:
+            except (ConflictError, BudgetExceededError):
                 connection.rollback()
                 raise
             except sqlite3.IntegrityError as exc:
@@ -942,7 +1049,11 @@ class InteractionStorage:
                 "deployment_sha256, route, policy_sha256, "
                 "credential_scope_sha256, provider, protocol, model, deadline, "
                 "outcome, request_bytes, response_bytes, http_status, error_code, "
-                "started_at, finished_at "
+                "budget_account, budget_revision, budget_policy_sha256, "
+                "budget_currency, budget_policy_json, reserved_microusd, "
+                "accounted_microusd, estimated_microusd, accounting_status, "
+                "input_tokens, cached_input_tokens, output_tokens, "
+                "reasoning_output_tokens, started_at, finished_at "
                 "FROM provider_invocations WHERE id = ?",
                 (invocation_id,),
             ).fetchone()
@@ -959,6 +1070,8 @@ class InteractionStorage:
         response_bytes: int,
         http_status: int | None,
         error_code: str | None,
+        usage: InferenceUsage | None = None,
+        release_budget: bool = False,
     ) -> dict[str, Any]:
         if (
             not isinstance(invocation_id, str)
@@ -981,6 +1094,12 @@ class InteractionStorage:
             raise ValidationError("http_status must be between 100 and 599")
         if error_code is not None:
             error_code = require_string(error_code, field="error_code", max_bytes=64)
+        if usage is not None and not isinstance(usage, InferenceUsage):
+            raise ValidationError("usage must be InferenceUsage")
+        if not isinstance(release_budget, bool):
+            raise ValidationError("release_budget must be boolean")
+        if usage is not None and release_budget:
+            raise ValidationError("reported usage cannot release its budget")
         if outcome == "succeeded":
             if http_status is None or not 200 <= http_status < 300 or error_code:
                 raise ValidationError("successful provider invocation is inconsistent")
@@ -990,21 +1109,13 @@ class InteractionStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                changed = connection.execute(
-                    "UPDATE provider_invocations SET outcome = ?, request_bytes = ?, "
-                    "response_bytes = ?, http_status = ?, error_code = ?, "
-                    "finished_at = ? WHERE id = ? AND outcome = 'dispatching'",
-                    (
-                        outcome,
-                        request_bytes,
-                        response_bytes,
-                        http_status,
-                        error_code,
-                        finished_at,
-                        invocation_id,
-                    ),
-                ).rowcount
-                if changed != 1:
+                pending = connection.execute(
+                    "SELECT budget_policy_json, budget_policy_sha256, "
+                    "reserved_microusd FROM provider_invocations "
+                    "WHERE id = ? AND outcome = 'dispatching'",
+                    (invocation_id,),
+                ).fetchone()
+                if pending is None:
                     exists = connection.execute(
                         "SELECT 1 FROM provider_invocations WHERE id = ?",
                         (invocation_id,),
@@ -1014,19 +1125,106 @@ class InteractionStorage:
                             f"provider invocation not found: {invocation_id}"
                         )
                     raise ConflictError("provider invocation is already final")
+                accounting_values: tuple[Any, ...] = (None,) * 7
+                if pending["budget_policy_json"] is None:
+                    if usage is not None:
+                        raise ValidationError(
+                            "unbudgeted provider invocation cannot contain accounting"
+                        )
+                else:
+                    try:
+                        budget = InferenceBudgetPolicy.from_mapping(
+                            json.loads(pending["budget_policy_json"])
+                        )
+                    except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                        raise StorageError(
+                            "stored provider invocation budget is invalid"
+                        ) from exc
+                    if budget.digest != pending["budget_policy_sha256"]:
+                        raise StorageError(
+                            "stored provider invocation budget digest does not match"
+                        )
+                    reserved = int(pending["reserved_microusd"])
+                    if usage is not None:
+                        estimate = budget.estimate_microusd(usage)
+                        if estimate > reserved:
+                            raise ConflictError(
+                                "provider usage exceeds its reserved budget"
+                            )
+                        accounting_values = (
+                            estimate,
+                            estimate,
+                            "reported",
+                            usage.input_tokens,
+                            usage.cached_input_tokens,
+                            usage.output_tokens,
+                            usage.reasoning_output_tokens,
+                        )
+                    elif release_budget:
+                        accounting_values = (
+                            0,
+                            None,
+                            "released",
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    else:
+                        accounting_values = (
+                            reserved,
+                            None,
+                            "conservative",
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    if outcome == "succeeded" and usage is None:
+                        raise ValidationError(
+                            "successful budgeted invocation requires usage"
+                        )
+                changed = connection.execute(
+                    "UPDATE provider_invocations SET outcome = ?, request_bytes = ?, "
+                    "response_bytes = ?, http_status = ?, error_code = ?, "
+                    "accounted_microusd = ?, estimated_microusd = ?, "
+                    "accounting_status = ?, input_tokens = ?, "
+                    "cached_input_tokens = ?, output_tokens = ?, "
+                    "reasoning_output_tokens = ?, finished_at = ? "
+                    "WHERE id = ? AND outcome = 'dispatching'",
+                    (
+                        outcome,
+                        request_bytes,
+                        response_bytes,
+                        http_status,
+                        error_code,
+                        *accounting_values,
+                        finished_at,
+                        invocation_id,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise StorageError(
+                        "provider invocation finalization was not retained"
+                    )
                 row = connection.execute(
                     "SELECT id, run_id, provider_grant_id, dispatch_kind, "
                     "inference_connector_id, connector_protocol_version, "
                     "deployment_sha256, route, policy_sha256, "
                     "credential_scope_sha256, provider, protocol, model, deadline, "
                     "outcome, request_bytes, response_bytes, http_status, error_code, "
-                    "started_at, finished_at FROM provider_invocations WHERE id = ?",
+                    "budget_account, budget_revision, budget_policy_sha256, "
+                    "budget_currency, budget_policy_json, reserved_microusd, "
+                    "accounted_microusd, estimated_microusd, accounting_status, "
+                    "input_tokens, cached_input_tokens, output_tokens, "
+                    "reasoning_output_tokens, started_at, finished_at "
+                    "FROM provider_invocations WHERE id = ?",
                     (invocation_id,),
                 ).fetchone()
                 assert row is not None
                 result = dict(row)
                 connection.commit()
-            except (NotFoundError, ConflictError):
+            except (NotFoundError, ConflictError, StorageError, ValidationError):
                 connection.rollback()
                 raise
             except sqlite3.IntegrityError as exc:
@@ -1036,28 +1234,81 @@ class InteractionStorage:
                 ) from exc
         return result
 
-    def list_provider_invocations(self, run_id: str) -> list[dict[str, Any]]:
+    def list_provider_invocations(
+        self,
+        run_id: str,
+        *,
+        limit: int = MAX_PROVIDER_INVOCATION_HISTORY,
+    ) -> list[dict[str, Any]]:
         with self._read_snapshot() as connection:
-            return self._list_provider_invocations(connection, run_id)
+            return self._list_provider_invocations(connection, run_id, limit=limit)
 
     def _list_provider_invocations(
-        self, connection: sqlite3.Connection, run_id: str
+        self,
+        connection: sqlite3.Connection,
+        run_id: str,
+        *,
+        limit: int = MAX_PROVIDER_INVOCATION_HISTORY,
     ) -> list[dict[str, Any]]:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_PROVIDER_INVOCATION_HISTORY
+        ):
+            raise ValidationError(
+                "provider invocation history limit must be between 1 and "
+                f"{MAX_PROVIDER_INVOCATION_HISTORY}"
+            )
         with self._connection(connection) as connection:
             exists = connection.execute(
                 "SELECT 1 FROM runs WHERE id = ?", (run_id,)
             ).fetchone()
             if exists is None:
                 raise NotFoundError(f"run not found: {run_id}")
-            rows = connection.execute(
-                "SELECT id, run_id, provider_grant_id, dispatch_kind, "
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            budget_columns = (
+                "budget_account, budget_revision, budget_policy_sha256, "
+                "budget_currency, budget_policy_json, reserved_microusd, "
+                "accounted_microusd, estimated_microusd, accounting_status, "
+                "input_tokens, cached_input_tokens, output_tokens, "
+                "reasoning_output_tokens, "
+                if version >= 19
+                else ""
+            )
+            columns = (
+                "id, run_id, provider_grant_id, dispatch_kind, "
                 "inference_connector_id, connector_protocol_version, "
                 "deployment_sha256, route, policy_sha256, "
                 "credential_scope_sha256, provider, protocol, model, deadline, "
                 "outcome, request_bytes, response_bytes, http_status, error_code, "
-                "started_at, finished_at "
-                "FROM provider_invocations WHERE run_id = ? "
-                "ORDER BY started_at, id",
-                (run_id,),
+                + budget_columns
+                + "started_at, finished_at"
+            )
+            rows = connection.execute(
+                "WITH latest AS (SELECT "  # noqa: S608 - columns are fixed by the local schema version
+                + columns
+                + " FROM provider_invocations WHERE run_id = ? "
+                "ORDER BY started_at DESC, id DESC LIMIT ?) "
+                "SELECT * FROM latest ORDER BY started_at, id",
+                (run_id, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        results = [dict(row) for row in rows]
+        if version < 19:
+            for result in results:
+                for field in (
+                    "budget_account",
+                    "budget_revision",
+                    "budget_policy_sha256",
+                    "budget_currency",
+                    "budget_policy_json",
+                    "reserved_microusd",
+                    "accounted_microusd",
+                    "estimated_microusd",
+                    "accounting_status",
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_output_tokens",
+                ):
+                    result[field] = None
+        return results

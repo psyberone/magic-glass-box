@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import SCHEMA_VERSION, ConflictError, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
@@ -27,9 +28,14 @@ from magic_glass_box.inference import (
     InferenceGrantSpec,
     InferenceInvocationRequest,
     InferenceInvocationResponse,
+    InferenceUsage,
 )
 from magic_glass_box.krab import KrabIdentity
-from magic_glass_box.provider import ProviderError, ProviderUpstreamError
+from magic_glass_box.provider import (
+    ProviderBudgetError,
+    ProviderError,
+    ProviderUpstreamError,
+)
 from magic_glass_box.service import AcceptedProviderResponse, ControlPlane
 
 
@@ -104,6 +110,12 @@ class RecordingConnectorClient:
         self.outcome = "succeeded"
         self.error_code: str | None = None
         self.provider_status: int | None = 200
+        self.usage: dict[str, int] = {
+            "input_tokens": 20,
+            "cached_input_tokens": 5,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 1,
+        }
 
     def invoke(
         self, request: InferenceInvocationRequest
@@ -130,6 +142,8 @@ class RecordingConnectorClient:
                 ),
             }
         )
+        if request.connector_protocol_version == 2:
+            response["usage"] = self.usage if self.outcome == "succeeded" else None
         return InferenceInvocationResponse.from_mapping(response)
 
 
@@ -237,6 +251,370 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             image_id="sha256:" + "a" * 64,
         )
         return self.database.get_run(run["id"])
+
+    def _budgeted_grant_spec(
+        self,
+        *,
+        invocation_microusd: int = 10_000,
+        run_microusd: int = 10_028,
+        project_microusd: int = 100_000,
+        grant_microusd: int = 100_000,
+        revision: str = "2026-10-17",
+    ) -> InferenceGrantSpec:
+        grant = grant_spec().to_dict()
+        grant.update(
+            {
+                "connector_name": "budget-sidecar",
+                "max_concurrency": 2,
+                "budget": {
+                    "schema_version": 1,
+                    "account": "personal-example",
+                    "revision": revision,
+                    "currency": "USD",
+                    "invocation_microusd": invocation_microusd,
+                    "max_output_tokens": 100,
+                    "run_microusd": run_microusd,
+                    "project_microusd": project_microusd,
+                    "grant_microusd": grant_microusd,
+                    "input_microusd_per_million_tokens": 1_000_000,
+                    "cached_input_microusd_per_million_tokens": 500_000,
+                    "output_microusd_per_million_tokens": 2_000_000,
+                },
+            }
+        )
+        return InferenceGrantSpec.from_mapping(grant)
+
+    def _create_budgeted_profile(
+        self,
+        *,
+        grant_name: str,
+        profile_name: str,
+        invocation_microusd: int = 10_000,
+        run_microusd: int = 10_028,
+        project_microusd: int = 100_000,
+        grant_microusd: int = 100_000,
+        revision: str = "2026-10-17",
+    ) -> None:
+        self.database.create_connector_provider_grant(
+            name=grant_name,
+            spec=self._budgeted_grant_spec(
+                invocation_microusd=invocation_microusd,
+                run_microusd=run_microusd,
+                project_microusd=project_microusd,
+                grant_microusd=grant_microusd,
+                revision=revision,
+            ),
+            expires_at=None,
+            created_by=self.user["id"],
+        )
+        self.database.create_agent_profile(
+            name=profile_name,
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:abc",
+                command=["agent"],
+                credential_names=[grant_name],
+                gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
+            ),
+            krab_identity_id=self.identity["id"],
+            created_by=self.user["id"],
+        )
+
+    def _start_run_for_profile(
+        self,
+        profile_name: str,
+        *,
+        marker: str,
+    ) -> dict[str, Any]:
+        run = self.database.create_run(
+            project_key="box-project",
+            profile_name=profile_name,
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+        )
+        attempt = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="codex",
+            owner_id="orchestrator-budget-test",
+            expected_run_version=run["version"],
+        )
+        self.database.start_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-budget-test",
+            expected_attempt_version=attempt["version"],
+            expected_run_version=attempt["run_version"],
+            source_revision="abc123",
+            container_id=marker * 64,
+            container_name=f"magic-glass-box-budget-test-{marker}",
+            image_id="sha256:" + "d" * 64,
+        )
+        return self.database.get_run(run["id"])
+
+    def create_budgeted_run(
+        self,
+        *,
+        invocation_microusd: int = 10_000,
+        run_microusd: int = 10_028,
+        project_microusd: int = 100_000,
+        grant_microusd: int = 100_000,
+        revision: str = "2026-10-17",
+    ) -> dict[str, Any]:
+        connector = connector_spec(self.socket_path).to_dict()
+        connector["connector_protocol_version"] = 2
+        connector["max_concurrency"] = 2
+        self.database.register_inference_connector(
+            name="budget-sidecar",
+            spec=InferenceConnectorSpec.from_mapping(connector),
+            created_by=self.user["id"],
+        )
+        self._create_budgeted_profile(
+            grant_name="budget-main",
+            profile_name="Budget Worker",
+            invocation_microusd=invocation_microusd,
+            run_microusd=run_microusd,
+            project_microusd=project_microusd,
+            grant_microusd=grant_microusd,
+            revision=revision,
+        )
+        return self._start_run_for_profile("Budget Worker", marker="c")
+
+    def test_budget_reservation_blocks_concurrent_overspend_then_reconciles(
+        self,
+    ) -> None:
+        run = self.create_budgeted_run()
+        self.client.release = threading.Event()
+        first_result: list[AcceptedProviderResponse] = []
+        first_error: list[BaseException] = []
+
+        def invoke_first() -> None:
+            try:
+                first_result.append(
+                    self.control.invoke_provider(
+                        run["id"],
+                        grant_name="budget-main",
+                        request={"input": "private first request"},
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - diagnostic capture
+                first_error.append(exc)
+
+        thread = threading.Thread(target=invoke_first)
+        thread.start()
+        self.assertTrue(self.client.started.wait(timeout=2))
+        inflight = ControlRoom(self.database).snapshot()["provider_budgets"][0]
+        self.assertEqual(inflight["active_reservations"], 1)
+        self.assertEqual(inflight["reserved_microusd"], 10_000)
+        self.assertEqual(inflight["accounted_microusd"], 0)
+        self.assertEqual(inflight["policy_consumed_microusd"], 10_000)
+        self.assertEqual(inflight["remaining_microusd"]["run"], 28)
+        with self.assertRaises(ProviderBudgetError):
+            self.control.invoke_provider(
+                run["id"],
+                grant_name="budget-main",
+                request={"input": "private second request"},
+            )
+        self.assertEqual(len(self.client.calls), 1)
+
+        self.client.release.set()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(first_error, [])
+        self.assertEqual(len(first_result), 1)
+        self.assertEqual(first_result[0].usage.total_tokens, 25)
+        self.assertEqual(first_result[0].estimated_microusd, 28)
+
+        invocations = self.database.list_provider_invocations(run["id"])
+        succeeded = next(item for item in invocations if item["outcome"] == "succeeded")
+        denied = next(
+            item for item in invocations if item["error_code"] == "budget_exhausted"
+        )
+        self.assertEqual(succeeded["accounting_status"], "reported")
+        self.assertEqual(succeeded["reserved_microusd"], 10_000)
+        self.assertEqual(succeeded["accounted_microusd"], 28)
+        self.assertEqual(succeeded["input_tokens"], 20)
+        self.assertIsNone(denied["budget_policy_sha256"])
+        encoded = canonical_json({"invocations": invocations})
+        self.assertNotIn("private first request", encoded)
+        self.assertNotIn("private second request", encoded)
+
+        # Reconciliation releases the unused allowance, so the next call fits.
+        self.client.release = None
+        accepted = self.control.invoke_provider(
+            run["id"],
+            grant_name="budget-main",
+            request={"input": "third"},
+        )
+        self.assertEqual(accepted.estimated_microusd, 28)
+
+        snapshot = ControlRoom(self.database).snapshot()
+        budget = snapshot["provider_budgets"][0]
+        self.assertEqual(budget["account"], "personal-example")
+        self.assertEqual(budget["usage"]["input_tokens"], 40)
+        self.assertEqual(budget["usage"]["output_tokens"], 10)
+        self.assertEqual(budget["reported_invocations"], 2)
+        self.assertEqual(budget["conservative_invocations"], 0)
+        self.assertEqual(budget["estimated_microusd"], 56)
+        self.assertEqual(budget["accounted_microusd"], 56)
+        self.assertEqual(budget["reserved_microusd"], 0)
+        self.assertEqual(budget["policy_consumed_microusd"], 56)
+        self.assertEqual(
+            budget["scope_consumed_microusd"],
+            {"run": 56, "grant": 56, "project": 56},
+        )
+        self.assertEqual(
+            budget["remaining_microusd"],
+            {"run": 9_972, "grant": 99_944, "project": 99_944},
+        )
+        self.assertTrue(budget["reconciled"])
+        self.assertNotIn("private", canonical_json(snapshot))
+
+    def test_budget_snapshot_aggregates_invocations_in_sql(self) -> None:
+        run = self.create_budgeted_run()
+        self.control.invoke_provider(
+            run["id"], grant_name="budget-main", request={"input": "bounded"}
+        )
+        statements: list[str] = []
+        with self.database.connect() as connection:
+            connection.set_trace_callback(statements.append)
+            budgets = ControlRoom._provider_budgets(connection, [run["id"]])
+            connection.set_trace_callback(None)
+
+        invocation_queries = [
+            statement
+            for statement in statements
+            if "FROM provider_invocations" in statement
+        ]
+        self.assertEqual(len(budgets), 1)
+        self.assertTrue(invocation_queries)
+        self.assertTrue(
+            all("GROUP BY" in statement for statement in invocation_queries),
+            invocation_queries,
+        )
+
+    def test_grant_budget_consumption_persists_across_runs(self) -> None:
+        first_run = self.create_budgeted_run(
+            run_microusd=100_000,
+            project_microusd=100_000,
+            grant_microusd=10_020,
+        )
+        accepted = self.control.invoke_provider(
+            first_run["id"],
+            grant_name="budget-main",
+            request={"input": "first"},
+        )
+        self.assertEqual(accepted.estimated_microusd, 28)
+
+        second_run = self._start_run_for_profile("Budget Worker", marker="e")
+        with self.assertRaises(ProviderBudgetError):
+            self.control.invoke_provider(
+                second_run["id"],
+                grant_name="budget-main",
+                request={"input": "second"},
+            )
+
+        self.assertEqual(len(self.client.calls), 1)
+        budget = next(
+            item
+            for item in ControlRoom(self.database).snapshot()["provider_budgets"]
+            if item["run_id"] == second_run["id"]
+        )
+        self.assertEqual(
+            budget["scope_consumed_microusd"],
+            {"run": 0, "grant": 28, "project": 28},
+        )
+        self.assertEqual(
+            budget["remaining_microusd"],
+            {"run": 100_000, "grant": 9_992, "project": 99_972},
+        )
+
+    def test_project_budget_consumption_persists_across_policy_revisions(
+        self,
+    ) -> None:
+        first_run = self.create_budgeted_run(
+            run_microusd=100_000,
+            project_microusd=10_020,
+            grant_microusd=100_000,
+        )
+        accepted = self.control.invoke_provider(
+            first_run["id"],
+            grant_name="budget-main",
+            request={"input": "first"},
+        )
+        self.assertEqual(accepted.estimated_microusd, 28)
+
+        self._create_budgeted_profile(
+            grant_name="budget-main-v2",
+            profile_name="Budget Worker v2",
+            run_microusd=100_000,
+            project_microusd=10_020,
+            grant_microusd=100_000,
+            revision="2026-10-18",
+        )
+        second_run = self._start_run_for_profile("Budget Worker v2", marker="e")
+        with self.assertRaises(ProviderBudgetError):
+            self.control.invoke_provider(
+                second_run["id"],
+                grant_name="budget-main-v2",
+                request={"input": "second"},
+            )
+
+        self.assertEqual(len(self.client.calls), 1)
+        budget = next(
+            item
+            for item in ControlRoom(self.database).snapshot()["provider_budgets"]
+            if item["run_id"] == second_run["id"]
+        )
+        self.assertEqual(budget["revision"], "2026-10-18")
+        self.assertEqual(
+            budget["scope_consumed_microusd"],
+            {"run": 0, "grant": 0, "project": 28},
+        )
+        self.assertEqual(
+            budget["remaining_microusd"],
+            {"run": 100_000, "grant": 100_000, "project": 9_992},
+        )
+
+    def test_provider_invocation_history_is_bounded_and_returns_latest(self) -> None:
+        run = self.create_budgeted_run(run_microusd=20_000)
+        self.control.invoke_provider(
+            run["id"], grant_name="budget-main", request={"input": "first"}
+        )
+        self.control.invoke_provider(
+            run["id"], grant_name="budget-main", request={"input": "second"}
+        )
+        history = self.database.list_provider_invocations(run["id"])
+
+        latest = self.database.list_provider_invocations(run["id"], limit=1)
+
+        self.assertEqual(latest, history[-1:])
+        with self.assertRaisesRegex(ValidationError, "limit"):
+            self.database.list_provider_invocations(run["id"], limit=0)
+
+    def test_ambiguous_budgeted_call_conservatively_consumes_full_allowance(
+        self,
+    ) -> None:
+        run = self.create_budgeted_run()
+        self.client.error = InferenceConnectorAmbiguousError("lost reply")
+
+        with self.assertRaises(ProviderError):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "private"}
+            )
+        invocation = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(invocation["outcome"], "ambiguous")
+        self.assertEqual(invocation["accounting_status"], "conservative")
+        self.assertEqual(invocation["accounted_microusd"], 10_000)
+        budget = ControlRoom(self.database).snapshot()["provider_budgets"][0]
+        self.assertEqual(budget["accounted_microusd"], 10_000)
+        self.assertEqual(budget["reserved_microusd"], 0)
+        self.assertEqual(budget["policy_consumed_microusd"], 10_000)
+        self.assertFalse(budget["reconciled"])
+
+        self.client.error = None
+        with self.assertRaises(ProviderBudgetError):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "retry"}
+            )
+        self.assertEqual(len(self.client.calls), 1)
 
     def test_connector_is_the_only_dispatch_path_and_ledger_pins_authority(
         self,
@@ -440,6 +818,45 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             [(item["outcome"], item["error_code"]) for item in invocations],
             [("ambiguous", "connector_ambiguous")],
         )
+
+    def test_transport_neutral_client_cannot_bypass_usage_bounds(self) -> None:
+        run = self.create_budgeted_run()
+        original_invoke = self.client.invoke
+
+        def excessive_usage(
+            request: InferenceInvocationRequest,
+        ) -> InferenceInvocationResponse:
+            response = original_invoke(request)
+            return replace(
+                response,
+                usage=InferenceUsage(
+                    input_tokens=20,
+                    cached_input_tokens=5,
+                    output_tokens=101,
+                    reasoning_output_tokens=1,
+                ),
+            )
+
+        self.client.invoke = excessive_usage  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(ProviderError, "ambiguous"):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "one"}
+            )
+
+        invocation = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(invocation["outcome"], "ambiguous")
+        self.assertEqual(invocation["error_code"], "connector_ambiguous")
+        self.assertEqual(invocation["accounting_status"], "conservative")
+        self.assertEqual(invocation["accounted_microusd"], 10_000)
+        budget = ControlRoom(self.database).snapshot()["provider_budgets"][0]
+        self.assertEqual(budget["active_reservations"], 0)
+        self.assertEqual(budget["conservative_invocations"], 1)
+        with self.assertRaises(ProviderBudgetError):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "retry"}
+            )
+        self.assertEqual(len(self.client.calls), 1)
 
     def test_post_dispatch_storage_failure_remains_durably_ambiguous(self) -> None:
         run = self.create_run()

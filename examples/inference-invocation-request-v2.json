@@ -1,0 +1,40 @@
+{
+  "budget": {
+    "cached_input_microusd_per_million_tokens": 125000,
+    "currency": "USD",
+    "input_microusd_per_million_tokens": 1250000,
+    "max_output_tokens": 1000,
+    "output_microusd_per_million_tokens": 10000000,
+    "policy_sha256": "82fd17dbdb95e904705c48cb76f245238bee1cd9114c5c5aff1c544150caae3a",
+    "reservation_microusd": 100000
+  },
+  "connector_id": "ifc_22222222222222222222222222222222",
+  "connector_protocol_version": 2,
+  "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "deadline": "2026-10-17T20:00:00.000000+00:00",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "grant_id": "pgr_33333333333333333333333333333333",
+  "invocation_id": "pinv_11111111111111111111111111111111",
+  "model": "gpt-test",
+  "policy_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "protocol": "openai-responses",
+  "provider": "openai",
+  "request": {
+    "body": {
+      "input": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "store": false,
+      "stream": true
+    },
+    "headers": {},
+    "protocol": "openai-responses"
+  },
+  "request_limit_bytes": 16384,
+  "response_limit_bytes": 32768,
+  "route": "chatgpt-main",
+  "schema_version": 1
+}

@@ -440,6 +440,34 @@ def _render_control_room(
                 action,
             )
         )
+    budget_rows: list[tuple[object, ...]] = []
+    for budget in snapshot.get("provider_budgets", []):
+        if not isinstance(budget, Mapping):
+            continue
+        usage = budget.get("usage")
+        usage = usage if isinstance(usage, Mapping) else {}
+        remaining = budget.get("remaining_microusd")
+        remaining = remaining if isinstance(remaining, Mapping) else {}
+        budget_rows.append(
+            (
+                budget.get("account"),
+                budget.get("revision"),
+                budget.get("project_key"),
+                budget.get("run_id"),
+                budget.get("authority_name"),
+                usage.get("total_tokens"),
+                budget.get("estimated_microusd"),
+                budget.get("accounted_microusd"),
+                budget.get("reserved_microusd"),
+                budget.get("policy_consumed_microusd"),
+                remaining.get("run"),
+                remaining.get("grant"),
+                remaining.get("project"),
+                budget.get("active_reservations"),
+                budget.get("conservative_invocations"),
+                budget.get("reconciled"),
+            )
+        )
 
     metadata = snapshot.get("snapshot")
     metadata = metadata if isinstance(metadata, Mapping) else {}
@@ -757,6 +785,36 @@ def _render_control_room(
         )
         + "</div>"
     )
+    budget_sections = (
+        (
+            _section(
+                "Provider budgets",
+                _table(
+                    (
+                        "Account",
+                        "Revision",
+                        "Project",
+                        "Run",
+                        "Authority",
+                        "Tokens",
+                        "Estimated µUSD",
+                        "Accounted µUSD",
+                        "Reserved µUSD",
+                        "Policy consumed µUSD",
+                        "Run remaining",
+                        "Grant remaining",
+                        "Project remaining",
+                        "Reservations",
+                        "Conservative",
+                        "Reconciled",
+                    ),
+                    budget_rows,
+                ),
+            ),
+        )
+        if budget_rows
+        else ()
+    )
     sections = (
         f"<section><h2>Recovery</h2>{reconcile_form}</section>",
         _section(
@@ -952,6 +1010,7 @@ def _render_control_room(
                 grant_rows,
             ),
         ),
+        *budget_sections,
         _section(
             "Run-bound authority",
             _table(

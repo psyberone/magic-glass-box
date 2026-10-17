@@ -1687,6 +1687,83 @@ class ControlRoomWebTests(unittest.TestCase):
                 self.assertEqual(status, expected_status)
                 self.assertNotIn(str(error), body)
 
+    def test_renderer_surfaces_budget_usage_reservations_and_remaining(self) -> None:
+        snapshot = snapshot_fixture()
+        snapshot["provider_budgets"] = [
+            {
+                "account": "personal-openai",
+                "revision": "2026-10-17",
+                "project_key": "box-project",
+                "run_id": "run_active",
+                "authority_name": "openai-main",
+                "usage": {"total_tokens": 150},
+                "estimated_microusd": 1969,
+                "accounted_microusd": 1969,
+                "reserved_microusd": 100000,
+                "policy_consumed_microusd": 101969,
+                "remaining_microusd": {
+                    "run": 398031,
+                    "grant": 898031,
+                    "project": 1898031,
+                },
+                "active_reservations": 1,
+                "conservative_invocations": 0,
+                "reconciled": False,
+            }
+        ]
+
+        body, _nonce = _render_control_room(
+            snapshot,
+            root="/private/",
+            csrf_token=CSRF_TOKEN,
+            receipt=None,
+        )
+        parser = ControlRoomHTMLParser()
+        parser.feed(body.decode("utf-8"))
+        parser.close()
+
+        self.assertEqual(
+            parser.tables["Provider budgets"],
+            [
+                [
+                    "Account",
+                    "Revision",
+                    "Project",
+                    "Run",
+                    "Authority",
+                    "Tokens",
+                    "Estimated µUSD",
+                    "Accounted µUSD",
+                    "Reserved µUSD",
+                    "Policy consumed µUSD",
+                    "Run remaining",
+                    "Grant remaining",
+                    "Project remaining",
+                    "Reservations",
+                    "Conservative",
+                    "Reconciled",
+                ],
+                [
+                    "personal-openai",
+                    "2026-10-17",
+                    "box-project",
+                    "run_active",
+                    "openai-main",
+                    "150",
+                    "1969",
+                    "1969",
+                    "100000",
+                    "101969",
+                    "398031",
+                    "898031",
+                    "1898031",
+                    "1",
+                    "0",
+                    "no",
+                ],
+            ],
+        )
+
     def test_renderer_handles_empty_and_non_record_collections(self) -> None:
         body, nonce = _render_control_room(
             {

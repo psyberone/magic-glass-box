@@ -40,6 +40,7 @@ from magic_glass_box.integration import (
     LandingReceipt,
     LandingReceiptRequest,
 )
+from magic_glass_box.openai_chatgpt import OpenAIResponsesClient
 from magic_glass_box.results import ResultError, ResultManifest
 
 
@@ -476,6 +477,172 @@ class ArtifactSchemaContractTests(unittest.TestCase):
                 validator.validate(example)
                 parsed = factory(example)
                 self.assertEqual(parsed.to_dict(), example)
+
+    def test_budgeted_inference_v2_examples_match_runtime_contracts(self) -> None:
+        contracts = (
+            (
+                "inference-connector-v1.schema.json",
+                "inference-connector-v2.json",
+                InferenceConnectorSpec.from_mapping,
+            ),
+            (
+                "inference-grant-v1.schema.json",
+                "inference-grant-budgeted.json",
+                InferenceGrantSpec.from_mapping,
+            ),
+            (
+                "inference-invocation-request-v2.schema.json",
+                "inference-invocation-request-v2.json",
+                InferenceInvocationRequest.from_mapping,
+            ),
+            (
+                "inference-invocation-response-v2.schema.json",
+                "inference-invocation-response-v2.json",
+                InferenceInvocationResponse.from_mapping,
+            ),
+        )
+        parsed: list[object] = []
+        for schema_name, example_name, factory in contracts:
+            with self.subTest(example=example_name):
+                schema = json.loads(
+                    (self.repository / "schemas" / schema_name).read_text()
+                )
+                example = json.loads(
+                    (self.repository / "examples" / example_name).read_text()
+                )
+                Draft202012Validator.check_schema(schema)
+                Draft202012Validator(schema, format_checker=FormatChecker()).validate(
+                    example
+                )
+                value = factory(example)
+                self.assertEqual(value.to_dict(), example)
+                parsed.append(value)
+
+        connector, grant, request, response = parsed
+        assert isinstance(connector, InferenceConnectorSpec)
+        assert isinstance(grant, InferenceGrantSpec)
+        assert isinstance(request, InferenceInvocationRequest)
+        assert isinstance(response, InferenceInvocationResponse)
+        connector.validate_grant("openai-personal", grant)
+        response.validate_correlation(request)
+
+        body, headers = OpenAIResponsesClient._body_and_headers(
+            request.request,
+            model=request.model,
+            request_limit_bytes=request.request_limit_bytes,
+            max_output_tokens=request.budget.max_output_tokens,
+        )
+        self.assertEqual(headers, {})
+        self.assertEqual(
+            json.loads(body)["input"],
+            [{"role": "user", "content": "hello"}],
+        )
+
+    def test_budgeted_inference_v2_contracts_reject_malformed_authority(self) -> None:
+        request_schema = json.loads(
+            (
+                self.repository / "schemas/inference-invocation-request-v2.schema.json"
+            ).read_text()
+        )
+        request = json.loads(
+            (
+                self.repository / "examples/inference-invocation-request-v2.json"
+            ).read_text()
+        )
+        validator = Draft202012Validator(request_schema, format_checker=FormatChecker())
+        candidates = []
+        missing_budget = copy.deepcopy(request)
+        missing_budget.pop("budget")
+        candidates.append(missing_budget)
+        empty_reservation = copy.deepcopy(request)
+        empty_reservation["budget"]["reservation_microusd"] = 0
+        candidates.append(empty_reservation)
+        unknown_budget_field = copy.deepcopy(request)
+        unknown_budget_field["budget"]["unbounded"] = True
+        candidates.append(unknown_budget_field)
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(SchemaValidationError):
+                    validator.validate(candidate)
+                with self.assertRaises(ValidationError):
+                    InferenceInvocationRequest.from_mapping(candidate)
+
+    def test_budgeted_inference_v2_response_must_correlate_to_request(self) -> None:
+        request = InferenceInvocationRequest.from_mapping(
+            json.loads(
+                (
+                    self.repository / "examples/inference-invocation-request-v2.json"
+                ).read_text()
+            )
+        )
+        response_schema = json.loads(
+            (
+                self.repository / "schemas/inference-invocation-response-v2.schema.json"
+            ).read_text()
+        )
+        response_value = json.loads(
+            (
+                self.repository / "examples/inference-invocation-response-v2.json"
+            ).read_text()
+        )
+        response_value["invocation_id"] = "pinv_" + "9" * 32
+        Draft202012Validator(response_schema, format_checker=FormatChecker()).validate(
+            response_value
+        )
+        response = InferenceInvocationResponse.from_mapping(response_value)
+
+        with self.assertRaisesRegex(ValidationError, "correlation"):
+            response.validate_correlation(request)
+
+    def test_budgeted_inference_v2_response_terminal_variants_are_consistent(
+        self,
+    ) -> None:
+        schema = json.loads(
+            (
+                self.repository / "schemas/inference-invocation-response-v2.schema.json"
+            ).read_text()
+        )
+        example = json.loads(
+            (
+                self.repository / "examples/inference-invocation-response-v2.json"
+            ).read_text()
+        )
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+        failed = copy.deepcopy(example)
+        failed.update(
+            {
+                "outcome": "failed",
+                "provider_status": 429,
+                "response_bytes": 0,
+                "error_code": "quota_exhausted",
+                "response": None,
+                "usage": None,
+            }
+        )
+        ambiguous = copy.deepcopy(example)
+        ambiguous.update(
+            {
+                "outcome": "ambiguous",
+                "provider_status": None,
+                "response_bytes": 0,
+                "error_code": "reply_lost",
+                "response": None,
+                "usage": None,
+            }
+        )
+        for candidate in (failed, ambiguous):
+            with self.subTest(outcome=candidate["outcome"]):
+                validator.validate(candidate)
+                parsed = InferenceInvocationResponse.from_mapping(candidate)
+                self.assertEqual(parsed.to_dict(), candidate)
+
+        success_without_usage = copy.deepcopy(example)
+        success_without_usage["usage"] = None
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(success_without_usage)
+        with self.assertRaises(ValidationError):
+            InferenceInvocationResponse.from_mapping(success_without_usage)
 
     def test_inference_connector_schemas_and_runtime_reject_unsafe_authority(
         self,

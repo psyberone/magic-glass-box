@@ -13,12 +13,72 @@ from pathlib import Path
 
 from magic_glass_box.inference import (
     InferenceInvocationRequest,
+    InferenceInvocationResponse,
     UnixInferenceConnectorClient,
 )
+from scripts.fake_inference_connector import _response_for
 from scripts.fake_inference_connector import main as fake_connector_main
 
 
+def connect_when_ready(
+    client: socket.socket,
+    socket_path: Path,
+    *,
+    timeout: float = 3.0,
+) -> None:
+    """Connect after bind/listen readiness, not merely socket-file creation."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            client.connect(str(socket_path))
+            return
+        except (ConnectionRefusedError, FileNotFoundError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 class FakeInferenceConnectorProcessTests(unittest.TestCase):
+    def test_v2_usage_respects_the_authorized_output_token_bound(self) -> None:
+        request = InferenceInvocationRequest.from_mapping(
+            {
+                "schema_version": 1,
+                "connector_protocol_version": 2,
+                "invocation_id": "pinv_" + "1" * 32,
+                "connector_id": "ifc_" + "2" * 32,
+                "deployment_sha256": "a" * 64,
+                "route": "chatgpt-main",
+                "grant_id": "pgr_" + "3" * 32,
+                "policy_sha256": "c" * 64,
+                "credential_scope_sha256": "b" * 64,
+                "provider": "openai",
+                "protocol": "openai-responses",
+                "model": "gpt-test",
+                "deadline": (datetime.now(UTC) + timedelta(seconds=3)).isoformat(
+                    timespec="microseconds"
+                ),
+                "request_limit_bytes": 1024,
+                "response_limit_bytes": 32768,
+                "budget": {
+                    "policy_sha256": "d" * 64,
+                    "currency": "USD",
+                    "reservation_microusd": 1,
+                    "max_output_tokens": 1,
+                    "input_microusd_per_million_tokens": 0,
+                    "cached_input_microusd_per_million_tokens": 0,
+                    "output_microusd_per_million_tokens": 0,
+                },
+                "request": {"body": {"input": "hello"}},
+            }
+        )
+
+        response = InferenceInvocationResponse.from_mapping(_response_for(request))
+
+        self.assertIsNotNone(response.usage)
+        assert response.usage is not None
+        self.assertEqual(response.usage.output_tokens, 1)
+
     def test_fake_connector_refuses_to_replace_an_existing_path(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             existing = Path(temporary) / "do-not-delete"
@@ -90,7 +150,7 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
                 self.fail(f"fake connector did not start: {stdout}{stderr}")
 
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as malformed:
-                malformed.connect(str(socket_path))
+                connect_when_ready(malformed, socket_path)
 
             request = InferenceInvocationRequest.from_mapping(
                 {

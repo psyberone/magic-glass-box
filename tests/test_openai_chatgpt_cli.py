@@ -121,6 +121,25 @@ def invocation(scope: str) -> InferenceInvocationRequest:
     )
 
 
+def connect_when_ready(
+    client: socket.socket,
+    socket_path: Path,
+    *,
+    timeout: float = 3.0,
+) -> None:
+    """Connect after bind/listen readiness, not merely socket-file creation."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            client.connect(str(socket_path))
+            return
+        except (ConnectionRefusedError, FileNotFoundError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 class EchoConnector:
     def __init__(self) -> None:
         self.requests: list[InferenceInvocationRequest] = []
@@ -312,9 +331,9 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
         self.assertTrue(socket_path.exists())
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as malformed:
-            malformed.connect(str(socket_path))
+            connect_when_ready(malformed, socket_path)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as idle:
-            idle.connect(str(socket_path))
+            connect_when_ready(idle, socket_path)
             time.sleep(0.1)
 
         request = invocation(self.session.credential_scope_sha256)

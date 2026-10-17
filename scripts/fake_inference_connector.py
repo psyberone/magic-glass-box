@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve deterministic credential-free inference responses over the v1 carrier."""
+"""Serve deterministic credential-free inference responses over the v1/v2 carrier."""
 
 from __future__ import annotations
 
@@ -102,6 +102,14 @@ def _response_for(
             "response": response,
         }
     )
+    if request.connector_protocol_version == 2:
+        assert request.budget is not None
+        request_value["usage"] = {
+            "input_tokens": 8,
+            "cached_input_tokens": 0,
+            "output_tokens": min(4, request.budget.max_output_tokens),
+            "reasoning_output_tokens": 0,
+        }
     return request_value
 
 

@@ -25,6 +25,7 @@ from .credentials import (
     PrivateFileCredentialResolver,
 )
 from .db import (
+    BudgetExceededError,
     ConcurrentUpdateError,
     ConflictError,
     Database,
@@ -66,12 +67,14 @@ from .inference import (
     InferenceGrantSpec,
     InferenceInvocationRequest,
     InferenceInvocationResponse,
+    InferenceUsage,
     UnixInferenceConnectorClient,
 )
 from .integration import FoldManifest, LandingReceiptRequest
 from .krab import ActivityPage, KrabClient, KrabError, SessionItem
 from .provider import (
     ProviderAmbiguousError,
+    ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
     ProviderUpstreamError,
@@ -167,6 +170,8 @@ class AcceptedProviderResponse:
     request_bytes: int
     response_bytes: int
     untrusted_response: dict[str, Any]
+    usage: InferenceUsage | None = None
+    estimated_microusd: int | None = None
 
 
 class ControlPlane:
@@ -1007,27 +1012,30 @@ class ControlPlane:
             raise ProviderBusyError("provider grant concurrency limit is reached")
         authority = reservation["inference"]
         try:
+            invocation_value: dict[str, Any] = {
+                "schema_version": INFERENCE_SCHEMA_VERSION,
+                "connector_protocol_version": authority["connector_protocol_version"],
+                "invocation_id": invocation_id,
+                "connector_id": authority["connector_id"],
+                "deployment_sha256": authority["deployment_sha256"],
+                "route": authority["route"],
+                "grant_id": grant["id"],
+                "policy_sha256": authority["policy_sha256"],
+                "credential_scope_sha256": authority["credential_scope_sha256"],
+                "provider": authority["provider"],
+                "protocol": authority["protocol"],
+                "model": authority["model"],
+                "deadline": deadline,
+                "request_limit_bytes": authority["request_bytes"],
+                "response_limit_bytes": authority["response_bytes"],
+                "request": request,
+            }
+            if spec.budget is not None:
+                invocation_value["budget"] = (
+                    spec.budget.invocation_authority().to_dict()
+                )
             invocation_request = InferenceInvocationRequest.from_mapping(
-                {
-                    "schema_version": INFERENCE_SCHEMA_VERSION,
-                    "connector_protocol_version": authority[
-                        "connector_protocol_version"
-                    ],
-                    "invocation_id": invocation_id,
-                    "connector_id": authority["connector_id"],
-                    "deployment_sha256": authority["deployment_sha256"],
-                    "route": authority["route"],
-                    "grant_id": grant["id"],
-                    "policy_sha256": authority["policy_sha256"],
-                    "credential_scope_sha256": authority["credential_scope_sha256"],
-                    "provider": authority["provider"],
-                    "protocol": authority["protocol"],
-                    "model": authority["model"],
-                    "deadline": deadline,
-                    "request_limit_bytes": authority["request_bytes"],
-                    "response_limit_bytes": authority["response_bytes"],
-                    "request": request,
-                }
+                invocation_value
             )
         except (KeyError, TypeError, ValidationError) as exc:
             self._record_provider_failure(
@@ -1093,7 +1101,27 @@ class ControlPlane:
                 http_status=None,
                 error_code=None,
                 started_at=started_at,
+                budget=spec.budget,
             )
+        except BudgetExceededError as exc:
+            try:
+                self.database.release_provider_dispatch(reservation["id"])
+            except Exception as release_error:
+                exc.add_note(
+                    "provider dispatch reservation release also failed: "
+                    f"{type(release_error).__name__}: {release_error}"
+                )
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="denied",
+                error_code="budget_exhausted",
+                started_at=started_at,
+                authority=authority,
+                deadline=deadline,
+            )
+            raise ProviderBudgetError("provider budget is exhausted") from exc
         except Exception as exc:
             try:
                 self.database.release_provider_dispatch(reservation["id"])
@@ -1133,6 +1161,7 @@ class ControlPlane:
                 reservation_id=reservation["id"],
                 outcome="failed",
                 error_code="connector_unavailable",
+                release_budget=True,
             )
             raise ProviderUpstreamError("inference connector is unavailable") from exc
         except InferenceConnectorAmbiguousError as exc:
@@ -1151,6 +1180,7 @@ class ControlPlane:
                 reservation_id=reservation["id"],
                 outcome="denied",
                 error_code="connector_denied",
+                release_budget=True,
             )
             raise ProviderError("provider connector denied the request") from exc
         except Exception as exc:
@@ -1174,6 +1204,7 @@ class ControlPlane:
                 request_bytes=response.request_bytes,
                 response_bytes=response.response_bytes,
                 http_status=response.provider_status,
+                usage=response.usage,
             )
             if response.outcome == "ambiguous":
                 raise ProviderAmbiguousError(
@@ -1205,6 +1236,12 @@ class ControlPlane:
             response_bytes=response.response_bytes,
             http_status=response.provider_status,
             error_code=None,
+            usage=response.usage,
+        )
+        estimated_microusd = (
+            None
+            if spec.budget is None or response.usage is None
+            else spec.budget.estimate_microusd(response.usage)
         )
         return AcceptedProviderResponse(
             invocation_id=invocation["id"],
@@ -1214,6 +1251,8 @@ class ControlPlane:
             status_code=response.provider_status,
             request_bytes=response.request_bytes,
             response_bytes=response.response_bytes,
+            usage=response.usage,
+            estimated_microusd=estimated_microusd,
             untrusted_response=untrusted_response,
         )
 
@@ -1227,6 +1266,8 @@ class ControlPlane:
         request_bytes: int = 0,
         response_bytes: int = 0,
         http_status: int | None = None,
+        usage: InferenceUsage | None = None,
+        release_budget: bool = False,
     ) -> dict[str, Any]:
         try:
             invocation = self.database.finalize_provider_invocation(
@@ -1236,6 +1277,8 @@ class ControlPlane:
                 response_bytes=response_bytes,
                 http_status=http_status,
                 error_code=error_code,
+                usage=usage,
+                release_budget=release_budget,
             )
         except Exception as exc:
             raise ProviderAmbiguousError(

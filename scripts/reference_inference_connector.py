@@ -189,6 +189,17 @@ def _invoke(
 ) -> dict[str, Any]:
     route = routes.get(request.route)
     authority = _response_authority(request)
+    if request.connector_protocol_version != 1:
+        return {
+            **authority,
+            "outcome": "failed",
+            "provider_status": None,
+            "request_bytes": 0,
+            "response_bytes": 0,
+            "error_code": "usage_accounting_unsupported",
+            "response": None,
+            "usage": None,
+        }
     if (
         route is None
         or route.connector_id != request.connector_id

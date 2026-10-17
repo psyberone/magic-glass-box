@@ -54,10 +54,11 @@ only into that sidecar. Agents receive narrow capabilities, never the
 configuration directory or reusable credential.
 
 AI inference follows the same separation with a distinct narrow contract. MGB
-pins and authorizes the run, model, limits, concurrency, and later budget; an
-inference sidecar or external integration owns provider OAuth/API credentials,
-refresh, and outbound transport. It is not a raw proxy and does not give a
-worker a provider client.
+pins and authorizes the run, model, limits, concurrency, and a versioned budget;
+an inference sidecar or external integration owns provider OAuth/API
+credentials, refresh, and outbound transport. Protocol v2 reserves allowance
+before dispatch and returns only normalized usage counters for reconciliation.
+It is not a raw proxy and does not give a worker a provider client.
 
 Imitation Krab owns identities, project roles, private message content,
 sessions, work claims, delivery, and message status. Magic Glass Box may retain

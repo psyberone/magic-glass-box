@@ -1,0 +1,25 @@
+{
+  "connector_protocol_version": 2,
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "max_concurrency": 2,
+  "request_bytes": 32768,
+  "response_bytes": 65536,
+  "routes": [
+    {
+      "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "models": [
+        "gpt-test",
+        "gpt-test-mini"
+      ],
+      "name": "chatgpt-main",
+      "protocol": "openai-responses",
+      "provider": "openai"
+    }
+  ],
+  "schema_version": 1,
+  "timeout_ms": 30000,
+  "transport": {
+    "kind": "unix",
+    "socket_path": "/var/run/magic-glass-box/openai-personal.sock"
+  }
+}

@@ -23,6 +23,10 @@ class ProviderBusyError(ProviderError):
     pass
 
 
+class ProviderBudgetError(ProviderError):
+    """A pinned local budget ceiling denied dispatch before provider access."""
+
+
 class ProviderUpstreamError(ProviderError):
     def __init__(
         self,

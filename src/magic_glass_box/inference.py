@@ -22,12 +22,14 @@ from .domain import (
 )
 
 INFERENCE_SCHEMA_VERSION = 1
-INFERENCE_CONNECTOR_PROTOCOL_VERSION = 1
+INFERENCE_CONNECTOR_PROTOCOL_VERSION = 2
+SUPPORTED_INFERENCE_CONNECTOR_PROTOCOL_VERSIONS = frozenset({1, 2})
 MAX_CONNECTOR_ROUTES = 32
 MAX_ROUTE_MODELS = 64
 MAX_CONNECTOR_FRAME_OVERHEAD = 64 * 1024
 # JSON may encode one raw control byte as a six-byte ``\u00xx`` escape.
 MAX_CONNECTOR_RESPONSE_EXPANSION = 6
+MAX_INPUT_TOKENS_PER_REQUEST_BYTE = 4
 MAX_UNIX_SOCKET_PATH_BYTES = 100
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 CONNECTOR_ID_RE = re.compile(r"^ifc_[0-9a-f]{32}$")
@@ -84,11 +86,19 @@ def _schema_version(value: object, *, field: str = "schema_version") -> int:
 
 
 def _connector_protocol_version(value: object) -> int:
-    if isinstance(value, bool) or value != INFERENCE_CONNECTOR_PROTOCOL_VERSION:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value not in SUPPORTED_INFERENCE_CONNECTOR_PROTOCOL_VERSIONS
+    ):
         raise ValidationError(
-            f"connector_protocol_version must be {INFERENCE_CONNECTOR_PROTOCOL_VERSION}"
+            "connector_protocol_version must be one of "
+            + ", ".join(
+                str(item)
+                for item in sorted(SUPPORTED_INFERENCE_CONNECTOR_PROTOCOL_VERSIONS)
+            )
         )
-    return INFERENCE_CONNECTOR_PROTOCOL_VERSION
+    return value
 
 
 def _sha256(value: object, *, field: str) -> str:
@@ -153,6 +163,19 @@ def _max_concurrency(value: object) -> int:
         field="max_concurrency",
         minimum=1,
         maximum=16,
+    )
+
+
+def _token_count(value: object, *, field: str) -> int:
+    return _bounded_integer(value, field=field, minimum=0, maximum=1_000_000_000_000)
+
+
+def _microusd(value: object, *, field: str, minimum: int = 0) -> int:
+    return _bounded_integer(
+        value,
+        field=field,
+        minimum=minimum,
+        maximum=1_000_000_000_000,
     )
 
 
@@ -265,6 +288,328 @@ class InferenceConnectorRoute:
 
 
 @dataclass(frozen=True)
+class InferenceUsage:
+    """Provider-neutral counters; subset counters are never double charged."""
+
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> InferenceUsage:
+        if not isinstance(value, dict):
+            raise ValidationError("inference usage must be an object")
+        _exact_fields(
+            value,
+            expected={
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+            },
+            subject="inference usage",
+        )
+        result = cls(
+            input_tokens=_token_count(value["input_tokens"], field="input_tokens"),
+            cached_input_tokens=_token_count(
+                value["cached_input_tokens"], field="cached_input_tokens"
+            ),
+            output_tokens=_token_count(value["output_tokens"], field="output_tokens"),
+            reasoning_output_tokens=_token_count(
+                value["reasoning_output_tokens"],
+                field="reasoning_output_tokens",
+            ),
+        )
+        if result.cached_input_tokens > result.input_tokens:
+            raise ValidationError("cached_input_tokens cannot exceed input_tokens")
+        if result.reasoning_output_tokens > result.output_tokens:
+            raise ValidationError("reasoning_output_tokens cannot exceed output_tokens")
+        return result
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "cached_input_tokens": self.cached_input_tokens,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_output_tokens": self.reasoning_output_tokens,
+        }
+
+
+@dataclass(frozen=True)
+class InferenceInvocationBudget:
+    policy_sha256: str
+    currency: str
+    reservation_microusd: int
+    max_output_tokens: int
+    input_microusd_per_million_tokens: int
+    cached_input_microusd_per_million_tokens: int
+    output_microusd_per_million_tokens: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> InferenceInvocationBudget:
+        if not isinstance(value, dict):
+            raise ValidationError("inference invocation budget must be an object")
+        _exact_fields(
+            value,
+            expected={
+                "policy_sha256",
+                "currency",
+                "reservation_microusd",
+                "max_output_tokens",
+                "input_microusd_per_million_tokens",
+                "cached_input_microusd_per_million_tokens",
+                "output_microusd_per_million_tokens",
+            },
+            subject="inference invocation budget",
+        )
+        currency = value["currency"]
+        if currency != "USD":
+            raise ValidationError("inference budget currency must be USD")
+        result = cls(
+            policy_sha256=_sha256(
+                value["policy_sha256"], field="inference budget policy"
+            ),
+            currency=currency,
+            reservation_microusd=_microusd(
+                value["reservation_microusd"],
+                field="reservation_microusd",
+                minimum=1,
+            ),
+            max_output_tokens=_bounded_integer(
+                value["max_output_tokens"],
+                field="max_output_tokens",
+                minimum=1,
+                maximum=1_000_000,
+            ),
+            input_microusd_per_million_tokens=_microusd(
+                value["input_microusd_per_million_tokens"],
+                field="input_microusd_per_million_tokens",
+            ),
+            cached_input_microusd_per_million_tokens=_microusd(
+                value["cached_input_microusd_per_million_tokens"],
+                field="cached_input_microusd_per_million_tokens",
+            ),
+            output_microusd_per_million_tokens=_microusd(
+                value["output_microusd_per_million_tokens"],
+                field="output_microusd_per_million_tokens",
+            ),
+        )
+        if (
+            result.cached_input_microusd_per_million_tokens
+            > result.input_microusd_per_million_tokens
+        ):
+            raise ValidationError(
+                "cached input token rate cannot exceed the input token rate"
+            )
+        return result
+
+    def estimate_microusd(self, usage: InferenceUsage) -> int:
+        if not isinstance(usage, InferenceUsage):
+            raise ValidationError("usage must be InferenceUsage")
+        uncached = usage.input_tokens - usage.cached_input_tokens
+        numerator = (
+            uncached * self.input_microusd_per_million_tokens
+            + usage.cached_input_tokens * self.cached_input_microusd_per_million_tokens
+            + usage.output_tokens * self.output_microusd_per_million_tokens
+        )
+        return (numerator + 999_999) // 1_000_000
+
+    def maximum_invocation_microusd(self, request_limit_bytes: int) -> int:
+        request_limit_bytes = _request_bytes(
+            request_limit_bytes, field="request_limit_bytes"
+        )
+        maximum_input_tokens = request_limit_bytes * MAX_INPUT_TOKENS_PER_REQUEST_BYTE
+        numerator = (
+            maximum_input_tokens * self.input_microusd_per_million_tokens
+            + self.max_output_tokens * self.output_microusd_per_million_tokens
+        )
+        return (numerator + 999_999) // 1_000_000
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cached_input_microusd_per_million_tokens": (
+                self.cached_input_microusd_per_million_tokens
+            ),
+            "currency": self.currency,
+            "input_microusd_per_million_tokens": (
+                self.input_microusd_per_million_tokens
+            ),
+            "max_output_tokens": self.max_output_tokens,
+            "output_microusd_per_million_tokens": (
+                self.output_microusd_per_million_tokens
+            ),
+            "policy_sha256": self.policy_sha256,
+            "reservation_microusd": self.reservation_microusd,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+
+@dataclass(frozen=True)
+class InferenceBudgetPolicy:
+    schema_version: int
+    account: str
+    revision: str
+    currency: str
+    invocation_microusd: int
+    max_output_tokens: int
+    run_microusd: int
+    project_microusd: int
+    grant_microusd: int
+    input_microusd_per_million_tokens: int
+    cached_input_microusd_per_million_tokens: int
+    output_microusd_per_million_tokens: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> InferenceBudgetPolicy:
+        if not isinstance(value, dict):
+            raise ValidationError("inference budget policy must be an object")
+        _exact_fields(
+            value,
+            expected={
+                "schema_version",
+                "account",
+                "revision",
+                "currency",
+                "invocation_microusd",
+                "max_output_tokens",
+                "run_microusd",
+                "project_microusd",
+                "grant_microusd",
+                "input_microusd_per_million_tokens",
+                "cached_input_microusd_per_million_tokens",
+                "output_microusd_per_million_tokens",
+            },
+            subject="inference budget policy",
+        )
+        currency = value["currency"]
+        if currency != "USD":
+            raise ValidationError("inference budget currency must be USD")
+        invocation = _microusd(
+            value["invocation_microusd"],
+            field="invocation_microusd",
+            minimum=1,
+        )
+        result = cls(
+            schema_version=_schema_version(
+                value["schema_version"], field="budget schema_version"
+            ),
+            account=validate_provider_name(
+                value["account"], field="inference budget account"
+            ),
+            revision=_nonblank(
+                value["revision"], field="inference budget revision", max_bytes=128
+            ),
+            currency=currency,
+            invocation_microusd=invocation,
+            max_output_tokens=_bounded_integer(
+                value["max_output_tokens"],
+                field="max_output_tokens",
+                minimum=1,
+                maximum=1_000_000,
+            ),
+            run_microusd=_microusd(
+                value["run_microusd"], field="run_microusd", minimum=invocation
+            ),
+            project_microusd=_microusd(
+                value["project_microusd"],
+                field="project_microusd",
+                minimum=invocation,
+            ),
+            grant_microusd=_microusd(
+                value["grant_microusd"],
+                field="grant_microusd",
+                minimum=invocation,
+            ),
+            input_microusd_per_million_tokens=_microusd(
+                value["input_microusd_per_million_tokens"],
+                field="input_microusd_per_million_tokens",
+            ),
+            cached_input_microusd_per_million_tokens=_microusd(
+                value["cached_input_microusd_per_million_tokens"],
+                field="cached_input_microusd_per_million_tokens",
+            ),
+            output_microusd_per_million_tokens=_microusd(
+                value["output_microusd_per_million_tokens"],
+                field="output_microusd_per_million_tokens",
+            ),
+        )
+        if (
+            result.cached_input_microusd_per_million_tokens
+            > result.input_microusd_per_million_tokens
+        ):
+            raise ValidationError(
+                "cached input token rate cannot exceed the input token rate"
+            )
+        if (
+            result.input_microusd_per_million_tokens == 0
+            and result.output_microusd_per_million_tokens == 0
+        ):
+            raise ValidationError("inference budget must price provider usage")
+        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account,
+            "cached_input_microusd_per_million_tokens": (
+                self.cached_input_microusd_per_million_tokens
+            ),
+            "currency": self.currency,
+            "grant_microusd": self.grant_microusd,
+            "input_microusd_per_million_tokens": (
+                self.input_microusd_per_million_tokens
+            ),
+            "invocation_microusd": self.invocation_microusd,
+            "max_output_tokens": self.max_output_tokens,
+            "output_microusd_per_million_tokens": (
+                self.output_microusd_per_million_tokens
+            ),
+            "project_microusd": self.project_microusd,
+            "revision": self.revision,
+            "run_microusd": self.run_microusd,
+            "schema_version": self.schema_version,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+    def invocation_authority(self) -> InferenceInvocationBudget:
+        return InferenceInvocationBudget(
+            policy_sha256=self.digest,
+            currency=self.currency,
+            reservation_microusd=self.invocation_microusd,
+            max_output_tokens=self.max_output_tokens,
+            input_microusd_per_million_tokens=(self.input_microusd_per_million_tokens),
+            cached_input_microusd_per_million_tokens=(
+                self.cached_input_microusd_per_million_tokens
+            ),
+            output_microusd_per_million_tokens=(
+                self.output_microusd_per_million_tokens
+            ),
+        )
+
+    def estimate_microusd(self, usage: InferenceUsage) -> int:
+        return self.invocation_authority().estimate_microusd(usage)
+
+    def maximum_invocation_microusd(self, request_limit_bytes: int) -> int:
+        return self.invocation_authority().maximum_invocation_microusd(
+            request_limit_bytes
+        )
+
+
+@dataclass(frozen=True)
 class InferenceConnectorSpec:
     schema_version: int
     connector_protocol_version: int
@@ -369,6 +714,20 @@ class InferenceConnectorSpec:
             )
         if grant.model not in route.models:
             raise ValidationError("grant model is not approved by connector route")
+        if self.connector_protocol_version == 1 and grant.budget is not None:
+            raise ValidationError(
+                "budgeted inference grants require connector protocol version 2"
+            )
+        if self.connector_protocol_version == 2 and grant.budget is None:
+            raise ValidationError("connector protocol version 2 requires a budget")
+        if (
+            grant.budget is not None
+            and grant.budget.maximum_invocation_microusd(grant.request_bytes)
+            > grant.budget.invocation_microusd
+        ):
+            raise ValidationError(
+                "grant invocation budget cannot cover its worst-case token bounds"
+            )
         for field in (
             "request_bytes",
             "response_bytes",
@@ -393,29 +752,40 @@ class InferenceGrantSpec:
     response_bytes: int
     timeout_ms: int
     max_concurrency: int
+    budget: InferenceBudgetPolicy | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> InferenceGrantSpec:
         if not isinstance(value, dict):
             raise ValidationError("inference grant spec must be an object")
-        _exact_fields(
-            value,
-            expected={
-                "schema_version",
-                "connector_name",
-                "deployment_sha256",
-                "route",
-                "credential_scope_sha256",
-                "provider",
-                "protocol",
-                "model",
-                "request_bytes",
-                "response_bytes",
-                "timeout_ms",
-                "max_concurrency",
-            },
-            subject="inference grant spec",
-        )
+        expected = {
+            "schema_version",
+            "connector_name",
+            "deployment_sha256",
+            "route",
+            "credential_scope_sha256",
+            "provider",
+            "protocol",
+            "model",
+            "request_bytes",
+            "response_bytes",
+            "timeout_ms",
+            "max_concurrency",
+        }
+        unknown = set(value) - expected - {"budget"}
+        if unknown:
+            raise ValidationError(
+                "inference grant spec contains unknown fields: "
+                + ", ".join(sorted(unknown))
+            )
+        missing = expected - set(value)
+        if missing:
+            raise ValidationError(
+                "inference grant spec is missing fields: " + ", ".join(sorted(missing))
+            )
+        raw_budget = value.get("budget")
+        if raw_budget is not None and not isinstance(raw_budget, dict):
+            raise ValidationError("inference grant budget must be an object")
         return cls(
             schema_version=_schema_version(value["schema_version"]),
             connector_name=validate_provider_name(
@@ -435,10 +805,15 @@ class InferenceGrantSpec:
             response_bytes=_response_bytes(value["response_bytes"]),
             timeout_ms=_timeout_ms(value["timeout_ms"]),
             max_concurrency=_max_concurrency(value["max_concurrency"]),
+            budget=(
+                None
+                if raw_budget is None
+                else InferenceBudgetPolicy.from_mapping(raw_budget)
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "connector_name": self.connector_name,
             "credential_scope_sha256": self.credential_scope_sha256,
             "deployment_sha256": self.deployment_sha256,
@@ -452,6 +827,9 @@ class InferenceGrantSpec:
             "schema_version": self.schema_version,
             "timeout_ms": self.timeout_ms,
         }
+        if self.budget is not None:
+            result["budget"] = self.budget.to_dict()
+        return result
 
     @property
     def canonical(self) -> str:
@@ -482,11 +860,27 @@ _CORRELATION_FIELDS = (
 
 
 def _invocation_authority(value: Mapping[str, Any]) -> dict[str, Any]:
+    protocol_version = _connector_protocol_version(value["connector_protocol_version"])
+    budget: InferenceInvocationBudget | None = None
+    if protocol_version == 2:
+        raw_budget = value.get("budget")
+        if not isinstance(raw_budget, dict):
+            raise ValidationError("protocol version 2 requires an invocation budget")
+        budget = InferenceInvocationBudget.from_mapping(raw_budget)
+    request_limit_bytes = _request_bytes(
+        value["request_limit_bytes"], field="request_limit_bytes"
+    )
+    if (
+        budget is not None
+        and budget.maximum_invocation_microusd(request_limit_bytes)
+        > budget.reservation_microusd
+    ):
+        raise ValidationError(
+            "inference invocation reservation cannot cover its token bounds"
+        )
     return {
         "schema_version": _schema_version(value["schema_version"]),
-        "connector_protocol_version": _connector_protocol_version(
-            value["connector_protocol_version"]
-        ),
+        "connector_protocol_version": protocol_version,
         "invocation_id": _identifier(
             value["invocation_id"],
             field="invocation_id",
@@ -514,12 +908,11 @@ def _invocation_authority(value: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "model": _nonblank(value["model"], field="invocation model", max_bytes=256),
         "deadline": _timestamp(value["deadline"], field="invocation deadline"),
-        "request_limit_bytes": _request_bytes(
-            value["request_limit_bytes"], field="request_limit_bytes"
-        ),
+        "request_limit_bytes": request_limit_bytes,
         "response_limit_bytes": _response_bytes(
             value["response_limit_bytes"], field="response_limit_bytes"
         ),
+        "budget": budget,
     }
 
 
@@ -540,15 +933,20 @@ class InferenceInvocationRequest:
     deadline: str
     request_limit_bytes: int
     response_limit_bytes: int
+    budget: InferenceInvocationBudget | None
     _request_json: str
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> InferenceInvocationRequest:
         if not isinstance(value, dict):
             raise ValidationError("inference invocation request must be an object")
+        version = _connector_protocol_version(value.get("connector_protocol_version"))
+        expected = set(_CORRELATION_FIELDS) | {"request"}
+        if version == 2:
+            expected.add("budget")
         _exact_fields(
             value,
-            expected=set(_CORRELATION_FIELDS) | {"request"},
+            expected=expected,
             subject="inference invocation request",
         )
         authority = _invocation_authority(value)
@@ -566,6 +964,8 @@ class InferenceInvocationRequest:
 
     def to_dict(self) -> dict[str, Any]:
         result = {field: getattr(self, field) for field in _CORRELATION_FIELDS}
+        if self.budget is not None:
+            result["budget"] = self.budget.to_dict()
         result["request"] = self.request
         return result
 
@@ -575,7 +975,9 @@ class InferenceInvocationRequest:
 
     @property
     def correlation(self) -> tuple[Any, ...]:
-        return tuple(getattr(self, field) for field in _CORRELATION_FIELDS)
+        return tuple(getattr(self, field) for field in _CORRELATION_FIELDS) + (
+            None if self.budget is None else self.budget.canonical,
+        )
 
 
 @dataclass(frozen=True)
@@ -595,28 +997,33 @@ class InferenceInvocationResponse:
     deadline: str
     request_limit_bytes: int
     response_limit_bytes: int
+    budget: InferenceInvocationBudget | None
     outcome: str
     provider_status: int | None
     request_bytes: int
     response_bytes: int
     error_code: str | None
+    usage: InferenceUsage | None
     _response_json: str | None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> InferenceInvocationResponse:
         if not isinstance(value, dict):
             raise ValidationError("inference invocation response must be an object")
+        version = _connector_protocol_version(value.get("connector_protocol_version"))
+        expected = set(_CORRELATION_FIELDS) | {
+            "outcome",
+            "provider_status",
+            "request_bytes",
+            "response_bytes",
+            "error_code",
+            "response",
+        }
+        if version == 2:
+            expected.update({"budget", "usage"})
         _exact_fields(
             value,
-            expected=set(_CORRELATION_FIELDS)
-            | {
-                "outcome",
-                "provider_status",
-                "request_bytes",
-                "response_bytes",
-                "error_code",
-                "response",
-            },
+            expected=expected,
             subject="inference invocation response",
         )
         authority = _invocation_authority(value)
@@ -659,12 +1066,36 @@ class InferenceInvocationResponse:
                 raise ValidationError(
                     "inference invocation response envelope is oversized"
                 )
+        usage: InferenceUsage | None = None
+        if version == 2:
+            raw_usage = value["usage"]
+            if raw_usage is not None:
+                if not isinstance(raw_usage, dict):
+                    raise ValidationError("inference usage must be an object")
+                usage = InferenceUsage.from_mapping(raw_usage)
+                budget = authority["budget"]
+                assert isinstance(budget, InferenceInvocationBudget)
+                if (
+                    usage.input_tokens
+                    > authority["request_limit_bytes"]
+                    * MAX_INPUT_TOKENS_PER_REQUEST_BYTE
+                ):
+                    raise ValidationError(
+                        "reported input usage exceeds the request token bound"
+                    )
+                if usage.output_tokens > budget.max_output_tokens:
+                    raise ValidationError(
+                        "reported output usage exceeds the output token bound"
+                    )
+                if budget.estimate_microusd(usage) > budget.reservation_microusd:
+                    raise ValidationError("reported usage exceeds the reserved budget")
         if outcome == "succeeded":
             if (
                 provider_status is None
                 or not 200 <= provider_status < 300
                 or error_code is not None
                 or response is None
+                or (version == 2 and usage is None)
             ):
                 raise ValidationError("successful inference invocation is inconsistent")
         elif error_code is None or response is not None:
@@ -678,6 +1109,7 @@ class InferenceInvocationResponse:
             request_bytes=request_bytes,
             response_bytes=response_bytes,
             error_code=error_code,
+            usage=usage,
             _response_json=response_canonical,
         )
 
@@ -699,11 +1131,17 @@ class InferenceInvocationResponse:
                 "response_bytes": self.response_bytes,
             }
         )
+        if self.connector_protocol_version == 2:
+            assert self.budget is not None
+            result["budget"] = self.budget.to_dict()
+            result["usage"] = None if self.usage is None else self.usage.to_dict()
         return result
 
     @property
     def correlation(self) -> tuple[Any, ...]:
-        return tuple(getattr(self, field) for field in _CORRELATION_FIELDS)
+        return tuple(getattr(self, field) for field in _CORRELATION_FIELDS) + (
+            None if self.budget is None else self.budget.canonical,
+        )
 
     def validate_correlation(self, request: InferenceInvocationRequest) -> None:
         if not isinstance(request, InferenceInvocationRequest):
