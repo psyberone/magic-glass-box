@@ -59,6 +59,7 @@ WORK_ENTRY_ID = "wle_" + "7" * 32
 
 class FakeGatewayDatabase:
     def __init__(self) -> None:
+        self.recovery_checkpoint: dict[str, Any] | None = None
         self.interactions = [
             {
                 "id": INTERACTION_ID,
@@ -131,6 +132,7 @@ class FakeGatewayDatabase:
                 "next_steps": ["Read the response."],
                 "pending_interaction_ids": [INTERACTION_ID],
             },
+            "recovery_checkpoint": self.recovery_checkpoint,
             "work_memory": {
                 "thread_id": "wth_" + "8" * 32,
                 "work_item_id": "wki_" + "4" * 32,
@@ -396,6 +398,7 @@ class RunGatewayTests(unittest.TestCase):
         self.assertEqual(result["work_item"]["title"], "Build the gateway")
         self.assertEqual(result["context"]["purpose"], "Build the box")
         self.assertEqual(result["handoff"]["id"], HANDOFF_ID)
+        self.assertIsNone(result["recovery_checkpoint"])
         self.assertEqual(result["work_memory"]["version"], 3)
         self.assertEqual(
             result["authority"],
@@ -594,6 +597,28 @@ class RunGatewayTests(unittest.TestCase):
         self.assertTrue(result["interactions_truncated"])
         self.assertEqual(len(result["interactions"]), 128)
         self.assertEqual(result["interactions"][0]["id"], "int_" + f"{2:032x}")
+
+    def test_describe_exposes_bodyless_recovery_checkpoint_provenance(self) -> None:
+        checkpoint = {
+            "id": "rcp_" + "1" * 32,
+            "attempt_id": ATTEMPT_ID,
+            "source_run_id": OTHER_RUN_ID,
+            "source_attempt_id": "att_" + "2" * 32,
+            "result_id": "rsl_" + "3" * 32,
+            "source_revision": "a" * 40,
+            "content_sha256": "b" * 64,
+            "changed_paths": 3,
+            "changed_bytes": 128,
+            "created_at": "2026-10-18T12:00:00.000000+00:00",
+            "applied_at": "2026-10-18T12:00:01.000000+00:00",
+        }
+        self.control.database.recovery_checkpoint = checkpoint
+
+        result = self.gateway.handle(request("run.describe"))["result"]
+
+        self.assertEqual(result["recovery_checkpoint"], checkpoint)
+        self.assertNotIn("manifest", result["recovery_checkpoint"])
+        self.assertNotIn("files", result["recovery_checkpoint"])
 
     def test_open_uses_bound_run_and_current_version_then_instructs_exit(self) -> None:
         response = self.gateway.handle(

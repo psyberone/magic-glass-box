@@ -67,6 +67,24 @@ class QueryStorage:
                 "ORDER BY a.sequence DESC LIMIT 1",
                 (run_id,),
             ).fetchone()
+            checkpoint_row = connection.execute(
+                "SELECT rc.id AS checkpoint_id, rc.attempt_id, "
+                "source_attempt.run_id AS source_run_id, rc.source_attempt_id, "
+                "rc.result_id, rc.source_revision, rc.content_sha256, "
+                "rc.changed_paths, rc.changed_bytes, "
+                "rc.created_at AS checkpoint_created_at, app.applied_at "
+                "FROM attempt_recovery_checkpoints rc "
+                "JOIN run_attempts target_attempt ON target_attempt.id = rc.attempt_id "
+                "JOIN run_attempts source_attempt "
+                "ON source_attempt.id = rc.source_attempt_id "
+                "LEFT JOIN attempt_recovery_applications app "
+                "ON app.checkpoint_id = rc.id "
+                "WHERE rc.attempt_id = ("
+                "SELECT latest.id FROM run_attempts latest "
+                "WHERE latest.run_id = ? ORDER BY latest.sequence DESC LIMIT 1"
+                ")",
+                (run_id,),
+            ).fetchone()
         if row is None:
             raise NotFoundError(f"run not found: {run_id}")
         result = dict(row)
@@ -114,6 +132,11 @@ class QueryStorage:
         ]
         result["handoff"] = (
             None if handoff_row is None else self._handoff_record(handoff_row)
+        )
+        result["recovery_checkpoint"] = (
+            None
+            if checkpoint_row is None
+            else self._recovery_checkpoint_record(checkpoint_row)
         )
         result["work_memory"] = self._get_work_memory_for_run(
             connection,

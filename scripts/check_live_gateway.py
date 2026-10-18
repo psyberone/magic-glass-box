@@ -85,6 +85,7 @@ while time.monotonic() < deadline:
                     response["ok"]
                     and result["run_id"] == os.environ["MAGIC_GLASS_BOX_RUN_ID"]
                     and result["handoff"] is None
+                    and result["recovery_checkpoint"] is None
                     and result["work_memory"] is None
                 ):
                     raise SystemExit(0)
@@ -126,6 +127,7 @@ class ProofDatabase:
             },
             "work_item": None,
             "handoff": None,
+            "recovery_checkpoint": None,
             "work_memory": None,
         }
 

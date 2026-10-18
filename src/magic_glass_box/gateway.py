@@ -431,6 +431,7 @@ class RunGateway:
             "context": context,
             "work_item": execution["work_item"],
             "handoff": execution["handoff"],
+            "recovery_checkpoint": execution["recovery_checkpoint"],
             "work_memory": execution["work_memory"],
             "authority": {
                 "workspace_mode": profile["workspace_mode"],

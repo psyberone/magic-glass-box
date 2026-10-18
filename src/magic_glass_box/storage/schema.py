@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -2686,6 +2686,64 @@ BEGIN
 END;
 """
 
+RECOVERY_CHECKPOINT_SCHEMA = """
+CREATE UNIQUE INDEX attempt_result_identity
+    ON attempt_results(id, attempt_id);
+
+CREATE TABLE attempt_recovery_checkpoints (
+    id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL UNIQUE,
+    source_attempt_id TEXT NOT NULL,
+    result_id TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    changed_paths INTEGER NOT NULL CHECK (changed_paths >= 0),
+    changed_bytes INTEGER NOT NULL CHECK (changed_bytes >= 0),
+    created_at TEXT NOT NULL,
+    UNIQUE (id, attempt_id),
+    FOREIGN KEY (attempt_id)
+        REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (source_attempt_id)
+        REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (result_id, source_attempt_id)
+        REFERENCES attempt_results(id, attempt_id) ON DELETE RESTRICT,
+    CHECK (attempt_id != source_attempt_id)
+) STRICT;
+
+CREATE TABLE attempt_recovery_applications (
+    checkpoint_id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL UNIQUE,
+    applied_at TEXT NOT NULL,
+    FOREIGN KEY (checkpoint_id, attempt_id)
+        REFERENCES attempt_recovery_checkpoints(id, attempt_id)
+        ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX attempt_recovery_source
+    ON attempt_recovery_checkpoints(source_attempt_id, created_at);
+
+CREATE TRIGGER attempt_recovery_checkpoint_immutable_update
+BEFORE UPDATE ON attempt_recovery_checkpoints
+BEGIN
+    SELECT RAISE(ABORT, 'attempt recovery checkpoints are immutable');
+END;
+CREATE TRIGGER attempt_recovery_checkpoint_immutable_delete
+BEFORE DELETE ON attempt_recovery_checkpoints
+BEGIN
+    SELECT RAISE(ABORT, 'attempt recovery checkpoints are immutable');
+END;
+CREATE TRIGGER attempt_recovery_application_immutable_update
+BEFORE UPDATE ON attempt_recovery_applications
+BEGIN
+    SELECT RAISE(ABORT, 'attempt recovery applications are immutable');
+END;
+CREATE TRIGGER attempt_recovery_application_immutable_delete
+BEFORE DELETE ON attempt_recovery_applications
+BEGIN
+    SELECT RAISE(ABORT, 'attempt recovery applications are immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -2708,6 +2766,7 @@ SCHEMA = (
     + PROVIDER_BUDGET_SCHEMA
     + RUN_PAUSED_STATE_MIGRATION
     + PROVIDER_RECOVERY_SCHEMA
+    + RECOVERY_CHECKPOINT_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -2729,4 +2788,5 @@ MIGRATIONS = {
     17: ATTEMPT_OWNER_AUDIT_SCHEMA,
     18: PROVIDER_BUDGET_SCHEMA,
     19: RUN_PAUSED_STATE_MIGRATION + PROVIDER_RECOVERY_SCHEMA,
+    20: RECOVERY_CHECKPOINT_SCHEMA,
 }

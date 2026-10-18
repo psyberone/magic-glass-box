@@ -15,9 +15,11 @@ profile revision and records:
 - the resolved source revision and container/image identity;
 - its orchestrator owner, heartbeat, expiring lease, and cancellation request;
 - creation, start, handoff, and outcome events;
-- exit status or a bounded failure reason; and
-- one immutable handoff, when supplied; and
-- one immutable host-captured workspace result after the worker stops.
+- exit status or a bounded failure reason;
+- one immutable handoff, when supplied;
+- one immutable host-captured workspace result after the worker stops;
+- one immutable recovery-checkpoint selection, when applicable; and
+- one immutable receipt proving that selection was applied before launch.
 
 Attempt states are `preparing`, `running`, `handed_off`, `succeeded`, `failed`,
 `cancelled`, and `interrupted`. The durable run keeps its own lifecycle. For
@@ -76,23 +78,43 @@ this sequence:
 5. A verified response marks the interaction answered. If the attempt has
    already closed, the run queues immediately; otherwise attempt finalization
    performs the transition.
-6. A replacement attempt reconstructs a clean workspace from the run's pinned
-   commit. `run.describe` includes the latest handoff and answered interaction
-   metadata; `interaction.read` transiently retrieves only the correlated
-   response from Krab. When the run's pinned supervision policy enables
-   automatic execution, the long-lived supervisor launches this replacement;
-   otherwise an operator launches it explicitly.
+6. A replacement attempt reconstructs a fresh workspace from the run's pinned
+   commit, stages that pristine baseline, then verifies and applies the prior
+   handed-off result as its recovery checkpoint. The container cannot start
+   until the application receipt is durable.
+7. `run.describe` includes the latest handoff, answered interaction metadata,
+   and bodyless checkpoint provenance; `interaction.read` transiently retrieves
+   only the correlated response from Krab. When the run's pinned supervision
+   policy enables automatic execution, the long-lived supervisor launches this
+   replacement; otherwise an operator launches it explicitly.
 
-The clean-workspace rule is deliberate: mutable state from a compromised or
-failed worker is not silently promoted into the next worker's authority. The
-captured result remains inert and separately inspectable; a replacement still
-starts from the pinned commit unless an operator explicitly applies that
-result. Workers should ask before making changes they cannot safely
-reconstruct.
+## File checkpoint recovery
+
+The mutable worker directory itself is never inherited. Recovery always starts
+with a newly materialized snapshot of the exact pinned revision and overlays a
+trusted result bundle only after that bundle crossed the capture boundary.
+This preserves the clean-workspace rule while avoiding re-derivation of work
+already captured from a stopped worker.
+
+Only a latest `handed_off` or `interrupted` attempt result is eligible as new
+recovery authority. A normal nonzero failure, cancellation, or success does not
+promote its output. Each target attempt stores an immutable selection containing
+the source attempt, result ID, source revision, digest, changed-path count, and
+changed-byte count. A failed or cancelled replacement may carry its already
+accepted input forward, but a successful replacement cannot resurrect that
+older checkpoint.
+
+The coordinator records the target's pristine baseline before applying the
+checkpoint. Consequently, if the replacement later stops, its result contains
+both the recovered edits and its own edits relative to the original commit.
+The next replacement needs one bundle rather than a fragile stack of patches.
+Source-revision, digest, and result-summary mismatches fail before the sandbox
+starts. The operator checkout is never a recovery destination.
 
 If a worker exits while paused without a handoff, the durable interaction is
 preserved but the attempt is recorded as `interrupted`. If the orchestrator
 restarts after a handoff but before normal attempt finalization, reconciliation
 waits for the ownership lease to expire, stops labeled resources, captures any
 remaining result, and records the attempt as interrupted while retaining the
-wait and handoff. No live resource is inferred from the durable record.
+wait and handoff. The captured result is then eligible for the same replacement
+recovery path. No live resource is inferred from the durable record.

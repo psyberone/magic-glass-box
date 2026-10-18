@@ -64,6 +64,78 @@ class ArtifactStorage:
             "created_at": row["created_at"],
         }
 
+    @staticmethod
+    def _recovery_checkpoint_record(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["checkpoint_id"],
+            "attempt_id": row["attempt_id"],
+            "source_run_id": row["source_run_id"],
+            "source_attempt_id": row["source_attempt_id"],
+            "result_id": row["result_id"],
+            "source_revision": row["source_revision"],
+            "content_sha256": row["content_sha256"],
+            "changed_paths": row["changed_paths"],
+            "changed_bytes": row["changed_bytes"],
+            "created_at": row["checkpoint_created_at"],
+            "applied_at": row["applied_at"],
+        }
+
+    def record_recovery_checkpoint_application(
+        self,
+        attempt_id: str,
+        *,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        """Record the trusted coordinator's successful workspace overlay."""
+
+        attempt_id = require_string(attempt_id, field="attempt_id", max_bytes=64)
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                checkpoint = connection.execute(
+                    "SELECT rc.id AS checkpoint_id, rc.attempt_id, "
+                    "ra.state, ra.owner_id, app.applied_at "
+                    "FROM attempt_recovery_checkpoints rc "
+                    "JOIN run_attempts ra ON ra.id = rc.attempt_id "
+                    "LEFT JOIN attempt_recovery_applications app "
+                    "ON app.checkpoint_id = rc.id WHERE rc.attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if checkpoint is None:
+                    raise NotFoundError(
+                        f"attempt recovery checkpoint not found: {attempt_id}"
+                    )
+                if checkpoint["owner_id"] != owner_id:
+                    raise ConflictError("run attempt is owned by another orchestrator")
+                if checkpoint["state"] != AttemptState.PREPARING.value:
+                    raise ConflictError(
+                        "run attempt is not preparing: " + checkpoint["state"]
+                    )
+                applied_at = checkpoint["applied_at"]
+                if applied_at is None:
+                    connection.execute(
+                        "INSERT INTO attempt_recovery_applications "
+                        "(checkpoint_id, attempt_id, applied_at) VALUES (?, ?, ?)",
+                        (checkpoint["checkpoint_id"], attempt_id, now),
+                    )
+                    applied_at = now
+                connection.commit()
+            except (NotFoundError, ConflictError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "attempt recovery checkpoint application could not be recorded"
+                ) from exc
+        return {
+            "checkpoint_id": checkpoint["checkpoint_id"],
+            "attempt_id": attempt_id,
+            "applied_at": applied_at,
+        }
+
     def record_attempt_result(
         self, attempt_id: str, manifest: ResultManifest
     ) -> dict[str, Any]:
@@ -191,6 +263,19 @@ class ArtifactStorage:
                 "FROM attempt_results WHERE attempt_id = ?",
                 (attempt_id,),
             ).fetchone()
+            checkpoint_row = connection.execute(
+                "SELECT rc.id AS checkpoint_id, rc.attempt_id, "
+                "source_attempt.run_id AS source_run_id, rc.source_attempt_id, "
+                "rc.result_id, rc.source_revision, rc.content_sha256, "
+                "rc.changed_paths, rc.changed_bytes, "
+                "rc.created_at AS checkpoint_created_at, app.applied_at "
+                "FROM attempt_recovery_checkpoints rc "
+                "JOIN run_attempts source_attempt "
+                "ON source_attempt.id = rc.source_attempt_id "
+                "LEFT JOIN attempt_recovery_applications app "
+                "ON app.checkpoint_id = rc.id WHERE rc.attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
         result = dict(row)
         try:
             result["events"] = [
@@ -207,6 +292,11 @@ class ArtifactStorage:
         result["handoff"] = None if handoff is None else self._handoff_record(handoff)
         result["result"] = (
             None if result_row is None else self._attempt_result_record(result_row)
+        )
+        result["recovery_checkpoint"] = (
+            None
+            if checkpoint_row is None
+            else self._recovery_checkpoint_record(checkpoint_row)
         )
         return result
 

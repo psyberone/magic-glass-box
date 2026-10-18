@@ -685,7 +685,7 @@ atomic finalizer.
 
 ## Milestone 9: destructive continuity proof
 
-**Status: planned**
+**Status: completed 2026-10-18**
 
 - Kill a worker during active file edits rather than at a clean interaction
   boundary.
@@ -698,6 +698,40 @@ atomic finalizer.
 
 **Exit proof:** an adversarial mid-task kill followed by replacement produces
 the expected final result and audit trail with no unaccounted file loss.
+
+Schema v21 makes the existing verified result bundle the durable file
+checkpoint for replacement recovery. Only results captured from `handed_off`
+or `interrupted` attempts can become new recovery authority; failed,
+cancelled, and successful attempts cannot promote incidental output. Each
+replacement pins one immutable source attempt, result identity, source
+revision, digest, path count, and byte count. The coordinator must stage the
+pristine pinned revision, apply that exact checkpoint, verify the application
+receipt, and record it before the replacement can enter `running`. Staging the
+baseline first also keeps the replacement's eventual result aggregate against
+the original revision instead of producing a patch-on-patch artifact.
+
+The destructive golden proof launches a real child process in a real Git
+snapshot workspace, waits until it has modified an accepted file, deleted a
+tracked file, and written a partial new file, then kills it without a clean
+handoff. Expired-owner reconciliation captures the untrusted workspace once,
+validates and retains the exact result, removes the abandoned workspace, and
+starts a replacement from a fresh snapshot plus that checkpoint. The
+replacement observes the edit and deletion exactly, leaves the already
+accepted file untouched, finishes the partial work, and produces an aggregate
+result that reconstructs the expected final tree from a pristine snapshot.
+The ledger and `run.describe` expose checkpoint provenance without exposing
+manifest or file bodies.
+
+Schema v21 and M9 passed 820 tests, Ruff format and lint, and 86% branch
+coverage. The identical production source passed a clean-from-scratch 83.06%
+mutation gate (32,513/39,146) before final survivor-driven test-only
+hardening; all mutants were classified: 6,570 survived, 27 timed out, 36 had
+no selected tests, and none were suspicious, skipped, interrupted, or crashed.
+A focused review then added exact checkpoint-provenance, audit-receipt,
+diagnostic, revision-mismatch, and cyclic-lineage assertions. Targeted reruns
+killed all 37 selected behaviorally meaningful recovery-boundary survivors;
+the remaining reviewed recovery-method survivor is SQLite keyword-case
+equivalence for `BEGIN IMMEDIATE`.
 
 ## Milestone 10: provider-neutral service sidecars
 

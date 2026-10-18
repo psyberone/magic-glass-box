@@ -1411,6 +1411,9 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE attempt_recovery_applications;
+                DROP TABLE attempt_recovery_checkpoints;
+                DROP INDEX attempt_result_identity;
                 DROP TABLE provider_recoveries;
                 DROP TRIGGER provider_invocation_immutable_update;
                 DROP TRIGGER provider_invocation_immutable_delete;

@@ -41,6 +41,10 @@ the timing field by itself never makes an ambiguous call replayable. Control-
 plane schema v20 adds the internal `paused` run state and immutable provider-
 recovery identity ledger.
 
+Control-plane schema v21 adds immutable attempt recovery-checkpoint selections
+and append-only application receipts. These are internal SQLite records over an
+existing bounded result manifest, not a new portable worker-authored document.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

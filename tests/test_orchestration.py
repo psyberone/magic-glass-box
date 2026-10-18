@@ -133,8 +133,10 @@ class FakeResultStore:
         self.root = root
         self.stage_error: Exception | None = None
         self.capture_error: Exception | None = None
+        self.apply_receipt_overrides: dict[str, object] = {}
         self.stage_calls: list[tuple[str, Path, str, tuple[str, ...]]] = []
         self.capture_calls: list[tuple[str, Path]] = []
+        self.apply_calls: list[tuple[str, Path, str | None]] = []
         self.discard_calls: list[str] = []
 
     def stage(
@@ -156,6 +158,23 @@ class FakeResultStore:
         directory = self.root / attempt_id
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         return CapturedResult(ResultManifest(1, attempt_id, COMMIT, ()), directory)
+
+    def apply(
+        self,
+        attempt_id: str,
+        workspace: Path,
+        *,
+        expected_digest: str | None = None,
+    ) -> dict[str, object]:
+        self.apply_calls.append((attempt_id, workspace, expected_digest))
+        manifest = ResultManifest(1, attempt_id, COMMIT, ())
+        return {
+            "attempt_id": attempt_id,
+            "changed_bytes": 0,
+            "changed_paths": 0,
+            "content_sha256": manifest.digest,
+            "source_revision": COMMIT,
+        } | self.apply_receipt_overrides
 
     def discard_stage(self, attempt_id: str) -> bool:
         self.discard_calls.append(attempt_id)
@@ -442,7 +461,7 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
 
-    def test_answered_handoff_resumes_same_run_with_a_replacement_worker(self) -> None:
+    def test_answered_handoff_recovers_files_for_replacement_worker(self) -> None:
         run = self.create_run(session_id="ses_" + "4" * 32)
 
         def hand_off(_request: SandboxRequest) -> None:
@@ -527,6 +546,30 @@ class RunCoordinatorTests(unittest.TestCase):
             ],
             [(1, "codex", "handed_off"), (2, "claude-code", "succeeded")],
         )
+        second_attempt = finished["attempts"][1]
+        self.assertEqual(
+            second_attempt["recovery_checkpoint"]["source_attempt_id"],
+            first_attempt["id"],
+        )
+        self.assertEqual(
+            second_attempt["recovery_checkpoint"]["result_id"],
+            first_attempt["result"]["id"],
+        )
+        self.assertIsNotNone(second_attempt["recovery_checkpoint"]["applied_at"])
+        self.assertEqual(
+            self.results.apply_calls,
+            [
+                (
+                    first_attempt["id"],
+                    replacement_workspaces.root / run["id"],
+                    first_attempt["result"]["content_sha256"],
+                )
+            ],
+        )
+        self.assertEqual(
+            second_attempt["events"][1]["metadata"]["recovery_checkpoint_id"],
+            second_attempt["recovery_checkpoint"]["id"],
+        )
         self.assertEqual(
             replacement_executor.requests[0].profile,
             self.executor.requests[0].profile,
@@ -556,6 +599,66 @@ class RunCoordinatorTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.workspaces.prepare_calls[0][2], None)
+
+    def test_replacement_fails_closed_on_inconsistent_checkpoint_receipt(self) -> None:
+        run = self.create_run()
+        preparing = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="command",
+            owner_id="orchestrator-lost",
+            expected_run_version=run["version"],
+        )
+        running = self.database.start_run_attempt(
+            preparing["id"],
+            owner_id="orchestrator-lost",
+            expected_attempt_version=preparing["version"],
+            expected_run_version=preparing["run_version"],
+            source_revision=COMMIT,
+            container_id=CONTAINER_ID,
+            container_name="lost-worker",
+            image_id=IMAGE_ID,
+        )
+        manifest = ResultManifest(1, running["id"], COMMIT, ())
+        result = self.database.record_attempt_result(running["id"], manifest)
+        interrupted = self.database.fail_run_attempt(
+            running["id"],
+            owner_id="orchestrator-lost",
+            expected_attempt_version=running["version"],
+            reason="worker disappeared",
+            interrupted=True,
+        )
+        successor = self.database.retry_run(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=interrupted["run_version"],
+        )
+        self.results.apply_receipt_overrides["content_sha256"] = "f" * 64
+
+        with self.assertRaises(RunOrchestrationError) as raised:
+            self.coordinator.execute(successor["id"])
+        self.assertEqual(str(raised.exception), "run execution failed")
+        self.assertIsInstance(raised.exception.__cause__, RunOrchestrationError)
+        self.assertEqual(
+            str(raised.exception.__cause__),
+            "recovery checkpoint application returned an inconsistent receipt",
+        )
+
+        failed = self.database.get_run(successor["id"])
+        attempt = failed["attempts"][0]
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(attempt["state"], "failed")
+        self.assertIsNone(attempt["recovery_checkpoint"]["applied_at"])
+        self.assertEqual(
+            self.results.apply_calls,
+            [
+                (
+                    running["id"],
+                    self.workspaces.root / successor["id"],
+                    result["content_sha256"],
+                )
+            ],
+        )
+        self.assertEqual(self.executor.requests, [])
 
     def test_unknown_adapter_does_not_claim_the_queued_run(self) -> None:
         run = self.create_run()

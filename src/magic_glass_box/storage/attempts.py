@@ -25,6 +25,62 @@ from .schema import (
 
 
 class AttemptStorage:
+    @staticmethod
+    def _select_recovery_result(
+        connection: sqlite3.Connection, run_id: str
+    ) -> sqlite3.Row | None:
+        """Select only durable work accepted for replacement recovery."""
+
+        current_run_id: str | None = run_id
+        visited: set[str] = set()
+        while current_run_id is not None:
+            if current_run_id in visited:
+                raise StorageError("run replacement lineage contains a cycle")
+            visited.add(current_run_id)
+            run = connection.execute(
+                "SELECT predecessor_run_id FROM runs WHERE id = ?",
+                (current_run_id,),
+            ).fetchone()
+            if run is None:
+                raise StorageError("run replacement lineage is incomplete")
+            latest = connection.execute(
+                "SELECT id, state FROM run_attempts WHERE run_id = ? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (current_run_id,),
+            ).fetchone()
+            if latest is None:
+                current_run_id = run["predecessor_run_id"]
+                continue
+            if latest["state"] in {
+                AttemptState.HANDED_OFF.value,
+                AttemptState.INTERRUPTED.value,
+            }:
+                result = connection.execute(
+                    "SELECT ar.id AS result_id, ar.attempt_id AS source_attempt_id, "
+                    "ar.content_sha256, ar.changed_paths, ar.changed_bytes, "
+                    "source_attempt.source_revision "
+                    "FROM attempt_results ar JOIN run_attempts source_attempt "
+                    "ON source_attempt.id = ar.attempt_id WHERE ar.attempt_id = ?",
+                    (latest["id"],),
+                ).fetchone()
+                if result is not None:
+                    return result
+            inherited = connection.execute(
+                "SELECT result_id, source_attempt_id, content_sha256, "
+                "changed_paths, changed_bytes, source_revision "
+                "FROM attempt_recovery_checkpoints WHERE attempt_id = ?",
+                (latest["id"],),
+            ).fetchone()
+            if latest["state"] in {
+                AttemptState.HANDED_OFF.value,
+                AttemptState.FAILED.value,
+                AttemptState.CANCELLED.value,
+                AttemptState.INTERRUPTED.value,
+            }:
+                return inherited
+            return None
+        return None
+
     def begin_run_attempt(
         self,
         run_id: str,
@@ -54,7 +110,8 @@ class AttemptStorage:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 run = connection.execute(
-                    "SELECT state, version, profile_version_id FROM runs WHERE id = ?",
+                    "SELECT state, version, profile_version_id, source_revision "
+                    "FROM runs WHERE id = ?",
                     (run_id,),
                 ).fetchone()
                 if run is None:
@@ -71,6 +128,15 @@ class AttemptStorage:
                     "WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()[0]
+                recovery = self._select_recovery_result(connection, run_id)
+                if (
+                    recovery is not None
+                    and run["source_revision"] is not None
+                    and recovery["source_revision"] != run["source_revision"]
+                ):
+                    raise StorageError(
+                        "recovery checkpoint source revision does not match run"
+                    )
                 connection.execute(
                     "INSERT INTO run_attempts "
                     "(id, run_id, sequence, profile_version_id, runtime_adapter, "
@@ -88,12 +154,44 @@ class AttemptStorage:
                         now,
                     ),
                 )
+                checkpoint_id: str | None = None
+                if recovery is not None:
+                    checkpoint_id = self.new_id("rcp")
+                    connection.execute(
+                        "INSERT INTO attempt_recovery_checkpoints "
+                        "(id, attempt_id, source_attempt_id, result_id, "
+                        "source_revision, content_sha256, changed_paths, "
+                        "changed_bytes, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            checkpoint_id,
+                            attempt_id,
+                            recovery["source_attempt_id"],
+                            recovery["result_id"],
+                            recovery["source_revision"],
+                            recovery["content_sha256"],
+                            recovery["changed_paths"],
+                            recovery["changed_bytes"],
+                            now,
+                        ),
+                    )
+                created_metadata = (
+                    "{}"
+                    if checkpoint_id is None
+                    else canonical_json(
+                        {
+                            "recovery_checkpoint_id": checkpoint_id,
+                            "recovery_result_sha256": recovery["content_sha256"],
+                            "recovery_source_attempt_id": recovery["source_attempt_id"],
+                        }
+                    )
+                )
                 connection.execute(
                     "INSERT INTO run_attempt_events "
                     "(attempt_id, sequence, kind, from_state, to_state, "
                     "metadata_json, created_at) "
-                    "VALUES (?, 1, 'attempt.created', NULL, 'preparing', '{}', ?)",
-                    (attempt_id, now),
+                    "VALUES (?, 1, 'attempt.created', NULL, 'preparing', ?, ?)",
+                    (attempt_id, created_metadata, now),
                 )
                 changed = connection.execute(
                     "UPDATE runs SET state = 'preparing', version = version + 1, "
@@ -118,7 +216,7 @@ class AttemptStorage:
                     (run_id, expected_run_version + 1, metadata, now),
                 )
                 connection.commit()
-            except (NotFoundError, ConflictError, ValidationError):
+            except (NotFoundError, ConflictError, StorageError, ValidationError):
                 connection.rollback()
                 raise
             except sqlite3.IntegrityError as exc:
@@ -369,6 +467,25 @@ class AttemptStorage:
                     raise ConflictError(
                         f"run attempt is not preparing: {attempt['state']}"
                     )
+                checkpoint = connection.execute(
+                    "SELECT rc.id, rc.source_attempt_id, rc.result_id, "
+                    "rc.source_revision, rc.content_sha256, app.applied_at "
+                    "FROM attempt_recovery_checkpoints rc "
+                    "LEFT JOIN attempt_recovery_applications app "
+                    "ON app.checkpoint_id = rc.id WHERE rc.attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if checkpoint is not None and checkpoint["applied_at"] is None:
+                    raise ConflictError(
+                        "run attempt recovery checkpoint has not been applied"
+                    )
+                if (
+                    checkpoint is not None
+                    and checkpoint["source_revision"] != source_revision
+                ):
+                    raise ConflictError(
+                        "run attempt recovery checkpoint source revision changed"
+                    )
                 if attempt["run_version"] != expected_run_version:
                     raise ConcurrentUpdateError(
                         f"run version is {attempt['run_version']}, "
@@ -415,6 +532,18 @@ class AttemptStorage:
                         "container_name": container_name,
                         "image_id": image_id,
                         "source_revision": source_revision,
+                        **(
+                            {}
+                            if checkpoint is None
+                            else {
+                                "recovery_checkpoint_id": checkpoint["id"],
+                                "recovery_result_id": checkpoint["result_id"],
+                                "recovery_result_sha256": checkpoint["content_sha256"],
+                                "recovery_source_attempt_id": checkpoint[
+                                    "source_attempt_id"
+                                ],
+                            }
+                        ),
                     }
                 )
                 event_sequence = connection.execute(

@@ -376,6 +376,14 @@ class DatabaseCore:
                 ("attempt_handoffs", "SELECT COUNT(*) FROM attempt_handoffs"),
                 ("attempt_results", "SELECT COUNT(*) FROM attempt_results"),
                 (
+                    "attempt_recovery_checkpoints",
+                    "SELECT COUNT(*) FROM attempt_recovery_checkpoints",
+                ),
+                (
+                    "attempt_recovery_applications",
+                    "SELECT COUNT(*) FROM attempt_recovery_applications",
+                ),
+                (
                     "integration_candidates",
                     "SELECT COUNT(*) FROM integration_candidates",
                 ),

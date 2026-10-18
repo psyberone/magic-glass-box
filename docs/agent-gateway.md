@@ -104,11 +104,14 @@ Payload: `{}`.
 
 Returns the current run state and version, pinned project key and source
 revision, sanitized project context, immutable work item, authority summary,
-bounded interaction metadata, latest structured handoff, and the initial
-bounded work-memory page. Work memory contains the latest checkpoint, entries
-after it, and assignment state with at most the latest 16 lifecycle events per
-assignment. It omits the host repository path, image and command details,
-credential references, and secret values.
+bounded interaction metadata, latest structured handoff, bodyless recovery
+checkpoint provenance when the current attempt used one, and the initial
+bounded work-memory page. Recovery provenance names only the source run,
+attempt, result, revision, digest, path/byte counts, and application time. Work
+memory contains the latest checkpoint, entries after it, and assignment state
+with at most the latest 16 lifecycle events per assignment. It omits the host
+repository path, image and command details, credential references, file bodies,
+and secret values.
 
 ### Work-memory operations
 

@@ -74,6 +74,14 @@ class RunResultStore(Protocol):
 
     def capture(self, attempt_id: str, workspace: Path) -> CapturedResult: ...
 
+    def apply(
+        self,
+        attempt_id: str,
+        repository: Path,
+        *,
+        expected_digest: str | None = None,
+    ) -> dict[str, Any]: ...
+
     def discard_stage(self, attempt_id: str) -> bool: ...
 
 
@@ -352,6 +360,10 @@ class RunCoordinator:
                     prepared.revision,
                     gitlinks=prepared.gitlinks,
                 )
+                self._apply_recovery_checkpoint(
+                    attempt,
+                    prepared,
+                )
                 gateway_directory = None
                 if profile.network_mode is NetworkMode.GATEWAY_ONLY:
                     credential_names = self._gateway_credential_names(
@@ -576,6 +588,43 @@ class RunCoordinator:
         captured = self.result_store.capture(attempt_id, workspace)
         self.database.record_attempt_result(attempt_id, captured.manifest)
         self.result_store.discard_stage(attempt_id)
+
+    def _apply_recovery_checkpoint(
+        self,
+        attempt: Mapping[str, Any],
+        prepared: PreparedWorkspace,
+    ) -> None:
+        checkpoint = attempt.get("recovery_checkpoint")
+        if checkpoint is None:
+            return
+        if not isinstance(checkpoint, Mapping):
+            raise RunOrchestrationError("recovery checkpoint metadata is invalid")
+        if checkpoint.get("source_revision") != prepared.revision:
+            raise RunOrchestrationError(
+                "recovery checkpoint source revision does not match workspace"
+            )
+        applied = self.result_store.apply(
+            checkpoint["source_attempt_id"],
+            prepared.path,
+            expected_digest=checkpoint["content_sha256"],
+        )
+        expected = {
+            "attempt_id": checkpoint["source_attempt_id"],
+            "changed_bytes": checkpoint["changed_bytes"],
+            "changed_paths": checkpoint["changed_paths"],
+            "content_sha256": checkpoint["content_sha256"],
+            "source_revision": checkpoint["source_revision"],
+        }
+        if not isinstance(applied, Mapping) or any(
+            applied.get(key) != value for key, value in expected.items()
+        ):
+            raise RunOrchestrationError(
+                "recovery checkpoint application returned an inconsistent receipt"
+            )
+        self.database.record_recovery_checkpoint_application(
+            attempt["id"],
+            owner_id=self.orchestrator_id,
+        )
 
     def _fail_uncaptured_attempt(
         self,

@@ -272,7 +272,8 @@ schema v16. Durable pre-dispatch invocation intent and one-way finalization
 advance it to schema v17. Audited attempt-owner takeover and stale-owner
 transition fencing advance it to schema v18. Provider budget reservations and
 normalized usage accounting advance it to schema v19. Quota-aware paused-run
-recovery advances it to schema v20.
+recovery advances it to schema v20. Immutable attempt recovery selections and
+application receipts advance it to schema v21.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -309,21 +310,26 @@ For an execution request, Magic Glass Box:
 3. asks the selected adapter for bounded argv, its explicit provider-grant
    route, and non-secret loopback environment;
 4. resolves the requested revision and exports only tracked Git files;
-5. validates the named authorities and opens the run-scoped gateway;
-6. resolves the image reference to an immutable digest and creates the sandbox;
-7. records the commit, image, and container identity before starting it;
-8. waits for the agent while renewing its ownership lease and polling durable
+5. records the pristine result baseline and, when the attempt pins a recovery
+   checkpoint, verifies and applies it to this disposable snapshot and records
+   an application receipt;
+6. validates the named authorities and opens the run-scoped gateway;
+7. resolves the image reference to an immutable digest and creates the sandbox;
+8. records the commit, image, container identity, and recovery provenance
+   before starting it;
+9. waits for the agent while renewing its ownership lease and polling durable
    cancellation or provider-pause requests; either signal stops the labeled
    container, Docker command timeouts remain bounded, and agent runtime has a
    six-hour default ceiling that the operator may override with
    `--run-timeout`;
-9. captures bounded stdout transiently with deterministic UTF-8 replacement
+10. captures bounded stdout transiently with deterministic UTF-8 replacement
    decoding, lets the adapter validate only its completion envelope, and
    retains none of that output;
-10. captures a bounded file-level result and binds its digest to the attempt;
-11. removes all labeled containers, gateway files, and the disposable snapshot;
+11. captures a bounded file-level result against the pristine baseline and
+    binds its digest to the attempt;
+12. removes all labeled containers, gateway files, and the disposable snapshot;
    and
-12. records the normalized exit status and terminal state.
+13. records the normalized exit status and terminal state.
 
 Operational failures become audited `failed` runs only after cleanup succeeds.
 If a started worker fails, its recoverable changes are captured before cleanup.
@@ -392,8 +398,8 @@ is queued only after that attempt has exited. An explicit quota or backpressure
 response instead moves the run to `paused`; the same worker is interrupted and
 the supervisor cannot requeue the run before its bounded eligibility time or
 while an interaction remains open. See [agent-gateway.md](agent-gateway.md),
-[provider-broker.md](provider-broker.md), [results.md](results.md), and
-[work-memory.md](work-memory.md).
+[provider-broker.md](provider-broker.md), [results.md](results.md),
+[worker-handoffs.md](worker-handoffs.md), and [work-memory.md](work-memory.md).
 
 ## Work-item boundary
 
@@ -424,9 +430,9 @@ storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
 autonomous supervision, and aging escalation are complete. Trusted candidate
 materialization, exact-input gates, dependency/refold queue, and manual landing
 flow are implemented. The credential-isolated inference connector, its
-real-account proof, provider usage/budget authority, and quota-aware recovery
-are implemented. Destructive continuity is the next numbered checkpoint;
-optional provider-neutral service sidecars follow it. See
+real-account proof, provider usage/budget authority, quota-aware recovery, and
+destructive replacement continuity are implemented. Optional
+provider-neutral service sidecars are the next numbered checkpoint. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),

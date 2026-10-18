@@ -172,10 +172,26 @@ mutation starts. Apply results only to a disposable clean checkout; if an I/O
 error or unsupported concurrent mutation occurs during the destructive phase,
 discard that checkout and retry from the known baseline.
 
-The operation is intentionally explicit. Results are never applied to the
-source checkout automatically and never become authority for a replacement
-worker. `result apply` does not stage or commit Git changes, push a branch, open
-a pull request, contact a hosting service, or store a service credential.
+The operation is intentionally explicit for operator-owned checkouts. Results
+are never applied to the source checkout automatically. One narrower internal
+path may apply a result to a new disposable worker snapshot: a handed-off or
+interrupted attempt can become an immutable recovery checkpoint for its next
+attempt or replacement run. The new attempt pins the exact source attempt,
+result ID, source revision, digest, path count, and byte count. MGB stages the
+pristine baseline first, verifies and overlays the checkpoint, records an
+application receipt, and refuses to start the container without that receipt.
+The replacement's later capture therefore remains an aggregate result against
+the original pinned revision rather than a delta against the checkpoint.
+
+Ordinary failed, cancelled, and successful output is not silently promoted.
+If a replacement fails before producing a newer recoverable result, its
+already-pinned input may carry forward; a successful replacement cannot
+resurrect that older input. Any revision, digest, count, or application-receipt
+mismatch fails before worker launch. See
+[worker-handoffs.md](worker-handoffs.md).
+
+`result apply` does not stage or commit Git changes, push a branch, open a pull
+request, contact a hosting service, or store a service credential.
 
 ## Promote to a trusted candidate
 

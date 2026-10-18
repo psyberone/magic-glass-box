@@ -78,9 +78,9 @@ This repository currently contains the first executable vertical slice:
   nonce-bound receipts that either confirm the unchanged base or truthfully
   advance an out-of-band observed ref and conservatively invalidate every
   remaining sibling without storing a Git-host credential;
-- a durable attempt ledger and bounded structured handoff that let a clean
-  replacement worker resume the same run from its pinned commit without a
-  transcript or inherited mutable sandbox;
+- a durable attempt ledger, bounded structured handoff, and immutable recovery
+  checkpoint that rebuild a replacement from its pinned commit plus verified
+  recoverable edits without a transcript or inherited mutable sandbox;
 - a work-item-scoped, append-only coordination log with optimistic checkpoints,
   profile-pinned leased assignments, and enough provenance for a replacement
   coordinator to recover parallel Claude/Codex-style work;
@@ -106,6 +106,10 @@ The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
 the source checkout remains untouched, bounded edits are retained in a trusted
 result bundle, and the container and snapshot are removed afterward. The
+destructive replacement proof kills a real process after active additions,
+modifications, and deletions, captures that stopped workspace through the same
+bounded result boundary, and verifies a fresh replacement receives the exact
+checkpoint before producing one aggregate final result. The
 interaction transport has also been exercised over HTTP
 against a real local `imitation-krab`: idempotent question delivery,
 bodyless reminder replay, reverse-route response verification, and

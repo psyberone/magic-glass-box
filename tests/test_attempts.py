@@ -15,6 +15,7 @@ from magic_glass_box.db import (
     ConflictError,
     Database,
     NotFoundError,
+    StorageError,
 )
 from magic_glass_box.domain import (
     AgentProfileSpec,
@@ -31,6 +32,7 @@ from magic_glass_box.storage.schema import (
     ATTEMPT_OWNER_AUDIT_SCHEMA,
     PROVIDER_BUDGET_SCHEMA,
     PROVIDER_RECOVERY_SCHEMA,
+    RECOVERY_CHECKPOINT_SCHEMA,
     RUN_PAUSED_STATE_MIGRATION,
 )
 
@@ -741,6 +743,396 @@ class RunAttemptTests(unittest.TestCase):
                 (first["id"],),
             )
 
+    def test_interrupted_result_is_pinned_and_applied_before_replacement_start(
+        self,
+    ) -> None:
+        run, running = self.running_attempt()
+        result = self.database.record_attempt_result(
+            running["id"], self.manifest(running["id"], changed=True)
+        )
+        interrupted = self.database.fail_run_attempt(
+            running["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=running["version"],
+            reason="worker process disappeared",
+            interrupted=True,
+        )
+        successor = self.database.retry_run(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=interrupted["run_version"],
+        )
+
+        preparing = self.database.begin_run_attempt(
+            successor["id"],
+            runtime_adapter="docker",
+            owner_id="replacement-owner",
+            expected_run_version=successor["version"],
+        )
+
+        checkpoint = preparing["recovery_checkpoint"]
+        self.assertEqual(
+            set(checkpoint),
+            {
+                "applied_at",
+                "attempt_id",
+                "changed_bytes",
+                "changed_paths",
+                "content_sha256",
+                "created_at",
+                "id",
+                "result_id",
+                "source_attempt_id",
+                "source_revision",
+                "source_run_id",
+            },
+        )
+        self.assertTrue(checkpoint["id"].startswith("rcp_"))
+        self.assertEqual(checkpoint["attempt_id"], preparing["id"])
+        self.assertEqual(checkpoint["source_run_id"], run["id"])
+        self.assertEqual(checkpoint["source_attempt_id"], running["id"])
+        self.assertEqual(checkpoint["result_id"], result["id"])
+        self.assertEqual(checkpoint["content_sha256"], result["content_sha256"])
+        self.assertEqual(checkpoint["changed_paths"], 1)
+        self.assertEqual(checkpoint["changed_bytes"], 4)
+        self.assertIsNotNone(checkpoint["created_at"])
+        self.assertIsNone(checkpoint["applied_at"])
+        self.assertEqual(
+            preparing["events"][-1]["metadata"],
+            {
+                "recovery_checkpoint_id": checkpoint["id"],
+                "recovery_result_sha256": result["content_sha256"],
+                "recovery_source_attempt_id": running["id"],
+            },
+        )
+        with self.assertRaises(ConflictError) as raised:
+            self.database.start_run_attempt(
+                preparing["id"],
+                owner_id="replacement-owner",
+                expected_attempt_version=preparing["version"],
+                expected_run_version=preparing["run_version"],
+                source_revision="a" * 40,
+                container_id="d" * 64,
+                container_name="replacement-worker",
+                image_id=IMAGE_ID,
+            )
+        self.assertEqual(
+            str(raised.exception),
+            "run attempt recovery checkpoint has not been applied",
+        )
+        with self.assertRaises(ConflictError) as raised:
+            self.database.record_recovery_checkpoint_application(
+                preparing["id"], owner_id="wrong-owner"
+            )
+        self.assertEqual(
+            str(raised.exception), "run attempt is owned by another orchestrator"
+        )
+
+        applied = self.database.record_recovery_checkpoint_application(
+            preparing["id"], owner_id="replacement-owner"
+        )
+        repeated_application = self.database.record_recovery_checkpoint_application(
+            preparing["id"], owner_id="replacement-owner"
+        )
+        self.assertEqual(repeated_application, applied)
+        self.assertEqual(applied["checkpoint_id"], checkpoint["id"])
+        self.assertEqual(applied["attempt_id"], preparing["id"])
+        self.assertIsNotNone(applied["applied_at"])
+        with self.assertRaises(ConflictError) as raised:
+            self.database.start_run_attempt(
+                preparing["id"],
+                owner_id="replacement-owner",
+                expected_attempt_version=preparing["version"],
+                expected_run_version=preparing["run_version"],
+                source_revision="e" * 40,
+                container_id="d" * 64,
+                container_name="replacement-worker",
+                image_id=IMAGE_ID,
+            )
+        self.assertEqual(
+            str(raised.exception),
+            "run attempt recovery checkpoint source revision changed",
+        )
+        started = self.database.start_run_attempt(
+            preparing["id"],
+            owner_id="replacement-owner",
+            expected_attempt_version=preparing["version"],
+            expected_run_version=preparing["run_version"],
+            source_revision="a" * 40,
+            container_id="d" * 64,
+            container_name="replacement-worker",
+            image_id=IMAGE_ID,
+        )
+        self.assertEqual(
+            started["events"][-1]["metadata"],
+            {
+                "container_id": "d" * 64,
+                "container_name": "replacement-worker",
+                "image_id": IMAGE_ID,
+                "recovery_checkpoint_id": checkpoint["id"],
+                "recovery_result_id": result["id"],
+                "recovery_result_sha256": result["content_sha256"],
+                "recovery_source_attempt_id": running["id"],
+                "source_revision": "a" * 40,
+            },
+        )
+        self.assertEqual(
+            self.database.get_run_execution(successor["id"])["recovery_checkpoint"][
+                "id"
+            ],
+            checkpoint["id"],
+        )
+        with self.assertRaises(ConflictError) as raised:
+            self.database.record_recovery_checkpoint_application(
+                preparing["id"], owner_id="replacement-owner"
+            )
+        self.assertEqual(str(raised.exception), "run attempt is not preparing: running")
+
+        connection = self.database.connect()
+        self.addCleanup(connection.close)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE attempt_recovery_checkpoints SET changed_paths = 0 "
+                "WHERE id = ?",
+                (checkpoint["id"],),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM attempt_recovery_applications WHERE checkpoint_id = ?",
+                (checkpoint["id"],),
+            )
+
+    def test_application_receipt_requires_a_selected_checkpoint(self) -> None:
+        run = self.create_run()
+        preparing = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=run["version"],
+        )
+
+        with self.assertRaisesRegex(NotFoundError, "checkpoint not found"):
+            self.database.record_recovery_checkpoint_application(
+                preparing["id"], owner_id=OWNER_ID
+            )
+
+    def test_application_receipt_validates_identifier_boundaries(self) -> None:
+        for arguments, message in (
+            (
+                {"attempt_id": None, "owner_id": OWNER_ID},
+                "attempt_id must be text",
+            ),
+            (
+                {"attempt_id": "x" * 65, "owner_id": OWNER_ID},
+                "attempt_id exceeds 64 UTF-8 bytes",
+            ),
+            (
+                {"attempt_id": "x" * 64, "owner_id": None},
+                "owner_id must be text",
+            ),
+            (
+                {"attempt_id": "x" * 64, "owner_id": "x" * 129},
+                "owner_id exceeds 128 UTF-8 bytes",
+            ),
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                self.assertRaises(ValidationError) as raised,
+            ):
+                self.database.record_recovery_checkpoint_application(  # type: ignore[arg-type]
+                    **arguments
+                )
+            self.assertEqual(str(raised.exception), message)
+
+        with self.assertRaises(NotFoundError):
+            self.database.record_recovery_checkpoint_application(
+                "x" * 64, owner_id="x" * 128
+            )
+
+    def test_recovery_selection_fails_closed_on_a_cyclic_lineage(self) -> None:
+        connection = mock.Mock()
+        connection.execute.side_effect = (
+            mock.Mock(
+                fetchone=mock.Mock(return_value={"predecessor_run_id": "run_cycle"})
+            ),
+            mock.Mock(fetchone=mock.Mock(return_value=None)),
+            AssertionError("recovery selection queried past the detected cycle"),
+        )
+
+        with self.assertRaises(StorageError) as raised:
+            self.database._select_recovery_result(  # noqa: SLF001
+                connection,
+                "run_cycle",
+            )
+        self.assertEqual(
+            str(raised.exception), "run replacement lineage contains a cycle"
+        )
+        self.assertEqual(connection.execute.call_count, 2)
+
+    def test_recovery_selection_rejects_a_changed_run_revision(self) -> None:
+        run, running = self.running_attempt()
+        self.record_result(running["id"])
+        interrupted = self.database.fail_run_attempt(
+            running["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=running["version"],
+            reason="worker process disappeared",
+            interrupted=True,
+        )
+        successor = self.database.retry_run(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=interrupted["run_version"],
+        )
+        with closing(self.database.connect()) as connection:
+            connection.execute(
+                "UPDATE runs SET source_revision = ? WHERE id = ?",
+                ("e" * 40, successor["id"]),
+            )
+            connection.commit()
+
+        with self.assertRaises(StorageError) as raised:
+            self.database.begin_run_attempt(
+                successor["id"],
+                runtime_adapter="docker",
+                owner_id="replacement-owner",
+                expected_run_version=successor["version"],
+            )
+        self.assertEqual(
+            str(raised.exception),
+            "recovery checkpoint source revision does not match run",
+        )
+
+    def test_failed_output_is_not_promoted_to_a_recovery_checkpoint(self) -> None:
+        run, running = self.running_attempt()
+        self.record_result(running["id"])
+        failed = self.database.complete_run_attempt(
+            running["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=running["version"],
+            exit_code=17,
+            image_id=IMAGE_ID,
+        )
+        successor = self.database.retry_run(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=failed["run_version"],
+        )
+
+        preparing = self.database.begin_run_attempt(
+            successor["id"],
+            runtime_adapter="docker",
+            owner_id="replacement-owner",
+            expected_run_version=successor["version"],
+        )
+
+        self.assertIsNone(preparing["recovery_checkpoint"])
+
+    def test_failed_replacement_carries_forward_only_its_pinned_checkpoint(
+        self,
+    ) -> None:
+        run, running = self.running_attempt()
+        result = self.record_result(running["id"])
+        interrupted = self.database.fail_run_attempt(
+            running["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=running["version"],
+            reason="worker process disappeared",
+            interrupted=True,
+        )
+        first_replacement = self.database.retry_run(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=interrupted["run_version"],
+        )
+        preparing = self.database.begin_run_attempt(
+            first_replacement["id"],
+            runtime_adapter="docker",
+            owner_id="replacement-one",
+            expected_run_version=first_replacement["version"],
+        )
+        failed = self.database.fail_run_attempt(
+            preparing["id"],
+            owner_id="replacement-one",
+            expected_attempt_version=preparing["version"],
+            reason="workspace preparation failed",
+        )
+        second_replacement = self.database.retry_run(
+            first_replacement["id"],
+            requested_by=self.user["id"],
+            expected_run_version=failed["run_version"],
+        )
+
+        carried = self.database.begin_run_attempt(
+            second_replacement["id"],
+            runtime_adapter="docker",
+            owner_id="replacement-two",
+            expected_run_version=second_replacement["version"],
+        )["recovery_checkpoint"]
+
+        self.assertEqual(carried["source_attempt_id"], running["id"])
+        self.assertEqual(carried["result_id"], result["id"])
+        self.assertEqual(carried["content_sha256"], result["content_sha256"])
+
+    def test_successful_replacement_does_not_resurrect_its_input_checkpoint(
+        self,
+    ) -> None:
+        run, running = self.running_attempt()
+        self.record_result(running["id"])
+        interrupted = self.database.fail_run_attempt(
+            running["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=running["version"],
+            reason="worker process disappeared",
+            interrupted=True,
+        )
+        replacement = self.database.retry_run(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=interrupted["run_version"],
+        )
+        preparing = self.database.begin_run_attempt(
+            replacement["id"],
+            runtime_adapter="docker",
+            owner_id="replacement-owner",
+            expected_run_version=replacement["version"],
+        )
+        self.database.record_recovery_checkpoint_application(
+            preparing["id"], owner_id="replacement-owner"
+        )
+        active = self.database.start_run_attempt(
+            preparing["id"],
+            owner_id="replacement-owner",
+            expected_attempt_version=preparing["version"],
+            expected_run_version=preparing["run_version"],
+            source_revision="a" * 40,
+            container_id="d" * 64,
+            container_name="replacement-worker",
+            image_id=IMAGE_ID,
+        )
+        self.record_result(active["id"])
+        succeeded = self.database.complete_run_attempt(
+            active["id"],
+            owner_id="replacement-owner",
+            expected_attempt_version=active["version"],
+            exit_code=0,
+            image_id=IMAGE_ID,
+        )
+        clean_retry = self.database.retry_run(
+            replacement["id"],
+            requested_by=self.user["id"],
+            expected_run_version=succeeded["run_version"],
+        )
+
+        next_attempt = self.database.begin_run_attempt(
+            clean_retry["id"],
+            runtime_adapter="docker",
+            owner_id="clean-retry-owner",
+            expected_run_version=clean_retry["version"],
+        )
+
+        self.assertIsNone(next_attempt["recovery_checkpoint"])
+
     def test_attempt_lease_renewal_and_expired_takeover_are_owner_checked(
         self,
     ) -> None:
@@ -956,6 +1348,7 @@ class AttemptMigrationTests(unittest.TestCase):
                 + PROVIDER_BUDGET_SCHEMA
                 + RUN_PAUSED_STATE_MIGRATION
                 + PROVIDER_RECOVERY_SCHEMA
+                + RECOVERY_CHECKPOINT_SCHEMA
             )
             self.assertTrue(SCHEMA.endswith(tail))
             historical_schema = SCHEMA[: -len(tail)]
@@ -1022,22 +1415,64 @@ class AttemptMigrationTests(unittest.TestCase):
                     requested_by=user["id"],
                     source_revision="a" * 40,
                 )
-            preparing = database.begin_run_attempt(
-                run["id"],
-                runtime_adapter="docker",
-                owner_id=OWNER_ID,
-                expected_run_version=run["version"],
-            )
-            running = database.start_run_attempt(
-                preparing["id"],
-                owner_id=OWNER_ID,
-                expected_attempt_version=preparing["version"],
-                expected_run_version=preparing["run_version"],
-                source_revision="a" * 40,
-                container_id="b" * 64,
-                container_name="migration-worker",
-                image_id=IMAGE_ID,
-            )
+
+            def legacy_attempt(attempt_id: str) -> dict[str, object]:
+                with closing(database.connect()) as connection:
+                    row = connection.execute(
+                        "SELECT ra.id, ra.state, ra.version, "
+                        "r.version AS run_version FROM run_attempts ra "
+                        "JOIN runs r ON r.id = ra.run_id WHERE ra.id = ?",
+                        (attempt_id,),
+                    ).fetchone()
+                self.assertIsNotNone(row)
+                return dict(row)
+
+            with mock.patch.object(
+                database, "get_run_attempt", side_effect=legacy_attempt
+            ):
+                preparing = database.begin_run_attempt(
+                    run["id"],
+                    runtime_adapter="docker",
+                    owner_id=OWNER_ID,
+                    expected_run_version=run["version"],
+                )
+            now = database.now()
+            with closing(database.connect()) as connection:
+                connection.execute(
+                    "UPDATE run_attempts SET state = 'running', version = 2, "
+                    "source_revision = ?, container_id = ?, container_name = ?, "
+                    "image_id = ?, started_at = ? WHERE id = ?",
+                    (
+                        "a" * 40,
+                        "b" * 64,
+                        "migration-worker",
+                        IMAGE_ID,
+                        now,
+                        preparing["id"],
+                    ),
+                )
+                connection.execute(
+                    "UPDATE runs SET state = 'running', version = 3, "
+                    "source_revision = ?, started_at = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    ("a" * 40, now, now, run["id"]),
+                )
+                connection.execute(
+                    "INSERT INTO run_attempt_events "
+                    "(attempt_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) VALUES (?, 2, "
+                    "'attempt.started', 'preparing', 'running', '{}', ?)",
+                    (preparing["id"], now),
+                )
+                connection.execute(
+                    "INSERT INTO run_events "
+                    "(run_id, sequence, kind, from_state, to_state, "
+                    "metadata_json, created_at) VALUES (?, 3, "
+                    "'run.transitioned', 'preparing', 'running', '{}', ?)",
+                    (run["id"], now),
+                )
+                connection.commit()
+            running = preparing
             with closing(database.connect()) as connection:
                 before = [
                     tuple(row)
@@ -1100,6 +1535,7 @@ class AttemptMigrationTests(unittest.TestCase):
                 PROVIDER_BUDGET_SCHEMA
                 + RUN_PAUSED_STATE_MIGRATION
                 + PROVIDER_RECOVERY_SCHEMA
+                + RECOVERY_CHECKPOINT_SCHEMA
             )
             self.assertTrue(SCHEMA.endswith(tail))
             historical_schema = SCHEMA[: -len(tail)]
@@ -1135,6 +1571,42 @@ class AttemptMigrationTests(unittest.TestCase):
             self.assertIn("budget_policy_sha256", columns)
             self.assertIn("accounted_microusd", columns)
             self.assertIn("provider_invocation_budget_grant", indexes)
+
+    def test_schema_twenty_migrates_recovery_checkpoint_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "schema-twenty.db"
+            self.assertTrue(SCHEMA.endswith(RECOVERY_CHECKPOINT_SCHEMA))
+            historical_schema = SCHEMA[: -len(RECOVERY_CHECKPOINT_SCHEMA)]
+            self.assertEqual(
+                hashlib.sha256(historical_schema.encode()).hexdigest(),
+                "e89d6945978ef7d1652a3c9ee954b6f7b48348226206a2351b3c6f462b11430a",
+            )
+            with closing(sqlite3.connect(path)) as connection:
+                connection.executescript(historical_schema)
+                connection.execute("PRAGMA user_version = 20")
+                connection.commit()
+            os.chmod(path, 0o600)
+
+            database = Database(path)
+            first = database.initialize()
+            second = database.initialize()
+
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(second, first)
+            self.assertEqual(first["counts"]["attempt_recovery_checkpoints"], 0)
+            self.assertEqual(first["counts"]["attempt_recovery_applications"], 0)
+            with closing(database.connect()) as connection:
+                tables = {
+                    row["name"]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                    )
+                }
+                self.assertEqual(
+                    connection.execute("PRAGMA foreign_key_check").fetchall(), []
+                )
+            self.assertIn("attempt_recovery_checkpoints", tables)
+            self.assertIn("attempt_recovery_applications", tables)
 
     def test_schema_four_migrates_existing_attempt_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
