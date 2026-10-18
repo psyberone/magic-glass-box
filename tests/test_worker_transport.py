@@ -22,8 +22,10 @@ from magic_glass_box.worker_transport import (
     PROVIDER_GATEWAY_TIMEOUT_SECONDS,
     FileGatewayClient,
     ProviderHTTPTransport,
+    ProviderRetryableTransportError,
     WorkerTransportError,
     _strict_json,
+    _TransportServer,
     main,
 )
 
@@ -570,6 +572,73 @@ class ProviderHTTPTransportTests(unittest.TestCase):
         gateway.response = {"ok": True, "result": {"status_code": 200}}
         with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
             transport.invoke("/v1/responses", request)
+
+    def test_retryable_gateway_failure_preserves_delay_without_poisoning(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        gateway.response = {
+            "version": 1,
+            "request_id": "worker-response",
+            "ok": False,
+            "error": {
+                "code": "rate_limited",
+                "message": "SECRET detail",
+                "retry_after_seconds": 45,
+            },
+        }
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        request = b'{"model":"x","stream":true}'
+
+        for _attempt in range(2):
+            with self.assertRaises(ProviderRetryableTransportError) as raised:
+                transport.invoke("/v1/responses", request)
+            self.assertEqual(raised.exception.category, "rate_limited")
+            self.assertEqual(raised.exception.retry_after_seconds, 45)
+            self.assertNotIn("SECRET", str(raised.exception))
+
+        self.assertEqual(len(gateway.calls), 2)
+
+    def test_retryable_failure_reaches_vendor_as_bounded_http_429(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        gateway.response = {
+            "version": 1,
+            "request_id": "worker-response",
+            "ok": False,
+            "error": {
+                "code": "quota_exhausted",
+                "message": "redacted",
+                "retry_after_seconds": 45,
+            },
+        }
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        server = _TransportServer(("127.0.0.1", 0), transport)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=2
+            )
+            connection.request(
+                "POST",
+                "/v1/responses",
+                body='{"model":"x","stream":true}',
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            connection.close()
+
+            self.assertEqual(response.status, 429)
+            self.assertEqual(response.getheader("Retry-After"), "45")
+            self.assertEqual(body["error"]["type"], "rate_limit_error")
+            self.assertEqual(len(gateway.calls), 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_ambiguous_result_poison_prevents_vendor_retry_redispatch(self) -> None:
         gateway = RecordingGateway("openai-responses")

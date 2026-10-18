@@ -208,6 +208,11 @@ project-activity projection.
   records the allowance before dispatch; exact provider counters release the
   unused allowance, known pre-dispatch failure releases it all, and uncertainty
   conservatively consumes the full reservation.
+- Schema v20 adds provider-recovery identity and a first-class `paused` run
+  state. Explicit quota, rate-limit, and overload failures atomically finalize
+  the invocation and pause the same run under bounded timing. The supervisor
+  requeues it only after its active attempt and open interactions are resolved;
+  cancellation permanently settles the pending wake.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -266,7 +271,8 @@ exclusive connector dispatch and its invocation authority ledger advance it to
 schema v16. Durable pre-dispatch invocation intent and one-way finalization
 advance it to schema v17. Audited attempt-owner takeover and stale-owner
 transition fencing advance it to schema v18. Provider budget reservations and
-normalized usage accounting advance it to schema v19.
+normalized usage accounting advance it to schema v19. Quota-aware paused-run
+recovery advances it to schema v20.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -307,8 +313,9 @@ For an execution request, Magic Glass Box:
 6. resolves the image reference to an immutable digest and creates the sandbox;
 7. records the commit, image, and container identity before starting it;
 8. waits for the agent while renewing its ownership lease and polling durable
-   cancellation; Docker command timeouts remain bounded, and agent runtime has
-   a six-hour default ceiling that the operator may override with
+   cancellation or provider-pause requests; either signal stops the labeled
+   container, Docker command timeouts remain bounded, and agent runtime has a
+   six-hour default ceiling that the operator may override with
    `--run-timeout`;
 9. captures bounded stdout transiently with deterministic UTF-8 replacement
    decoding, lets the adapter validate only its completion envelope, and
@@ -381,7 +388,10 @@ an interaction tells a
 handoff-capable worker to submit bounded replacement state and exit. Cleanup
 removes its resources, and the durable run remains `waiting_for_input`. A
 verified response becomes available to the current attempt, but a replacement
-is queued only after that attempt has exited. See [agent-gateway.md](agent-gateway.md),
+is queued only after that attempt has exited. An explicit quota or backpressure
+response instead moves the run to `paused`; the same worker is interrupted and
+the supervisor cannot requeue the run before its bounded eligibility time or
+while an interaction remains open. See [agent-gateway.md](agent-gateway.md),
 [provider-broker.md](provider-broker.md), [results.md](results.md), and
 [work-memory.md](work-memory.md).
 
@@ -414,10 +424,9 @@ storage-boundary refactor, runtime adapter contract, live dual-runtime proof,
 autonomous supervision, and aging escalation are complete. Trusted candidate
 materialization, exact-input gates, dependency/refold queue, and manual landing
 flow are implemented. The credential-isolated inference connector, its
-real-account proof, and provider usage/budget authority are implemented.
-Quota-aware recovery remains the next inference checkpoint. Optional
-provider-neutral service sidecars follow the budget and destructive-continuity
-phases. See
+real-account proof, provider usage/budget authority, and quota-aware recovery
+are implemented. Destructive continuity is the next numbered checkpoint;
+optional provider-neutral service sidecars follow it. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),

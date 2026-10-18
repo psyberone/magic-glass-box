@@ -28,6 +28,61 @@ class SupervisionStorage:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                due_recoveries = connection.execute(
+                    "SELECT pr.id, pr.run_id, pr.category, pr.invocation_id, "
+                    "pr.eligible_at, r.version, r.supervision_policy_json "
+                    "FROM provider_recoveries pr JOIN runs r ON r.id = pr.run_id "
+                    "WHERE pr.state = 'active' AND pr.eligible_at <= ? "
+                    "AND r.state = 'paused' AND NOT EXISTS ("
+                    "SELECT 1 FROM run_attempts ra WHERE ra.run_id = pr.run_id "
+                    "AND ra.state IN ('preparing', 'running')) AND NOT EXISTS ("
+                    "SELECT 1 FROM interactions i WHERE i.run_id = pr.run_id "
+                    "AND i.state = 'open') "
+                    "ORDER BY pr.eligible_at, pr.created_at, pr.id",
+                    (now,),
+                ).fetchall()
+                for recovery in due_recoveries:
+                    resolved = connection.execute(
+                        "UPDATE provider_recoveries SET state = 'resumed', "
+                        "version = version + 1, updated_at = ?, resolved_at = ? "
+                        "WHERE id = ? AND state = 'active'",
+                        (now, now, recovery["id"]),
+                    ).rowcount
+                    changed = connection.execute(
+                        "UPDATE runs SET state = 'queued', version = version + 1, "
+                        "updated_at = ?, finished_at = NULL WHERE id = ? "
+                        "AND version = ? AND state = 'paused'",
+                        (
+                            now,
+                            recovery["run_id"],
+                            recovery["version"],
+                        ),
+                    ).rowcount
+                    if resolved != 1 or changed != 1:
+                        raise ConflictError(
+                            "provider recovery changed while it was waking"
+                        )
+                    metadata = json.dumps(
+                        {
+                            "category": recovery["category"],
+                            "invocation_id": recovery["invocation_id"],
+                            "recovery_id": recovery["id"],
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    connection.execute(
+                        "INSERT INTO run_events "
+                        "(run_id, sequence, kind, from_state, to_state, "
+                        "metadata_json, created_at) VALUES (?, ?, "
+                        "'run.provider_resumed', 'paused', 'queued', ?, ?)",
+                        (
+                            recovery["run_id"],
+                            recovery["version"] + 1,
+                            metadata,
+                            now,
+                        ),
+                    )
                 queued = connection.execute(
                     "SELECT id, version, supervision_policy_json FROM runs "
                     "WHERE state = 'queued' ORDER BY created_at, id"
@@ -602,7 +657,8 @@ class SupervisionStorage:
                     "ON pcb.provider_grant_id = pg.id "
                     "LEFT JOIN inference_connectors c "
                     "ON c.id = pcb.inference_connector_id WHERE r.state IN "
-                    "('queued', 'preparing', 'running', 'waiting_for_input') "
+                    "('queued', 'preparing', 'running', 'waiting_for_input', "
+                    "'paused') "
                     "AND (pg.grant_kind != 'connector' OR pg.state != 'active' OR "
                     "pcb.inference_connector_id IS NULL OR c.state IS NULL OR "
                     "c.state != 'active' OR "

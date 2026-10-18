@@ -573,6 +573,24 @@ class DatabaseTests(unittest.TestCase):
             [1, 2, 3, 4, 5],
         )
 
+    def test_generic_transition_cannot_forge_provider_pause(self) -> None:
+        run = self.create_run()
+        preparing = self.database.transition_run(
+            run["id"], target=RunState.PREPARING, expected_version=run["version"]
+        )
+        running = self.database.transition_run(
+            run["id"],
+            target=RunState.RUNNING,
+            expected_version=preparing["version"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "provider recovery"):
+            self.database.transition_run(
+                run["id"],
+                target=RunState.PAUSED,
+                expected_version=running["version"],
+            )
+
     def test_run_input_boundaries_and_validation_errors(self) -> None:
         accepted = self.database.create_run(
             project_key="box-project",

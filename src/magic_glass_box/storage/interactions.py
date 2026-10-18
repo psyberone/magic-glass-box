@@ -196,7 +196,10 @@ class InteractionStorage:
                     "u.active AS recipient_active, "
                     "EXISTS (SELECT 1 FROM run_attempts ra "
                     "WHERE ra.run_id = r.id "
-                    "AND ra.state IN ('preparing', 'running')) AS active_attempt "
+                    "AND ra.state IN ('preparing', 'running')) AS active_attempt, "
+                    "EXISTS (SELECT 1 FROM provider_recoveries pr "
+                    "WHERE pr.run_id = r.id AND pr.state = 'active') "
+                    "AS active_provider_recovery "
                     "FROM interactions i JOIN runs r ON r.id = i.run_id "
                     "JOIN krab_identities ki "
                     "ON ki.id = i.recipient_krab_identity_id "
@@ -223,7 +226,12 @@ class InteractionStorage:
                     raise ValidationError(
                         "response item must differ from the request item"
                     )
-                if interaction["run_state"] != RunState.WAITING_FOR_INPUT.value:
+                waiting = interaction["run_state"] == RunState.WAITING_FOR_INPUT.value
+                provider_paused = (
+                    interaction["run_state"] == RunState.PAUSED.value
+                    and interaction["active_provider_recovery"] == 1
+                )
+                if not waiting and not provider_paused:
                     raise ConflictError(
                         "interaction run is not waiting for input: "
                         + interaction["run_state"]
@@ -255,7 +263,7 @@ class InteractionStorage:
                         now,
                     ),
                 )
-                if not interaction["active_attempt"]:
+                if not interaction["active_attempt"] and waiting:
                     run_changed = connection.execute(
                         "UPDATE runs SET state = 'queued', version = version + 1, "
                         "updated_at = ? WHERE id = ? AND version = ?",
@@ -1072,6 +1080,8 @@ class InteractionStorage:
         error_code: str | None,
         usage: InferenceUsage | None = None,
         release_budget: bool = False,
+        recovery_category: str | None = None,
+        retry_after_seconds: int | None = None,
     ) -> dict[str, Any]:
         if (
             not isinstance(invocation_id, str)
@@ -1100,6 +1110,17 @@ class InteractionStorage:
             raise ValidationError("release_budget must be boolean")
         if usage is not None and release_budget:
             raise ValidationError("reported usage cannot release its budget")
+        if (recovery_category is None) != (retry_after_seconds is None):
+            raise ValidationError("provider recovery metadata is incomplete")
+        if recovery_category is not None:
+            recovery_category, retry_after_seconds = self._validate_provider_recovery(
+                category=recovery_category,
+                retry_after_seconds=retry_after_seconds,
+            )
+            if outcome != "failed":
+                raise ValidationError(
+                    "provider recovery requires an explicitly failed invocation"
+                )
         if outcome == "succeeded":
             if http_status is None or not 200 <= http_status < 300 or error_code:
                 raise ValidationError("successful provider invocation is inconsistent")
@@ -1206,6 +1227,15 @@ class InteractionStorage:
                 if changed != 1:
                     raise StorageError(
                         "provider invocation finalization was not retained"
+                    )
+                if recovery_category is not None:
+                    assert retry_after_seconds is not None
+                    self._pause_run_for_provider_recovery(
+                        connection,
+                        invocation_id=invocation_id,
+                        category=recovery_category,
+                        retry_after_seconds=retry_after_seconds,
+                        now=finished_at,
                     )
                 row = connection.execute(
                     "SELECT id, run_id, provider_grant_id, dispatch_kind, "

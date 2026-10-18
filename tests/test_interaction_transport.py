@@ -7,6 +7,7 @@ from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.db import (
@@ -375,6 +376,35 @@ class InteractionTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(NotFoundError, "not found for run"):
             self.control.read_interaction_response(other["id"], opened["id"])
         self.assertEqual(self.client.get_calls, calls_before)
+
+    def test_operator_response_preflight_accepts_provider_paused_work(self) -> None:
+        run = self.running_run()
+        opened = self.open_interaction(run)
+        paused_projection = {
+            **self.database.get_interaction(opened["id"]),
+            "run_state": "paused",
+        }
+        original_get = self.database.get_interaction
+        calls = 0
+
+        def projected_then_stored(interaction_id: str) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return paused_projection
+            return original_get(interaction_id)
+
+        with mock.patch.object(
+            self.database, "get_interaction", side_effect=projected_then_stored
+        ):
+            accepted = self.control.accept_interaction_response(
+                opened["id"],
+                response_item_id=RESPONSE_ITEM_ID,
+                expected_version=opened["version"],
+            )
+
+        self.assertEqual(accepted.interaction_state, "answered")
+        self.assertEqual(len(self.client.get_calls), 2)
 
     def test_request_metadata_must_match_the_pinned_run_and_recipient(self) -> None:
         run = self.running_run()

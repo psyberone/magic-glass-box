@@ -201,7 +201,9 @@ class _AttemptLeaseMonitor:
                 lease_seconds=self.lease_seconds,
             )
             self._lease_deadline = renewal_started + self.lease_seconds
-            if control["cancel_requested"] and not self._cancel_stopped:
+            if (
+                control["cancel_requested"] or control.get("pause_requested", False)
+            ) and not self._cancel_stopped:
                 self._cancel_stopped = self.executor.stop_run(self.run_id) > 0
 
     def check(self) -> None:

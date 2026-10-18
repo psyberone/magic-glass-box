@@ -366,7 +366,8 @@ class RunStorage:
                     raise ConflictError("run project is not active")
                 active_successor = connection.execute(
                     "SELECT id FROM runs WHERE predecessor_run_id = ? "
-                    "AND state IN ('queued','preparing','running','waiting_for_input')",
+                    "AND state IN ("
+                    "'queued','preparing','running','waiting_for_input','paused')",
                     (run_id,),
                 ).fetchone()
                 if active_successor is not None:
@@ -694,9 +695,11 @@ class RunStorage:
                     if state not in {
                         RunState.QUEUED,
                         RunState.WAITING_FOR_INPUT,
+                        RunState.PAUSED,
                     }:
                         raise ConflictError("active run has no active attempt")
                     self._cancel_open_interactions(connection, run_id, now)
+                    self._cancel_active_provider_recoveries(connection, run_id, now)
                     changed = connection.execute(
                         "UPDATE runs SET state = 'cancelled', "
                         "version = version + 1, updated_at = ?, finished_at = ? "
@@ -811,6 +814,10 @@ class RunStorage:
                 if active_attempt is not None:
                     raise ConflictError(
                         "run transition is controlled by its active attempt"
+                    )
+                if source is RunState.PAUSED or target is RunState.PAUSED:
+                    raise ConflictError(
+                        "paused runs are controlled by provider recovery"
                     )
                 open_interactions = connection.execute(
                     "SELECT id, version FROM interactions "

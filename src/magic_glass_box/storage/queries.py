@@ -211,13 +211,16 @@ class QueryStorage:
         result["provider_invocations"] = self._list_provider_invocations(
             connection, run_id
         )
+        result["provider_recoveries"] = self._list_provider_recoveries(
+            connection, run_id
+        )
         return result
 
     def iter_active_runs(self) -> Iterator[dict[str, Any]]:
         with self._read_snapshot() as connection:
             rows = connection.execute(
                 "SELECT id FROM runs WHERE state IN "
-                "('queued', 'preparing', 'running', 'waiting_for_input') "
+                "('queued', 'preparing', 'running', 'waiting_for_input', 'paused') "
                 "ORDER BY created_at"
             ).fetchall()
             runs = [self._get_run(connection, row["id"]) for row in rows]

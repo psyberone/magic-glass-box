@@ -201,6 +201,13 @@ authority tuple are durable. A lost or invalid post-dispatch reply is recorded
 as ambiguous and is never replayed automatically. See
 [inference-connectors.md](inference-connectors.md).
 
+An explicit quota, rate-limit, or overload response is different: the gateway
+returns a redacted retryable error with a bounded delay after the invocation
+and provider recovery are durably committed. The run is already `paused`, so a
+worker-side vendor retry cannot dispatch another model call. Its loopback HTTP
+bridge receives status 429 and `Retry-After`; the attempt heartbeat then asks
+the coordinator to stop the disposable worker.
+
 Every mailbox operation retains a worker-side deadline. Provider exchanges use
 that deadline as a 30-second host-liveness window rather than an absolute model
 turn limit. While a provider operation is pending, the trusted host publishes
@@ -223,6 +230,11 @@ handoff and answered interaction, then calls `interaction.read`. The original
 worker is not kept alive while a person is thinking, and its mutable filesystem
 is not inherited automatically. An explicitly automatic run is launched again
 by the durable supervisor; a manual run remains queued for the operator.
+
+A provider-paused run follows the same replacement boundary but remains the
+same run rather than creating a successor. The supervisor waits for the active
+attempt to close, the retry time to arrive, and every open interaction to be
+answered before requeueing. Human answers remain accepted during the pause.
 
 Configured interaction-age thresholds produce a bodyless, idempotent reminder
 for the existing Krab item. The worker gateway is not involved, no second

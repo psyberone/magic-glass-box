@@ -365,6 +365,46 @@ class InferenceContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "cannot cover"):
             InferenceInvocationRequest.from_mapping(underfunded_request)
 
+    def test_failed_invocation_carries_only_bounded_retry_timing(self) -> None:
+        budget = InferenceBudgetPolicy.from_mapping(budget_mapping())
+        request_value = request_mapping()
+        request_value["connector_protocol_version"] = 2
+        request_value["budget"] = budget.invocation_authority().to_dict()
+        request = InferenceInvocationRequest.from_mapping(request_value)
+        failed = response_for(request, outcome="failed")
+        failed.update(
+            {
+                "provider_status": 429,
+                "error_code": "quota_exhausted",
+                "retry_after_seconds": 45,
+                "usage": None,
+            }
+        )
+
+        response = InferenceInvocationResponse.from_mapping(failed)
+
+        self.assertEqual(response.retry_after_seconds, 45)
+        self.assertEqual(response.to_dict(), failed)
+        for invalid in (0, 2_592_001, True, "45"):
+            candidate = copy.deepcopy(failed)
+            candidate["retry_after_seconds"] = invalid
+            with (
+                self.subTest(retry_after_seconds=invalid),
+                self.assertRaisesRegex(ValidationError, "retry_after_seconds"),
+            ):
+                InferenceInvocationResponse.from_mapping(candidate)
+
+        succeeded = response_for(request)
+        succeeded["usage"] = {
+            "input_tokens": 1,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+            "reasoning_output_tokens": 0,
+        }
+        succeeded["retry_after_seconds"] = 45
+        with self.assertRaisesRegex(ValidationError, "retry_after_seconds"):
+            InferenceInvocationResponse.from_mapping(succeeded)
+
     def test_budget_requires_v2_and_v2_requires_budget(self) -> None:
         v1_connector = InferenceConnectorSpec.from_mapping(
             connector_mapping(self.socket_path)

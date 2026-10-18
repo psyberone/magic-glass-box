@@ -15,13 +15,17 @@ from magic_glass_box.db import SCHEMA_VERSION, ConflictError, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
+    InteractionKind,
     ProjectContext,
     ProviderGrantSpec,
+    RunState,
+    SupervisionPolicy,
     ValidationError,
     WorkItemEnvelope,
     canonical_json,
 )
 from magic_glass_box.inference import (
+    MAX_PROVIDER_RETRY_AFTER_SECONDS,
     InferenceConnectorAmbiguousError,
     InferenceConnectorSpec,
     InferenceConnectorUnavailableError,
@@ -34,8 +38,11 @@ from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.provider import (
     ProviderBudgetError,
     ProviderError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
     ProviderUpstreamError,
 )
+from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import AcceptedProviderResponse, ControlPlane
 
 
@@ -110,6 +117,7 @@ class RecordingConnectorClient:
         self.outcome = "succeeded"
         self.error_code: str | None = None
         self.provider_status: int | None = 200
+        self.retry_after_seconds: int | None = None
         self.usage: dict[str, int] = {
             "input_tokens": 20,
             "cached_input_tokens": 5,
@@ -144,6 +152,8 @@ class RecordingConnectorClient:
         )
         if request.connector_protocol_version == 2:
             response["usage"] = self.usage if self.outcome == "succeeded" else None
+        if self.retry_after_seconds is not None:
+            response["retry_after_seconds"] = self.retry_after_seconds
         return InferenceInvocationResponse.from_mapping(response)
 
 
@@ -227,12 +237,18 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             inference_client_factory=client_factory,
         )
 
-    def create_run(self) -> dict[str, Any]:
+    def create_run(
+        self,
+        *,
+        source_revision: str = "abc123",
+        krab_session_id: str | None = None,
+    ) -> dict[str, Any]:
         run = self.database.create_run(
             project_key="box-project",
             profile_name="Provider Worker",
             work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
+            krab_session_id=krab_session_id,
         )
         attempt = self.database.begin_run_attempt(
             run["id"],
@@ -245,7 +261,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             owner_id="orchestrator-inference-test",
             expected_attempt_version=attempt["version"],
             expected_run_version=attempt["run_version"],
-            source_revision="abc123",
+            source_revision=source_revision,
             container_id="b" * 64,
             container_name="magic-glass-box-inference-test",
             image_id="sha256:" + "a" * 64,
@@ -324,12 +340,14 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         profile_name: str,
         *,
         marker: str,
+        supervision_policy: SupervisionPolicy | None = None,
     ) -> dict[str, Any]:
         run = self.database.create_run(
             project_key="box-project",
             profile_name=profile_name,
             work_item_id=self.work_item["id"],
             requested_by=self.user["id"],
+            supervision_policy=supervision_policy,
         )
         attempt = self.database.begin_run_attempt(
             run["id"],
@@ -357,6 +375,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         project_microusd: int = 100_000,
         grant_microusd: int = 100_000,
         revision: str = "2026-10-17",
+        supervision_policy: SupervisionPolicy | None = None,
     ) -> dict[str, Any]:
         connector = connector_spec(self.socket_path).to_dict()
         connector["connector_protocol_version"] = 2
@@ -375,7 +394,11 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             grant_microusd=grant_microusd,
             revision=revision,
         )
-        return self._start_run_for_profile("Budget Worker", marker="c")
+        return self._start_run_for_profile(
+            "Budget Worker",
+            marker="c",
+            supervision_policy=supervision_policy,
+        )
 
     def test_budget_reservation_blocks_concurrent_overspend_then_reconciles(
         self,
@@ -769,8 +792,8 @@ class InferenceDispatchServiceTests(unittest.TestCase):
     def test_connector_reported_failure_and_ambiguity_are_durable(self) -> None:
         run = self.create_run()
         self.client.outcome = "failed"
-        self.client.error_code = "quota_exhausted"
-        self.client.provider_status = 429
+        self.client.error_code = "server_error"
+        self.client.provider_status = 503
         with self.assertRaises(ProviderUpstreamError):
             self.control.invoke_provider(
                 run["id"], grant_name="example-main", request={"input": "one"}
@@ -791,10 +814,441 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 for item in invocations
             ],
             [
-                ("failed", 429, "quota_exhausted"),
+                ("failed", 503, "server_error"),
                 ("ambiguous", None, "reply_lost"),
             ],
         )
+
+    def test_provider_recovery_validation_has_exact_delay_and_id_bounds(self) -> None:
+        for delay in (1, MAX_PROVIDER_RETRY_AFTER_SECONDS):
+            with self.subTest(valid_delay=delay):
+                self.assertEqual(
+                    self.database._validate_provider_recovery(
+                        category="rate_limited",
+                        retry_after_seconds=delay,
+                    ),
+                    ("rate_limited", delay),
+                )
+
+        for delay in (
+            True,
+            None,
+            "1",
+            1.0,
+            0,
+            MAX_PROVIDER_RETRY_AFTER_SECONDS + 1,
+        ):
+            with (
+                self.subTest(invalid_delay=delay),
+                self.assertRaisesRegex(ValidationError, "retry_after_seconds"),
+            ):
+                self.database._validate_provider_recovery(
+                    category="rate_limited",
+                    retry_after_seconds=delay,
+                )
+
+        with self.assertRaises(ValidationError) as raised:
+            self.database.list_provider_recoveries("r" * 65)
+        self.assertEqual(str(raised.exception), "run_id exceeds 64 UTF-8 bytes")
+
+    def test_quota_pause_wakes_same_run_with_pinned_authority_and_budget(self) -> None:
+        automatic = SupervisionPolicy.from_mapping(
+            {
+                **SupervisionPolicy.disabled().to_dict(),
+                "auto_execute": True,
+            }
+        )
+        run = self.create_budgeted_run(
+            run_microusd=30_000,
+            supervision_policy=automatic,
+        )
+        original_attempt = run["attempts"][-1]
+        original_grant = run["provider_grants"][0]
+        self.client.outcome = "failed"
+        self.client.error_code = "quota_exhausted"
+        self.client.provider_status = 429
+        self.client.retry_after_seconds = 120
+
+        with self.assertRaises(ProviderQuotaError) as raised:
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "first"}
+            )
+
+        self.assertEqual(raised.exception.retry_after_seconds, 120)
+        paused = self.database.get_run(run["id"])
+        self.assertEqual(paused["state"], "paused")
+        self.assertEqual(len(paused["provider_recoveries"]), 1)
+        recovery = paused["provider_recoveries"][0]
+        self.assertRegex(recovery["id"], r"^prc_[0-9a-f]{32}$")
+        self.assertEqual(self.database.list_provider_recoveries(run["id"]), [recovery])
+        self.assertEqual(recovery["state"], "active")
+        self.assertEqual(recovery["category"], "quota_exhausted")
+        self.assertEqual(recovery["attempt_id"], original_attempt["id"])
+        self.assertEqual(
+            recovery["invocation_id"], paused["provider_invocations"][0]["id"]
+        )
+        self.assertEqual(recovery["retry_after_seconds"], 120)
+        self.assertEqual(
+            datetime.fromisoformat(recovery["eligible_at"])
+            - datetime.fromisoformat(recovery["created_at"]),
+            timedelta(seconds=120),
+        )
+        lease_control = self.database.renew_run_attempt_lease(
+            original_attempt["id"],
+            owner_id="orchestrator-budget-test",
+            lease_seconds=60,
+        )
+        self.assertTrue(lease_control["pause_requested"])
+        self.assertEqual(lease_control["provider_recovery_id"], recovery["id"])
+        pause_event = paused["events"][-1]
+        self.assertEqual(pause_event["kind"], "run.provider_paused")
+        self.assertEqual(pause_event["from_state"], "running")
+        self.assertEqual(pause_event["to_state"], "paused")
+        self.assertEqual(
+            pause_event["metadata"],
+            {
+                "attempt_id": original_attempt["id"],
+                "category": "quota_exhausted",
+                "eligible_at": recovery["eligible_at"],
+                "invocation_id": recovery["invocation_id"],
+                "recovery_id": recovery["id"],
+                "retry_after_seconds": 120,
+            },
+        )
+        self.assertEqual(len(self.client.calls), 1)
+        snapshot = ControlRoom(self.database).snapshot()
+        self.assertEqual(snapshot["provider_recoveries"], [recovery])
+        self.assertEqual(snapshot["summary"]["runs"]["paused"], 1)
+        provider_attention = next(
+            item for item in snapshot["attention"] if item["kind"] == "provider.paused"
+        )
+        self.assertEqual(provider_attention["run_id"], run["id"])
+        self.assertEqual(provider_attention["category"], "quota_exhausted")
+        self.assertFalse(provider_attention["eligible"])
+
+        with self.assertRaisesRegex(ConflictError, "not running: paused"):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "too soon"}
+            )
+        self.assertEqual(len(self.client.calls), 1)
+        eligible_at = datetime.fromisoformat(recovery["eligible_at"])
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=eligible_at.isoformat(timespec="microseconds"),
+        ):
+            active_actions = self.database.enqueue_supervisor_actions()
+        self.assertEqual(
+            [item["kind"] for item in active_actions], ["attempt.reconcile"]
+        )
+        self.assertEqual(self.database.get_run(run["id"])["state"], "paused")
+        interrupted = self.database.fail_run_attempt(
+            original_attempt["id"],
+            owner_id="orchestrator-budget-test",
+            expected_attempt_version=original_attempt["version"],
+            reason="provider recovery pause requested",
+            interrupted=True,
+        )
+        self.assertEqual(interrupted["state"], "interrupted")
+        self.assertEqual(self.database.get_run(run["id"])["state"], "paused")
+
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=(eligible_at - timedelta(microseconds=1)).isoformat(
+                timespec="microseconds"
+            ),
+        ):
+            self.assertEqual(self.database.enqueue_supervisor_actions(), [])
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=eligible_at.isoformat(timespec="microseconds"),
+        ):
+            actions = self.database.enqueue_supervisor_actions()
+
+        self.assertEqual(
+            [(item["kind"], item["run_id"]) for item in actions],
+            [
+                ("run.execute", run["id"]),
+            ],
+        )
+        queued = self.database.get_run(run["id"])
+        self.assertEqual(queued["state"], "queued")
+        self.assertEqual(queued["provider_recoveries"][0]["state"], "resumed")
+        resume_event = queued["events"][-1]
+        self.assertEqual(resume_event["kind"], "run.provider_resumed")
+        self.assertEqual(resume_event["from_state"], "paused")
+        self.assertEqual(resume_event["to_state"], "queued")
+        self.assertEqual(
+            resume_event["metadata"],
+            {
+                "category": "quota_exhausted",
+                "invocation_id": recovery["invocation_id"],
+                "recovery_id": recovery["id"],
+            },
+        )
+        replacement = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="codex",
+            owner_id="orchestrator-budget-test",
+            expected_run_version=queued["version"],
+        )
+        self.database.start_run_attempt(
+            replacement["id"],
+            owner_id="orchestrator-budget-test",
+            expected_attempt_version=replacement["version"],
+            expected_run_version=replacement["run_version"],
+            source_revision="abc123",
+            container_id="f" * 64,
+            container_name="magic-glass-box-budget-test-f",
+            image_id="sha256:" + "d" * 64,
+        )
+        self.client.outcome = "succeeded"
+        self.client.error_code = None
+        self.client.provider_status = 200
+        self.client.retry_after_seconds = None
+
+        accepted = self.control.invoke_provider(
+            run["id"], grant_name="budget-main", request={"input": "continued"}
+        )
+
+        self.assertEqual(accepted.grant_name, "budget-main")
+        self.assertEqual(len(self.client.calls), 2)
+        continued = self.database.get_run(run["id"])
+        self.assertEqual(continued["id"], run["id"])
+        self.assertEqual(continued["source_revision"], "abc123")
+        self.assertEqual(
+            continued["provider_grants"][0]["grant_id"],
+            original_grant["grant_id"],
+        )
+        budget = next(
+            item
+            for item in ControlRoom(self.database).snapshot()["provider_budgets"]
+            if item["run_id"] == run["id"]
+        )
+        self.assertEqual(budget["conservative_invocations"], 1)
+        self.assertEqual(budget["reported_invocations"], 1)
+        self.assertEqual(budget["remaining_microusd"]["run"], 19_972)
+
+    def test_recoverable_rate_signals_pause_but_503_remains_permanent(self) -> None:
+        rate_limited = self.create_run()
+        self.client.outcome = "failed"
+        self.client.error_code = "too_many_requests"
+        self.client.provider_status = 429
+
+        with self.assertRaises(ProviderRateLimitError) as raised:
+            self.control.invoke_provider(
+                rate_limited["id"],
+                grant_name="example-main",
+                request={"input": "one"},
+            )
+        self.assertGreater(raised.exception.retry_after_seconds, 0)
+        self.assertEqual(self.database.get_run(rate_limited["id"])["state"], "paused")
+
+        overloaded = self.create_run()
+        self.client.error_code = "overloaded_error"
+        self.client.provider_status = 529
+        with self.assertRaises(ProviderRateLimitError) as overloaded_error:
+            self.control.invoke_provider(
+                overloaded["id"],
+                grant_name="example-main",
+                request={"input": "overloaded"},
+            )
+        self.assertEqual(overloaded_error.exception.retry_after_seconds, 60)
+        self.assertEqual(self.database.get_run(overloaded["id"])["state"], "paused")
+
+        permanent = self.create_run()
+        self.client.error_code = "server_error"
+        self.client.provider_status = 503
+        with self.assertRaises(ProviderUpstreamError):
+            self.control.invoke_provider(
+                permanent["id"],
+                grant_name="example-main",
+                request={"input": "two"},
+            )
+        self.assertEqual(self.database.get_run(permanent["id"])["state"], "running")
+
+    def test_recovery_classification_uses_independent_codes_and_statuses(self) -> None:
+        cases = (
+            ("quota_exhausted", 400, ProviderQuotaError, 900),
+            ("server_error", 429, ProviderRateLimitError, 60),
+            ("server_error", 529, ProviderRateLimitError, 60),
+            ("overloaded_error", 503, ProviderRateLimitError, 60),
+        )
+        for error_code, status, error_type, retry_after in cases:
+            run = self.create_run()
+            self.client.outcome = "failed"
+            self.client.error_code = error_code
+            self.client.provider_status = status
+            self.client.retry_after_seconds = None
+            with self.subTest(error_code=error_code, status=status):
+                with self.assertRaises(error_type) as raised:
+                    self.control.invoke_provider(
+                        run["id"],
+                        grant_name="example-main",
+                        request={"input": "classification"},
+                    )
+                self.assertEqual(raised.exception.retry_after_seconds, retry_after)
+                recovery = self.database.get_run(run["id"])["provider_recoveries"][0]
+                self.assertEqual(recovery["retry_after_seconds"], retry_after)
+
+    def test_manual_provider_recovery_wakes_without_launch_authority(self) -> None:
+        run = self.create_run()
+        attempt = run["attempts"][-1]
+        self.client.outcome = "failed"
+        self.client.error_code = "rate_limit_exceeded"
+        self.client.provider_status = 429
+        self.client.retry_after_seconds = 30
+        with self.assertRaises(ProviderRateLimitError):
+            self.control.invoke_provider(
+                run["id"], grant_name="example-main", request={"input": "one"}
+            )
+        recovery = self.database.get_run(run["id"])["provider_recoveries"][0]
+        self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-inference-test",
+            expected_attempt_version=attempt["version"],
+            reason="provider recovery pause requested",
+            interrupted=True,
+        )
+        paused = self.database.get_run(run["id"])
+        with self.assertRaisesRegex(ConflictError, "provider recovery"):
+            self.database.transition_run(
+                run["id"],
+                target=RunState.QUEUED,
+                expected_version=paused["version"],
+            )
+
+        with mock.patch.object(
+            self.database, "now", return_value=recovery["eligible_at"]
+        ):
+            actions = self.database.enqueue_supervisor_actions()
+
+        self.assertEqual(actions, [])
+        resumed = self.database.get_run(run["id"])
+        self.assertEqual(resumed["state"], "queued")
+        self.assertEqual(resumed["provider_recoveries"][0]["state"], "resumed")
+        self.assertEqual(len(self.client.calls), 1)
+
+    def test_recovery_waits_for_open_interaction_then_wakes_answered_work(self) -> None:
+        run = self.create_run(krab_session_id="ses_" + "3" * 32)
+        attempt = run["attempts"][-1]
+        interaction = self.database.open_interaction(
+            run["id"],
+            kind=InteractionKind.QUESTION,
+            recipient_krab_identity_id=self.identity["id"],
+            request_item_id="itm_" + "4" * 32,
+            expected_run_version=run["version"],
+        )
+        self.client.outcome = "failed"
+        self.client.error_code = "quota_exhausted"
+        self.client.provider_status = 429
+        self.client.retry_after_seconds = 30
+
+        with self.assertRaises(ProviderQuotaError):
+            self.control.invoke_provider(
+                run["id"], grant_name="example-main", request={"input": "one"}
+            )
+
+        paused = self.database.get_run(run["id"])
+        recovery = paused["provider_recoveries"][0]
+        self.assertEqual(paused["state"], "paused")
+        self.assertEqual(paused["events"][-1]["from_state"], "waiting_for_input")
+        self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-inference-test",
+            expected_attempt_version=attempt["version"],
+            reason="provider recovery pause requested",
+            interrupted=True,
+        )
+        with mock.patch.object(
+            self.database, "now", return_value=recovery["eligible_at"]
+        ):
+            self.assertEqual(self.database.enqueue_supervisor_actions(), [])
+        self.assertEqual(self.database.get_run(run["id"])["state"], "paused")
+
+        answered = self.database.answer_interaction(
+            interaction["id"],
+            response_item_id="itm_" + "5" * 32,
+            expected_version=interaction["version"],
+        )
+        self.assertEqual(answered["state"], "answered")
+        self.assertEqual(answered["run_state"], "paused")
+        with mock.patch.object(
+            self.database, "now", return_value=recovery["eligible_at"]
+        ):
+            self.assertEqual(self.database.enqueue_supervisor_actions(), [])
+        resumed = self.database.get_run(run["id"])
+        self.assertEqual(resumed["state"], "queued")
+        self.assertEqual(resumed["provider_recoveries"][0]["state"], "resumed")
+
+    def test_cancelling_a_paused_run_cancels_its_future_wake(self) -> None:
+        run = self.create_run()
+        attempt = run["attempts"][-1]
+        self.client.outcome = "failed"
+        self.client.error_code = "quota_exhausted"
+        self.client.provider_status = 429
+        self.client.retry_after_seconds = 30
+        with self.assertRaises(ProviderQuotaError):
+            self.control.invoke_provider(
+                run["id"], grant_name="example-main", request={"input": "one"}
+            )
+        paused = self.database.get_run(run["id"])
+        self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-inference-test",
+            expected_attempt_version=attempt["version"],
+            reason="provider recovery pause requested",
+            interrupted=True,
+        )
+
+        cancelled = self.database.request_run_cancellation(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=paused["version"],
+            reason="operator cancelled paused work",
+        )
+
+        self.assertEqual(cancelled["state"], "cancelled")
+        recovery = cancelled["provider_recoveries"][0]
+        self.assertEqual(recovery["state"], "cancelled")
+        after_eligibility = (
+            datetime.fromisoformat(recovery["eligible_at"]) + timedelta(seconds=1)
+        ).isoformat(timespec="microseconds")
+        with mock.patch.object(self.database, "now", return_value=after_eligibility):
+            self.assertEqual(self.database.enqueue_supervisor_actions(), [])
+        self.assertEqual(len(self.client.calls), 1)
+
+    def test_worker_completion_during_provider_pause_preserves_recovery(self) -> None:
+        source_revision = "a" * 40
+        run = self.create_run(source_revision=source_revision)
+        attempt = run["attempts"][-1]
+        self.client.outcome = "failed"
+        self.client.error_code = "quota_exhausted"
+        self.client.provider_status = 429
+        self.client.retry_after_seconds = 30
+        with self.assertRaises(ProviderQuotaError):
+            self.control.invoke_provider(
+                run["id"], grant_name="example-main", request={"input": "one"}
+            )
+        self.database.record_attempt_result(
+            attempt["id"], ResultManifest(1, attempt["id"], source_revision, ())
+        )
+
+        completed = self.database.complete_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-inference-test",
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id="sha256:" + "a" * 64,
+        )
+
+        self.assertEqual(completed["state"], "interrupted")
+        self.assertEqual(completed["run_state"], "paused")
+        paused = self.database.get_run(run["id"])
+        self.assertEqual(paused["state"], "paused")
+        self.assertEqual(paused["provider_recoveries"][0]["state"], "active")
 
     def test_transport_neutral_client_cannot_bypass_response_validation(self) -> None:
         run = self.create_run()
@@ -957,6 +1411,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE provider_recoveries;
                 DROP TRIGGER provider_invocation_immutable_update;
                 DROP TRIGGER provider_invocation_immutable_delete;
                 DROP INDEX provider_invocation_run;

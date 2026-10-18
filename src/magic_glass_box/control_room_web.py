@@ -18,7 +18,13 @@ MAX_FORM_FIELDS = 8
 TOKEN_MIN_LENGTH = 32
 TOKEN_MAX_LENGTH = 128
 CONTROL_ROOM_SOCKET_TIMEOUT_SECONDS = 15.0
-ACTIVE_RUN_STATES = {"queued", "preparing", "running", "waiting_for_input"}
+ACTIVE_RUN_STATES = {
+    "queued",
+    "preparing",
+    "running",
+    "waiting_for_input",
+    "paused",
+}
 TERMINAL_RUN_STATES = {"succeeded", "failed", "cancelled"}
 CONTROL_ROOM_CSS = """
 :root {

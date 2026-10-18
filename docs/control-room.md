@@ -41,6 +41,8 @@ contains:
   active reservation amount, policy consumption, scope ceilings, and remaining
   run/grant/project allowance. No prompt, response, or transcript content is
   part of this projection;
+- provider-recovery records with category, source invocation and attempt IDs,
+  bounded delay, eligibility timestamp, and active/resumed/cancelled state;
 - current work-item generations and visible, explicitly untrusted titles;
 - local profile-pinned assignments and their visible, untrusted titles;
 - all active runs plus a bounded number of recent terminal runs;
@@ -52,8 +54,9 @@ contains:
   and threshold escalation records; and
 - an attention queue for pending interactions, open or expired assignments,
   blocker evidence, expired attempt leases, cancellation requests, inconsistent
-  active runs, unavailable authorities, required refolds, pending landing
-  receipts, expired integration claims, and exhausted supervisor work. Every
+  active runs, paused provider recovery, unavailable authorities, required
+  refolds, pending landing receipts, expired integration claims, and exhausted
+  supervisor work. Every
   current attention entry includes its age in seconds at the snapshot's
   consistency timestamp.
 

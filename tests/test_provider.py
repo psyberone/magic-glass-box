@@ -13,7 +13,9 @@ from magic_glass_box.provider import (
     ProviderBusyError,
     ProviderError,
     ProviderInvocationResult,
+    ProviderQuotaError,
     ProviderUpstreamError,
+    provider_recovery_error,
 )
 
 
@@ -83,6 +85,25 @@ class ProviderGrantSpecTests(unittest.TestCase):
     def test_loopback_http_is_available_for_local_provider_adapters(self) -> None:
         spec = policy(destination="http://127.0.0.1:8080/v1/invoke")
         self.assertEqual(spec.destination, "http://127.0.0.1:8080/v1/invoke")
+
+
+class ProviderRecoveryClassificationTests(unittest.TestCase):
+    def test_recoverable_error_preserves_retry_and_audit_diagnostics(self) -> None:
+        error = provider_recovery_error(
+            error_code="quota_exhausted",
+            status_code=429,
+            retry_after_seconds=73,
+            request_bytes=17,
+            response_bytes=23,
+        )
+
+        self.assertIsInstance(error, ProviderQuotaError)
+        assert error is not None
+        self.assertEqual(str(error), "provider request is temporarily ineligible")
+        self.assertEqual(error.retry_after_seconds, 73)
+        self.assertEqual(error.status_code, 429)
+        self.assertEqual(error.request_bytes, 17)
+        self.assertEqual(error.response_bytes, 23)
 
 
 class RecordingAdapter:

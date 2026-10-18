@@ -16,6 +16,12 @@
 > run, project, and grant ceilings, retains only normalized token counters and
 > integer USD-micro accounting, and exposes reconciled totals in the control
 > room. Prompt, response, and transcript content remain outside the ledger.
+>
+> **M8B IMPLEMENTED:** Schema v20 records explicit quota, rate-limit, and
+> overload refusals as durable provider recoveries. The same run enters
+> `paused`, its disposable worker is stopped through the lease heartbeat, and
+> the supervisor requeues it only after the bounded eligibility time, active
+> attempt cleanup, and any open human interaction are all resolved.
 
 An inference connector is a narrow API server that performs an already
 authorized model invocation. The implemented v1/v2 carrier is a local
@@ -201,6 +207,10 @@ not expose arbitrary URLs, headers, commands, filesystem paths, or a
 pass-through vendor client. Its response is limited to the provider stream
 plus normalized status, byte counts, and the identities needed to bind the
 result to the invocation. Request and response content remains transient.
+An explicitly failed response may additionally carry only an integer
+`retry_after_seconds` from 1 second through 30 days. The field is invalid on a
+successful, denied, busy, or ambiguous response; it is timing evidence, not
+permission for the connector or worker to replay a call.
 V2 adds only `input_tokens`, `cached_input_tokens`, `output_tokens`, and
 `reasoning_output_tokens`; the subset counters are not charged twice. V1
 remains available for legacy unmetered connectors and carries no MGB-enforced
@@ -404,8 +414,32 @@ malformed post-dispatch reply, so even a vendor CLI retry fails locally without
 another gateway or provider dispatch. The bounded dispatch reservation is not
 released until terminal ledger finalization succeeds. V2 reported usage
 reconciles that allowance; ambiguous or missing accounting consumes it in full.
-Quota/rate-limit classification, durable pause, and supervisor wake-up remain
-Milestone 8B rather than being smuggled into accounting.
+An explicit connector failure is recoverable only when its bounded error code
+or status identifies quota exhaustion, rate limiting, or provider overload.
+Quota markers default to a 15-minute delay; rate-limit and overload markers,
+HTTP 429, and HTTP 529 default to 60 seconds. Connector-supplied
+`retry_after_seconds` overrides that default after being capped at 30 days;
+the OpenAI connector derives it from a numeric upstream `Retry-After` header.
+Ordinary 5xx failures remain permanent, and an ambiguous outcome is never
+converted into recovery merely because retry timing was present.
+
+Invocation finalization and creation of the provider-recovery record happen in
+one SQLite transaction. The run moves from `running` or the short
+`waiting_for_input` continuation window to `paused`; generic run transitions
+cannot forge or bypass that state. Lease renewal tells the owning coordinator
+to stop the disposable container, and completion or failure closes that
+attempt as `interrupted` without failing the run. The worker-facing HTTP bridge
+returns a redacted 429 with the bounded `Retry-After`, while the run-scoped
+gateway prevents another provider dispatch once the pause is durable.
+
+The supervisor never wakes a paused run while an attempt is still active or a
+human interaction remains open. An operator may answer that interaction while
+the provider is paused; the answer stays durable and the next eligible pass
+requeues the same run. `auto_execute` still controls whether that queued run is
+launched. A manual run is requeued but not started. Cancellation marks the
+recovery cancelled, and no later timer can resurrect it. Recovery reuses the
+same run, source revision, connector-bound grant, and remaining budget ledger;
+it does not create a successor or reset consumption.
 
 ## Migration and proof
 

@@ -616,6 +616,7 @@ class ArtifactSchemaContractTests(unittest.TestCase):
                 "provider_status": 429,
                 "response_bytes": 0,
                 "error_code": "quota_exhausted",
+                "retry_after_seconds": 45,
                 "response": None,
                 "usage": None,
             }
@@ -643,6 +644,13 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             validator.validate(success_without_usage)
         with self.assertRaises(ValidationError):
             InferenceInvocationResponse.from_mapping(success_without_usage)
+
+        ambiguous_with_retry = copy.deepcopy(ambiguous)
+        ambiguous_with_retry["retry_after_seconds"] = 45
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(ambiguous_with_retry)
+        with self.assertRaises(ValidationError):
+            InferenceInvocationResponse.from_mapping(ambiguous_with_retry)
 
     def test_inference_connector_schemas_and_runtime_reject_unsafe_authority(
         self,

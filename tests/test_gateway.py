@@ -39,6 +39,8 @@ from magic_glass_box.provider import (
     ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
     ProviderUpstreamError,
 )
 from magic_glass_box.service import (
@@ -723,13 +725,27 @@ class RunGatewayTests(unittest.TestCase):
         self.assertEqual(self.control.provider_calls, [])
 
         failures = (
-            (ProviderBusyError("SECRET busy"), "busy"),
-            (ProviderBudgetError("SECRET budget"), "budget_exhausted"),
-            (ProviderAmbiguousError("SECRET ambiguous"), "ambiguous"),
-            (ProviderUpstreamError("SECRET upstream"), "upstream_error"),
-            (ProviderError("SECRET denied"), "forbidden"),
+            (ProviderBusyError("SECRET busy"), "busy", None),
+            (ProviderBudgetError("SECRET budget"), "budget_exhausted", None),
+            (
+                ProviderQuotaError(
+                    "SECRET quota", retry_after_seconds=900, status_code=429
+                ),
+                "quota_exhausted",
+                900,
+            ),
+            (
+                ProviderRateLimitError(
+                    "SECRET rate", retry_after_seconds=45, status_code=429
+                ),
+                "rate_limited",
+                45,
+            ),
+            (ProviderAmbiguousError("SECRET ambiguous"), "ambiguous", None),
+            (ProviderUpstreamError("SECRET upstream"), "upstream_error", None),
+            (ProviderError("SECRET denied"), "forbidden", None),
         )
-        for failure, code in failures:
+        for failure, code, retry_after_seconds in failures:
             with self.subTest(code=code):
                 self.control.provider_failure = failure
                 response = self.gateway.handle(
@@ -740,6 +756,10 @@ class RunGatewayTests(unittest.TestCase):
                 )
                 self.assertFalse(response["ok"])
                 self.assertEqual(response["error"]["code"], code)
+                self.assertEqual(
+                    response["error"].get("retry_after_seconds"),
+                    retry_after_seconds,
+                )
                 self.assertNotIn("SECRET", json.dumps(response))
 
     def test_protocol_and_capability_errors_fail_closed(self) -> None:
@@ -945,11 +965,11 @@ class FileGatewayManagerTests(unittest.TestCase):
                 response_marker = json.loads(ready)
                 if response_marker["sequence"] == sequence:
                     raw = (directory / GATEWAY_RESPONSE_NAME).read_bytes()
-                    self.assertEqual(response_marker["size"], len(raw))
-                    self.assertEqual(
-                        response_marker["sha256"], hashlib.sha256(raw).hexdigest()
-                    )
-                    return json.loads(raw)
+                    if (
+                        response_marker["size"] == len(raw)
+                        and response_marker["sha256"] == hashlib.sha256(raw).hexdigest()
+                    ):
+                        return json.loads(raw)
             time.sleep(0.01)
         self.fail("gateway response timed out")
 
@@ -1047,11 +1067,19 @@ class FileGatewayManagerTests(unittest.TestCase):
         deadline = time.monotonic() + 2
         replayed = invalid_commit
         while time.monotonic() < deadline:
-            replayed = json.loads(
-                (endpoint.directory / GATEWAY_RESPONSE_NAME).read_bytes()
+            ready = json.loads(
+                (endpoint.directory / GATEWAY_RESPONSE_READY_NAME).read_bytes()
             )
-            if replayed != invalid_commit:
-                break
+            raw_response = (endpoint.directory / GATEWAY_RESPONSE_NAME).read_bytes()
+            if (
+                ready["sequence"] == 1
+                and ready["size"] == len(raw_response)
+                and ready["sha256"] == hashlib.sha256(raw_response).hexdigest()
+            ):
+                candidate = json.loads(raw_response)
+                if candidate != invalid_commit:
+                    replayed = candidate
+                    break
             time.sleep(0.01)
         self.assertFalse(replayed["ok"])
         self.assertIn("not increasing", replayed["error"]["message"])

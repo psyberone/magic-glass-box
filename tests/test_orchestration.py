@@ -811,6 +811,31 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(cancelled["state"], "cancelled")
         self.assertEqual(self.executor.stop_calls, [run["id"], run["id"]])
 
+    def test_provider_pause_monitor_stops_the_container(self) -> None:
+        class PausedLeaseDatabase:
+            def renew_run_attempt_lease(
+                self,
+                attempt_id: str,
+                *,
+                owner_id: str,
+                lease_seconds: int,
+            ) -> dict[str, object]:
+                return {"cancel_requested": False, "pause_requested": True}
+
+        monitor = _AttemptLeaseMonitor(
+            PausedLeaseDatabase(),  # type: ignore[arg-type]
+            self.executor,
+            attempt_id="att_" + "a" * 32,
+            run_id="run_" + "b" * 32,
+            owner_id="orchestrator-provider-pause-test",
+            lease_seconds=60,
+            interval=15,
+        )
+
+        monitor.pulse()
+
+        self.assertEqual(self.executor.stop_calls, ["run_" + "b" * 32])
+
     def test_lease_monitor_recovers_from_one_transient_storage_failure(self) -> None:
         renewed = threading.Event()
 

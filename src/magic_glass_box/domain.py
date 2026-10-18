@@ -1558,6 +1558,7 @@ class RunState(StrEnum):
     PREPARING = "preparing"
     RUNNING = "running"
     WAITING_FOR_INPUT = "waiting_for_input"
+    PAUSED = "paused"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -1593,12 +1594,21 @@ RUN_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.RUNNING: frozenset(
         {
             RunState.WAITING_FOR_INPUT,
+            RunState.PAUSED,
             RunState.SUCCEEDED,
             RunState.FAILED,
             RunState.CANCELLED,
         }
     ),
     RunState.WAITING_FOR_INPUT: frozenset(
+        {
+            RunState.QUEUED,
+            RunState.PAUSED,
+            RunState.FAILED,
+            RunState.CANCELLED,
+        }
+    ),
+    RunState.PAUSED: frozenset(
         {
             RunState.QUEUED,
             RunState.FAILED,

@@ -152,7 +152,8 @@ class WorkItemStorage:
                     raise ConflictError("work item is already completed")
                 active_run = connection.execute(
                     "SELECT id FROM runs WHERE work_thread_id = ? AND state IN "
-                    "('queued', 'preparing', 'running', 'waiting_for_input') "
+                    "('queued', 'preparing', 'running', 'waiting_for_input', "
+                    "'paused') "
                     "LIMIT 1",
                     (thread["id"],),
                 ).fetchone()

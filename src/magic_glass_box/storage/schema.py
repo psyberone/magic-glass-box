@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -2539,6 +2539,153 @@ BEGIN
 END;
 """
 
+RUN_PAUSED_STATE_MIGRATION = """
+CREATE TABLE runs_v20 (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    context_version_id TEXT NOT NULL,
+    profile_version_id TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'queued', 'preparing', 'running', 'waiting_for_input', 'paused',
+            'succeeded', 'failed', 'cancelled'
+        )
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    source_revision TEXT,
+    krab_session_id TEXT,
+    krab_claim_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    work_item_version_id TEXT
+        REFERENCES work_item_versions(id) ON DELETE RESTRICT,
+    work_thread_id TEXT REFERENCES work_threads(id) ON DELETE RESTRICT,
+    predecessor_run_id TEXT REFERENCES runs(id) ON DELETE RESTRICT,
+    replacement_kind TEXT CHECK (replacement_kind IN ('retry', 'reassign')),
+    supervision_policy_json TEXT NOT NULL DEFAULT
+        '{"attempt_idle_escalation_seconds":[],"attempt_lease_expired_escalation_seconds":[],"auto_execute":false,"interaction_escalation_seconds":[],"other_attention_escalation_seconds":[],"retry_backoff_seconds":[5,30,300],"schema_version":1}',
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (context_version_id)
+        REFERENCES project_context_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (profile_version_id)
+        REFERENCES agent_profile_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO runs_v20 (
+    id, project_id, context_version_id, profile_version_id, requested_by,
+    state, version, source_revision, krab_session_id, krab_claim_id,
+    created_at, updated_at, started_at, finished_at, work_item_version_id,
+    work_thread_id, predecessor_run_id, replacement_kind,
+    supervision_policy_json
+)
+SELECT
+    id, project_id, context_version_id, profile_version_id, requested_by,
+    state, version, source_revision, krab_session_id, krab_claim_id,
+    created_at, updated_at, started_at, finished_at, work_item_version_id,
+    work_thread_id, predecessor_run_id, replacement_kind,
+    supervision_policy_json
+FROM runs;
+
+DROP TABLE runs;
+ALTER TABLE runs_v20 RENAME TO runs;
+
+CREATE INDEX run_project_created ON runs(project_id, created_at DESC);
+CREATE INDEX run_state_created ON runs(state, created_at);
+CREATE INDEX run_work_item_version ON runs(work_item_version_id);
+CREATE INDEX run_work_thread ON runs(work_thread_id);
+CREATE INDEX run_predecessor_created
+    ON runs(predecessor_run_id, created_at DESC)
+    WHERE predecessor_run_id IS NOT NULL;
+CREATE UNIQUE INDEX run_one_active_successor
+    ON runs(predecessor_run_id)
+    WHERE predecessor_run_id IS NOT NULL
+      AND state IN (
+          'queued', 'preparing', 'running', 'waiting_for_input', 'paused'
+      );
+
+CREATE TRIGGER run_replacement_consistent_insert
+BEFORE INSERT ON runs
+WHEN (NEW.predecessor_run_id IS NULL) <> (NEW.replacement_kind IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'run replacement metadata is incomplete');
+END;
+CREATE TRIGGER run_replacement_consistent_update
+BEFORE UPDATE ON runs
+WHEN (NEW.predecessor_run_id IS NULL) <> (NEW.replacement_kind IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'run replacement metadata is incomplete');
+END;
+CREATE TRIGGER run_replacement_immutable_update
+BEFORE UPDATE OF predecessor_run_id, replacement_kind ON runs
+WHEN NEW.predecessor_run_id IS NOT OLD.predecessor_run_id
+  OR NEW.replacement_kind IS NOT OLD.replacement_kind
+BEGIN
+    SELECT RAISE(ABORT, 'run replacement metadata is immutable');
+END;
+CREATE TRIGGER run_supervision_policy_immutable
+BEFORE UPDATE OF supervision_policy_json ON runs
+WHEN NEW.supervision_policy_json IS NOT OLD.supervision_policy_json
+BEGIN
+    SELECT RAISE(ABORT, 'run supervision policy is immutable');
+END;
+"""
+
+PROVIDER_RECOVERY_SCHEMA = """
+CREATE TABLE provider_recoveries (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL CHECK (
+        category IN ('quota_exhausted', 'rate_limited')
+    ),
+    state TEXT NOT NULL CHECK (state IN ('active', 'resumed', 'cancelled')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    retry_after_seconds INTEGER NOT NULL CHECK (
+        retry_after_seconds BETWEEN 1 AND 2592000
+    ),
+    eligible_at TEXT NOT NULL,
+    error_code TEXT NOT NULL,
+    provider_status INTEGER CHECK (provider_status BETWEEN 100 AND 599),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (invocation_id)
+        REFERENCES provider_invocations(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND resolved_at IS NULL)
+        OR (state IN ('resumed', 'cancelled') AND resolved_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX provider_recovery_active_run
+    ON provider_recoveries(run_id) WHERE state = 'active';
+CREATE INDEX provider_recovery_due
+    ON provider_recoveries(state, eligible_at, created_at, id);
+CREATE INDEX provider_recovery_run
+    ON provider_recoveries(run_id, created_at, id);
+
+CREATE TRIGGER provider_recovery_identity_immutable
+BEFORE UPDATE OF
+    id, run_id, attempt_id, invocation_id, category, retry_after_seconds,
+    eligible_at, error_code, provider_status, created_at
+ON provider_recoveries
+BEGIN
+    SELECT RAISE(ABORT, 'provider recovery identity is immutable');
+END;
+CREATE TRIGGER provider_recovery_immutable_delete
+BEFORE DELETE ON provider_recoveries
+BEGIN
+    SELECT RAISE(ABORT, 'provider recoveries cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -2559,6 +2706,8 @@ SCHEMA = (
     + PROVIDER_INVOCATION_LIFECYCLE_SCHEMA
     + ATTEMPT_OWNER_AUDIT_SCHEMA
     + PROVIDER_BUDGET_SCHEMA
+    + RUN_PAUSED_STATE_MIGRATION
+    + PROVIDER_RECOVERY_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -2579,4 +2728,5 @@ MIGRATIONS = {
     16: PROVIDER_INVOCATION_LIFECYCLE_SCHEMA,
     17: ATTEMPT_OWNER_AUDIT_SCHEMA,
     18: PROVIDER_BUDGET_SCHEMA,
+    19: RUN_PAUSED_STATE_MIGRATION + PROVIDER_RECOVERY_SCHEMA,
 }

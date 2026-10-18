@@ -30,6 +30,7 @@ MAX_CONNECTOR_FRAME_OVERHEAD = 64 * 1024
 # JSON may encode one raw control byte as a six-byte ``\u00xx`` escape.
 MAX_CONNECTOR_RESPONSE_EXPANSION = 6
 MAX_INPUT_TOKENS_PER_REQUEST_BYTE = 4
+MAX_PROVIDER_RETRY_AFTER_SECONDS = 30 * 24 * 60 * 60
 MAX_UNIX_SOCKET_PATH_BYTES = 100
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 CONNECTOR_ID_RE = re.compile(r"^ifc_[0-9a-f]{32}$")
@@ -65,9 +66,13 @@ class InferenceConnectorClient(Protocol):
 
 
 def _exact_fields(
-    value: Mapping[str, Any], *, expected: set[str], subject: str
+    value: Mapping[str, Any],
+    *,
+    expected: set[str],
+    subject: str,
+    optional: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    unknown = set(value) - expected
+    unknown = set(value) - expected - set(optional)
     if unknown:
         raise ValidationError(
             f"{subject} contains unknown fields: " + ", ".join(sorted(unknown))
@@ -1004,6 +1009,7 @@ class InferenceInvocationResponse:
     response_bytes: int
     error_code: str | None
     usage: InferenceUsage | None
+    retry_after_seconds: int | None
     _response_json: str | None
 
     @classmethod
@@ -1025,6 +1031,7 @@ class InferenceInvocationResponse:
             value,
             expected=expected,
             subject="inference invocation response",
+            optional={"retry_after_seconds"},
         )
         authority = _invocation_authority(value)
         outcome = value["outcome"]
@@ -1089,6 +1096,19 @@ class InferenceInvocationResponse:
                     )
                 if budget.estimate_microusd(usage) > budget.reservation_microusd:
                     raise ValidationError("reported usage exceeds the reserved budget")
+        raw_retry_after = value.get("retry_after_seconds")
+        retry_after_seconds: int | None = None
+        if raw_retry_after is not None:
+            retry_after_seconds = _bounded_integer(
+                raw_retry_after,
+                field="retry_after_seconds",
+                minimum=1,
+                maximum=MAX_PROVIDER_RETRY_AFTER_SECONDS,
+            )
+            if outcome != "failed":
+                raise ValidationError(
+                    "retry_after_seconds is only valid for failed invocations"
+                )
         if outcome == "succeeded":
             if (
                 provider_status is None
@@ -1110,6 +1130,7 @@ class InferenceInvocationResponse:
             response_bytes=response_bytes,
             error_code=error_code,
             usage=usage,
+            retry_after_seconds=retry_after_seconds,
             _response_json=response_canonical,
         )
 
@@ -1135,6 +1156,8 @@ class InferenceInvocationResponse:
             assert self.budget is not None
             result["budget"] = self.budget.to_dict()
             result["usage"] = None if self.usage is None else self.usage.to_dict()
+        if self.retry_after_seconds is not None:
+            result["retry_after_seconds"] = self.retry_after_seconds
         return result
 
     @property

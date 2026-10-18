@@ -333,6 +333,7 @@ class ControlRoomTests(unittest.TestCase):
                 "profiles",
                 "provider_grants",
                 "provider_budgets",
+                "provider_recoveries",
                 "work_items",
                 "assignments",
                 "runs",
@@ -369,6 +370,7 @@ class ControlRoomTests(unittest.TestCase):
                 "profiles",
                 "provider_grants",
                 "provider_budgets",
+                "provider_recoveries",
                 "work_items",
                 "runs",
                 "attempts",
@@ -639,6 +641,7 @@ class ControlRoomTests(unittest.TestCase):
                 "retained_result_count",
                 "candidate_count",
                 "authority_count",
+                "provider_recovery_count",
             },
         )
         self.assertEqual(snapshot["runs"][0]["attempt_count"], 1)
@@ -646,6 +649,7 @@ class ControlRoomTests(unittest.TestCase):
         self.assertEqual(snapshot["runs"][0]["retained_result_count"], 1)
         self.assertEqual(snapshot["runs"][0]["candidate_count"], 0)
         self.assertEqual(snapshot["runs"][0]["authority_count"], 1)
+        self.assertEqual(snapshot["runs"][0]["provider_recovery_count"], 0)
         self.assertFalse(snapshot["runs"][0]["supervision_policy"]["auto_execute"])
         self.assertEqual(snapshot["supervisor_actions"], [])
         self.assertEqual(snapshot["escalations"], [])
@@ -1783,6 +1787,7 @@ class ControlRoomTests(unittest.TestCase):
             "projects",
             "profiles",
             "provider_grants",
+            "provider_recoveries",
             "work_items",
             "assignments",
             "runs",

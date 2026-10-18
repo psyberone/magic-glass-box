@@ -78,6 +78,7 @@ from .provider import (
     ProviderBusyError,
     ProviderError,
     ProviderUpstreamError,
+    provider_recovery_error,
 )
 from .results import WorkspaceResultStore
 from .runtime import RuntimeLaunch
@@ -1196,6 +1197,17 @@ class ControlPlane:
         finally:
             dispatch_monitor.close()
         if response.outcome != "succeeded":
+            recoverable = (
+                None
+                if response.outcome != "failed" or response.error_code is None
+                else provider_recovery_error(
+                    error_code=response.error_code,
+                    status_code=response.provider_status,
+                    retry_after_seconds=response.retry_after_seconds,
+                    request_bytes=response.request_bytes,
+                    response_bytes=response.response_bytes,
+                )
+            )
             self._finalize_provider_invocation(
                 invocation_id=invocation_id,
                 reservation_id=reservation["id"],
@@ -1205,6 +1217,12 @@ class ControlPlane:
                 response_bytes=response.response_bytes,
                 http_status=response.provider_status,
                 usage=response.usage,
+                recovery_category=(
+                    None if recoverable is None else recoverable.category
+                ),
+                retry_after_seconds=(
+                    None if recoverable is None else recoverable.retry_after_seconds
+                ),
             )
             if response.outcome == "ambiguous":
                 raise ProviderAmbiguousError(
@@ -1213,6 +1231,8 @@ class ControlPlane:
                     request_bytes=response.request_bytes,
                     response_bytes=response.response_bytes,
                 )
+            if recoverable is not None:
+                raise recoverable
             raise ProviderUpstreamError(
                 "provider request failed",
                 status_code=response.provider_status,
@@ -1268,6 +1288,8 @@ class ControlPlane:
         http_status: int | None = None,
         usage: InferenceUsage | None = None,
         release_budget: bool = False,
+        recovery_category: str | None = None,
+        retry_after_seconds: int | None = None,
     ) -> dict[str, Any]:
         try:
             invocation = self.database.finalize_provider_invocation(
@@ -1279,6 +1301,8 @@ class ControlPlane:
                 error_code=error_code,
                 usage=usage,
                 release_budget=release_budget,
+                recovery_category=recovery_category,
+                retry_after_seconds=retry_after_seconds,
             )
         except Exception as exc:
             raise ProviderAmbiguousError(
@@ -1774,7 +1798,10 @@ class ControlPlane:
             )
         if interaction["state"] != "open":
             raise ConflictError(f"interaction is not open: {interaction['state']}")
-        if interaction["run_state"] != RunState.WAITING_FOR_INPUT.value:
+        if interaction["run_state"] not in {
+            RunState.WAITING_FOR_INPUT.value,
+            RunState.PAUSED.value,
+        }:
             raise ConflictError(
                 "interaction run is not waiting for input: " + interaction["run_state"]
             )

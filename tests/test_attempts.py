@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 from magic_glass_box.db import (
     SCHEMA,
@@ -29,6 +30,8 @@ from magic_glass_box.results import FileState, ResultChange, ResultManifest
 from magic_glass_box.storage.schema import (
     ATTEMPT_OWNER_AUDIT_SCHEMA,
     PROVIDER_BUDGET_SCHEMA,
+    PROVIDER_RECOVERY_SCHEMA,
+    RUN_PAUSED_STATE_MIGRATION,
 )
 
 OWNER_ID = "orchestrator-test-owner"
@@ -948,7 +951,12 @@ class AttemptMigrationTests(unittest.TestCase):
     def test_schema_seventeen_preserves_attempt_events_and_immutability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-seventeen.db"
-            tail = ATTEMPT_OWNER_AUDIT_SCHEMA + PROVIDER_BUDGET_SCHEMA
+            tail = (
+                ATTEMPT_OWNER_AUDIT_SCHEMA
+                + PROVIDER_BUDGET_SCHEMA
+                + RUN_PAUSED_STATE_MIGRATION
+                + PROVIDER_RECOVERY_SCHEMA
+            )
             self.assertTrue(SCHEMA.endswith(tail))
             historical_schema = SCHEMA[: -len(tail)]
             self.assertEqual(
@@ -1004,13 +1012,16 @@ class AttemptMigrationTests(unittest.TestCase):
                 krab_identity_id=identity["id"],
                 created_by=user["id"],
             )
-            run = database.create_run(
-                project_key="migration-project",
-                profile_name="Worker",
-                work_item_id=item["id"],
-                requested_by=user["id"],
-                source_revision="a" * 40,
-            )
+            with mock.patch.object(
+                database, "_list_provider_recoveries", return_value=[]
+            ):
+                run = database.create_run(
+                    project_key="migration-project",
+                    profile_name="Worker",
+                    work_item_id=item["id"],
+                    requested_by=user["id"],
+                    source_revision="a" * 40,
+                )
             preparing = database.begin_run_attempt(
                 run["id"],
                 runtime_adapter="docker",
@@ -1058,7 +1069,20 @@ class AttemptMigrationTests(unittest.TestCase):
                     "SELECT sql FROM sqlite_schema "
                     "WHERE type = 'table' AND name = 'run_attempt_events'"
                 ).fetchone()[0]
+                run_table_sql = connection.execute(
+                    "SELECT sql FROM sqlite_schema "
+                    "WHERE type = 'table' AND name = 'runs'"
+                ).fetchone()[0]
+                recovery_table = connection.execute(
+                    "SELECT 1 FROM sqlite_schema "
+                    "WHERE type = 'table' AND name = 'provider_recoveries'"
+                ).fetchone()
                 self.assertIn("attempt.owner_changed", table_sql)
+                self.assertIn("'paused'", run_table_sql)
+                self.assertIsNotNone(recovery_table)
+                self.assertEqual(
+                    connection.execute("PRAGMA foreign_key_check").fetchall(), []
+                )
                 with self.assertRaises(sqlite3.IntegrityError):
                     connection.execute(
                         "UPDATE run_attempt_events SET metadata_json = '{}' "
@@ -1072,8 +1096,13 @@ class AttemptMigrationTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-eighteen.db"
-            self.assertTrue(SCHEMA.endswith(PROVIDER_BUDGET_SCHEMA))
-            historical_schema = SCHEMA[: -len(PROVIDER_BUDGET_SCHEMA)]
+            tail = (
+                PROVIDER_BUDGET_SCHEMA
+                + RUN_PAUSED_STATE_MIGRATION
+                + PROVIDER_RECOVERY_SCHEMA
+            )
+            self.assertTrue(SCHEMA.endswith(tail))
+            historical_schema = SCHEMA[: -len(tail)]
             self.assertEqual(
                 hashlib.sha256(historical_schema.encode()).hexdigest(),
                 "3aadec58ec078154cda90837b38cac335fd1d82d400a3cfa5d6bbd8612f211e4",

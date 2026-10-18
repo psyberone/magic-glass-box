@@ -30,7 +30,13 @@ from .krab import KrabClient, KrabError, WorkClaim
 from .results import ResultError, ResultManifest
 
 ClientFactory = Callable[[str, str], KrabClient]
-ACTIVE_RUN_STATES = {"queued", "preparing", "running", "waiting_for_input"}
+ACTIVE_RUN_STATES = {
+    "queued",
+    "preparing",
+    "running",
+    "waiting_for_input",
+    "paused",
+}
 ACTIVE_ATTEMPT_STATES = {"preparing", "running"}
 
 
@@ -156,11 +162,18 @@ class ControlRoom:
             connection, history_limit, generated_at
         )
         authorities = self._run_authorities(connection, run_ids, generated_at)
+        provider_recoveries = self._provider_recoveries(connection, run_ids)
         provider_budgets = self._provider_budgets(connection, run_ids)
         supervisor_actions = self._supervisor_actions(connection, run_ids)
         escalations = self._escalations(connection, run_ids)
         self._attach_run_counts(
-            runs, attempts, interactions, retained_results, candidates, authorities
+            runs,
+            attempts,
+            interactions,
+            retained_results,
+            candidates,
+            authorities,
+            provider_recoveries,
         )
         summary = self._summary(connection, provider_grants, attempts)
         summary["provider_budgets"] = {
@@ -184,6 +197,15 @@ class ControlRoom:
                 item["conservative_invocations"] for item in provider_budgets
             ),
         }
+        summary["provider_recoveries"] = {
+            "total": len(provider_recoveries),
+            **{
+                state: sum(
+                    1 for recovery in provider_recoveries if recovery["state"] == state
+                )
+                for state in ("active", "resumed", "cancelled")
+            },
+        }
         attention = self._attention(
             work_items,
             assignments,
@@ -191,6 +213,7 @@ class ControlRoom:
             attempts,
             interactions,
             authorities,
+            provider_recoveries,
             supervisor_actions,
             escalations,
             gate_policies,
@@ -225,6 +248,7 @@ class ControlRoom:
                 "landing_dependencies": landing_dependencies,
                 "integration_queue": integration_queue,
                 "run_authorities": authorities,
+                "provider_recoveries": provider_recoveries,
                 "provider_budgets": provider_budgets,
                 "supervisor_actions": supervisor_actions,
                 "escalations": escalations,
@@ -476,7 +500,8 @@ class ControlRoom:
             "(SELECT COUNT(*) FROM runs r WHERE r.work_thread_id = wt.id) "
             "AS run_count, "
             "(SELECT COUNT(*) FROM runs r WHERE r.work_thread_id = wt.id "
-            "AND r.state IN ('queued','preparing','running','waiting_for_input')) "
+            "AND r.state IN ("
+            "'queued','preparing','running','waiting_for_input','paused')) "
             "AS active_run_count "
             "FROM work_items wi JOIN projects p ON p.id = wi.project_id "
             "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
@@ -600,7 +625,8 @@ class ControlRoom:
             "('succeeded','failed','cancelled') "
             "ORDER BY updated_at DESC, id LIMIT ?), visible AS ("
             "SELECT id, 0 AS group_order FROM runs WHERE state IN "
-            "('queued','preparing','running','waiting_for_input') UNION ALL "
+            "('queued','preparing','running','waiting_for_input','paused') "
+            "UNION ALL "
             "SELECT id, 1 AS group_order FROM terminal"
             ") SELECT r.id, r.state, r.version, r.source_revision, "
             "r.predecessor_run_id, r.replacement_kind, "
@@ -988,6 +1014,23 @@ class ControlRoom:
         return authorities
 
     @classmethod
+    def _provider_recoveries(
+        cls,
+        connection: sqlite3.Connection,
+        run_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        rows = cls._for_runs(
+            connection,
+            run_ids,
+            "SELECT id, run_id, attempt_id, invocation_id, category, state, "
+            "version, retry_after_seconds, eligible_at, error_code, "
+            "provider_status, created_at, updated_at, resolved_at "
+            "FROM provider_recoveries WHERE run_id IN ({run_ids}) "
+            "ORDER BY created_at, id",
+        )
+        return [dict(row) for row in rows]
+
+    @classmethod
     def _provider_budgets(
         cls,
         connection: sqlite3.Connection,
@@ -1289,6 +1332,7 @@ class ControlRoom:
         results: list[dict[str, Any]],
         candidates: list[dict[str, Any]],
         authorities: list[dict[str, Any]],
+        provider_recoveries: list[dict[str, Any]],
     ) -> None:
         indexes: tuple[tuple[str, list[dict[str, Any]], str], ...] = (
             ("attempt_count", attempts, "run_id"),
@@ -1296,6 +1340,7 @@ class ControlRoom:
             ("retained_result_count", results, "run_id"),
             ("candidate_count", candidates, "producer_run_id"),
             ("authority_count", authorities, "run_id"),
+            ("provider_recovery_count", provider_recoveries, "run_id"),
         )
         counts: dict[str, dict[str, int]] = {}
         for label, records, run_key in indexes:
@@ -1464,6 +1509,7 @@ class ControlRoom:
         attempts: list[dict[str, Any]],
         interactions: list[dict[str, Any]],
         authorities: list[dict[str, Any]],
+        provider_recoveries: list[dict[str, Any]] | None = None,
         supervisor_actions: list[dict[str, Any]] | None = None,
         escalations: list[dict[str, Any]] | None = None,
         gate_policies: list[dict[str, Any]] | None = None,
@@ -1581,6 +1627,26 @@ class ControlRoom:
                     },
                     attempt["lease_expires_at"],
                 )
+        for recovery in provider_recoveries or []:
+            if recovery["state"] != "active":
+                continue
+            eligible_at = _timestamp(
+                recovery["eligible_at"], label="provider recovery eligibility"
+            )
+            entry = {
+                "kind": "provider.paused",
+                "severity": "warning",
+                "subject_type": "provider_recovery",
+                "subject_id": recovery["id"],
+                "run_id": recovery["run_id"],
+                "attempt_id": recovery["attempt_id"],
+                "category": recovery["category"],
+                "retry_after_seconds": recovery["retry_after_seconds"],
+                "eligible_at": recovery["eligible_at"],
+                "eligible": now is not None and eligible_at <= now,
+                "created_at": recovery["created_at"],
+            }
+            add(entry, recovery["created_at"])
         for run_id, run in active_runs.items():
             if (
                 run["state"] in {"preparing", "running"}

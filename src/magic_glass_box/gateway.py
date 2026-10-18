@@ -37,6 +37,8 @@ from .provider import (
     ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
+    ProviderQuotaError,
+    ProviderRateLimitError,
     ProviderUpstreamError,
 )
 from .service import AcceptedInteractionResponse, AcceptedProviderResponse
@@ -254,12 +256,21 @@ class RunGateway:
         }
 
     @staticmethod
-    def _failure(request_id: str | None, code: str, message: str) -> dict[str, Any]:
+    def _failure(
+        request_id: str | None,
+        code: str,
+        message: str,
+        *,
+        retry_after_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        error: dict[str, Any] = {"code": code, "message": message}
+        if retry_after_seconds is not None:
+            error["retry_after_seconds"] = retry_after_seconds
         return {
             "version": GATEWAY_PROTOCOL_VERSION,
             "request_id": request_id,
             "ok": False,
-            "error": {"code": code, "message": message},
+            "error": error,
         }
 
     def handle(self, value: object) -> dict[str, Any]:
@@ -354,6 +365,20 @@ class RunGateway:
         except ProviderBudgetError:
             return self._failure(
                 request_id, "budget_exhausted", "provider budget is exhausted"
+            )
+        except ProviderQuotaError as exc:
+            return self._failure(
+                request_id,
+                "quota_exhausted",
+                "provider quota is temporarily exhausted",
+                retry_after_seconds=exc.retry_after_seconds,
+            )
+        except ProviderRateLimitError as exc:
+            return self._failure(
+                request_id,
+                "rate_limited",
+                "provider rate limit is temporarily exhausted",
+                retry_after_seconds=exc.retry_after_seconds,
             )
         except ProviderAmbiguousError:
             return self._failure(

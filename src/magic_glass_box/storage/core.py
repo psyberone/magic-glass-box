@@ -141,7 +141,11 @@ class DatabaseCore:
 
     @classmethod
     def _initialize_schema(cls, connection: sqlite3.Connection) -> None:
+        foreign_keys_enabled = bool(
+            connection.execute("PRAGMA foreign_keys").fetchone()[0]
+        )
         try:
+            connection.execute("PRAGMA foreign_keys = OFF")
             connection.execute("BEGIN EXCLUSIVE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -162,6 +166,10 @@ class DatabaseCore:
                 raise StorageError("unversioned database is not empty")
             cls._execute_statements(connection, SCHEMA)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise StorageError(
+                    "database foreign key check failed after initialization"
+                )
             connection.commit()
         except StorageError:
             connection.rollback()
@@ -169,11 +177,19 @@ class DatabaseCore:
         except sqlite3.Error as exc:
             connection.rollback()
             raise StorageError(f"cannot initialize database: {exc}") from exc
+        finally:
+            connection.execute(
+                "PRAGMA foreign_keys = " + ("ON" if foreign_keys_enabled else "OFF")
+            )
 
     @classmethod
     def _migrate(cls, connection: sqlite3.Connection, version: int) -> None:
         target = version + 1
+        foreign_keys_enabled = bool(
+            connection.execute("PRAGMA foreign_keys").fetchone()[0]
+        )
         try:
+            connection.execute("PRAGMA foreign_keys = OFF")
             connection.execute("BEGIN EXCLUSIVE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -189,6 +205,8 @@ class DatabaseCore:
                 cls._execute_statements(connection, migration)
                 connection.execute(f"PRAGMA user_version = {target}")
                 version = target
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise StorageError("database foreign key check failed after migration")
             connection.commit()
         except StorageError:
             connection.rollback()
@@ -198,6 +216,10 @@ class DatabaseCore:
             raise StorageError(
                 f"cannot migrate database from schema {version} to {target}: {exc}"
             ) from exc
+        finally:
+            connection.execute(
+                "PRAGMA foreign_keys = " + ("ON" if foreign_keys_enabled else "OFF")
+            )
 
     def _prepare_file(self) -> None:
         parent_exists = self.path.parent.exists()
@@ -347,6 +369,10 @@ class DatabaseCore:
                 ),
                 ("runs", "SELECT COUNT(*) FROM runs"),
                 ("run_attempts", "SELECT COUNT(*) FROM run_attempts"),
+                (
+                    "provider_recoveries",
+                    "SELECT COUNT(*) FROM provider_recoveries",
+                ),
                 ("attempt_handoffs", "SELECT COUNT(*) FROM attempt_handoffs"),
                 ("attempt_results", "SELECT COUNT(*) FROM attempt_results"),
                 (

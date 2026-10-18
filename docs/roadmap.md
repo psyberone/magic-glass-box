@@ -646,17 +646,42 @@ invoice or a promise about external quota enforcement.
 
 ## Milestone 8B: quota-aware recovery
 
-**Status: planned**
+**Status: completed 2026-10-18**
 
-- Classify provider quota exhaustion and rate limits separately from permanent
-  upstream failure.
+- Classify provider quota exhaustion, rate limits, and overload separately from
+  permanent upstream failure without converting ambiguity into replay.
 - Honor bounded provider retry timing and move recoverable work into a durable
-  paused state rather than burning attempts.
-- Let the supervisor wake eligible work without a human acting as a timer.
+  paused state. Stop and close the disposable attempt as interrupted without
+  failing the same run.
+- Let the supervisor wake eligible work without a human acting as a timer,
+  while preserving manual launch policy and waiting for active attempts and
+  open human interactions to resolve.
 
 **Exit proof:** a simulated quota outage pauses the same durable work, consumes
 no calls while ineligible, and later resumes it under its original pinned
 authority and remaining budget.
+
+Schema v20 proves the complete path with an explicit connector failure,
+bounded retry timing, atomic invocation/recovery publication, worker-stop
+signal, interrupted-attempt cleanup, exact eligibility boundary, and
+supervisor requeue. The golden path retains the original run, source revision,
+connector-bound grant, and budget ledger; a second provider call occurs only
+after recovery. Manual work stops at `queued`, cancellation prevents a future
+wake, generic transitions cannot forge or bypass `paused`, and an unanswered
+Krab interaction can be answered during the pause but blocks wake-up until it
+is resolved.
+
+Schema v20 and M8B passed 808 tests, Ruff format and lint, and 86% branch
+coverage. The identical production source passed a clean-from-scratch 82.91%
+mutation gate (32,175/38,808) before final survivor-driven test-only hardening;
+all mutants were classified: 6,571 survived, 26 timed out, 36 had no selected
+tests, and none were suspicious, skipped, interrupted, or crashed. A focused
+review then added exact lexical, delay, identifier, and diagnostic-provenance
+assertions and targeted reruns killed all 24 behaviorally meaningful M8B
+survivors. The four remaining M8B-named survivors are reviewed equivalents:
+two overwritten initializer values, the timezone predicate equivalence for
+`datetime.fromisoformat`, and a private guard already enforced by the public
+atomic finalizer.
 
 ## Milestone 9: destructive continuity proof
 

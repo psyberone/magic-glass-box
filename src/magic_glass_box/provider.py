@@ -46,6 +46,76 @@ class ProviderAmbiguousError(ProviderUpstreamError):
     """An invocation may have consumed provider quota and must not be replayed."""
 
 
+class ProviderRecoverableError(ProviderUpstreamError):
+    """An explicit provider refusal can be retried after a bounded delay."""
+
+    category: str
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: int,
+        status_code: int | None = None,
+        request_bytes: int = 0,
+        response_bytes: int = 0,
+    ):
+        super().__init__(
+            message,
+            status_code=status_code,
+            request_bytes=request_bytes,
+            response_bytes=response_bytes,
+        )
+        self.retry_after_seconds = retry_after_seconds
+
+
+class ProviderQuotaError(ProviderRecoverableError):
+    category = "quota_exhausted"
+
+
+class ProviderRateLimitError(ProviderRecoverableError):
+    category = "rate_limited"
+
+
+DEFAULT_QUOTA_RETRY_AFTER_SECONDS = 15 * 60
+DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 60
+_QUOTA_ERROR_MARKERS = ("quota", "usage_limit", "billing", "credit_balance")
+_RATE_LIMIT_ERROR_MARKERS = ("rate_limit", "too_many_requests", "overload")
+
+
+def provider_recovery_error(
+    *,
+    error_code: str,
+    status_code: int | None,
+    retry_after_seconds: int | None,
+    request_bytes: int,
+    response_bytes: int,
+) -> ProviderRecoverableError | None:
+    """Classify only explicit provider failures whose replay timing is known."""
+
+    normalized = error_code.lower()
+    error_type: type[ProviderRecoverableError] | None = None
+    fallback = 0
+    if any(marker in normalized for marker in _QUOTA_ERROR_MARKERS):
+        error_type = ProviderQuotaError
+        fallback = DEFAULT_QUOTA_RETRY_AFTER_SECONDS
+    elif status_code in {429, 529} or any(
+        marker in normalized for marker in _RATE_LIMIT_ERROR_MARKERS
+    ):
+        error_type = ProviderRateLimitError
+        fallback = DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS
+    if error_type is None:
+        return None
+    delay = fallback if retry_after_seconds is None else retry_after_seconds
+    return error_type(
+        "provider request is temporarily ineligible",
+        retry_after_seconds=delay,
+        status_code=status_code,
+        request_bytes=request_bytes,
+        response_bytes=response_bytes,
+    )
+
+
 @dataclass(frozen=True)
 class ProviderInvocationResult:
     status_code: int

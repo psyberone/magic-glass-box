@@ -21,6 +21,7 @@ from .storage.integration import (
 )
 from .storage.interactions import InteractionStorage
 from .storage.queries import QueryStorage
+from .storage.recovery import RecoveryStorage
 from .storage.runs import RunStorage
 from .storage.schema import (
     ATTEMPT_SCHEMA,
@@ -41,7 +42,9 @@ from .storage.schema import (
     MIN_ATTEMPT_LEASE_SECONDS,
     PROVIDER_BUDGET_SCHEMA,
     PROVIDER_DISPATCH_SCHEMA,
+    PROVIDER_RECOVERY_SCHEMA,
     PROVIDER_SCHEMA,
+    RUN_PAUSED_STATE_MIGRATION,
     RUN_REPLACEMENT_SCHEMA,
     SCHEMA,
     SCHEMA_V1,
@@ -83,7 +86,9 @@ __all__ = [
     "PROVIDER_SCHEMA",
     "PROVIDER_BUDGET_SCHEMA",
     "PROVIDER_DISPATCH_SCHEMA",
+    "PROVIDER_RECOVERY_SCHEMA",
     "RUN_REPLACEMENT_SCHEMA",
+    "RUN_PAUSED_STATE_MIGRATION",
     "SCHEMA",
     "SCHEMA_V1",
     "SCHEMA_VERSION",
@@ -100,6 +105,7 @@ __all__ = [
 class Database(
     SupervisionStorage,
     QueryStorage,
+    RecoveryStorage,
     IntegrationStorage,
     InferenceStorage,
     GateStorage,

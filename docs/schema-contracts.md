@@ -33,6 +33,14 @@ Control-plane schema v18 adds immutable attempt-owner takeover events and
 increments optimistic attempt authority on every expired-lease claim. This is
 an internal SQLite transition contract, not a new portable JSON document.
 
+Milestone 8B extends both published invocation-response schemas with optional
+`retry_after_seconds`. Portable validation bounds it to 1 through 2,592,000
+and permits it only on an explicitly `failed` outcome. Runtime validation
+enforces the same rule before the control plane classifies the provider error;
+the timing field by itself never makes an ambiguous call replayable. Control-
+plane schema v20 adds the internal `paused` run state and immutable provider-
+recovery identity ledger.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

@@ -45,6 +45,11 @@ This repository currently contains the first executable vertical slice:
   versioned USD-micro pricing and run/project/grant ceilings, atomic
   pre-dispatch allowance reservations, conservative ambiguity accounting, and
   reconciled control-room totals;
+- schema-v20 quota-aware recovery that atomically records explicit quota,
+  rate-limit, and overload refusals, pauses the same durable run under bounded
+  retry timing, interrupts its disposable worker safely, and lets the
+  supervisor requeue eligible work without changing its pinned authority or
+  budget;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;

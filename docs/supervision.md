@@ -102,6 +102,31 @@ Answered interactions queue their run only when the previous attempt is gone.
 An opted-in queued run is then discovered by the same normal action path; no
 special in-memory resume signal is required.
 
+## Provider recovery
+
+An explicit provider quota, rate-limit, or overload refusal creates one active
+provider-recovery record and moves the same run to `paused`. The provider
+invocation outcome, bounded retry delay, eligibility timestamp, category,
+attempt, and recovery identity are committed atomically; prompt and response
+content are not retained. Ambiguous calls and ordinary upstream failures do
+not enter this path.
+
+The attempt heartbeat reports the pause to its current owner, which stops the
+container through the normal run-labeled cleanup path. A clean or failed exit
+while the run is paused closes the disposable attempt as `interrupted` and
+leaves the run paused. If the owner dies instead, ordinary lease-expiry
+reconciliation performs the same cleanup; eligibility never authorizes the
+supervisor to overlap a live attempt.
+
+Every discovery pass also checks eligible recovery records. A run can move
+from `paused` to `queued` only after its active attempt is gone and it has no
+open interaction. Human answers remain accepted while provider recovery is
+active, so an unanswered question cannot be skipped and an answer cannot be
+lost. The recovery transition is optimistic, audited, and idempotent. A manual
+policy stops at `queued`; only an immutable policy with `auto_execute` creates
+the normal `run.execute` action. Cancellation settles the recovery as
+`cancelled` and prevents a later wake-up.
+
 The supervisor advances an interaction only after durable state says it is
 answered. It sends age-based reminders but does not scan Krab activity and
 guess which message is a response. Until the transport exposes trusted
@@ -127,6 +152,8 @@ existing private item; it does not create or copy another message.
 The CLI and browser control room expose:
 
 - every visible run's pinned supervision policy;
+- active, resumed, and cancelled provider recoveries with bounded eligibility
+  metadata;
 - pending, claimed, succeeded, and exhausted dispatcher actions;
 - escalation threshold, channel, and delivery state;
 - safe error classes for exhausted work; and

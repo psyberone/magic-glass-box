@@ -33,6 +33,7 @@ from .gateway import (
     MAX_GATEWAY_RESPONSE_BYTES,
     MAX_GATEWAY_SEQUENCE,
 )
+from .inference import MAX_PROVIDER_RETRY_AFTER_SECONDS
 
 TRANSPORT_HOST = "127.0.0.1"
 TRANSPORT_PORT = 8766
@@ -53,6 +54,15 @@ class GatewayRequestCommittedError(WorkerTransportError):
 
 class ProviderAmbiguousTransportError(WorkerTransportError):
     """A provider call may have occurred and this bridge must never replay it."""
+
+
+class ProviderRetryableTransportError(WorkerTransportError):
+    """The provider explicitly rejected work until a bounded later time."""
+
+    def __init__(self, *, category: str, retry_after_seconds: int):
+        super().__init__("provider invocation is temporarily ineligible")
+        self.category = category
+        self.retry_after_seconds = retry_after_seconds
 
 
 class GatewayClient(Protocol):
@@ -502,6 +512,20 @@ class ProviderHTTPTransport:
                 raise ProviderAmbiguousTransportError(
                     "provider gateway returned an invalid response"
                 )
+            if error["code"] in {"quota_exhausted", "rate_limited"}:
+                retry_after_seconds = error.get("retry_after_seconds")
+                if (
+                    isinstance(retry_after_seconds, bool)
+                    or not isinstance(retry_after_seconds, int)
+                    or not 1 <= retry_after_seconds <= MAX_PROVIDER_RETRY_AFTER_SECONDS
+                ):
+                    raise ProviderAmbiguousTransportError(
+                        "provider gateway returned an invalid response"
+                    )
+                raise ProviderRetryableTransportError(
+                    category=error["code"],
+                    retry_after_seconds=retry_after_seconds,
+                )
             raise WorkerTransportError("provider gateway denied the request")
         result = response.get("result")
         if not isinstance(result, dict):
@@ -592,6 +616,9 @@ class _TransportHandler(BaseHTTPRequestHandler):
         except ProviderAmbiguousTransportError:
             self._failure(409)
             return
+        except ProviderRetryableTransportError as exc:
+            self._failure(429, retry_after_seconds=exc.retry_after_seconds)
+            return
         except WorkerTransportError:
             self._failure(502)
             return
@@ -602,20 +629,28 @@ class _TransportHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response.body)
 
-    def _failure(self, status_code: int) -> None:
+    def _failure(
+        self, status_code: int, *, retry_after_seconds: int | None = None
+    ) -> None:
         message = "Magic Glass Box provider transport rejected the request"
         if self.server.transport.dialect == "anthropic-messages":
+            error_type = "rate_limit_error" if status_code == 429 else "api_error"
             value = {
                 "type": "error",
-                "error": {"type": "api_error", "message": message},
+                "error": {"type": error_type, "message": message},
             }
         else:
-            value = {"error": {"type": "invalid_request_error", "message": message}}
+            error_type = (
+                "rate_limit_error" if status_code == 429 else "invalid_request_error"
+            )
+            value = {"error": {"type": error_type, "message": message}}
         raw = canonical_json(value).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        if retry_after_seconds is not None:
+            self.send_header("Retry-After", str(retry_after_seconds))
         self.end_headers()
         self.wfile.write(raw)
 

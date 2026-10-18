@@ -209,6 +209,7 @@ class BoundedHTTPSClientTests(unittest.TestCase):
                 headers={
                     "Content-Length": "4",
                     "Content-Type": "application/json",
+                    "Retry-After": "45",
                     "request-id": "req_fallback",
                 },
             )
@@ -243,7 +244,35 @@ class BoundedHTTPSClientTests(unittest.TestCase):
         self.assertEqual(response.body, b"okay")
         self.assertEqual(response.content_type, "application/json")
         self.assertEqual(response.request_id, "req_fallback")
+        self.assertEqual(response.retry_after_seconds, 45)
         self.assertTrue(connection.closed)
+
+    def test_retry_after_is_bounded_and_invalid_values_are_ignored(self) -> None:
+        for raw, expected in (
+            ("1", 1),
+            ("2592001", 2_592_000),
+            ("9" * 10, 2_592_000),
+            ("9" * 11, None),
+            ("١", None),
+            ("0", None),
+            ("not-a-delay", None),
+            ("9" * 5000, None),
+        ):
+            connection = FakeConnection(
+                FakeWireResponse(b"{}", headers={"Retry-After": raw})
+            )
+            response = BoundedHTTPSClient(
+                lambda *_args, selected=connection: selected
+            ).request(
+                "GET",
+                "https://api.openai.com/v1/models",
+                headers={},
+                body=None,
+                timeout=1,
+                max_response_bytes=8,
+            )
+            with self.subTest(raw=raw):
+                self.assertEqual(response.retry_after_seconds, expected)
 
     def test_invalid_destination_and_request_fail_before_connection(self) -> None:
         invalid = (
@@ -1549,6 +1578,7 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                     b'{"error":{"code":"subscription_sharing_usage_limit_exceeded",'
                     b'"message":"private upstream detail"}}',
                     "req_http",
+                    73,
                 ),
                 "subscription_sharing_usage_limit_exceeded",
                 429,
@@ -1560,6 +1590,10 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                     self.invoke(FakeHTTPClient(response))
                 self.assertEqual(raised.exception.error_code, code)
                 self.assertEqual(raised.exception.status_code, status)
+                self.assertEqual(
+                    raised.exception.retry_after_seconds,
+                    73 if status == 429 else None,
+                )
                 self.assertNotIn("private upstream detail", str(raised.exception))
                 self.assertNotIn("access-secret", str(raised.exception))
 
@@ -1939,6 +1973,7 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
                     "application/json",
                     b'{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}',
                     "req_limit",
+                    91,
                 )
             )
         ).invoke(invocation_request(self.scope))
@@ -1951,6 +1986,7 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
             failed.error_code,
             "subscription_sharing_usage_limit_exceeded",
         )
+        self.assertEqual(failed.retry_after_seconds, 91)
         self.assertEqual(ambiguous.outcome, "ambiguous")
         self.assertEqual(ambiguous.error_code, "upstream_ambiguous")
 

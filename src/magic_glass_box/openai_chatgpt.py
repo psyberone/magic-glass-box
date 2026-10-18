@@ -23,6 +23,7 @@ from . import __version__
 from .domain import ValidationError, canonical_json, validate_provider_name
 from .inference import (
     CONNECTOR_ID_RE,
+    MAX_PROVIDER_RETRY_AFTER_SECONDS,
     InferenceInvocationRequest,
     InferenceInvocationResponse,
     InferenceUsage,
@@ -67,12 +68,14 @@ class ChatGPTResponseFailure(ChatGPTConnectorError):
         status_code: int | None = None,
         request_bytes: int = 0,
         response_bytes: int = 0,
+        retry_after_seconds: int | None = None,
     ):
         super().__init__(message)
         self.error_code = error_code
         self.status_code = status_code
         self.request_bytes = request_bytes
         self.response_bytes = response_bytes
+        self.retry_after_seconds = retry_after_seconds
 
 
 class ChatGPTResponseAmbiguousError(ChatGPTResponseFailure):
@@ -91,6 +94,16 @@ class HTTPResponse:
     content_type: str | None
     body: bytes
     request_id: str | None
+    retry_after_seconds: int | None = None
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    if value is None or len(value) > 10 or not value.isascii() or not value.isdecimal():
+        return None
+    seconds = int(value)
+    if seconds < 1:
+        return None
+    return min(seconds, MAX_PROVIDER_RETRY_AFTER_SECONDS)
 
 
 class HTTPClient(Protocol):
@@ -208,6 +221,9 @@ class BoundedHTTPSClient:
                     request_id=(
                         response.getheader("x-request-id")
                         or response.getheader("request-id")
+                    ),
+                    retry_after_seconds=_retry_after_seconds(
+                        response.getheader("Retry-After")
                     ),
                 )
             except HTTPTransportError:
@@ -1698,6 +1714,7 @@ class OpenAIResponsesClient:
                 status_code=response.status_code,
                 request_bytes=len(body),
                 response_bytes=len(response.body),
+                retry_after_seconds=response.retry_after_seconds,
             )
         content_type = response.content_type
         if content_type is not None and (
@@ -1900,6 +1917,7 @@ class OpenAIChatGPTConnector:
         status_code: int | None = None,
         request_bytes: int = 0,
         response_bytes: int = 0,
+        retry_after_seconds: int | None = None,
         outcome: str = "failed",
     ) -> InferenceInvocationResponse:
         value: dict[str, Any] = {
@@ -1913,6 +1931,8 @@ class OpenAIChatGPTConnector:
         }
         if request.connector_protocol_version == 2:
             value["usage"] = None
+        if retry_after_seconds is not None:
+            value["retry_after_seconds"] = retry_after_seconds
         return InferenceInvocationResponse.from_mapping(value)
 
     def _authority_error(
@@ -1993,6 +2013,7 @@ class OpenAIChatGPTConnector:
                 status_code=exc.status_code,
                 request_bytes=exc.request_bytes,
                 response_bytes=exc.response_bytes,
+                retry_after_seconds=exc.retry_after_seconds,
             )
         if request.connector_protocol_version == 2:
             budget = request.budget

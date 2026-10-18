@@ -167,8 +167,11 @@ class AttemptStorage:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 attempt = connection.execute(
-                    "SELECT state, owner_id, cancel_requested_at, cancel_reason "
-                    "FROM run_attempts WHERE id = ?",
+                    "SELECT ra.state, ra.owner_id, ra.cancel_requested_at, "
+                    "ra.cancel_reason, pr.id AS provider_recovery_id "
+                    "FROM run_attempts ra LEFT JOIN provider_recoveries pr "
+                    "ON pr.run_id = ra.run_id AND pr.state = 'active' "
+                    "WHERE ra.id = ?",
                     (attempt_id,),
                 ).fetchone()
                 if attempt is None:
@@ -201,6 +204,8 @@ class AttemptStorage:
             "attempt_id": attempt_id,
             "cancel_reason": attempt["cancel_reason"],
             "cancel_requested": attempt["cancel_requested_at"] is not None,
+            "pause_requested": attempt["provider_recovery_id"] is not None,
+            "provider_recovery_id": attempt["provider_recovery_id"],
             "heartbeat_at": now,
             "lease_expires_at": expires_at,
             "owner_id": owner_id,
@@ -518,6 +523,9 @@ class AttemptStorage:
                     outcome = AttemptState.CANCELLED
                     reason = attempt["cancel_reason"]
                     self._cancel_open_interactions(connection, attempt["run_id"], now)
+                    self._cancel_active_provider_recoveries(
+                        connection, attempt["run_id"], now
+                    )
                     run_metadata = {
                         "exit_code": exit_code,
                         "image_id": image_id,
@@ -591,6 +599,9 @@ class AttemptStorage:
                             now,
                         ),
                     )
+                elif run_state is RunState.PAUSED:
+                    outcome = AttemptState.INTERRUPTED
+                    reason = "provider recovery pause requested"
                 elif run_state in {
                     RunState.WAITING_FOR_INPUT,
                     RunState.QUEUED,
@@ -754,11 +765,14 @@ class AttemptStorage:
                 source_state = attempt["state"]
                 run_state = RunState(attempt["run_state"])
                 cancellation_requested = attempt["cancel_requested_at"] is not None
+                provider_paused = run_state is RunState.PAUSED
                 if run_state is RunState.CANCELLED or cancellation_requested:
                     outcome = AttemptState.CANCELLED
                 else:
                     outcome = (
-                        AttemptState.INTERRUPTED if interrupted else AttemptState.FAILED
+                        AttemptState.INTERRUPTED
+                        if interrupted or provider_paused
+                        else AttemptState.FAILED
                     )
                 if cancellation_requested:
                     cancellation_reason = attempt["cancel_reason"]
@@ -767,6 +781,9 @@ class AttemptStorage:
                         "requested_by": attempt["cancel_requested_by"],
                     }
                     self._cancel_open_interactions(connection, attempt["run_id"], now)
+                    self._cancel_active_provider_recoveries(
+                        connection, attempt["run_id"], now
+                    )
                     changed = connection.execute(
                         "UPDATE runs SET state = 'cancelled', "
                         "version = version + 1, updated_at = ?, finished_at = ? "
@@ -822,6 +839,7 @@ class AttemptStorage:
                 elif run_state not in {
                     RunState.QUEUED,
                     RunState.WAITING_FOR_INPUT,
+                    RunState.PAUSED,
                     RunState.CANCELLED,
                 }:
                     raise ConflictError(
@@ -847,7 +865,11 @@ class AttemptStorage:
                     "FROM run_attempt_events WHERE attempt_id = ?",
                     (attempt_id,),
                 ).fetchone()[0]
-                kind = "attempt.interrupted" if interrupted else "attempt.failed"
+                kind = (
+                    "attempt.interrupted"
+                    if outcome is AttemptState.INTERRUPTED
+                    else "attempt.failed"
+                )
                 connection.execute(
                     "INSERT INTO run_attempt_events "
                     "(attempt_id, sequence, kind, from_state, to_state, "
