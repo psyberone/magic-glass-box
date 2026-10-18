@@ -727,6 +727,166 @@ bounded evidence while its reusable credential remains absent from the worker,
 core database, and logs. GitLab, Jira, and other services remain independent
 add-ons that implement only the capability families they support.
 
+## Optional provider-auth track: Anthropic Console OAuth connector
+
+**Status: planned, non-blocking — does not gate or reorder Milestones 8B–11**
+
+This track is intentionally outside the numbered milestone sequence. It may be
+scheduled after Milestone 11; pulling it forward requires an explicit roadmap
+decision rather than silently displacing an existing item.
+
+> **DESIGN ONLY — NOT IMPLEMENTED:** No Anthropic connector module, CLI,
+> private configuration, example, or live proof exists yet. Claude Code
+> currently runs only through the API-key reference connector.
+
+Verified 2026-10-17: Anthropic publishes no equivalent of OpenAI's Sign in
+with ChatGPT. Its Claude Code terms forbid third-party applications from
+offering claude.ai login, routing requests through Free, Pro, or Max plan
+credentials, or intermediating session tokens. Anthropic also publishes no
+supported third-party route for presenting those subscription tokens outside
+Claude Code. The M7D connector shape, which re-originates the HTTPS request
+from its own process and holds the token in a connector-private store, is
+exactly that prohibited pattern for a subscription token. MGB therefore
+builds no subscription pass-through for Anthropic and never imitates Claude
+Code's identity headers to obtain one. The supported analog is a Claude
+Console OAuth profile: the ChatGPT connector's operator experience (sign in,
+no static secret, short-lived refreshable token, revocation, non-secret scope
+fingerprint) with API-rate billing to the Console organization, the same
+economics as the existing API-key route.
+
+**Subscription-auth watch:** revisit this boundary only when Anthropic
+publishes a supported third-party flow for Claude subscription credentials.
+That event triggers a fresh design and legal review; it does not automatically
+reorder this roadmap. Any resulting adapter must preserve connector-owned
+credentials and the existing worker-network isolation.
+
+- Delegate sign-in to Anthropic's own `ant auth login`, passing
+  `--no-browser` and `--workspace-id` through. Anthropic currently publishes
+  no third-party OAuth client-registration flow, so the connector implements
+  no authorization, token, or refresh exchange of its own. It runs the CLI with
+  `ANTHROPIC_CONFIG_DIR` pointed at a connector-private directory and the
+  fixed profile name `mgb`, and never reads `~/.config/anthropic`,
+  `~/.claude`, or any other installation's credentials.
+- Obtain the bearer token per invocation from
+  `ant auth print-credentials --profile mgb --access-token`, which
+  refreshes the roughly ten-minute token itself. The connector holds the
+  token only for the duration of one invocation, serializes CLI calls
+  under one lock, and never caches, logs, or returns it.
+- Derive the credential-scope fingerprint from non-secret profile metadata
+  read through `ant profile get --profile mgb --format json`: the SHA-256
+  of canonical JSON `{"base_url", "organization_id", "workspace_id"}`. A
+  profile whose authentication type is not `user_oauth`, whose base URL is
+  not `https://api.anthropic.com`, or which lacks either ID fails closed.
+- Send `Authorization: Bearer`, `anthropic-version: 2023-06-01`, and the
+  profile's `anthropic-workspace-id`, and merge `oauth-2025-04-20` into
+  the worker-forwarded `anthropic-beta` list by flag name, as the official
+  SDK does. The connector sends neither `x-api-key` nor any Claude Code
+  identity header; its user agent names this connector.
+- Accept only the pinned Claude Code request shape before HTTPS dispatch,
+  mirroring the OpenAI allowlist. A 2026-10-17 capture of
+  `claude --print --bare` 2.1.302 sends `POST /v1/messages?beta=true`
+  with exactly `messages`, `system`, `max_tokens`, `stream`, `tools`,
+  `metadata`, `thinking`, `context_management`, and `output_config` (plus
+  `model`, which the worker bridge removes); declares only the local
+  `Bash`, `Edit`, and `Read` tools with `name`, `description`, and
+  `input_schema`; and requests the betas `claude-code-20250219`,
+  `context-1m-2025-08-07`, `interleaved-thinking-2025-05-14`,
+  `thinking-token-count-2026-05-13`, `context-management-2025-06-27`,
+  `prompt-caching-scope-2026-01-05`, `per-turn-control-2026-07-01`, and
+  `effort-2025-11-24`. The capture is repeated against the image-pinned
+  CLI before the allowlist is frozen, and each route pins its allowed
+  beta set. Content is limited to `text`, `tool_use`, text-only
+  `tool_result`, `thinking`, and `redacted_thinking` blocks with optional
+  `cache_control`; `tool_choice` may name only declared tools; `metadata`
+  is exactly `{"user_id": <string>}`; and the trailing `system`-role
+  message carrying only `output_config.effort` is accepted solely when
+  `per-turn-control-2026-07-01` is forwarded. Any other top-level field,
+  beta flag, tool `type` (server, built-in, or MCP tools), `image`,
+  `document`, or hosted-tool block fails closed.
+- Replace the worker-selected model with the grant's pinned model, require
+  `stream: true`, and clamp `max_tokens` (Claude Code asks for 64,000) to
+  the v2 budget's `max_output_tokens`.
+- Normalize Messages usage for M8A: `input_tokens` plus
+  `cache_creation_input_tokens` from `message_start` become
+  `input_tokens`, `cache_read_input_tokens` becomes `cached_input_tokens`,
+  the final `message_delta` count becomes `output_tokens`, and reported
+  thinking tokens become `reasoning_output_tokens`. A completed stream
+  missing either usage object fails closed; cache-write premiums stay an
+  estimate.
+- Preserve Anthropic's machine-readable error type (`authentication_error`,
+  `rate_limit_error`, `overloaded_error`, and so on) and HTTP status as
+  bounded failure metadata so M8B can classify quota and overload
+  responses. A truncated stream, non-SSE success body, or any
+  post-dispatch loss is ambiguous and is never replayed.
+
+If scheduled, this track lands as three internal checkpoints with M7D's
+RED-first gates, the normal quality gate at each checkpoint, and the clean
+mutation gate at the completed boundary:
+
+1. **Anthropic.1 — profile ownership and operator surface:** add
+   `src/magic_glass_box/anthropic_console.py` with an `AntCLI` protocol,
+   `AntProcessCLI`, `AnthropicProfile`, `AnthropicConnectorRoute` (with an
+   explicit `betas` list), and `AnthropicConnectorConfig`; add
+   `src/magic_glass_box/anthropic_console_cli.py` with `login`, `status`,
+   `models`, and `serve`; register the
+   `magic-glass-box-anthropic-connector` entry point and
+   `scripts/anthropic_console_connector.py`; and move the framed
+   request/response helpers from the OpenAI CLI into `sidecar.py` so both
+   connectors share one carrier. `AntProcessCLI` runs `ant` with only
+   `PATH`, `HOME`, and `ANTHROPIC_CONFIG_DIR` in its environment, a
+   30-second timeout, and a 64 KiB output ceiling; the profile directory
+   must be an operator-owned mode-`0700` directory that is not a symlink.
+   Tests in `tests/test_anthropic_console.py` and
+   `tests/test_anthropic_console_cli.py` inject a fake CLI and prove that
+   `status` never prints a token, that a scrubbed environment and explicit
+   profile reach the CLI, that non-`user_oauth` and non-default base URL
+   profiles are refused, and that the fingerprint is stable. No Python
+   dependency is added.
+2. **Anthropic.2 — bounded Messages transport:** add `AnthropicMessagesClient`
+   over the existing `BoundedHTTPSClient` and `AnthropicConsoleConnector`,
+   whose authority check mirrors `OpenAIChatGPTConnector` with
+   `provider == "anthropic"` and `protocol == "anthropic-messages"`.
+   Tests replay the captured request through the allowlist, assert the
+   merged beta and bearer headers, reject every disallowed field and tool
+   type before HTTP, classify terminal, error, and truncated streams, and
+   fail closed on missing usage. The deterministic runtime proof
+   additionally records the tool names Claude Code declares and asserts
+   `Bash`, `Edit`, and `Read`, so a CLI bump that adds hosted tools fails
+   the gate. The reference connector and `ClaudeCodeRuntimeAdapter` are
+   unchanged: `scripts/reference_inference_connector.py` resolves its
+   credential once at startup and `provider.py` lets static headers
+   override forwarded ones, so neither can carry a rotating bearer token
+   with a merged beta list.
+3. **Anthropic.3 — bounded live proof:** add
+   `scripts/check_live_anthropic_console.py` and
+   `tests/test_live_anthropic_console.py` modeled on the OpenAI proof:
+   `--i-understand-this-bills-the-console-org` is required, one attempt,
+   no replay, `--max-invocations 6`, a 300-second ceiling, v2 budgets with
+   a $1 per-call maximum and a $5 run/project/grant ceiling at rates
+   pinned to the most expensive allowed model's list price, networkless
+   worker and gate containers, the credential-leak audit on success and
+   failure, and a recorded `ant --version`. Add
+   `examples/inference-connector-anthropic.json` and
+   `examples/inference-grant-anthropic.json`, and document the operator
+   flow in [inference-connectors.md](inference-connectors.md).
+
+**Exit proof:** a deterministic fake `ant` and SSE fixture complete one
+authorized `anthropic-messages` invocation through the new connector while
+wrong provider, protocol, scope, model, beta, tool type, and limit tuples
+fail before HTTPS. One explicitly opted-in Claude Code run then completes a
+disposable task billed to the operator's Console workspace; the token
+exists only inside the connector process and Anthropic's own profile
+directory, never in the worker container, MGB state or SQLite, retained
+results, runtime output, or logs. The proof reports reconciled usage under
+the pinned ceiling and stops at an issued landing plan. Subscription
+authentication is not inferred from this proof. A Workload Identity
+Federation profile for a daemonized connector is a later option that reuses
+the same module. See Anthropic's
+[CLI authentication](https://platform.claude.com/docs/en/cli-sdks-libraries/cli/authentication)
+and
+[Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
+pages.
+
 ## Continuous gates
 
 Every milestone retains the existing RED-first workflow, happy-path and
