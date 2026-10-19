@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import socket
 import threading
+import time
 import unittest
 from collections import Counter
 from html.parser import HTMLParser
@@ -1843,9 +1844,9 @@ class ControlRoomWebTests(unittest.TestCase):
                 csrf_token=ACCESS_TOKEN,
             )
 
-    def test_stalled_connections_have_a_bounded_socket_idle_time(self) -> None:
-        self.assertFalse(ControlRoomHTTPServer.daemon_threads)
-        self.assertTrue(ControlRoomHTTPServer.block_on_close)
+    def test_stalled_connections_have_a_bounded_absolute_lifetime(self) -> None:
+        self.assertTrue(ControlRoomHTTPServer.daemon_threads)
+        self.assertFalse(ControlRoomHTTPServer.block_on_close)
         self.assertIsInstance(_ControlRoomHandler.timeout, float)
         self.assertEqual(_ControlRoomHandler.timeout, 15.0)
 
@@ -1856,6 +1857,22 @@ class ControlRoomWebTests(unittest.TestCase):
             client.settimeout(1)
             client.sendall(b"POST /incomplete HTTP/1.1\r\nHost: 127.0.0.1")
             self.assertEqual(client.recv(1), b"")
+
+        with (
+            mock.patch.object(_ControlRoomHandler, "timeout", 0.08),
+            socket.create_connection(self.server.server_address, timeout=1) as client,
+        ):
+            client.settimeout(1)
+            closed = False
+            for byte in b"GET /slow HTTP/1.1\r\n":
+                try:
+                    client.sendall(bytes([byte]))
+                except OSError:
+                    closed = True
+                    break
+                time.sleep(0.03)
+            if not closed:
+                self.assertEqual(client.recv(1), b"")
 
 
 if __name__ == "__main__":

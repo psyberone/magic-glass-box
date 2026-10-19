@@ -639,6 +639,69 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             )
         self.assertEqual(len(self.client.calls), 1)
 
+    def test_non_success_usage_cannot_undercharge_an_ambiguous_call(self) -> None:
+        run = self.create_budgeted_run()
+        original_invoke = self.client.invoke
+
+        def ambiguous_with_usage(
+            request: InferenceInvocationRequest,
+        ) -> InferenceInvocationResponse:
+            self.client.outcome = "ambiguous"
+            self.client.error_code = "reply_lost"
+            self.client.provider_status = None
+            response = original_invoke(request)
+            return replace(
+                response,
+                usage=InferenceUsage(
+                    input_tokens=1,
+                    cached_input_tokens=0,
+                    output_tokens=0,
+                    reasoning_output_tokens=0,
+                ),
+            )
+
+        self.client.invoke = ambiguous_with_usage  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(ProviderError, "ambiguous"):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "one"}
+            )
+
+        invocation = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(invocation["outcome"], "ambiguous")
+        self.assertEqual(invocation["accounting_status"], "conservative")
+        self.assertEqual(invocation["accounted_microusd"], 10_000)
+        self.assertIsNone(invocation["input_tokens"])
+
+    def test_successful_reported_overrun_is_retained_and_blocks_future_spend(
+        self,
+    ) -> None:
+        run = self.create_budgeted_run(run_microusd=30_000)
+        self.client.usage = {
+            "input_tokens": 20_000,
+            "cached_input_tokens": 0,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 1,
+        }
+
+        accepted = self.control.invoke_provider(
+            run["id"], grant_name="budget-main", request={"input": "one"}
+        )
+
+        self.assertEqual(accepted.estimated_microusd, 20_010)
+        invocation = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(invocation["outcome"], "succeeded")
+        self.assertEqual(invocation["accounting_status"], "reported")
+        self.assertEqual(invocation["reserved_microusd"], 10_000)
+        self.assertEqual(invocation["accounted_microusd"], 20_010)
+        budget = ControlRoom(self.database).snapshot()["provider_budgets"][0]
+        self.assertEqual(budget["remaining_microusd"]["run"], 9_990)
+        with self.assertRaises(ProviderBudgetError):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "two"}
+            )
+        self.assertEqual(len(self.client.calls), 1)
+
     def test_connector_is_the_only_dispatch_path_and_ledger_pins_authority(
         self,
     ) -> None:
@@ -1411,6 +1474,9 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TRIGGER integration_landing_plan_nonce_immutable_update;
+                DROP TRIGGER integration_landing_plan_nonce_immutable_delete;
+                DROP TABLE integration_landing_plan_nonces;
                 DROP TABLE attempt_recovery_applications;
                 DROP TABLE attempt_recovery_checkpoints;
                 DROP INDEX attempt_result_identity;

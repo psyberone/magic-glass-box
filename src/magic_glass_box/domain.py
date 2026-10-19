@@ -237,6 +237,73 @@ class WorkItemEnvelope:
     labels: tuple[str, ...] = ()
     priority: WorkItemPriority = WorkItemPriority.NORMAL
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, bool)
+            or self.schema_version != WORK_ITEM_SCHEMA_VERSION
+        ):
+            raise ValidationError(f"schema_version must be {WORK_ITEM_SCHEMA_VERSION}")
+        if (
+            not isinstance(self.source, str)
+            or WORK_ITEM_SOURCE_RE.fullmatch(self.source) is None
+        ):
+            raise ValidationError("source must match [a-z][a-z0-9_.-]{0,63}")
+        object.__setattr__(
+            self,
+            "external_id",
+            _nonblank_string(self.external_id, field="external_id", max_bytes=512),
+        )
+        object.__setattr__(
+            self, "source_updated_at", self._timestamp(self.source_updated_at)
+        )
+        object.__setattr__(
+            self,
+            "title",
+            _nonblank_string(self.title, field="title", max_bytes=512),
+        )
+        object.__setattr__(
+            self,
+            "brief",
+            _nonblank_string(self.brief, field="brief", max_bytes=65536),
+        )
+        for field, maximum, item_bytes in (
+            ("acceptance_criteria", 128, 4096),
+            ("constraints", 128, 4096),
+            ("labels", 64, 128),
+        ):
+            raw = getattr(self, field)
+            if isinstance(raw, tuple):
+                raw = list(raw)
+            object.__setattr__(
+                self,
+                field,
+                _nonblank_tuple(
+                    raw,
+                    field=field,
+                    maximum=maximum,
+                    item_bytes=item_bytes,
+                ),
+            )
+        raw_context = self.context
+        if not isinstance(raw_context, (list, tuple)) or len(raw_context) > 128:
+            raise ValidationError("context must be a list of at most 128 entries")
+        context: list[WorkItemContext] = []
+        for index, entry in enumerate(raw_context):
+            if not isinstance(entry, WorkItemContext):
+                raise ValidationError(f"context[{index}] must be a WorkItemContext")
+            context.append(WorkItemContext.from_mapping(entry.to_dict(), index=index))
+        if len(set(context)) != len(context):
+            raise ValidationError("context entries must be unique")
+        object.__setattr__(self, "context", tuple(context))
+        try:
+            object.__setattr__(self, "priority", WorkItemPriority(self.priority))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("priority is invalid") from exc
+        if len(self.canonical.encode("utf-8")) > MAX_WORK_ITEM_CONTENT_BYTES:
+            raise ValidationError(
+                f"work item content exceeds {MAX_WORK_ITEM_CONTENT_BYTES} UTF-8 bytes"
+            )
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> WorkItemEnvelope:
         if not isinstance(value, dict):

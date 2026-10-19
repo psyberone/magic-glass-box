@@ -4,6 +4,7 @@ import html
 import ipaddress
 import secrets
 import socket
+import threading
 from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ MAX_FORM_FIELDS = 8
 TOKEN_MIN_LENGTH = 32
 TOKEN_MAX_LENGTH = 128
 CONTROL_ROOM_SOCKET_TIMEOUT_SECONDS = 15.0
+MAX_CONTROL_ROOM_HANDLERS = 32
 ACTIVE_RUN_STATES = {
     "queued",
     "preparing",
@@ -1134,8 +1136,8 @@ def _required(fields: Mapping[str, str], name: str, maximum: int) -> str:
 
 
 class ControlRoomHTTPServer(ThreadingHTTPServer):
-    daemon_threads = False
-    block_on_close = True
+    daemon_threads = True
+    block_on_close = False
     allow_reuse_address = False
 
     def __init__(
@@ -1153,6 +1155,7 @@ class ControlRoomHTTPServer(ThreadingHTTPServer):
         self.access_token = access_token
         self.csrf_token = csrf_token
         self.history_limit = history_limit
+        self._handler_slots = threading.BoundedSemaphore(MAX_CONTROL_ROOM_HANDLERS)
         super().__init__(server_address, _ControlRoomHandler)
         bound_host, bound_port = self.server_address[:2]
         display_host = f"[{bound_host}]" if ":" in bound_host else bound_host
@@ -1160,6 +1163,26 @@ class ControlRoomHTTPServer(ThreadingHTTPServer):
         self.authority = f"{display_host}:{bound_port}"
         self.root_path = f"/{self.access_token}/"
         self.control_url = self.origin + self.root_path
+
+    def process_request(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        if not self._handler_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._handler_slots.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._handler_slots.release()
 
 
 class _ControlRoomHTTPServerV6(ControlRoomHTTPServer):
@@ -1173,6 +1196,24 @@ class _ControlRoomHandler(BaseHTTPRequestHandler):
     # request headers. It therefore bounds incomplete headers, partial bodies,
     # idle keep-alive connections, and stalled response writes.
     timeout = CONTROL_ROOM_SOCKET_TIMEOUT_SECONDS
+
+    def setup(self) -> None:
+        super().setup()
+        self._lifetime_timer = threading.Timer(
+            float(self.timeout), self._expire_connection
+        )
+        self._lifetime_timer.daemon = True
+        self._lifetime_timer.start()
+
+    def finish(self) -> None:
+        self._lifetime_timer.cancel()
+        super().finish()
+
+    def _expire_connection(self) -> None:
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            return
 
     def log_message(self, _format: str, *_args: object) -> None:
         return

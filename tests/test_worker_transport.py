@@ -25,6 +25,7 @@ from magic_glass_box.worker_transport import (
     ProviderRetryableTransportError,
     WorkerTransportError,
     _strict_json,
+    _TransportHandler,
     _TransportServer,
     main,
 )
@@ -421,6 +422,10 @@ class RecordingGateway:
 
 
 class ProviderHTTPTransportTests(unittest.TestCase):
+    def test_loopback_handler_has_a_bounded_idle_timeout(self) -> None:
+        self.assertIsInstance(_TransportHandler.timeout, float)
+        self.assertGreater(_TransportHandler.timeout, 0)
+
     def test_vendor_dialects_strip_model_and_forward_buffered_sse(self) -> None:
         cases = (
             ("openai-responses", "/v1/responses"),
@@ -534,6 +539,32 @@ class ProviderHTTPTransportTests(unittest.TestCase):
                     {"x-codex-beta-features": value},
                 )
 
+        transport.invoke(
+            "/v1/responses",
+            request,
+            headers={
+                "OpenAI-Beta": "responses=v1",
+                "X-Codex-Beta-Features": "tools",
+            },
+        )
+        self.assertEqual(
+            gateway.calls[-1][1]["request"]["headers"],
+            {
+                "openai-beta": "responses=v1",
+                "x-codex-beta-features": "tools",
+            },
+        )
+
+        with self.assertRaisesRegex(WorkerTransportError, "header"):
+            transport.invoke(
+                "/v1/responses",
+                request,
+                headers={
+                    "OpenAI-Beta": "one",
+                    "openai-beta": "two",
+                },
+            )
+
         rejected: tuple[object, ...] = (
             "",
             "feature\nvalue",
@@ -551,7 +582,7 @@ class ProviderHTTPTransportTests(unittest.TestCase):
                     request,
                     headers={"x-codex-beta-features": value},  # type: ignore[dict-item]
                 )
-        self.assertEqual(len(gateway.calls), len(accepted))
+        self.assertEqual(len(gateway.calls), len(accepted) + 1)
 
     def test_gateway_errors_and_malformed_responses_are_redacted(self) -> None:
         gateway = RecordingGateway("openai-responses")

@@ -42,9 +42,10 @@ Run the fast gate while developing:
 make quality
 ```
 
-The project requires at least **85% branch coverage** over the
-`magic_glass_box` package. Coverage is a floor and a gap-finding tool, not a
-substitute for assertions that demonstrate useful behavior.
+The project requires at least **85% aggregate statement-and-branch coverage**
+over the `magic_glass_box` package, using Coverage.py's combined percentage
+with branch measurement enabled. Coverage is a floor and a gap-finding tool,
+not a substitute for assertions that demonstrate useful behavior.
 
 Run mutation testing before merging a substantial behavior change:
 

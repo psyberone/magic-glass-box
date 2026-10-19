@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import math
 import re
+import socket
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,6 +45,57 @@ WORK_CLAIM_STATUSES = {
     "done",
 }
 WORK_CLAIM_PATHS = {"issue": "issues", "pull_request": "pull-requests"}
+
+
+def _remaining_http_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Krab request deadline expired")
+    return remaining
+
+
+def _apply_http_deadline(connection: Any, deadline: float) -> None:
+    remaining = _remaining_http_time(deadline)
+    if hasattr(connection, "timeout"):
+        connection.timeout = remaining
+    active_socket = getattr(connection, "sock", None)
+    if active_socket is not None:
+        active_socket.settimeout(remaining)
+
+
+def _expire_http_connection(connection: Any) -> None:
+    active_socket = getattr(connection, "sock", None)
+    if active_socket is not None:
+        with contextlib.suppress(OSError):
+            active_socket.shutdown(socket.SHUT_RDWR)
+    with contextlib.suppress(OSError):
+        connection.close()
+
+
+def _read_bounded_http_body(
+    response: Any,
+    connection: Any,
+    *,
+    deadline: float,
+    maximum: int,
+) -> bytes:
+    read_once = getattr(response, "read1", None)
+    if not callable(read_once):
+        _apply_http_deadline(connection, deadline)
+        raw = response.read(maximum + 1)
+        _apply_http_deadline(connection, deadline)
+        return raw
+    chunks: list[bytes] = []
+    size = 0
+    while size <= maximum:
+        _apply_http_deadline(connection, deadline)
+        chunk = read_once(min(64 * 1024, maximum + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    _apply_http_deadline(connection, deadline)
+    return b"".join(chunks)
 
 
 class KrabError(RuntimeError):
@@ -538,10 +593,21 @@ class KrabClient:
             )
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
+        deadline = time.monotonic() + self.timeout
         connection = self._connection_factory(self.host, self.port, self.timeout)
+        watchdog = threading.Timer(
+            max(0.0, deadline - time.monotonic()),
+            _expire_http_connection,
+            (connection,),
+        )
+        watchdog.daemon = True
+        watchdog.start()
         try:
+            _apply_http_deadline(connection, deadline)
             connection.request(method, target, body=body, headers=headers)
+            _apply_http_deadline(connection, deadline)
             response = connection.getresponse()
+            _apply_http_deadline(connection, deadline)
             declared = response.getheader("Content-Length")
             if declared is not None:
                 try:
@@ -550,7 +616,12 @@ class KrabClient:
                     raise KrabError("Krab returned invalid Content-Length") from exc
                 if declared_size < 0 or declared_size > MAX_RESPONSE_BYTES:
                     raise KrabError("Krab response exceeds the size limit")
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            raw = _read_bounded_http_body(
+                response,
+                connection,
+                deadline=deadline,
+                maximum=MAX_RESPONSE_BYTES,
+            )
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise KrabError("Krab response exceeds the size limit")
             status = response.status
@@ -565,6 +636,7 @@ class KrabClient:
             )
             raise KrabError(f"Krab is unavailable: {exc}{retry}") from None
         finally:
+            watchdog.cancel()
             connection.close()
         payload = _strict_json(raw)
         if status >= 400:

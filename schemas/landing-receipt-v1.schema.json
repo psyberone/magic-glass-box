@@ -24,13 +24,6 @@
     "request_sha256": { "$ref": "#/$defs/sha256" },
     "schema_version": { "const": 1 }
   },
-  "allOf": [
-    {
-      "if": { "properties": { "outcome": { "const": "landed" } }, "required": ["outcome"] },
-      "then": { "properties": { "assurance": { "const": "base_and_head_enforced" } } },
-      "else": { "properties": { "assurance": { "const": "operator_attested" } } }
-    }
-  ],
   "$defs": {
     "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }

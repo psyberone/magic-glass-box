@@ -278,6 +278,26 @@ class CandidateKernelTests(unittest.TestCase):
             first,
         )
 
+    def test_candidate_import_rejects_a_source_backed_by_git_alternates(self) -> None:
+        shared = self.root / "shared-source"
+        git(
+            self.git_binary,
+            "clone",
+            "--quiet",
+            "--shared",
+            "--no-checkout",
+            str(self.repository),
+            str(shared),
+            cwd=self.root,
+        )
+        alternate = shared / ".git" / "objects" / "info" / "alternates"
+        self.assertTrue(alternate.read_text(encoding="utf-8").strip())
+
+        with self.assertRaisesRegex(CandidateError, "alternates"):
+            self.store.materialize(self.project_id, shared, self.result, self.blobs)
+
+        self.assertFalse(self.candidate_repository().exists())
+
     def test_refolds_original_result_onto_new_base_and_recovers_exact_revision(
         self,
     ) -> None:

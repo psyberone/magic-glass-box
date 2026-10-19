@@ -120,9 +120,10 @@ stylesheet. The page has no JavaScript and loads no external assets.
 
 The Host header, path capability, form content type, body size, exact field
 set, duplicate fields, CSRF token, and optimistic object version are all
-checked before an action reaches the control plane. Accepted sockets have a
-15-second idle timeout so incomplete headers, partial bodies, idle keep-alive
-connections, and stalled writes cannot retain a handler thread indefinitely.
+checked before an action reaches the control plane. At most 32 accepted sockets
+have handler authority at once. Each has both a 15-second socket-idle timeout
+and a 15-second absolute lifetime, so slow-dripped headers or bodies cannot
+retain daemonized handler capacity or delay server shutdown indefinitely.
 Visible titles and every other rendered value are HTML-escaped. Errors returned
 to the browser do not include credential, filesystem, upstream, or cleanup
 details.

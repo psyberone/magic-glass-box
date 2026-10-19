@@ -29,7 +29,12 @@ from .path_safety import (
     validate_symlink_target,
 )
 from .results import FileState, ResultManifest
-from .workspace import GitSnapshotter, SnapshotResult, WorkspaceError
+from .workspace import (
+    GitSnapshotter,
+    SnapshotResult,
+    WorkspaceError,
+    validate_git_source,
+)
 
 CANDIDATE_SCHEMA_VERSION = 1
 OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -359,6 +364,10 @@ class GitCandidateStore:
             raise CandidateError(
                 "candidate source repository must not be a filesystem root"
             )
+        try:
+            validate_git_source(resolved)
+        except WorkspaceError as exc:
+            raise CandidateError(str(exc)) from exc
         return resolved
 
     def _environment(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:

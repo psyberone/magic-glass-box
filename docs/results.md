@@ -17,6 +17,14 @@ workspace and retains:
 - safe relative symlink targets; and
 - the full pinned source revision.
 
+The registered source must have a real local Git directory and object store.
+Gitfile and `commondir` redirects (including linked worktrees), symlinks or
+special files anywhere in the object store, and non-empty
+`objects/info/alternates` or `http-alternates` are rejected before a snapshot
+or candidate import. This one boundary walk keeps object reads inside the
+admitted source repository rather than repeatedly distrusting private state
+after capture.
+
 Gitlinks are represented as empty directories because submodules are never
 initialized or recursed. Those placeholders are materialized mode `0555` so
 ordinary package managers and build tools fail immediately instead of writing

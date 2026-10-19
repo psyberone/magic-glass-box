@@ -45,6 +45,13 @@ Control-plane schema v21 adds immutable attempt recovery-checkpoint selections
 and append-only application receipts. These are internal SQLite records over an
 existing bounded result manifest, not a new portable worker-authored document.
 
+Control-plane schema v22 adds append-only landing-plan nonce generations and
+allows successful reported provider accounting to exceed its pre-dispatch
+reservation. The portable inference-response v2 contract permits usage only on
+successful outcomes; failed and ambiguous outcomes must carry `null` usage.
+Connector-owned request expansion remains bounded separately from the worker's
+request-byte authority.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

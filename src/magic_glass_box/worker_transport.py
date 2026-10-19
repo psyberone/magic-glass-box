@@ -474,12 +474,16 @@ class ProviderHTTPTransport:
             raise WorkerTransportError("provider request must use streaming")
         forwarded_headers: dict[str, str] = {}
         if headers is not None:
-            for name in self.HEADERS[self.dialect]:
-                header = headers.get(name)
-                if header is None:
+            allowed_headers = self.HEADERS[self.dialect]
+            for raw_name, header in headers.items():
+                if not isinstance(raw_name, str):
+                    continue
+                name = raw_name.lower()
+                if name not in allowed_headers:
                     continue
                 if (
-                    not isinstance(header, str)
+                    name in forwarded_headers
+                    or not isinstance(header, str)
                     or not header
                     or len(header) > 8192
                     or any(not 0x20 <= ord(character) <= 0x7E for character in header)
@@ -585,6 +589,7 @@ class _TransportServer(ThreadingHTTPServer):
 
 class _TransportHandler(BaseHTTPRequestHandler):
     server: _TransportServer
+    timeout = 5.0
 
     def do_POST(self) -> None:  # noqa: N802
         declared = self.headers.get("Content-Length")

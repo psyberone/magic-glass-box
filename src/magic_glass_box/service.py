@@ -598,6 +598,20 @@ class ControlPlane:
     def get_landing_plan(self, plan_id: str) -> dict[str, Any]:
         return self.database.get_landing_plan(plan_id)
 
+    def reissue_landing_plan_nonce(
+        self,
+        plan_id: str,
+        *,
+        expected_generation: int,
+        reissued_by_handle: str,
+    ) -> dict[str, Any]:
+        issuer = self.database.get_user(reissued_by_handle)
+        return self.database.reissue_landing_plan_nonce(
+            plan_id,
+            expected_generation=expected_generation,
+            reissued_by=issuer["id"],
+        )
+
     def list_integration_queue(
         self, *, project_key: str | None = None, limit: int = 100
     ) -> list[dict[str, Any]]:

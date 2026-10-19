@@ -205,14 +205,21 @@ project-activity projection.
   evidence and making the call appear safely retryable.
 - Schema v19 adds protocol-v2 budget authority and content-free normalized
   usage. One `BEGIN IMMEDIATE` transaction checks every applicable ceiling and
-  records the allowance before dispatch; exact provider counters release the
-  unused allowance, known pre-dispatch failure releases it all, and uncertainty
-  conservatively consumes the full reservation.
+  records the allowance before dispatch; successful provider counters release
+  unused allowance or honestly account a paid overrun, known pre-dispatch
+  failure releases it all, and uncertainty conservatively consumes the full
+  reservation.
 - Schema v20 adds provider-recovery identity and a first-class `paused` run
   state. Explicit quota, rate-limit, and overload failures atomically finalize
   the invocation and pause the same run under bounded timing. The supervisor
   requeues it only after its active attempt and open interactions are resolved;
   cancellation permanently settles the pending wake.
+- Schema v21 pins one verified retained-result checkpoint and immutable apply
+  receipt for destructive replacement recovery.
+- Schema v22 retains every landing-plan nonce generation so lost output can be
+  rotated without releasing the lane, exposes only the newest 32 generations
+  in control-plane views, and admits successful reported provider usage above
+  its pre-dispatch estimate.
 - Every run transition is appended to an immutable event stream and guarded by
   optimistic concurrency.
 - Supervisor actions bind an operation to one subject version and use their own
@@ -273,7 +280,8 @@ advance it to schema v17. Audited attempt-owner takeover and stale-owner
 transition fencing advance it to schema v18. Provider budget reservations and
 normalized usage accounting advance it to schema v19. Quota-aware paused-run
 recovery advances it to schema v20. Immutable attempt recovery selections and
-application receipts advance it to schema v21.
+application receipts advance it to schema v21. Append-only landing-nonce
+generations and honest reported provider overruns advance it to schema v22.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted

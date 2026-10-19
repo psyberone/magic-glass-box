@@ -450,11 +450,15 @@ class ArtifactSchemaContractTests(unittest.TestCase):
 
         validator, receipt = self.load("landing-receipt")
         false_assurance = copy.deepcopy(receipt)
-        false_assurance["assurance"] = "operator_attested"
+        false_assurance["assurance"] = "head_enforced"
         with self.assertRaises(SchemaValidationError):
             validator.validate(false_assurance)
         with self.assertRaises(IntegrationError):
             LandingReceipt.from_mapping(false_assurance)
+        legacy_actuator_assurance = copy.deepcopy(receipt)
+        legacy_actuator_assurance["assurance"] = "base_and_head_enforced"
+        validator.validate(legacy_actuator_assurance)
+        LandingReceipt.from_mapping(legacy_actuator_assurance)
 
         validator, fold = self.load("integration-fold")
         wrong_format = copy.deepcopy(fold)
@@ -644,6 +648,13 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             validator.validate(success_without_usage)
         with self.assertRaises(ValidationError):
             InferenceInvocationResponse.from_mapping(success_without_usage)
+
+        ambiguous_with_usage = copy.deepcopy(ambiguous)
+        ambiguous_with_usage["usage"] = copy.deepcopy(example["usage"])
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(ambiguous_with_usage)
+        with self.assertRaisesRegex(ValidationError, "non-successful.*usage"):
+            InferenceInvocationResponse.from_mapping(ambiguous_with_usage)
 
         ambiguous_with_retry = copy.deepcopy(ambiguous)
         ambiguous_with_retry["retry_after_seconds"] = 45

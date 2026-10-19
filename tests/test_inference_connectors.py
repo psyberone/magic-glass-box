@@ -15,6 +15,7 @@ from unittest import mock
 
 from magic_glass_box.domain import ProviderGrantSpec, ValidationError
 from magic_glass_box.inference import (
+    MAX_CONNECTOR_REQUEST_EXPANSION,
     InferenceBudgetPolicy,
     InferenceConnectorAmbiguousError,
     InferenceConnectorError,
@@ -342,11 +343,49 @@ class InferenceContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "output token bound"):
             InferenceInvocationResponse.from_mapping(over_budget)
 
-        over_input_bound = copy.deepcopy(response_value)
-        over_input_bound["usage"]["input_tokens"] = 65_537
-        over_input_bound["usage"]["cached_input_tokens"] = 0
-        with self.assertRaisesRegex(ValidationError, "request token bound"):
-            InferenceInvocationResponse.from_mapping(over_input_bound)
+        # Upstream usage can include provider-owned instructions and tool
+        # formatting that were never present in the worker's request bytes.
+        # It remains valid reported usage even when it exceeds the conservative
+        # pre-dispatch reservation estimate.
+        reported_overrun = copy.deepcopy(response_value)
+        reported_overrun["usage"].update(
+            {
+                "input_tokens": 100_000,
+                "cached_input_tokens": 0,
+                "output_tokens": 100,
+            }
+        )
+        parsed_overrun = InferenceInvocationResponse.from_mapping(reported_overrun)
+        assert parsed_overrun.usage is not None
+        self.assertEqual(parsed_overrun.usage.input_tokens, 100_000)
+        self.assertGreater(
+            budget.estimate_microusd(parsed_overrun.usage),
+            parsed_overrun.budget.reservation_microusd,  # type: ignore[union-attr]
+        )
+
+        connector_expanded = copy.deepcopy(response_value)
+        connector_expanded["request_bytes"] = (
+            request.request_limit_bytes + MAX_CONNECTOR_REQUEST_EXPANSION
+        )
+        self.assertEqual(
+            InferenceInvocationResponse.from_mapping(connector_expanded).request_bytes,
+            connector_expanded["request_bytes"],
+        )
+        connector_expanded["request_bytes"] += 1
+        with self.assertRaisesRegex(ValidationError, "request_bytes"):
+            InferenceInvocationResponse.from_mapping(connector_expanded)
+
+        failed_with_usage = copy.deepcopy(response_value)
+        failed_with_usage.update(
+            {
+                "outcome": "ambiguous",
+                "provider_status": None,
+                "error_code": "reply_lost",
+                "response": None,
+            }
+        )
+        with self.assertRaisesRegex(ValidationError, "non-successful.*usage"):
+            InferenceInvocationResponse.from_mapping(failed_with_usage)
 
         bad_usage = usage.to_dict()
         bad_usage["cached_input_tokens"] = 1_001
@@ -427,7 +466,7 @@ class InferenceContractTests(unittest.TestCase):
 
         underfunded = copy.deepcopy(budgeted_grant)
         underfunded["budget"]["invocation_microusd"] = 91_919
-        with self.assertRaisesRegex(ValidationError, "worst-case token bounds"):
+        with self.assertRaisesRegex(ValidationError, "reservation estimate"):
             v2_connector.validate_grant(
                 "openai-personal", InferenceGrantSpec.from_mapping(underfunded)
             )
@@ -536,7 +575,7 @@ class ReferenceConnectorAccountingTests(unittest.TestCase):
             broker=OversizedBroker(),  # type: ignore[arg-type]
         )
 
-        self.assertEqual(response["request_bytes"], request.request_limit_bytes)
+        self.assertEqual(response["request_bytes"], request.request_limit_bytes + 1)
         self.assertEqual(response["response_bytes"], request.response_limit_bytes)
 
     def test_reference_connector_enforces_complete_authority_and_deadline(self) -> None:

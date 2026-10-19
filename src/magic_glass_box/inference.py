@@ -27,9 +27,12 @@ SUPPORTED_INFERENCE_CONNECTOR_PROTOCOL_VERSIONS = frozenset({1, 2})
 MAX_CONNECTOR_ROUTES = 32
 MAX_ROUTE_MODELS = 64
 MAX_CONNECTOR_FRAME_OVERHEAD = 64 * 1024
+# A connector may add only its pinned model and provider-enforced output limit
+# after the worker request crosses the control-plane byte boundary.
+MAX_CONNECTOR_REQUEST_EXPANSION = 512
 # JSON may encode one raw control byte as a six-byte ``\u00xx`` escape.
 MAX_CONNECTOR_RESPONSE_EXPANSION = 6
-MAX_INPUT_TOKENS_PER_REQUEST_BYTE = 4
+RESERVATION_INPUT_TOKENS_PER_REQUEST_BYTE = 4
 MAX_PROVIDER_RETRY_AFTER_SECONDS = 30 * 24 * 60 * 60
 MAX_UNIX_SOCKET_PATH_BYTES = 100
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -424,13 +427,15 @@ class InferenceInvocationBudget:
         )
         return (numerator + 999_999) // 1_000_000
 
-    def maximum_invocation_microusd(self, request_limit_bytes: int) -> int:
+    def minimum_reservation_microusd(self, request_limit_bytes: int) -> int:
         request_limit_bytes = _request_bytes(
             request_limit_bytes, field="request_limit_bytes"
         )
-        maximum_input_tokens = request_limit_bytes * MAX_INPUT_TOKENS_PER_REQUEST_BYTE
+        estimated_input_tokens = (
+            request_limit_bytes * RESERVATION_INPUT_TOKENS_PER_REQUEST_BYTE
+        )
         numerator = (
-            maximum_input_tokens * self.input_microusd_per_million_tokens
+            estimated_input_tokens * self.input_microusd_per_million_tokens
             + self.max_output_tokens * self.output_microusd_per_million_tokens
         )
         return (numerator + 999_999) // 1_000_000
@@ -608,8 +613,8 @@ class InferenceBudgetPolicy:
     def estimate_microusd(self, usage: InferenceUsage) -> int:
         return self.invocation_authority().estimate_microusd(usage)
 
-    def maximum_invocation_microusd(self, request_limit_bytes: int) -> int:
-        return self.invocation_authority().maximum_invocation_microusd(
+    def minimum_reservation_microusd(self, request_limit_bytes: int) -> int:
+        return self.invocation_authority().minimum_reservation_microusd(
             request_limit_bytes
         )
 
@@ -727,11 +732,11 @@ class InferenceConnectorSpec:
             raise ValidationError("connector protocol version 2 requires a budget")
         if (
             grant.budget is not None
-            and grant.budget.maximum_invocation_microusd(grant.request_bytes)
+            and grant.budget.minimum_reservation_microusd(grant.request_bytes)
             > grant.budget.invocation_microusd
         ):
             raise ValidationError(
-                "grant invocation budget cannot cover its worst-case token bounds"
+                "grant invocation budget cannot cover its reservation estimate"
             )
         for field in (
             "request_bytes",
@@ -877,11 +882,11 @@ def _invocation_authority(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if (
         budget is not None
-        and budget.maximum_invocation_microusd(request_limit_bytes)
+        and budget.minimum_reservation_microusd(request_limit_bytes)
         > budget.reservation_microusd
     ):
         raise ValidationError(
-            "inference invocation reservation cannot cover its token bounds"
+            "inference invocation reservation cannot cover its estimate"
         )
     return {
         "schema_version": _schema_version(value["schema_version"]),
@@ -1048,7 +1053,9 @@ class InferenceInvocationResponse:
             value["request_bytes"],
             field="request_bytes",
             minimum=0,
-            maximum=authority["request_limit_bytes"],
+            maximum=(
+                authority["request_limit_bytes"] + MAX_CONNECTOR_REQUEST_EXPANSION
+            ),
         )
         response_bytes = _bounded_integer(
             value["response_bytes"],
@@ -1077,25 +1084,19 @@ class InferenceInvocationResponse:
         if version == 2:
             raw_usage = value["usage"]
             if raw_usage is not None:
+                if outcome != "succeeded":
+                    raise ValidationError(
+                        "non-successful inference invocation cannot report usage"
+                    )
                 if not isinstance(raw_usage, dict):
                     raise ValidationError("inference usage must be an object")
                 usage = InferenceUsage.from_mapping(raw_usage)
                 budget = authority["budget"]
                 assert isinstance(budget, InferenceInvocationBudget)
-                if (
-                    usage.input_tokens
-                    > authority["request_limit_bytes"]
-                    * MAX_INPUT_TOKENS_PER_REQUEST_BYTE
-                ):
-                    raise ValidationError(
-                        "reported input usage exceeds the request token bound"
-                    )
                 if usage.output_tokens > budget.max_output_tokens:
                     raise ValidationError(
                         "reported output usage exceeds the output token bound"
                     )
-                if budget.estimate_microusd(usage) > budget.reservation_microusd:
-                    raise ValidationError("reported usage exceeds the reserved budget")
         raw_retry_after = value.get("retry_after_seconds")
         retry_after_seconds: int | None = None
         if raw_retry_after is not None:

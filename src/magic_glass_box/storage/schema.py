@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -2744,6 +2744,270 @@ BEGIN
 END;
 """
 
+LANDING_PLAN_NONCE_SCHEMA = """
+CREATE TABLE integration_landing_plan_nonces (
+    plan_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    nonce_sha256 TEXT NOT NULL CHECK (length(nonce_sha256) = 64),
+    issued_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (plan_id, generation),
+    FOREIGN KEY (plan_id)
+        REFERENCES integration_landing_plans(id) ON DELETE RESTRICT,
+    FOREIGN KEY (issued_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO integration_landing_plan_nonces (
+    plan_id, generation, nonce_sha256, issued_by, created_at
+)
+SELECT id, 1, nonce_sha256, issued_by, created_at
+FROM integration_landing_plans;
+
+CREATE TRIGGER integration_landing_plan_nonce_immutable_update
+BEFORE UPDATE ON integration_landing_plan_nonces
+BEGIN
+    SELECT RAISE(ABORT, 'landing plan nonces are immutable');
+END;
+CREATE TRIGGER integration_landing_plan_nonce_immutable_delete
+BEFORE DELETE ON integration_landing_plan_nonces
+BEGIN
+    SELECT RAISE(ABORT, 'landing plan nonces are immutable');
+END;
+"""
+
+PROVIDER_REPORTED_OVERRUN_SCHEMA = """
+CREATE TABLE provider_invocations_v22 AS
+SELECT * FROM provider_invocations;
+
+DROP TABLE provider_invocations;
+
+CREATE TABLE provider_invocations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    provider_grant_id TEXT NOT NULL,
+    dispatch_kind TEXT NOT NULL CHECK (
+        dispatch_kind IN ('direct', 'connector')
+    ),
+    inference_connector_id TEXT,
+    connector_protocol_version INTEGER,
+    deployment_sha256 TEXT,
+    route TEXT,
+    policy_sha256 TEXT,
+    credential_scope_sha256 TEXT,
+    provider TEXT,
+    protocol TEXT,
+    model TEXT,
+    deadline TEXT,
+    outcome TEXT NOT NULL CHECK (
+        outcome IN (
+            'dispatching', 'succeeded', 'failed', 'denied', 'busy', 'ambiguous'
+        )
+    ),
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 0),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+    http_status INTEGER CHECK (http_status BETWEEN 100 AND 599),
+    error_code TEXT,
+    budget_account TEXT,
+    budget_revision TEXT,
+    budget_policy_sha256 TEXT,
+    budget_currency TEXT,
+    budget_policy_json TEXT,
+    reserved_microusd INTEGER CHECK (reserved_microusd >= 1),
+    accounted_microusd INTEGER CHECK (accounted_microusd >= 0),
+    estimated_microusd INTEGER CHECK (estimated_microusd >= 0),
+    accounting_status TEXT CHECK (
+        accounting_status IN ('reserved', 'reported', 'released', 'conservative')
+    ),
+    input_tokens INTEGER CHECK (input_tokens >= 0),
+    cached_input_tokens INTEGER CHECK (cached_input_tokens >= 0),
+    output_tokens INTEGER CHECK (output_tokens >= 0),
+    reasoning_output_tokens INTEGER CHECK (reasoning_output_tokens >= 0),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_grant_id)
+        REFERENCES provider_grants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (inference_connector_id)
+        REFERENCES inference_connectors(id) ON DELETE RESTRICT,
+    CHECK (
+        (dispatch_kind = 'direct'
+            AND inference_connector_id IS NULL
+            AND connector_protocol_version IS NULL
+            AND deployment_sha256 IS NULL
+            AND route IS NULL
+            AND policy_sha256 IS NULL
+            AND credential_scope_sha256 IS NULL
+            AND provider IS NULL
+            AND protocol IS NULL
+            AND model IS NULL
+            AND deadline IS NULL)
+        OR
+        (dispatch_kind = 'connector'
+            AND inference_connector_id IS NOT NULL
+            AND connector_protocol_version IN (1, 2)
+            AND length(deployment_sha256) = 64
+            AND route IS NOT NULL
+            AND length(policy_sha256) = 64
+            AND length(credential_scope_sha256) = 64
+            AND provider IS NOT NULL
+            AND protocol IS NOT NULL
+            AND model IS NOT NULL
+            AND deadline IS NOT NULL)
+    ),
+    CHECK (
+        (outcome = 'dispatching'
+            AND dispatch_kind = 'connector'
+            AND request_bytes = 0
+            AND response_bytes = 0
+            AND http_status IS NULL
+            AND error_code IS NULL
+            AND finished_at IS NULL)
+        OR
+        (outcome = 'succeeded'
+            AND http_status BETWEEN 200 AND 299
+            AND error_code IS NULL
+            AND finished_at IS NOT NULL)
+        OR
+        (outcome IN ('failed', 'denied', 'busy', 'ambiguous')
+            AND error_code IS NOT NULL
+            AND finished_at IS NOT NULL)
+    ),
+    CHECK (
+        (budget_account IS NULL
+            AND budget_revision IS NULL
+            AND budget_policy_sha256 IS NULL
+            AND budget_currency IS NULL
+            AND budget_policy_json IS NULL
+            AND reserved_microusd IS NULL
+            AND accounted_microusd IS NULL
+            AND estimated_microusd IS NULL
+            AND accounting_status IS NULL
+            AND input_tokens IS NULL
+            AND cached_input_tokens IS NULL
+            AND output_tokens IS NULL
+            AND reasoning_output_tokens IS NULL)
+        OR
+        (dispatch_kind = 'connector'
+            AND connector_protocol_version = 2
+            AND budget_account IS NOT NULL
+            AND budget_revision IS NOT NULL
+            AND length(budget_policy_sha256) = 64
+            AND budget_currency = 'USD'
+            AND budget_policy_json IS NOT NULL
+            AND reserved_microusd IS NOT NULL
+            AND (
+                (outcome = 'dispatching'
+                    AND accounting_status = 'reserved'
+                    AND accounted_microusd IS NULL
+                    AND estimated_microusd IS NULL
+                    AND input_tokens IS NULL
+                    AND cached_input_tokens IS NULL
+                    AND output_tokens IS NULL
+                    AND reasoning_output_tokens IS NULL)
+                OR
+                (outcome != 'dispatching'
+                    AND accounting_status = 'reported'
+                    AND accounted_microusd = estimated_microusd
+                    AND input_tokens IS NOT NULL
+                    AND cached_input_tokens IS NOT NULL
+                    AND cached_input_tokens <= input_tokens
+                    AND output_tokens IS NOT NULL
+                    AND reasoning_output_tokens IS NOT NULL
+                    AND reasoning_output_tokens <= output_tokens)
+                OR
+                (outcome != 'dispatching'
+                    AND accounting_status = 'released'
+                    AND accounted_microusd = 0
+                    AND estimated_microusd IS NULL
+                    AND input_tokens IS NULL
+                    AND cached_input_tokens IS NULL
+                    AND output_tokens IS NULL
+                    AND reasoning_output_tokens IS NULL)
+                OR
+                (outcome != 'dispatching'
+                    AND accounting_status = 'conservative'
+                    AND accounted_microusd = reserved_microusd
+                    AND estimated_microusd IS NULL
+                    AND input_tokens IS NULL
+                    AND cached_input_tokens IS NULL
+                    AND output_tokens IS NULL
+                    AND reasoning_output_tokens IS NULL)
+            ))
+    )
+) STRICT;
+
+INSERT INTO provider_invocations (
+    id, run_id, provider_grant_id, dispatch_kind,
+    inference_connector_id, connector_protocol_version, deployment_sha256,
+    route, policy_sha256, credential_scope_sha256, provider, protocol, model,
+    deadline, outcome, request_bytes, response_bytes, http_status, error_code,
+    budget_account, budget_revision, budget_policy_sha256, budget_currency,
+    budget_policy_json, reserved_microusd, accounted_microusd,
+    estimated_microusd, accounting_status, input_tokens, cached_input_tokens,
+    output_tokens, reasoning_output_tokens, started_at, finished_at
+)
+SELECT
+    id, run_id, provider_grant_id, dispatch_kind,
+    inference_connector_id, connector_protocol_version, deployment_sha256,
+    route, policy_sha256, credential_scope_sha256, provider, protocol, model,
+    deadline, outcome, request_bytes, response_bytes, http_status, error_code,
+    budget_account, budget_revision, budget_policy_sha256, budget_currency,
+    budget_policy_json, reserved_microusd, accounted_microusd,
+    estimated_microusd, accounting_status, input_tokens, cached_input_tokens,
+    output_tokens, reasoning_output_tokens, started_at, finished_at
+FROM provider_invocations_v22;
+
+DROP TABLE provider_invocations_v22;
+
+CREATE INDEX provider_invocation_run
+    ON provider_invocations(run_id, started_at, id);
+CREATE INDEX provider_invocation_connector
+    ON provider_invocations(inference_connector_id, started_at, id)
+    WHERE inference_connector_id IS NOT NULL;
+CREATE INDEX provider_invocation_budget_account
+    ON provider_invocations(budget_account, outcome)
+    WHERE budget_account IS NOT NULL;
+CREATE INDEX provider_invocation_budget_grant
+    ON provider_invocations(provider_grant_id, budget_account)
+    WHERE budget_account IS NOT NULL;
+
+CREATE TRIGGER provider_invocation_immutable_update
+BEFORE UPDATE ON provider_invocations
+WHEN
+    OLD.outcome != 'dispatching'
+    OR NEW.outcome = 'dispatching'
+    OR NEW.finished_at IS NULL
+    OR NEW.id IS NOT OLD.id
+    OR NEW.run_id IS NOT OLD.run_id
+    OR NEW.provider_grant_id IS NOT OLD.provider_grant_id
+    OR NEW.dispatch_kind IS NOT OLD.dispatch_kind
+    OR NEW.inference_connector_id IS NOT OLD.inference_connector_id
+    OR NEW.connector_protocol_version IS NOT OLD.connector_protocol_version
+    OR NEW.deployment_sha256 IS NOT OLD.deployment_sha256
+    OR NEW.route IS NOT OLD.route
+    OR NEW.policy_sha256 IS NOT OLD.policy_sha256
+    OR NEW.credential_scope_sha256 IS NOT OLD.credential_scope_sha256
+    OR NEW.provider IS NOT OLD.provider
+    OR NEW.protocol IS NOT OLD.protocol
+    OR NEW.model IS NOT OLD.model
+    OR NEW.deadline IS NOT OLD.deadline
+    OR NEW.budget_account IS NOT OLD.budget_account
+    OR NEW.budget_revision IS NOT OLD.budget_revision
+    OR NEW.budget_policy_sha256 IS NOT OLD.budget_policy_sha256
+    OR NEW.budget_currency IS NOT OLD.budget_currency
+    OR NEW.budget_policy_json IS NOT OLD.budget_policy_json
+    OR NEW.reserved_microusd IS NOT OLD.reserved_microusd
+    OR NEW.started_at IS NOT OLD.started_at
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+CREATE TRIGGER provider_invocation_immutable_delete
+BEFORE DELETE ON provider_invocations
+BEGIN
+    SELECT RAISE(ABORT, 'provider invocations are immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -2767,6 +3031,8 @@ SCHEMA = (
     + RUN_PAUSED_STATE_MIGRATION
     + PROVIDER_RECOVERY_SCHEMA
     + RECOVERY_CHECKPOINT_SCHEMA
+    + LANDING_PLAN_NONCE_SCHEMA
+    + PROVIDER_REPORTED_OVERRUN_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -2789,4 +3055,5 @@ MIGRATIONS = {
     18: PROVIDER_BUDGET_SCHEMA,
     19: RUN_PAUSED_STATE_MIGRATION + PROVIDER_RECOVERY_SCHEMA,
     20: RECOVERY_CHECKPOINT_SCHEMA,
+    21: LANDING_PLAN_NONCE_SCHEMA + PROVIDER_REPORTED_OVERRUN_SCHEMA,
 }

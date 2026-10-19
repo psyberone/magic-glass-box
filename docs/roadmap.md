@@ -355,7 +355,7 @@ See
 [candidates.md](candidates.md).
 
 The 2026-10-14 end-of-slice internal checkpoint closed M7A after the frozen
-tree passed 556 tests, 87% branch coverage, the 25-test real Git/SQLite
+tree passed 556 tests, 87% aggregate coverage with branch measurement, the 25-test real Git/SQLite
 candidate proof, and a clean 25,686-mutant run with 21,558 killed (83.93%).
 The review found and corrected hostile flat-directory enumeration, source
 checkout proof gaps, and cache-recovery documentation that overstated what can
@@ -386,7 +386,8 @@ gate, evidence for another head/base/policy tuple is rejected, and a candidate
 becomes ready only when every gate required by its pinned policy passes.
 
 The 2026-10-15 end-of-slice internal checkpoint closed M7B after the frozen
-tree passed 588 tests, 86% branch coverage, the 25-test exact-input gate proof,
+tree passed 588 tests, 86% aggregate coverage with branch measurement, the
+25-test exact-input gate proof,
 and a clean-tree 27,879-mutant run with 23,435 killed (84.06%). The final audit
 removed run-only review separation because another run ID is not independent,
 and aligned the public/runtime validation-command argument ceiling with the
@@ -471,7 +472,7 @@ lifecycle state, immutable connector-bound grants without credential
 references, four public strict contracts, absolute-deadline Unix transport,
 and a separately launched deterministic fake connector. Connector grants are
 visible but cannot enter run authority at that checkpoint. Its normal quality
-gate passes with 638 tests and 86% total branch coverage.
+gate passes with 638 tests and 86% aggregate coverage with branch measurement.
 
 The 2026-10-15 M7D.2 checkpoint advances to schema v16 and makes connector
 dispatch exclusive for normal execution. MGB no longer creates direct grants,
@@ -483,7 +484,7 @@ both a grant and its connector. The networkless Docker canary proof passes with
 no credential exposure, and the real Codex and Claude Code CLIs both pass the
 two-runtime proof through a separately launched reference connector and
 deterministic host fixture. The normal gate passes with 650 tests, 964
-subtests, clean lint, and 86% total branch coverage. At that checkpoint, the
+subtests, clean lint, and 86% aggregate coverage with branch measurement. At that checkpoint, the
 M7D.3 real-account proof remained due. The completed-slice mutation gate now
 passes with 29,433 of 35,432 mutants killed (83.07%), 5,939 survived, 36
 uncovered, 24 timed out, and zero suspicious classifications.
@@ -505,7 +506,7 @@ SSE may omit `Content-Type`, and the proof harness raised before scanning or
 reporting bounded failure evidence. RED-first corrections now accept only a
 headerless body with a valid completed SSE terminal, preserve structured SSE
 error codes, and run the credential-leak audit on both success and failure.
-The normal suite now passes with 708 tests and 86% total branch coverage. The
+The normal suite now passes with 708 tests and 86% aggregate coverage with branch measurement. The
 clean mutation gate passes at 83.07%. On 2026-10-16, the operator separately
 authorized one additional `gpt-6.1-sol` attempt with a six-invocation and
 300-second ceiling. It passed using five connector invocations: the networkless
@@ -597,7 +598,8 @@ grouped by invariant so overlapping findings produced one coherent change:
    deterministic live proofs, and the internal promise audit.
 
 Each checkpoint was RED-first with happy and sad paths. The completed boundary
-passed all 773 tests, Ruff formatting and lint, 86% branch coverage, and a
+passed all 773 tests, Ruff formatting and lint, 86% aggregate coverage with
+branch measurement, and a
 clean-from-scratch 83.18% mutation score (31,103/37,393). All mutants were
 classified: 6,227 survived, 27 timed out, 36 had no selected tests, and none
 were suspicious, skipped, interrupted, or crashed. Mutmut's timeout-checker
@@ -633,7 +635,7 @@ revisions; exact reported usage releases unused allowance; and ambiguous usage
 consumes the full reservation without retaining prompts or responses.
 
 Schema v19 and connector protocol v2 passed 792 tests, Ruff format and lint,
-86% branch coverage, and a clean-from-scratch 82.82% mutation score
+86% aggregate coverage with branch measurement, and a clean-from-scratch 82.82% mutation score
 (31,619/38,180). All mutants were classified: 6,497 survived, 28 timed out, 36
 had no selected tests, and none were suspicious, skipped, interrupted, or
 crashed. A single authorized real-account proof used one worker attempt and
@@ -722,16 +724,59 @@ result that reconstructs the expected final tree from a pristine snapshot.
 The ledger and `run.describe` expose checkpoint provenance without exposing
 manifest or file bodies.
 
-Schema v21 and M9 passed 820 tests, Ruff format and lint, and 86% branch
-coverage. The identical production source passed a clean-from-scratch 83.06%
-mutation gate (32,513/39,146) before final survivor-driven test-only
-hardening; all mutants were classified: 6,570 survived, 27 timed out, 36 had
+Schema v21 and M9 passed 820 tests, Ruff format and lint, and 86% aggregate
+coverage with branch measurement. The identical production source passed a
+clean-from-scratch 83.06% mutation gate (32,513/39,146) before final
+survivor-driven test-only hardening; all mutants were classified: 6,570
+survived, 27 timed out, 36 had
 no selected tests, and none were suspicious, skipped, interrupted, or crashed.
 A focused review then added exact checkpoint-provenance, audit-receipt,
 diagnostic, revision-mismatch, and cyclic-lineage assertions. Targeted reruns
 killed all 37 selected behaviorally meaningful recovery-boundary survivors;
 the remaining reviewed recovery-method survivor is SQLite keyword-case
 equivalence for `BEGIN IMMEDIATE`.
+
+## Post-Milestone 9 external-review stabilization
+
+**Status: completed 2026-10-18**
+
+Three independent cold reviews produced one boundary-focused remediation wave:
+
+- reject Gitfile and `commondir` object-store redirects, symlinks or special
+  entries beneath the object store, and non-empty local or HTTP alternates at
+  source admission before snapshot and candidate import;
+- retain every landing-plan nonce generation so a lost one-time nonce can be
+  rotated without releasing the serialized ref lane, while exposing only the
+  newest 32 generations in control-plane views;
+- record current manual landing receipts as operator-attested evidence rather
+  than claiming MGB independently verified the generated Git preconditions;
+- require usage to be absent from failed or ambiguous inference replies, while
+  retaining and charging successful provider-reported usage above the
+  pre-dispatch estimate;
+- separate worker request-byte authority from a 512-byte connector-owned model
+  and output-limit expansion, and let workers narrow—but never raise—the pinned
+  output-token ceiling;
+- apply one monotonic HTTP deadline across all OpenAI and Krab phases, normalize
+  allowed worker protocol headers case-insensitively, bound the worker bridge's
+  idle sockets, and give the control room a capped daemon handler pool plus an
+  absolute connection lifetime;
+- validate the existing database state directory at entry, normalize direct
+  work-item construction before chronological storage comparisons, and state
+  the configured coverage metric accurately.
+
+Schema v22 contains the append-only nonce authority and relaxed successful
+reported-accounting constraint. The response-v2 portable contract now forbids
+usage on non-success outcomes. The source repository is the hostile boundary;
+once input is admitted, private control-plane state continues to use ordinary
+permissions, transactions, digests, atomic publication, and locks rather than
+same-user filesystem paranoia.
+
+Schema v22 and the stabilization wave passed 841 tests, Ruff format and lint,
+and 86% aggregate statement-plus-branch coverage. The candidate, gate, and
+integration suites passed independently with 30, 25, and 25 tests. The
+identical production source then passed a clean-from-scratch 83.09% mutation
+gate (32,981/39,694): 6,642 survived, 35 timed out, 36 had no selected tests,
+and none were suspicious, skipped, interrupted, or crashed.
 
 ## Milestone 10: provider-neutral service sidecars
 
@@ -949,6 +994,7 @@ pages.
 ## Continuous gates
 
 Every milestone retains the existing RED-first workflow, happy-path and
-sad-path coverage, at least 85% branch coverage, and at least an 80% mutation
-kill rate. Security-sensitive boundaries also require a live integration test
-against the real local dependency where practical.
+sad-path coverage, at least 85% aggregate coverage with branch measurement,
+and at least an 80% mutation kill rate. Security-sensitive boundaries also
+require a live integration test against the real local dependency where
+practical.

@@ -22,6 +22,7 @@ from .errors import ConcurrentUpdateError, ConflictError, NotFoundError, Storage
 
 MIN_INTEGRATION_LEASE_SECONDS = 1
 MAX_INTEGRATION_LEASE_SECONDS = 3600
+MAX_VISIBLE_LANDING_NONCE_GENERATIONS = 32
 
 
 class IntegrationStorage:
@@ -1120,7 +1121,19 @@ class IntegrationStorage:
         return result
 
     @staticmethod
-    def _plan_record(row: sqlite3.Row) -> dict[str, Any]:
+    def _plan_nonce_rows(
+        connection: sqlite3.Connection, plan_id: str
+    ) -> list[sqlite3.Row]:
+        newest_first = connection.execute(
+            "SELECT generation, nonce_sha256, issued_by, created_at "
+            "FROM integration_landing_plan_nonces WHERE plan_id = ? "
+            "ORDER BY generation DESC LIMIT ?",
+            (plan_id, MAX_VISIBLE_LANDING_NONCE_GENERATIONS),
+        ).fetchall()
+        return list(reversed(newest_first))
+
+    @staticmethod
+    def _plan_record(row: sqlite3.Row, nonce_rows: list[sqlite3.Row]) -> dict[str, Any]:
         try:
             plan = LandingPlan.from_mapping(json.loads(row["plan_json"]))
             evidence = json.loads(row["evidence_snapshot_json"])
@@ -1132,13 +1145,18 @@ class IntegrationStorage:
             != row["evidence_snapshot_sha256"]
         ):
             raise StorageError("stored landing plan digest does not match")
+        if not nonce_rows:
+            raise StorageError("stored landing plan nonce history is invalid")
+        current_nonce = nonce_rows[-1]
         return {
             "id": row["id"],
             "queue_item_id": row["queue_item_id"],
             "sequence": row["sequence"],
             "plan": plan.to_dict(),
             "content_sha256": row["content_sha256"],
-            "nonce_sha256": row["nonce_sha256"],
+            "nonce_generation": current_nonce["generation"],
+            "nonce_sha256": current_nonce["nonce_sha256"],
+            "nonce_generations": [dict(item) for item in nonce_rows],
             "evidence_snapshot": evidence,
             "evidence_snapshot_sha256": row["evidence_snapshot_sha256"],
             "actuator": row["actuator"],
@@ -1251,6 +1269,12 @@ class IntegrationStorage:
                         now,
                     ),
                 )
+                connection.execute(
+                    "INSERT INTO integration_landing_plan_nonces "
+                    "(plan_id, generation, nonce_sha256, issued_by, created_at) "
+                    "VALUES (?, 1, ?, ?, ?)",
+                    (plan_id, nonce_sha256, issued_by, now),
+                )
                 event_sequence = queue["event_sequence"] + 1
                 connection.execute(
                     "UPDATE integration_queue_items SET state = 'awaiting_receipt', "
@@ -1274,6 +1298,7 @@ class IntegrationStorage:
                     created_at=now,
                 )
                 plan_row = self._plan_row(connection, plan_id)
+                nonce_rows = self._plan_nonce_rows(connection, plan_id)
                 connection.commit()
             except (
                 ConcurrentUpdateError,
@@ -1288,7 +1313,7 @@ class IntegrationStorage:
                 connection.rollback()
                 raise ConflictError("landing plan could not be issued") from exc
         assert plan_row is not None
-        return {**self._plan_record(plan_row), "nonce": nonce}
+        return {**self._plan_record(plan_row, nonce_rows), "nonce": nonce}
 
     def get_landing_plan(self, plan_id: str) -> dict[str, Any]:
         plan_id = require_string(plan_id, field="plan_id", max_bytes=64)
@@ -1296,7 +1321,71 @@ class IntegrationStorage:
             row = self._plan_row(connection, plan_id)
             if row is None:
                 raise NotFoundError(f"landing plan not found: {plan_id}")
-            return self._plan_record(row)
+            return self._plan_record(row, self._plan_nonce_rows(connection, plan_id))
+
+    def reissue_landing_plan_nonce(
+        self,
+        plan_id: str,
+        *,
+        expected_generation: int,
+        reissued_by: str,
+    ) -> dict[str, Any]:
+        plan_id = require_string(plan_id, field="plan_id", max_bytes=64)
+        if (
+            isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or expected_generation < 1
+        ):
+            raise ValueError("expected_generation must be a positive integer")
+        reissued_by = require_string(reissued_by, field="reissued_by", max_bytes=64)
+        nonce = secrets.token_hex(32)
+        nonce_sha256 = hashlib.sha256(nonce.encode("ascii")).hexdigest()
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, reissued_by, role="plan nonce issuer")
+                plan_row = self._plan_row(connection, plan_id)
+                if plan_row is None:
+                    raise NotFoundError(f"landing plan not found: {plan_id}")
+                if plan_row["state"] != "pending":
+                    raise ConflictError("landing plan is already resolved")
+                nonce_rows = self._plan_nonce_rows(connection, plan_id)
+                if not nonce_rows:
+                    raise StorageError("landing plan nonce history is unavailable")
+                current_generation = nonce_rows[-1]["generation"]
+                if current_generation != expected_generation:
+                    raise ConcurrentUpdateError("landing plan nonce generation changed")
+                connection.execute(
+                    "INSERT INTO integration_landing_plan_nonces "
+                    "(plan_id, generation, nonce_sha256, issued_by, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        plan_id,
+                        current_generation + 1,
+                        nonce_sha256,
+                        reissued_by,
+                        now,
+                    ),
+                )
+                nonce_rows = self._plan_nonce_rows(connection, plan_id)
+                result = {
+                    **self._plan_record(plan_row, nonce_rows),
+                    "nonce": nonce,
+                }
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("landing plan nonce could not be reissued") from exc
+        return result
 
     @staticmethod
     def _receipt_record(row: sqlite3.Row) -> dict[str, Any]:
@@ -1335,9 +1424,12 @@ class IntegrationStorage:
                     raise NotFoundError(f"landing plan not found: {request.plan_id}")
                 if plan_row["state"] != "pending":
                     raise ConflictError("landing plan is already resolved")
+                nonce_rows = self._plan_nonce_rows(connection, request.plan_id)
+                if not nonce_rows:
+                    raise StorageError("landing plan nonce history is unavailable")
                 if not secrets.compare_digest(
                     hashlib.sha256(request.nonce.encode("ascii")).hexdigest(),
-                    plan_row["nonce_sha256"],
+                    nonce_rows[-1]["nonce_sha256"],
                 ):
                     raise ConflictError("landing receipt nonce does not match")
                 plan = LandingPlan.from_mapping(json.loads(plan_row["plan_json"]))

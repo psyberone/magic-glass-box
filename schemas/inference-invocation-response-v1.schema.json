@@ -57,7 +57,7 @@
       "minimum": 100,
       "maximum": 599
     },
-    "request_bytes": { "type": "integer", "minimum": 0, "maximum": 2097152 },
+    "request_bytes": { "type": "integer", "minimum": 0, "maximum": 2097664 },
     "response_bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 },
     "retry_after_seconds": {
       "type": "integer",

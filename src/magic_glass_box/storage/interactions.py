@@ -1106,6 +1106,10 @@ class InteractionStorage:
             error_code = require_string(error_code, field="error_code", max_bytes=64)
         if usage is not None and not isinstance(usage, InferenceUsage):
             raise ValidationError("usage must be InferenceUsage")
+        if usage is not None and outcome != "succeeded":
+            raise ValidationError(
+                "non-successful provider invocation cannot contain reported usage"
+            )
         if not isinstance(release_budget, bool):
             raise ValidationError("release_budget must be boolean")
         if usage is not None and release_budget:
@@ -1168,10 +1172,6 @@ class InteractionStorage:
                     reserved = int(pending["reserved_microusd"])
                     if usage is not None:
                         estimate = budget.estimate_microusd(usage)
-                        if estimate > reserved:
-                            raise ConflictError(
-                                "provider usage exceeds its reserved budget"
-                            )
                         accounting_values = (
                             estimate,
                             estimate,

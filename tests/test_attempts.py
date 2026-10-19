@@ -31,9 +31,7 @@ from magic_glass_box.results import FileState, ResultChange, ResultManifest
 from magic_glass_box.storage.schema import (
     ATTEMPT_OWNER_AUDIT_SCHEMA,
     PROVIDER_BUDGET_SCHEMA,
-    PROVIDER_RECOVERY_SCHEMA,
     RECOVERY_CHECKPOINT_SCHEMA,
-    RUN_PAUSED_STATE_MIGRATION,
 )
 
 OWNER_ID = "orchestrator-test-owner"
@@ -1343,15 +1341,7 @@ class AttemptMigrationTests(unittest.TestCase):
     def test_schema_seventeen_preserves_attempt_events_and_immutability(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-seventeen.db"
-            tail = (
-                ATTEMPT_OWNER_AUDIT_SCHEMA
-                + PROVIDER_BUDGET_SCHEMA
-                + RUN_PAUSED_STATE_MIGRATION
-                + PROVIDER_RECOVERY_SCHEMA
-                + RECOVERY_CHECKPOINT_SCHEMA
-            )
-            self.assertTrue(SCHEMA.endswith(tail))
-            historical_schema = SCHEMA[: -len(tail)]
+            historical_schema = SCHEMA[: SCHEMA.index(ATTEMPT_OWNER_AUDIT_SCHEMA)]
             self.assertEqual(
                 hashlib.sha256(historical_schema.encode()).hexdigest(),
                 "d60985b6a8aa69e910c330a8399b4f2e728ae213c94ae017eb648a50b5bfbb3f",
@@ -1531,14 +1521,7 @@ class AttemptMigrationTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-eighteen.db"
-            tail = (
-                PROVIDER_BUDGET_SCHEMA
-                + RUN_PAUSED_STATE_MIGRATION
-                + PROVIDER_RECOVERY_SCHEMA
-                + RECOVERY_CHECKPOINT_SCHEMA
-            )
-            self.assertTrue(SCHEMA.endswith(tail))
-            historical_schema = SCHEMA[: -len(tail)]
+            historical_schema = SCHEMA[: SCHEMA.index(PROVIDER_BUDGET_SCHEMA)]
             self.assertEqual(
                 hashlib.sha256(historical_schema.encode()).hexdigest(),
                 "3aadec58ec078154cda90837b38cac335fd1d82d400a3cfa5d6bbd8612f211e4",
@@ -1575,8 +1558,7 @@ class AttemptMigrationTests(unittest.TestCase):
     def test_schema_twenty_migrates_recovery_checkpoint_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "schema-twenty.db"
-            self.assertTrue(SCHEMA.endswith(RECOVERY_CHECKPOINT_SCHEMA))
-            historical_schema = SCHEMA[: -len(RECOVERY_CHECKPOINT_SCHEMA)]
+            historical_schema = SCHEMA[: SCHEMA.index(RECOVERY_CHECKPOINT_SCHEMA)]
             self.assertEqual(
                 hashlib.sha256(historical_schema.encode()).hexdigest(),
                 "e89d6945978ef7d1652a3c9ee954b6f7b48348226206a2351b3c6f462b11430a",

@@ -57,6 +57,19 @@ def envelope(
 
 
 class WorkItemEnvelopeTests(unittest.TestCase):
+    def test_direct_construction_normalizes_source_time_before_storage(self) -> None:
+        item = WorkItemEnvelope(
+            schema_version=1,
+            source="github",
+            external_id="owner/repository#17",
+            source_updated_at="2026-10-09T14:00:00+02:00",
+            title="Keep imported work durable",
+            brief="Preserve normalized source chronology.",
+        )
+
+        self.assertEqual(item.source_updated_at, "2026-10-09T12:00:00.000000Z")
+        self.assertIs(item.priority, WorkItemPriority.NORMAL)
+
     def test_published_schema_and_example_match_the_v1_contract(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         schema = json.loads(

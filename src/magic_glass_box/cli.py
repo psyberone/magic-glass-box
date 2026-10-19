@@ -759,6 +759,13 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-show", help="show one issued plan without its raw nonce"
     )
     plan_show.add_argument("plan_id")
+    plan_reissue = integration_commands.add_parser(
+        "plan-reissue",
+        help="replace a lost plan nonce without releasing its lane",
+    )
+    plan_reissue.add_argument("plan_id")
+    plan_reissue.add_argument("--expected-generation", required=True, type=int)
+    plan_reissue.add_argument("--reissued-by", required=True)
     receipt = integration_commands.add_parser(
         "receipt", help="record one nonce-bound landed or not-landed outcome"
     )
@@ -1265,6 +1272,12 @@ def _dispatch(
             )
         if args.integration_command == "plan-show":
             return control.get_landing_plan(args.plan_id)
+        if args.integration_command == "plan-reissue":
+            return control.reissue_landing_plan_nonce(
+                args.plan_id,
+                expected_generation=args.expected_generation,
+                reissued_by_handle=args.reissued_by,
+            )
         if args.integration_command == "receipt":
             return control.record_landing_receipt(
                 _json_file(args.document), recorded_by_handle=args.recorded_by

@@ -17,6 +17,7 @@ from magic_glass_box.credentials import PrivateFileCredentialResolver
 from magic_glass_box.domain import ProviderGrantSpec, ValidationError, canonical_json
 from magic_glass_box.inference import (
     CONNECTOR_ID_RE,
+    MAX_CONNECTOR_REQUEST_EXPANSION,
     SHA256_RE,
     InferenceInvocationRequest,
 )
@@ -264,7 +265,10 @@ def _invoke(
             **authority,
             "outcome": "ambiguous",
             "provider_status": exc.status_code,
-            "request_bytes": min(exc.request_bytes, request.request_limit_bytes),
+            "request_bytes": min(
+                exc.request_bytes,
+                request.request_limit_bytes + MAX_CONNECTOR_REQUEST_EXPANSION,
+            ),
             "response_bytes": min(exc.response_bytes, request.response_limit_bytes),
             "error_code": "upstream_ambiguous",
             "response": None,
@@ -274,7 +278,10 @@ def _invoke(
             **authority,
             "outcome": "failed",
             "provider_status": exc.status_code,
-            "request_bytes": min(exc.request_bytes, request.request_limit_bytes),
+            "request_bytes": min(
+                exc.request_bytes,
+                request.request_limit_bytes + MAX_CONNECTOR_REQUEST_EXPANSION,
+            ),
             "response_bytes": min(exc.response_bytes, request.response_limit_bytes),
             "error_code": "upstream_error",
             "response": None,

@@ -288,6 +288,27 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
 
+    def test_existing_state_directory_must_already_be_private(self) -> None:
+        state = Path(self.temporary.name) / "unsafe-state"
+        state.mkdir()
+        os.chmod(state, 0o777)  # noqa: S103 - intentionally unsafe fixture
+
+        with self.assertRaisesRegex(StorageError, "state directory must be private"):
+            Database(state / "control-plane.db").initialize()
+
+        self.assertFalse((state / "control-plane.db").exists())
+
+    def test_state_directory_must_not_be_a_symlink(self) -> None:
+        target = Path(self.temporary.name) / "private-state"
+        target.mkdir(mode=0o700)
+        state = Path(self.temporary.name) / "state-link"
+        state.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(StorageError, "state directory"):
+            Database(state / "control-plane.db").initialize()
+
+        self.assertFalse((target / "control-plane.db").exists())
+
     def test_status_rejects_broken_foreign_key_state(self) -> None:
         connection = sqlite3.connect(self.path)
         try:

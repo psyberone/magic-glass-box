@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -285,7 +286,7 @@ class IntegrationContractTests(unittest.TestCase):
         receipt = LandingReceipt.from_request(request, plan_id=plan_id, plan=plan)
 
         self.assertEqual(receipt.outcome, LandingOutcome.LANDED)
-        self.assertEqual(receipt.assurance, LandingAssurance.BASE_AND_HEAD_ENFORCED)
+        self.assertEqual(receipt.assurance, LandingAssurance.OPERATOR_ATTESTED)
         self.assertNotIn("nonce", receipt.to_dict())
         self.assertEqual(LandingReceipt.from_mapping(receipt.to_dict()), receipt)
 
@@ -370,7 +371,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 21)
+        self.assertEqual(SCHEMA_VERSION, 22)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -389,6 +390,7 @@ class IntegrationMigrationTests(unittest.TestCase):
             "integration_folds",
             "integration_queue_events",
             "integration_landing_plans",
+            "integration_landing_plan_nonces",
             "integration_landing_receipts",
         ):
             self.assertIn(("table", table), objects)
@@ -1128,6 +1130,171 @@ class IntegrationLedgerTests(unittest.TestCase):
             self.database.record_landing_receipt(request, recorded_by=self.user["id"])
         self.assertNotIn(
             issued["nonce"], str(self.database.get_landing_plan(issued["id"]))
+        )
+
+    def test_lost_plan_nonce_can_be_reissued_without_releasing_the_lane(self) -> None:
+        queue = self.database.enqueue_integration(
+            self._policy(self.candidate_a)["id"], created_by=self.user["id"]
+        )
+        sibling = self.database.enqueue_integration(
+            self._policy(self.candidate_b)["id"], created_by=self.user["id"]
+        )
+        claimed = self.database.claim_integration_item(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=queue["version"],
+            lease_seconds=30,
+        )
+        issued = self.database.issue_landing_plan(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=claimed["version"],
+            candidate_repository=self.root / "repository.git",
+            remote="origin",
+            issued_by=self.user["id"],
+        )
+        plan = LandingPlan.from_mapping(issued["plan"])
+        old_nonce = issued["nonce"]
+        self.assertEqual(issued["nonce_generation"], 1)
+
+        reissued = self.database.reissue_landing_plan_nonce(
+            issued["id"],
+            expected_generation=1,
+            reissued_by=self.user["id"],
+        )
+
+        self.assertEqual(reissued["id"], issued["id"])
+        self.assertEqual(reissued["content_sha256"], issued["content_sha256"])
+        self.assertEqual(reissued["nonce_generation"], 2)
+        self.assertNotEqual(reissued["nonce"], old_nonce)
+        shown = self.database.get_landing_plan(issued["id"])
+        self.assertEqual(shown["nonce_generation"], 2)
+        self.assertNotIn(reissued["nonce"], str(shown))
+        self.assertEqual(
+            self.database.get_integration_queue_item(queue["id"])["state"],
+            "awaiting_receipt",
+        )
+        with self.assertRaisesRegex(ConflictError, "already claimed"):
+            self.database.claim_integration_item(
+                sibling["id"],
+                owner_id="other",
+                expected_version=sibling["version"],
+                lease_seconds=30,
+            )
+        with self.assertRaisesRegex(ConcurrentUpdateError, "generation changed"):
+            self.database.reissue_landing_plan_nonce(
+                issued["id"],
+                expected_generation=1,
+                reissued_by=self.user["id"],
+            )
+
+        old_request = LandingReceiptRequest(
+            1,
+            issued["id"],
+            plan.digest,
+            old_nonce,
+            LandingOutcome.LANDED,
+            plan.head_revision,
+        )
+        with self.assertRaisesRegex(ConflictError, "nonce"):
+            self.database.record_landing_receipt(
+                old_request, recorded_by=self.user["id"]
+            )
+        accepted = self.database.record_landing_receipt(
+            replace(old_request, nonce=reissued["nonce"]),
+            recorded_by=self.user["id"],
+        )
+        self.assertEqual(accepted["receipt"]["assurance"], "operator_attested")
+        with self.assertRaisesRegex(ConflictError, "resolved"):
+            self.database.reissue_landing_plan_nonce(
+                issued["id"],
+                expected_generation=2,
+                reissued_by=self.user["id"],
+            )
+
+    def test_plan_nonce_reissue_has_no_artificial_generation_ceiling(self) -> None:
+        queue = self.database.enqueue_integration(
+            self._policy(self.candidate_a)["id"], created_by=self.user["id"]
+        )
+        claimed = self.database.claim_integration_item(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=queue["version"],
+            lease_seconds=30,
+        )
+        issued = self.database.issue_landing_plan(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=claimed["version"],
+            candidate_repository=self.root / "repository.git",
+            remote="origin",
+            issued_by=self.user["id"],
+        )
+        with closing(self.database.connect()) as connection, connection:
+            connection.executemany(
+                "INSERT INTO integration_landing_plan_nonces "
+                "(plan_id, generation, nonce_sha256, issued_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    (
+                        issued["id"],
+                        generation,
+                        hashlib.sha256(str(generation).encode("ascii")).hexdigest(),
+                        self.user["id"],
+                        self.database.now(),
+                    )
+                    for generation in range(2, 33)
+                ),
+            )
+
+        reissued = self.database.reissue_landing_plan_nonce(
+            issued["id"],
+            expected_generation=32,
+            reissued_by=self.user["id"],
+        )
+
+        self.assertEqual(reissued["nonce_generation"], 33)
+        self.assertEqual(len(reissued["nonce_generations"]), 32)
+        self.assertEqual(reissued["nonce_generations"][0]["generation"], 2)
+        self.assertEqual(reissued["nonce_generations"][-1]["generation"], 33)
+
+    def test_schema_twenty_two_backfills_plan_nonce_authority_from_twenty_one(
+        self,
+    ) -> None:
+        queue = self.database.enqueue_integration(
+            self._policy(self.candidate_a)["id"], created_by=self.user["id"]
+        )
+        claimed = self.database.claim_integration_item(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=queue["version"],
+            lease_seconds=30,
+        )
+        issued = self.database.issue_landing_plan(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=claimed["version"],
+            candidate_repository=self.root / "repository.git",
+            remote="origin",
+            issued_by=self.user["id"],
+        )
+        with closing(self.database.connect()) as connection, connection:
+            connection.execute(
+                "DROP TRIGGER integration_landing_plan_nonce_immutable_update"
+            )
+            connection.execute(
+                "DROP TRIGGER integration_landing_plan_nonce_immutable_delete"
+            )
+            connection.execute("DROP TABLE integration_landing_plan_nonces")
+            connection.execute("PRAGMA user_version = 21")
+
+        migrated = Database(self.database.path)
+        self.assertEqual(migrated.initialize()["schema_version"], 22)
+        shown = migrated.get_landing_plan(issued["id"])
+        self.assertEqual(shown["nonce_generation"], 1)
+        self.assertEqual(
+            shown["nonce_sha256"],
+            hashlib.sha256(issued["nonce"].encode("ascii")).hexdigest(),
         )
 
     def test_lane_is_serialized_and_an_expired_preplan_claim_is_reclaimed(
@@ -2002,7 +2169,7 @@ class IntegrationGoldenPathTests(unittest.TestCase):
         )
         stale_b = self.control.get_integration_queue_item(queue_b["id"])
         self.assertEqual(stale_b["state"], "refold_required")
-        self.assertEqual(receipt_a["receipt"]["assurance"], "base_and_head_enforced")
+        self.assertEqual(receipt_a["receipt"]["assurance"], "operator_attested")
         snapshot = self.control.control_room_snapshot()
         self.assertEqual(snapshot["summary"]["integration_queue"]["landed"], 1)
         self.assertEqual(snapshot["summary"]["landing_dependencies"]["active"], 1)

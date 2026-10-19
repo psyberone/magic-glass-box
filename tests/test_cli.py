@@ -269,6 +269,11 @@ class FakeControlPlane:
     def get_landing_plan(self, plan_id: str) -> dict[str, object]:
         return self._called("integration.plan-show", plan_id=plan_id)
 
+    def reissue_landing_plan_nonce(
+        self, plan_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("integration.plan-reissue", plan_id=plan_id, **kwargs)
+
     def record_landing_receipt(
         self, request: object, **kwargs: object
     ) -> dict[str, object]:
@@ -590,6 +595,10 @@ class CLITests(unittest.TestCase):
                     ("plan", "issue an exact argv-only manual landing plan"),
                     ("plan-show", "show one issued plan without its raw nonce"),
                     (
+                        "plan-reissue",
+                        "replace a lost plan nonce without releasing its lane",
+                    ),
+                    (
                         "receipt",
                         "record one nonce-bound landed or not-landed outcome",
                     ),
@@ -763,6 +772,10 @@ class CLITests(unittest.TestCase):
                     "--owner",
                     "--expected-version",
                     "--issued-by",
+                ),
+                ("integration", "plan-reissue"): (
+                    "--expected-generation",
+                    "--reissued-by",
                 ),
                 ("integration", "receipt"): ("--document", "--recorded-by"),
             },
@@ -1658,6 +1671,9 @@ class CLITests(unittest.TestCase):
                 "cancel": "cancel an item before landing authority is issued",
                 "plan": "issue an exact argv-only manual landing plan",
                 "plan-show": "show one issued plan without its raw nonce",
+                "plan-reissue": (
+                    "replace a lost plan nonce without releasing its lane"
+                ),
                 "receipt": "record one nonce-bound landed or not-landed outcome",
             },
         }
@@ -2538,6 +2554,25 @@ class CLITests(unittest.TestCase):
             (
                 ["integration", "plan-show", plan_id],
                 ("integration.plan-show", {"plan_id": plan_id}),
+            ),
+            (
+                [
+                    "integration",
+                    "plan-reissue",
+                    plan_id,
+                    "--expected-generation",
+                    "1",
+                    "--reissued-by",
+                    "operator",
+                ],
+                (
+                    "integration.plan-reissue",
+                    {
+                        "plan_id": plan_id,
+                        "expected_generation": 1,
+                        "reissued_by_handle": "operator",
+                    },
+                ),
             ),
             (
                 [

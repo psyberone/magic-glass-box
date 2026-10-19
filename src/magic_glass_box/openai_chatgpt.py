@@ -10,7 +10,10 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
+import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -23,6 +26,7 @@ from . import __version__
 from .domain import ValidationError, canonical_json, validate_provider_name
 from .inference import (
     CONNECTOR_ID_RE,
+    MAX_CONNECTOR_REQUEST_EXPANSION,
     MAX_PROVIDER_RETRY_AFTER_SECONDS,
     InferenceInvocationRequest,
     InferenceInvocationResponse,
@@ -122,6 +126,57 @@ class HTTPClient(Protocol):
 HTTPSConnectionFactory = Callable[[str, int | None, float], http.client.HTTPSConnection]
 
 
+def _remaining_http_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("HTTPS request deadline expired")
+    return remaining
+
+
+def _apply_http_deadline(connection: Any, deadline: float) -> None:
+    remaining = _remaining_http_time(deadline)
+    if hasattr(connection, "timeout"):
+        connection.timeout = remaining
+    active_socket = getattr(connection, "sock", None)
+    if active_socket is not None:
+        active_socket.settimeout(remaining)
+
+
+def _expire_http_connection(connection: Any) -> None:
+    active_socket = getattr(connection, "sock", None)
+    if active_socket is not None:
+        with contextlib.suppress(OSError):
+            active_socket.shutdown(socket.SHUT_RDWR)
+    with contextlib.suppress(OSError):
+        connection.close()
+
+
+def _read_bounded_http_body(
+    response: Any,
+    connection: Any,
+    *,
+    deadline: float,
+    maximum: int,
+) -> bytes:
+    read_once = getattr(response, "read1", None)
+    if not callable(read_once):
+        _apply_http_deadline(connection, deadline)
+        raw = response.read(maximum + 1)
+        _apply_http_deadline(connection, deadline)
+        return raw
+    chunks: list[bytes] = []
+    size = 0
+    while size <= maximum:
+        _apply_http_deadline(connection, deadline)
+        chunk = read_once(min(64 * 1024, maximum + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    _apply_http_deadline(connection, deadline)
+    return b"".join(chunks)
+
+
 class BoundedHTTPSClient:
     """Issue one bounded HTTPS request and classify pre/post-dispatch failures."""
 
@@ -178,25 +233,38 @@ class BoundedHTTPSClient:
         target = parsed.path
         if parsed.query:
             target += "?" + parsed.query
+        deadline = time.monotonic() + float(timeout)
         try:
             connection = self.connection_factory(parsed.hostname, port, float(timeout))
         except (OSError, TimeoutError, http.client.HTTPException) as exc:
             raise HTTPTransportError(
                 "HTTPS endpoint is unavailable", ambiguous=False
             ) from exc
+        watchdog = threading.Timer(
+            max(0.0, deadline - time.monotonic()),
+            _expire_http_connection,
+            (connection,),
+        )
+        watchdog.daemon = True
+        watchdog.start()
         dispatched = False
         raw = b""
         try:
             try:
+                _apply_http_deadline(connection, deadline)
                 connection.connect()
+                _apply_http_deadline(connection, deadline)
             except (OSError, TimeoutError, http.client.HTTPException) as exc:
                 raise HTTPTransportError(
                     "HTTPS endpoint is unavailable", ambiguous=False
                 ) from exc
             try:
                 dispatched = True
+                _apply_http_deadline(connection, deadline)
                 connection.request(method, target, body=body, headers=headers)
+                _apply_http_deadline(connection, deadline)
                 response = connection.getresponse()
+                _apply_http_deadline(connection, deadline)
                 declared = response.getheader("Content-Length")
                 if declared is not None:
                     try:
@@ -209,7 +277,12 @@ class BoundedHTTPSClient:
                         raise HTTPTransportError(
                             "HTTPS response is oversized", ambiguous=True
                         )
-                raw = response.read(max_response_bytes + 1)
+                raw = _read_bounded_http_body(
+                    response,
+                    connection,
+                    deadline=deadline,
+                    maximum=max_response_bytes,
+                )
                 if len(raw) > max_response_bytes:
                     raise HTTPTransportError(
                         "HTTPS response is oversized", ambiguous=True
@@ -234,6 +307,7 @@ class BoundedHTTPSClient:
                     ambiguous=dispatched,
                 ) from exc
         finally:
+            watchdog.cancel()
             connection.close()
 
 
@@ -1276,6 +1350,7 @@ class OpenAIResponsesClient:
             "include",
             "input",
             "instructions",
+            "max_output_tokens",
             "parallel_tool_calls",
             "prompt_cache_key",
             "reasoning",
@@ -1623,24 +1698,52 @@ class OpenAIResponsesClient:
                 )
             forwarded[name] = raw_value
         try:
-            outbound_body = {**provider_body, "model": model}
-            if max_output_tokens is not None:
+            worker_bytes = len(canonical_json(request).encode("utf-8"))
+            policy_output_limit = max_output_tokens
+            if policy_output_limit is not None and (
+                isinstance(policy_output_limit, bool)
+                or not isinstance(policy_output_limit, int)
+                or not 1 <= policy_output_limit <= 1_000_000
+            ):
+                raise ChatGPTResponseFailure(
+                    "provider output token bound is invalid",
+                    error_code="invalid_request",
+                )
+            requested_output_limit = provider_body.get("max_output_tokens")
+            if "max_output_tokens" in provider_body:
                 if (
-                    isinstance(max_output_tokens, bool)
-                    or not isinstance(max_output_tokens, int)
-                    or not 1 <= max_output_tokens <= 1_000_000
+                    isinstance(requested_output_limit, bool)
+                    or not isinstance(requested_output_limit, int)
+                    or not 1 <= requested_output_limit <= 1_000_000
                 ):
                     raise ChatGPTResponseFailure(
                         "provider output token bound is invalid",
                         error_code="invalid_request",
                     )
-                outbound_body["max_output_tokens"] = max_output_tokens
+                if (
+                    policy_output_limit is not None
+                    and requested_output_limit > policy_output_limit
+                ):
+                    raise ChatGPTResponseFailure(
+                        "provider request exceeds its output token limit",
+                        error_code="output_limit_exceeded",
+                    )
+                effective_output_limit = requested_output_limit
+            else:
+                effective_output_limit = policy_output_limit
+            outbound_body = {**provider_body, "model": model}
+            if effective_output_limit is not None:
+                outbound_body["max_output_tokens"] = effective_output_limit
             body = canonical_json(outbound_body).encode("utf-8")
         except ValidationError as exc:
             raise ChatGPTResponseFailure(
                 "provider request JSON is invalid", error_code="invalid_request"
             ) from exc
-        if not body or len(body) > request_limit_bytes:
+        if (
+            worker_bytes > request_limit_bytes
+            or not body
+            or len(body) > request_limit_bytes + MAX_CONNECTOR_REQUEST_EXPANSION
+        ):
             raise ChatGPTResponseFailure(
                 "provider request exceeds its size limit",
                 error_code="request_too_large",
@@ -1924,7 +2027,10 @@ class OpenAIChatGPTConnector:
             **_response_authority(request),
             "outcome": outcome,
             "provider_status": status_code,
-            "request_bytes": min(request_bytes, request.request_limit_bytes),
+            "request_bytes": min(
+                request_bytes,
+                request.request_limit_bytes + MAX_CONNECTOR_REQUEST_EXPANSION,
+            ),
             "response_bytes": min(response_bytes, request.response_limit_bytes),
             "error_code": _safe_error_code(error_code, fallback="connector_error"),
             "response": None,
@@ -2018,17 +2124,19 @@ class OpenAIChatGPTConnector:
         if request.connector_protocol_version == 2:
             budget = request.budget
             assert budget is not None
-            if (
-                result.usage is None
-                or budget.estimate_microusd(result.usage) > budget.reservation_microusd
-            ):
+            if result.usage is None:
                 return self._failed(
                     request,
-                    error_code=(
-                        "usage_unavailable"
-                        if result.usage is None
-                        else "usage_exceeds_budget"
-                    ),
+                    error_code="usage_unavailable",
+                    status_code=result.status_code,
+                    request_bytes=result.request_bytes,
+                    response_bytes=result.response_bytes,
+                    outcome="ambiguous",
+                )
+            if result.usage.output_tokens > budget.max_output_tokens:
+                return self._failed(
+                    request,
+                    error_code="usage_exceeds_output_limit",
                     status_code=result.status_code,
                     request_bytes=result.request_bytes,
                     response_bytes=result.response_bytes,

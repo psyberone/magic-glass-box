@@ -591,13 +591,8 @@ class LandingReceipt:
             raise IntegrationError("landing receipt observed revision is invalid")
         if self.actuator != "git-force-with-lease-v1":
             raise IntegrationError("landing receipt actuator is invalid")
-        expected_assurance = (
-            LandingAssurance.BASE_AND_HEAD_ENFORCED
-            if self.outcome is LandingOutcome.LANDED
-            else LandingAssurance.OPERATOR_ATTESTED
-        )
-        if self.assurance is not expected_assurance:
-            raise IntegrationError("landing receipt assurance is not truthful")
+        if not isinstance(self.assurance, LandingAssurance):
+            raise IntegrationError("landing receipt assurance is invalid")
 
     @classmethod
     def from_request(
@@ -639,11 +634,7 @@ class LandingReceipt:
             outcome=request.outcome,
             observed_revision=request.observed_revision,
             actuator=plan.actuator,
-            assurance=(
-                plan.assurance
-                if request.outcome is LandingOutcome.LANDED
-                else LandingAssurance.OPERATOR_ATTESTED
-            ),
+            assurance=LandingAssurance.OPERATOR_ATTESTED,
         )
 
     @classmethod

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import unittest
 from typing import Any
 
@@ -226,6 +228,67 @@ def reminder_response() -> dict[str, Any]:
 
 
 class KrabClientTests(unittest.TestCase):
+    def test_total_deadline_interrupts_a_stalled_response_header_read(self) -> None:
+        class HeaderStallConnection(FakeConnection):
+            def __init__(self) -> None:
+                super().__init__(FakeResponse(200, {"trusted_metadata": {}}))
+                self.released = threading.Event()
+
+            def getresponse(self) -> FakeResponse:
+                self.released.wait(0.3)
+                raise TimeoutError("stalled headers")
+
+            def close(self) -> None:
+                self.released.set()
+                super().close()
+
+        connection = HeaderStallConnection()
+        client = KrabClient(
+            "http://127.0.0.1:8765",
+            "secret-token",
+            timeout=0.05,
+            connection_factory=lambda *_args: connection,
+        )
+        started = time.monotonic()
+
+        with self.assertRaisesRegex(KrabError, "unavailable"):
+            client.whoami()
+
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertTrue(connection.closed)
+
+    def test_request_timeout_is_one_total_monotonic_deadline(self) -> None:
+        class CumulativelySlowConnection(FakeConnection):
+            def request(
+                self,
+                method: str,
+                target: str,
+                body: bytes | None = None,
+                *,
+                headers: dict[str, str],
+            ) -> None:
+                time.sleep(0.03)
+                super().request(method, target, body, headers=headers)
+
+            def getresponse(self) -> FakeResponse:
+                time.sleep(0.03)
+                return super().getresponse()
+
+        connection = CumulativelySlowConnection(
+            FakeResponse(200, {"trusted_metadata": {}})
+        )
+        client = KrabClient(
+            "http://127.0.0.1:8765",
+            "secret-token",
+            timeout=0.05,
+            connection_factory=lambda *_args: connection,
+        )
+
+        with self.assertRaisesRegex(KrabError, "unavailable"):
+            client.whoami()
+
+        self.assertTrue(connection.closed)
+
     def test_whoami_is_typed_and_authenticated(self) -> None:
         client, connection = client_for(
             FakeResponse(

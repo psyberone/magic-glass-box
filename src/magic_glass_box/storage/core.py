@@ -230,6 +230,16 @@ class DatabaseCore:
         if not parent_exists:
             os.chmod(self.path.parent, 0o700)
         try:
+            parent_info = self.path.parent.lstat()
+        except OSError as exc:
+            raise StorageError(f"cannot inspect state directory: {exc}") from exc
+        if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+            raise StorageError("state directory must be a real directory")
+        if hasattr(os, "getuid") and parent_info.st_uid != os.getuid():
+            raise StorageError("state directory must be owned by the current user")
+        if parent_info.st_mode & 0o077:
+            raise StorageError("state directory must be private")
+        try:
             info = self.path.lstat()
         except FileNotFoundError:
             flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
@@ -420,6 +430,10 @@ class DatabaseCore:
                 (
                     "integration_landing_plans",
                     "SELECT COUNT(*) FROM integration_landing_plans",
+                ),
+                (
+                    "integration_landing_plan_nonces",
+                    "SELECT COUNT(*) FROM integration_landing_plan_nonces",
                 ),
                 (
                     "integration_landing_receipts",

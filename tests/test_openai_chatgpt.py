@@ -5,6 +5,8 @@ import os
 import stat
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -13,7 +15,10 @@ from typing import Any
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from magic_glass_box.inference import InferenceInvocationRequest
+from magic_glass_box.inference import (
+    MAX_CONNECTOR_REQUEST_EXPANSION,
+    InferenceInvocationRequest,
+)
 from magic_glass_box.openai_chatgpt import (
     CHATGPT_DIRECT_SCOPE,
     BoundedHTTPSClient,
@@ -183,6 +188,72 @@ class FakeConnection:
 
 
 class BoundedHTTPSClientTests(unittest.TestCase):
+    def test_total_deadline_interrupts_a_stalled_response_header_read(self) -> None:
+        class HeaderStallConnection(FakeConnection):
+            def __init__(self) -> None:
+                super().__init__(FakeWireResponse(b"{}"))
+                self.released = threading.Event()
+
+            def getresponse(self) -> FakeWireResponse:
+                self.released.wait(0.3)
+                raise TimeoutError("stalled headers")
+
+            def close(self) -> None:
+                self.released.set()
+                super().close()
+
+        connection = HeaderStallConnection()
+        started = time.monotonic()
+
+        with self.assertRaises(HTTPTransportError) as raised:
+            BoundedHTTPSClient(lambda *_args: connection).request(
+                "GET",
+                "https://api.openai.com/v1/models",
+                headers={},
+                body=None,
+                timeout=0.05,
+                max_response_bytes=8,
+            )
+
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertTrue(raised.exception.ambiguous)
+        self.assertTrue(connection.closed)
+
+    def test_timeout_is_one_total_monotonic_deadline(self) -> None:
+        class CumulativelySlowConnection(FakeConnection):
+            def connect(self) -> None:
+                time.sleep(0.02)
+
+            def request(
+                self,
+                method: str,
+                target: str,
+                *,
+                body: bytes | None,
+                headers: dict[str, str],
+            ) -> None:
+                time.sleep(0.02)
+                super().request(method, target, body=body, headers=headers)
+
+            def getresponse(self) -> FakeWireResponse:
+                time.sleep(0.02)
+                return super().getresponse()
+
+        connection = CumulativelySlowConnection(FakeWireResponse(b"{}"))
+
+        with self.assertRaises(HTTPTransportError) as raised:
+            BoundedHTTPSClient(lambda *_args: connection).request(
+                "GET",
+                "https://api.openai.com/v1/models",
+                headers={},
+                body=None,
+                timeout=0.05,
+                max_response_bytes=8,
+            )
+
+        self.assertTrue(raised.exception.ambiguous)
+        self.assertTrue(connection.closed)
+
     def test_connection_factory_failure_is_a_pre_dispatch_transport_error(self) -> None:
         def unavailable(_host: str, _port: int | None, _timeout: float):
             raise OSError("private resolver detail")
@@ -1532,7 +1603,6 @@ class OpenAIResponsesClientTests(unittest.TestCase):
             (self.request(store=True), "store"),
             (self.request(stream=False), "stream"),
             (self.request(input="not-an-array"), "input"),
-            (self.request(max_output_tokens=100), "unsupported"),
             (self.request(service_tier="priority"), "unsupported"),
             (self.request(future_provider_capability=True), "unsupported"),
             (
@@ -1557,6 +1627,78 @@ class OpenAIResponsesClientTests(unittest.TestCase):
             ):
                 self.invoke(http, request)
             self.assertEqual(http.requests, [])
+
+    def test_worker_may_narrow_but_not_expand_the_output_token_ceiling(self) -> None:
+        raw = completed_sse()
+        http = FakeHTTPClient(
+            HTTPResponse(200, "text/event-stream", raw, "req_narrowed")
+        )
+
+        OpenAIResponsesClient(http).invoke(
+            access_token="access-secret",  # noqa: S106 - test token
+            model=MODEL,
+            request=self.request(max_output_tokens=100),
+            request_limit_bytes=65536,
+            response_limit_bytes=65536,
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+            max_output_tokens=1_000,
+        )
+
+        self.assertEqual(json.loads(http.requests[0]["body"])["max_output_tokens"], 100)
+        with self.assertRaises(ChatGPTResponseFailure) as raised:
+            OpenAIResponsesClient(FakeHTTPClient()).invoke(
+                access_token="access-secret",  # noqa: S106 - test token
+                model=MODEL,
+                request=self.request(max_output_tokens=1_001),
+                request_limit_bytes=65536,
+                response_limit_bytes=65536,
+                deadline=datetime.now(UTC) + timedelta(seconds=30),
+                max_output_tokens=1_000,
+            )
+        self.assertEqual(raised.exception.error_code, "output_limit_exceeded")
+
+        legacy_http = FakeHTTPClient(
+            HTTPResponse(200, "text/event-stream", raw, "req_legacy_narrowed")
+        )
+        OpenAIResponsesClient(legacy_http).invoke(
+            access_token="access-secret",  # noqa: S106 - test token
+            model=MODEL,
+            request=self.request(max_output_tokens=100),
+            request_limit_bytes=65536,
+            response_limit_bytes=65536,
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+            max_output_tokens=None,
+        )
+        self.assertEqual(
+            json.loads(legacy_http.requests[0]["body"])["max_output_tokens"], 100
+        )
+
+    def test_connector_owned_fields_have_a_separate_bounded_byte_allowance(
+        self,
+    ) -> None:
+        request = self.request()
+        worker_bytes = len(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        )
+        model = "gpt-" + "x" * 240
+        http = FakeHTTPClient(
+            HTTPResponse(200, "text/event-stream", completed_sse(), "req_expanded")
+        )
+
+        result = OpenAIResponsesClient(http).invoke(
+            access_token="access-secret",  # noqa: S106 - test token
+            model=model,
+            request=request,
+            request_limit_bytes=worker_bytes,
+            response_limit_bytes=65536,
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+            max_output_tokens=1_000_000,
+        )
+
+        self.assertGreater(result.request_bytes, worker_bytes)
+        sent = json.loads(http.requests[0]["body"])
+        self.assertEqual(sent["model"], model)
+        self.assertEqual(sent["max_output_tokens"], 1_000_000)
 
     def test_known_stream_and_http_errors_preserve_only_bounded_metadata(self) -> None:
         cases = (
@@ -1943,6 +2085,84 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
         self.assertEqual(missing.error_code, "usage_unavailable")
         self.assertIsNone(missing.usage)
 
+    def test_v2_connector_retains_paid_usage_beyond_the_reservation_estimate(
+        self,
+    ) -> None:
+        budget = {
+            "policy_sha256": "8" * 64,
+            "currency": "USD",
+            "reservation_microusd": 300_000,
+            "max_output_tokens": 1_000,
+            "input_microusd_per_million_tokens": 1_000_000,
+            "cached_input_microusd_per_million_tokens": 500_000,
+            "output_microusd_per_million_tokens": 2_000_000,
+        }
+        request = invocation_request(
+            self.scope,
+            connector_protocol_version=2,
+            budget=budget,
+        )
+        event = {
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 300_001,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 1,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 300_002,
+                },
+            },
+        }
+        raw = ("data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n").encode()
+
+        response = self.connector(
+            FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, "req_overrun"))
+        ).invoke(request)
+
+        self.assertEqual(response.outcome, "succeeded")
+        assert response.usage is not None
+        self.assertEqual(response.usage.input_tokens, 300_001)
+
+    def test_v2_connector_converts_output_bound_violations_to_ambiguity(self) -> None:
+        budget = {
+            "policy_sha256": "8" * 64,
+            "currency": "USD",
+            "reservation_microusd": 300_000,
+            "max_output_tokens": 10,
+            "input_microusd_per_million_tokens": 1,
+            "cached_input_microusd_per_million_tokens": 0,
+            "output_microusd_per_million_tokens": 1,
+        }
+        request = invocation_request(
+            self.scope,
+            connector_protocol_version=2,
+            budget=budget,
+        )
+        event = {
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 1,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 11,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 12,
+                },
+            },
+        }
+        raw = ("data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n").encode()
+
+        response = self.connector(
+            FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, "req_output"))
+        ).invoke(request)
+
+        self.assertEqual(response.outcome, "ambiguous")
+        self.assertEqual(response.error_code, "usage_exceeds_output_limit")
+        self.assertIsNone(response.usage)
+
     def test_connector_rejects_wrong_authority_before_provider_transport(self) -> None:
         cases = (
             ({"connector_id": "ifc_" + "9" * 32}, "connector"),
@@ -2144,7 +2364,7 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
             credentials=Credentials(),
             responses=FailingResponses(),  # type: ignore[arg-type]
         ).invoke(invocation_request(self.scope))
-        self.assertEqual(capped.request_bytes, 65536)
+        self.assertEqual(capped.request_bytes, 65536 + MAX_CONNECTOR_REQUEST_EXPANSION)
         self.assertEqual(capped.response_bytes, 65536)
 
 

@@ -60,7 +60,7 @@
       "minimum": 100,
       "maximum": 599
     },
-    "request_bytes": { "type": "integer", "minimum": 0, "maximum": 2097152 },
+    "request_bytes": { "type": "integer", "minimum": 0, "maximum": 2097664 },
     "response_bytes": { "type": "integer", "minimum": 0, "maximum": 4194304 },
     "retry_after_seconds": {
       "type": "integer",
@@ -96,7 +96,8 @@
       "else": {
         "properties": {
           "error_code": { "$ref": "#/$defs/name" },
-          "response": { "type": "null" }
+          "response": { "type": "null" },
+          "usage": { "type": "null" }
         }
       }
     },

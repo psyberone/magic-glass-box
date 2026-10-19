@@ -43,7 +43,7 @@ class LiveOpenAIChatGPTProofContractTests(unittest.TestCase):
         self.assertEqual(grant.budget.project_microusd, BUDGET_CEILING_MICROUSD)
         self.assertEqual(grant.budget.grant_microusd, BUDGET_CEILING_MICROUSD)
         self.assertLessEqual(
-            grant.budget.maximum_invocation_microusd(grant.request_bytes),
+            grant.budget.minimum_reservation_microusd(grant.request_bytes),
             grant.budget.invocation_microusd,
         )
         connector.validate_grant("openai-chatgpt", grant)

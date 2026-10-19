@@ -1018,6 +1018,82 @@ class RealGitSnapshotterTests(unittest.TestCase):
         self.assertFalse(sentinel.exists())
         self.assertFalse((self.root / "hostile.index").exists())
 
+    def test_on_disk_git_alternates_cannot_escape_the_registered_repository(self):
+        self.initialize()
+        (self.repository / "private.txt").write_bytes(b"private alternate object\n")
+        self.git("add", "private.txt")
+        self.git("commit", "-qm", "private alternate commit")
+        commit = self.git("rev-parse", "HEAD").decode().strip()
+        shared = self.root / "shared-source"
+        subprocess.run(  # noqa: S603 - controlled real Git test fixture
+            [
+                str(GitSnapshotter().binary),
+                "clone",
+                "--quiet",
+                "--shared",
+                "--no-checkout",
+                str(self.repository),
+                str(shared),
+            ],
+            check=True,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
+        )
+        alternate = shared / ".git" / "objects" / "info" / "alternates"
+        self.assertTrue(alternate.read_text(encoding="utf-8").strip())
+
+        with self.assertRaisesRegex(WorkspaceError, "alternates"):
+            GitSnapshotter().snapshot(shared, commit, self.destination)
+
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_git_commondir_cannot_escape_the_registered_repository(self):
+        self.initialize()
+        (self.repository / "private.txt").write_bytes(b"private common object\n")
+        self.git("add", "private.txt")
+        self.git("commit", "-qm", "private common commit")
+        commit = self.git("rev-parse", "HEAD").decode().strip()
+        redirected = self.root / "commondir-source"
+        subprocess.run(  # noqa: S603 - controlled real Git test fixture
+            [str(GitSnapshotter().binary), "init", "-q", str(redirected)],
+            check=True,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
+        )
+        git_directory = redirected / ".git"
+        (git_directory / "HEAD").write_text(commit + "\n", encoding="ascii")
+        (git_directory / "commondir").write_text(
+            str(self.repository / ".git") + "\n", encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(WorkspaceError, "common Git directory"):
+            GitSnapshotter().snapshot(redirected, commit, self.destination)
+
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_symlinked_git_object_entries_cannot_escape_the_repository(self):
+        self.initialize()
+        (self.repository / "private.txt").write_bytes(b"private packed object\n")
+        self.git("add", "private.txt")
+        self.git("commit", "-qm", "private packed commit")
+        self.git("gc", "--prune=now", "--quiet")
+        commit = self.git("rev-parse", "HEAD").decode().strip()
+        redirected = self.root / "object-link-source"
+        subprocess.run(  # noqa: S603 - controlled real Git test fixture
+            [str(GitSnapshotter().binary), "init", "-q", str(redirected)],
+            check=True,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
+        )
+        pack_directory = redirected / ".git" / "objects" / "pack"
+        pack_directory.rmdir()
+        pack_directory.symlink_to(
+            self.repository / ".git" / "objects" / "pack", target_is_directory=True
+        )
+        (redirected / ".git" / "HEAD").write_text(commit + "\n", encoding="ascii")
+
+        with self.assertRaisesRegex(WorkspaceError, "object store"):
+            GitSnapshotter().snapshot(redirected, commit, self.destination)
+
+        self.assertEqual(list(self.destination.iterdir()), [])
+
     def test_raw_blobs_stream_through_one_batch_process(self):
         self.initialize()
         for index in range(50):

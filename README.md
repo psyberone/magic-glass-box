@@ -44,7 +44,8 @@ This repository currently contains the first executable vertical slice:
 - schema-v19 provider-budget authority with normalized content-free usage,
   versioned USD-micro pricing and run/project/grant ceilings, atomic
   pre-dispatch allowance reservations, conservative ambiguity accounting, and
-  reconciled control-room totals;
+  reconciled control-room totals; schema v22 retains honest paid-usage overruns
+  instead of discarding them as ambiguity;
 - schema-v20 quota-aware recovery that atomically records explicit quota,
   rate-limit, and overload refusals, pauses the same durable run under bounded
   retry timing, interrupts its disposable worker safely, and lets the
@@ -75,9 +76,9 @@ This repository currently contains the first executable vertical slice:
   command output;
 - hard work-item landing dependencies, immutable deterministic refolds, one
   leased integration lane per ref, exact argv-only manual Git plans, and
-  nonce-bound receipts that either confirm the unchanged base or truthfully
-  advance an out-of-band observed ref and conservatively invalidate every
-  remaining sibling without storing a Git-host credential;
+  reissuable nonce-bound receipts that either confirm the unchanged base or
+  truthfully advance an out-of-band observed ref and conservatively invalidate
+  every remaining sibling without storing a Git-host credential;
 - a durable attempt ledger, bounded structured handoff, and immutable recovery
   checkpoint that rebuild a replacement from its pinned commit plus verified
   recoverable edits without a transcript or inherited mutable sandbox;
@@ -310,6 +311,8 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
 The returned commands are argv arrays and are never executed by MGB. After the
 operator executes them, `integration receipt` imports the nonce-bound outcome.
 Any sibling must be refolded and fully re-gated before another plan can issue.
+If the raw nonce is lost first, `integration plan-reissue` rotates only that
+one-time authority while keeping the landing lane reserved.
 
 After all runs and assignments are terminal and the final work-log entry is an
 `outcome`, seal or later reopen the local work cycle with:
@@ -375,8 +378,9 @@ The old `HEX_DB` and `HEX_STATE_DIR` overrides and Docker labels are recognized
 only for migration and interrupted-run cleanup; new configuration uses the
 `MAGIC_GLASS_BOX_` prefix and `io.magicglassbox` labels.
 
-Development uses RED-first tests, an 85% branch-coverage floor, and an 80%
-mutation kill-rate floor. The repeatable gates are:
+Development uses RED-first tests, an 85% aggregate coverage floor with branch
+measurement enabled, and an 80% mutation kill-rate floor. The repeatable gates
+are:
 
 ```console
 make quality

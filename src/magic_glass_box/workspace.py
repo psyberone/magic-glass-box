@@ -42,6 +42,105 @@ class WorkspaceError(RuntimeError):
     """A per-run workspace could not be prepared without weakening isolation."""
 
 
+def _validate_git_object_entries(objects: Path) -> None:
+    pending = [objects]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise WorkspaceError(
+                            "source Git object store entry is unavailable"
+                        ) from exc
+                    if stat.S_ISLNK(info.st_mode):
+                        raise WorkspaceError(
+                            "source Git object store must not contain symlinks"
+                        )
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(Path(entry.path))
+                    elif not stat.S_ISREG(info.st_mode):
+                        raise WorkspaceError(
+                            "source Git object store entries must be regular files"
+                        )
+        except WorkspaceError:
+            raise
+        except OSError as exc:
+            raise WorkspaceError("source Git object store is unavailable") from exc
+
+
+def validate_git_source(repository: Path) -> None:
+    """Reject Git metadata that redirects object reads outside the source."""
+
+    source = Path(repository)
+    try:
+        source_info = source.lstat()
+    except OSError as exc:
+        raise WorkspaceError("source repository is unavailable") from exc
+    if stat.S_ISLNK(source_info.st_mode) or not stat.S_ISDIR(source_info.st_mode):
+        raise WorkspaceError("source repository must be a real directory")
+
+    marker = source / ".git"
+    try:
+        marker_info = marker.lstat()
+    except FileNotFoundError:
+        git_directory = source
+    except OSError as exc:
+        raise WorkspaceError("source Git metadata is unavailable") from exc
+    else:
+        if stat.S_ISLNK(marker_info.st_mode) or not stat.S_ISDIR(marker_info.st_mode):
+            raise WorkspaceError("redirected source Git directories are not allowed")
+        git_directory = marker
+
+    common_directory = git_directory / "commondir"
+    try:
+        common_directory.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise WorkspaceError("source common Git directory is unavailable") from exc
+    else:
+        raise WorkspaceError("source common Git directory redirects are not allowed")
+
+    objects = git_directory / "objects"
+    try:
+        objects_info = objects.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise WorkspaceError("source Git object store is unavailable") from exc
+    if stat.S_ISLNK(objects_info.st_mode) or not stat.S_ISDIR(objects_info.st_mode):
+        raise WorkspaceError("redirected source Git object stores are not allowed")
+    _validate_git_object_entries(objects)
+
+    info_directory = objects / "info"
+    try:
+        info = info_directory.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise WorkspaceError("source Git object metadata is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise WorkspaceError("redirected source Git object metadata is not allowed")
+
+    for name in ("alternates", "http-alternates"):
+        path = info_directory / name
+        try:
+            alternate = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise WorkspaceError("source Git alternates are unavailable") from exc
+        if (
+            stat.S_ISLNK(alternate.st_mode)
+            or not stat.S_ISREG(alternate.st_mode)
+            or alternate.st_size != 0
+        ):
+            raise WorkspaceError("source Git alternates are not allowed")
+
+
 @dataclass(frozen=True)
 class PreparedWorkspace:
     path: Path
@@ -540,6 +639,7 @@ class GitSnapshotter:
             valid = False
         if not valid:
             raise WorkspaceError("source revision is invalid")
+        validate_git_source(repository)
         try:
             info = destination.lstat()
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):

@@ -227,8 +227,9 @@ hash is retained.
 
 The imported receipt must bind that nonce and report what the actuator says it
 did. MGB validates the receipt against the issued authority and records the
-reported assurance level; without a dedicated actuator integration, it does
-not independently observe the remote forge. The available levels are:
+assurance supported by MGB's evidence; without a dedicated actuator
+integration, it does not independently observe the remote forge. The assurance
+model distinguishes these levels:
 
 - **base-and-head enforced** — the actuator atomically required both expected
   values;
@@ -237,11 +238,30 @@ not independently observe the remote forge. The available levels are:
 - **operator attested** — the provider offered no machine-verifiable
   precondition through the selected path.
 
-These levels are not interchangeable. In particular, GitHub CLI's
+Receipt schema v1 recognizes `base_and_head_enforced` for legacy or future
+machine-observed imports and `operator_attested` for the current manual path;
+`head_enforced` requires a future actuator and schema revision. These levels
+are not interchangeable. In particular, GitHub CLI's
 `--match-head-commit` requires the pull-request head to match; its documented
 contract does not include an expected-base parameter. A plan using that option
 must not claim base-and-head compare-and-swap. See the
 [GitHub CLI merge contract](https://cli.github.com/manual/gh_pr_merge).
+
+If the one-time nonce is lost before a receipt is recorded, reissue only the
+nonce authority without releasing the serialized landing lane:
+
+```console
+magic-glass-box integration plan-reissue lpl_<id> \
+  --expected-generation <generation> --reissued-by operator
+```
+
+Reissue appends an immutable nonce generation, returns the new raw nonce once,
+and immediately invalidates every earlier nonce. It does not rebuild the plan,
+change its authorized revisions, or allow a sibling queue item to pass it.
+Manual receipt imports are recorded as **operator attested** because MGB does
+not observe the remote ref. The plan's **base-and-head enforced** value describes
+the generated `--force-with-lease` actuator contract; it is not promoted into a
+claim that MGB independently verified execution.
 
 ## Receipts
 

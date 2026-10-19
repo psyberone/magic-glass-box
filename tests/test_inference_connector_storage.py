@@ -422,7 +422,7 @@ class InferenceConnectorMigrationTests(unittest.TestCase):
             first = database.initialize()
             second = database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(SCHEMA_VERSION, 22)
             self.assertEqual(first["schema_version"], SCHEMA_VERSION)
             self.assertEqual(second, first)
             legacy = database.get_provider_grant("legacy-direct")
@@ -435,8 +435,15 @@ class InferenceConnectorMigrationTests(unittest.TestCase):
                         "SELECT name FROM sqlite_schema WHERE type = 'table'"
                     )
                 }
+                invocation_schema = migrated.execute(
+                    "SELECT sql FROM sqlite_schema "
+                    "WHERE type = 'table' AND name = 'provider_invocations'"
+                ).fetchone()[0]
             self.assertIn("inference_connectors", tables)
             self.assertIn("provider_connector_bindings", tables)
+            self.assertNotIn(
+                "accounted_microusd <= reserved_microusd", invocation_schema
+            )
 
 
 if __name__ == "__main__":

@@ -238,11 +238,18 @@ revision does not erase prior spend. A deliberately new account starts a new
 budget epoch and is therefore an explicit operator authority change.
 
 Before a v2 grant can be registered, its invocation allowance must cover a
-conservative worst case: four input tokens for every permitted request byte,
-plus the maximum output tokens at the pinned rates. The v2 request repeats that
-authority. The OpenAI connector injects `max_output_tokens` after validating
-the worker body, so the worker cannot remove or raise the provider-side bound.
-Other v2 connectors must enforce an equivalent output bound for their provider.
+conservative reservation estimate: four input tokens for every permitted
+worker-request byte, plus the maximum output tokens at the pinned rates. This
+is an admission estimate, not a physical upper bound on provider-reported input
+usage; providers may add their own instructions and tool formatting. The v2
+request repeats that authority. The OpenAI connector injects
+`max_output_tokens` after validating the worker body. A worker may request a
+smaller value but cannot remove or raise the provider-side bound. Connector-
+owned model and output-limit fields have a separate 512-byte expansion
+allowance and do not consume the worker's request-byte authority. Other v2
+connectors must enforce an equivalent output bound for their provider. A
+protocol-v1 request has no MGB budget ceiling to raise; when it supplies its own
+valid `max_output_tokens`, the OpenAI connector forwards that caller cap.
 
 Immediately before dispatch, one SQLite `BEGIN IMMEDIATE` transaction totals
 existing consumption and active reservations for all three scopes. It either
@@ -250,13 +257,18 @@ records the new `dispatching` row and full allowance or denies the call before
 the sidecar sees it. Concurrent control-plane processes therefore cannot each
 observe the same remaining allowance and collectively overspend it.
 
-A verified provider usage report replaces the reservation with its rounded-up
-estimate and releases the remainder. A known pre-connector failure releases the
-allowance. Missing, malformed, or lost post-dispatch accounting consumes the
-full reservation conservatively. The control room separates reported estimate,
-finalized accounting, active reservation, total policy consumption, and
-remaining run/grant/project allowance. `reconciled` is false while a
-reservation is active or any invocation remains conservatively accounted.
+A verified successful provider usage report replaces the reservation with its
+rounded-up estimate and releases the remainder. If actual paid usage exceeds
+the estimate reserved before dispatch, MGB retains and accounts the larger
+reported amount; subsequent calls are denied wherever the remaining ceiling is
+smaller than the per-invocation allowance. A known pre-connector failure
+releases the allowance.
+Non-success replies may not attach partial usage. Missing, malformed, or lost
+post-dispatch accounting consumes the full reservation conservatively. The
+control room separates reported estimate, finalized accounting, active
+reservation, total policy consumption, and remaining run/grant/project
+allowance. `reconciled` is false while a reservation is active or any
+invocation remains conservatively accounted.
 
 Local deployments use an operator-owned Unix socket. A future authenticated
 loopback or external transport must preserve the same client contract; its
@@ -339,7 +351,9 @@ the strict framed v1 and v2 invocation contracts; it does not expose OAuth,
 arbitrary URLs, raw HTTP, or a provider CLI over that socket. V2 completed
 Responses streams must contain structurally valid usage. The connector reduces
 that provider object to the four normalized counters and fails closed if usage
-is absent or exceeds the pinned request/output/reservation bounds.
+is absent or exceeds the pinned output bound. Provider-reported input overhead
+and monetary reservation overruns remain successful, honestly accounted paid
+work rather than becoming discarded ambiguous responses.
 
 The OpenAI route additionally enforces the current Sign in with ChatGPT
 requirements before any HTTPS dispatch: `store` is false, `stream` is true,
@@ -422,6 +436,10 @@ HTTP 429, and HTTP 529 default to 60 seconds. Connector-supplied
 the OpenAI connector derives it from a numeric upstream `Retry-After` header.
 Ordinary 5xx failures remain permanent, and an ambiguous outcome is never
 converted into recovery merely because retry timing was present.
+
+Both the OpenAI HTTPS client and Krab client apply one monotonic deadline across
+connection, request transmission, response headers, and bounded body reads.
+Progress on a slow-dripping socket does not reset that total call budget.
 
 Invocation finalization and creation of the provider-recovery record happen in
 one SQLite transaction. The run moves from `running` or the short

@@ -17,10 +17,12 @@ atomic and reports one of three outcomes:
 - `unchanged` records a successful observation without appending duplicate
   content.
 
-`source_updated_at` is normalized to UTC and provides source ordering. An older
-timestamp is rejected as stale. Different content at the same timestamp is
-rejected as ambiguous rather than choosing a winner. Content may legitimately
-return to an earlier digest after an intervening version.
+`source_updated_at` is normalized to UTC at construction and provides source
+ordering. This invariant applies equally to the JSON parser and direct internal
+construction, so storage never compares mixed-offset timestamp strings. An
+older timestamp is rejected as stale. Different content at the same timestamp
+is rejected as ambiguous rather than choosing a winner. Content may
+legitimately return to an earlier digest after an intervening version.
 
 Every new run must name a local work-item ID and pins its current immutable
 version. A later import cannot change the title or instructions visible to that
