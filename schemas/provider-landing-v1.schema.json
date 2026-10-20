@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:provider-landing:v1",
+  "title": "Magic Glass Box Provider Landing Authority v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "assurance",
+    "candidate_id",
+    "capability_binding_id",
+    "evidence_snapshot_sha256",
+    "expected_base_revision",
+    "fold_id",
+    "head_revision",
+    "integration_ref",
+    "object_format",
+    "policy_id",
+    "policy_revision",
+    "queue_item_id",
+    "queue_version",
+    "repository_identity",
+    "schema_version",
+    "service_operation_id",
+    "service_operation_sha256",
+    "tree_revision"
+  ],
+  "properties": {
+    "assurance": { "const": "head_enforced" },
+    "candidate_id": { "type": "string", "pattern": "^cnd_[0-9a-f]{32}$" },
+    "capability_binding_id": { "type": "string", "pattern": "^cpb_[0-9a-f]{32}$" },
+    "evidence_snapshot_sha256": { "$ref": "#/$defs/sha256" },
+    "expected_base_revision": { "$ref": "#/$defs/objectId" },
+    "fold_id": { "type": ["string", "null"], "pattern": "^ifd_[0-9a-f]{32}$" },
+    "head_revision": { "$ref": "#/$defs/objectId" },
+    "integration_ref": { "$ref": "#/$defs/integrationRef" },
+    "object_format": { "enum": ["sha1", "sha256"] },
+    "policy_id": { "type": "string", "pattern": "^gpl_[0-9a-f]{32}$" },
+    "policy_revision": { "$ref": "#/$defs/sha256" },
+    "queue_item_id": { "type": "string", "pattern": "^iqm_[0-9a-f]{32}$" },
+    "queue_version": { "type": "integer", "minimum": 1 },
+    "repository_identity": { "type": "string", "pattern": "^boxp_[0-9a-f]{32}$" },
+    "schema_version": { "const": 1 },
+    "service_operation_id": { "type": "string", "pattern": "^sop_[0-9a-f]{32}$" },
+    "service_operation_sha256": { "$ref": "#/$defs/sha256" },
+    "tree_revision": { "$ref": "#/$defs/objectId" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "object_format": { "const": "sha1" } }, "required": ["object_format"] },
+      "then": {
+        "properties": {
+          "expected_base_revision": { "pattern": "^[0-9a-f]{40}$" },
+          "head_revision": { "pattern": "^[0-9a-f]{40}$" },
+          "tree_revision": { "pattern": "^[0-9a-f]{40}$" }
+        }
+      },
+      "else": {
+        "properties": {
+          "expected_base_revision": { "pattern": "^[0-9a-f]{64}$" },
+          "head_revision": { "pattern": "^[0-9a-f]{64}$" },
+          "tree_revision": { "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "integrationRef": {
+      "type": "string",
+      "pattern": "^refs/heads/(?!@$)(?!\\.)(?!.*\\/\\.)(?!.*(?:\\.\\.|@\\{|//|\\.lock(?:/|$)))(?!.*[/.]$)[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$",
+      "maxLength": 512
+    },
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

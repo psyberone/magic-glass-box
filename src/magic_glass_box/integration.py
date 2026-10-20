@@ -10,10 +10,13 @@ from typing import Any
 from .candidates import CandidateManifest, MaterializedCandidate
 from .domain import ValidationError, canonical_json, content_sha256, require_string
 from .gates import GateError, normalize_integration_ref
+from .service_sidecar import ServiceOperationReceipt
 
 INTEGRATION_FOLD_SCHEMA_VERSION = 1
 LANDING_PLAN_SCHEMA_VERSION = 1
 LANDING_RECEIPT_SCHEMA_VERSION = 1
+PROVIDER_LANDING_SCHEMA_VERSION = 1
+PROVIDER_LANDING_RECEIPT_SCHEMA_VERSION = 1
 
 OBJECT_FORMAT_LENGTHS = {"sha1": 40, "sha256": 64}
 OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -27,7 +30,10 @@ ID_PATTERNS = {
     "plan_id": re.compile(r"^lpl_[0-9a-f]{32}$"),
     "policy_id": re.compile(r"^gpl_[0-9a-f]{32}$"),
     "project_id": re.compile(r"^boxp_[0-9a-f]{32}$"),
+    "provider_landing_id": re.compile(r"^plr_[0-9a-f]{32}$"),
     "queue_item_id": re.compile(r"^iqm_[0-9a-f]{32}$"),
+    "service_operation_id": re.compile(r"^sop_[0-9a-f]{32}$"),
+    "capability_binding_id": re.compile(r"^cpb_[0-9a-f]{32}$"),
     "work_thread_id": re.compile(r"^wth_[0-9a-f]{32}$"),
 }
 
@@ -38,6 +44,7 @@ class IntegrationError(RuntimeError):
 
 class LandingAssurance(StrEnum):
     BASE_AND_HEAD_ENFORCED = "base_and_head_enforced"
+    HEAD_ENFORCED = "head_enforced"
     OPERATOR_ATTESTED = "operator_attested"
 
 
@@ -591,7 +598,10 @@ class LandingReceipt:
             raise IntegrationError("landing receipt observed revision is invalid")
         if self.actuator != "git-force-with-lease-v1":
             raise IntegrationError("landing receipt actuator is invalid")
-        if not isinstance(self.assurance, LandingAssurance):
+        if self.assurance not in {
+            LandingAssurance.BASE_AND_HEAD_ENFORCED,
+            LandingAssurance.OPERATOR_ATTESTED,
+        }:
             raise IntegrationError("landing receipt assurance is invalid")
 
     @classmethod
@@ -676,6 +686,292 @@ class LandingReceipt:
             "plan_id": self.plan_id,
             "request_sha256": self.request_sha256,
             "schema_version": self.schema_version,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
+@dataclass(frozen=True)
+class ProviderLandingRequest:
+    schema_version: int
+    queue_item_id: str
+    queue_version: int
+    policy_id: str
+    policy_revision: str
+    candidate_id: str
+    fold_id: str | None
+    repository_identity: str
+    integration_ref: str
+    expected_base_revision: str
+    head_revision: str
+    tree_revision: str
+    object_format: str
+    evidence_snapshot_sha256: str
+    service_operation_id: str
+    service_operation_sha256: str
+    capability_binding_id: str
+    assurance: LandingAssurance
+
+    def __post_init__(self) -> None:
+        _schema_version(
+            self.schema_version,
+            expected=PROVIDER_LANDING_SCHEMA_VERSION,
+            label="provider landing request",
+        )
+        _identifier(self.queue_item_id, field="queue_item_id")
+        if (
+            isinstance(self.queue_version, bool)
+            or not isinstance(self.queue_version, int)
+            or self.queue_version < 1
+        ):
+            raise IntegrationError("provider landing queue version is invalid")
+        _identifier(self.policy_id, field="policy_id")
+        _sha256(self.policy_revision, field="policy revision")
+        _identifier(self.candidate_id, field="candidate_id")
+        if self.fold_id is not None:
+            _identifier(self.fold_id, field="fold_id")
+        _identifier(self.repository_identity, field="project_id")
+        _integration_ref(self.integration_ref)
+        object_format = _object_format(self.object_format)
+        for field in (
+            "expected_base_revision",
+            "head_revision",
+            "tree_revision",
+        ):
+            _object_id(getattr(self, field), field=field, object_format=object_format)
+        _sha256(self.evidence_snapshot_sha256, field="evidence snapshot digest")
+        _identifier(self.service_operation_id, field="service_operation_id")
+        _sha256(self.service_operation_sha256, field="service operation digest")
+        _identifier(self.capability_binding_id, field="capability_binding_id")
+        if self.assurance is not LandingAssurance.HEAD_ENFORCED:
+            raise IntegrationError("provider landing assurance is invalid")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ProviderLandingRequest:
+        fields = {
+            "schema_version",
+            "queue_item_id",
+            "queue_version",
+            "policy_id",
+            "policy_revision",
+            "candidate_id",
+            "fold_id",
+            "repository_identity",
+            "integration_ref",
+            "expected_base_revision",
+            "head_revision",
+            "tree_revision",
+            "object_format",
+            "evidence_snapshot_sha256",
+            "service_operation_id",
+            "service_operation_sha256",
+            "capability_binding_id",
+            "assurance",
+        }
+        document = _strict_fields(
+            value, label="provider landing request", fields=fields
+        )
+        try:
+            assurance = LandingAssurance(document["assurance"])
+        except (TypeError, ValueError) as exc:
+            raise IntegrationError("provider landing assurance is invalid") from exc
+        return cls(
+            **{field: document[field] for field in fields if field != "assurance"},
+            assurance=assurance,
+        )  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "assurance": self.assurance.value,
+            "candidate_id": self.candidate_id,
+            "capability_binding_id": self.capability_binding_id,
+            "evidence_snapshot_sha256": self.evidence_snapshot_sha256,
+            "expected_base_revision": self.expected_base_revision,
+            "fold_id": self.fold_id,
+            "head_revision": self.head_revision,
+            "integration_ref": self.integration_ref,
+            "object_format": self.object_format,
+            "policy_id": self.policy_id,
+            "policy_revision": self.policy_revision,
+            "queue_item_id": self.queue_item_id,
+            "queue_version": self.queue_version,
+            "repository_identity": self.repository_identity,
+            "schema_version": self.schema_version,
+            "service_operation_id": self.service_operation_id,
+            "service_operation_sha256": self.service_operation_sha256,
+            "tree_revision": self.tree_revision,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
+@dataclass(frozen=True)
+class ProviderLandingReceipt:
+    schema_version: int
+    provider_landing_id: str
+    request_sha256: str
+    service_operation_id: str
+    service_receipt_sha256: str
+    outcome: LandingOutcome
+    observed_revision: str
+    object_format: str
+    remote_identity: str
+    closed_references: tuple[str, ...]
+    actuator: str
+    assurance: LandingAssurance
+
+    def __post_init__(self) -> None:
+        _schema_version(
+            self.schema_version,
+            expected=PROVIDER_LANDING_RECEIPT_SCHEMA_VERSION,
+            label="provider landing receipt",
+        )
+        _identifier(self.provider_landing_id, field="provider_landing_id")
+        _sha256(self.request_sha256, field="provider landing request digest")
+        _identifier(self.service_operation_id, field="service_operation_id")
+        _sha256(self.service_receipt_sha256, field="service receipt digest")
+        if not isinstance(self.outcome, LandingOutcome):
+            raise IntegrationError("provider landing outcome is invalid")
+        object_format = _object_format(self.object_format)
+        _object_id(
+            self.observed_revision,
+            field="provider landing observed revision",
+            object_format=object_format,
+        )
+        try:
+            remote_identity = require_string(
+                self.remote_identity,
+                field="provider landing remote identity",
+                max_bytes=512,
+            )
+            closed = tuple(
+                require_string(
+                    item,
+                    field="provider landing closed reference",
+                    max_bytes=256,
+                )
+                for item in self.closed_references
+            )
+        except ValidationError as exc:
+            raise IntegrationError(str(exc)) from exc
+        if (
+            remote_identity != self.remote_identity
+            or closed != self.closed_references
+            or len(closed) > 64
+            or len(set(closed)) != len(closed)
+        ):
+            raise IntegrationError("provider landing closed references are invalid")
+        landed = self.remote_identity in self.closed_references
+        if landed != (self.outcome is LandingOutcome.LANDED):
+            raise IntegrationError("provider landing outcome is inconsistent")
+        if self.actuator != "service-sidecar-v1":
+            raise IntegrationError("provider landing actuator is invalid")
+        if self.assurance is not LandingAssurance.HEAD_ENFORCED:
+            raise IntegrationError("provider landing assurance is invalid")
+
+    @classmethod
+    def from_service_receipt(
+        cls,
+        provider_landing_id: str,
+        request: ProviderLandingRequest,
+        receipt: ServiceOperationReceipt,
+    ) -> ProviderLandingReceipt:
+        _identifier(provider_landing_id, field="provider_landing_id")
+        if not isinstance(request, ProviderLandingRequest):
+            raise IntegrationError("provider landing request is invalid")
+        if not isinstance(receipt, ServiceOperationReceipt):
+            raise IntegrationError("service operation receipt is invalid")
+        if receipt.observed_revision is None:
+            raise IntegrationError("provider landing observed revision is missing")
+        outcome = (
+            LandingOutcome.LANDED
+            if receipt.remote_identity in receipt.closed_references
+            else LandingOutcome.NOT_LANDED
+        )
+        receipt_json = canonical_json(receipt.to_dict())
+        return cls(
+            schema_version=PROVIDER_LANDING_RECEIPT_SCHEMA_VERSION,
+            provider_landing_id=provider_landing_id,
+            request_sha256=request.digest,
+            service_operation_id=request.service_operation_id,
+            service_receipt_sha256=content_sha256(receipt_json),
+            outcome=outcome,
+            observed_revision=receipt.observed_revision,
+            object_format=request.object_format,
+            remote_identity=receipt.remote_identity,
+            closed_references=receipt.closed_references,
+            actuator="service-sidecar-v1",
+            assurance=LandingAssurance.HEAD_ENFORCED,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> ProviderLandingReceipt:
+        fields = {
+            "schema_version",
+            "provider_landing_id",
+            "request_sha256",
+            "service_operation_id",
+            "service_receipt_sha256",
+            "outcome",
+            "observed_revision",
+            "object_format",
+            "remote_identity",
+            "closed_references",
+            "actuator",
+            "assurance",
+        }
+        document = _strict_fields(
+            value, label="provider landing receipt", fields=fields
+        )
+        raw_closed = document["closed_references"]
+        if not isinstance(raw_closed, list):
+            raise IntegrationError("provider landing closed references are invalid")
+        try:
+            outcome = LandingOutcome(document["outcome"])
+            assurance = LandingAssurance(document["assurance"])
+        except (TypeError, ValueError) as exc:
+            raise IntegrationError("provider landing receipt enum is invalid") from exc
+        return cls(
+            schema_version=document["schema_version"],
+            provider_landing_id=document["provider_landing_id"],
+            request_sha256=document["request_sha256"],
+            service_operation_id=document["service_operation_id"],
+            service_receipt_sha256=document["service_receipt_sha256"],
+            outcome=outcome,
+            observed_revision=document["observed_revision"],
+            object_format=document["object_format"],
+            remote_identity=document["remote_identity"],
+            closed_references=tuple(raw_closed),
+            actuator=document["actuator"],
+            assurance=assurance,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "actuator": self.actuator,
+            "assurance": self.assurance.value,
+            "closed_references": list(self.closed_references),
+            "object_format": self.object_format,
+            "observed_revision": self.observed_revision,
+            "outcome": self.outcome.value,
+            "provider_landing_id": self.provider_landing_id,
+            "remote_identity": self.remote_identity,
+            "request_sha256": self.request_sha256,
+            "schema_version": self.schema_version,
+            "service_operation_id": self.service_operation_id,
+            "service_receipt_sha256": self.service_receipt_sha256,
         }
 
     @property

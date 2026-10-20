@@ -279,6 +279,37 @@ class FakeControlPlane:
     ) -> dict[str, object]:
         return self._called("integration.receipt", request=request, **kwargs)
 
+    def issue_provider_landing(
+        self, queue_item_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "integration.provider-issue", queue_item_id=queue_item_id, **kwargs
+        )
+
+    def get_provider_landing(self, provider_landing_id: str) -> dict[str, object]:
+        return self._called(
+            "integration.provider-show",
+            provider_landing_id=provider_landing_id,
+        )
+
+    def execute_provider_landing(
+        self, provider_landing_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "integration.provider-execute",
+            provider_landing_id=provider_landing_id,
+            **kwargs,
+        )
+
+    def settle_provider_landing(
+        self, provider_landing_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "integration.provider-settle",
+            provider_landing_id=provider_landing_id,
+            **kwargs,
+        )
+
 
 class FakeRunCoordinator:
     def __init__(self) -> None:
@@ -406,7 +437,7 @@ class CLITests(unittest.TestCase):
                     ("gate", "manage exact-input integration gates"),
                     (
                         "integration",
-                        "order, refold, and manually land exact candidates",
+                        "order, refold, and land exact candidates",
                     ),
                 ),
             ),
@@ -656,6 +687,22 @@ class CLITests(unittest.TestCase):
                         "receipt",
                         "record one nonce-bound landed or not-landed outcome",
                     ),
+                    (
+                        "provider-issue",
+                        "issue exact landing authority to the bound provider",
+                    ),
+                    (
+                        "provider-show",
+                        "show one provider landing and its service operation",
+                    ),
+                    (
+                        "provider-execute",
+                        "execute and settle one provider landing",
+                    ),
+                    (
+                        "provider-settle",
+                        "settle one externally completed provider landing",
+                    ),
                 ),
             ),
         }
@@ -862,6 +909,18 @@ class CLITests(unittest.TestCase):
                     "--reissued-by",
                 ),
                 ("integration", "receipt"): ("--document", "--recorded-by"),
+                ("integration", "provider-issue"): (
+                    "--owner",
+                    "--expected-version",
+                    "--resource-id",
+                    "--merge-method",
+                    "--issued-by",
+                ),
+                ("integration", "provider-execute"): (
+                    "--owner",
+                    "--settled-by",
+                ),
+                ("integration", "provider-settle"): ("--settled-by",),
             },
         )
         self.assertEqual(
@@ -875,6 +934,11 @@ class CLITests(unittest.TestCase):
                     "CRITICAL",
                 ),
                 (("gate", "review-record"), "outcome"): ("passed", "failed"),
+                (("integration", "provider-issue"), "merge_method"): (
+                    "merge",
+                    "rebase",
+                    "squash",
+                ),
             },
         )
 
@@ -1670,7 +1734,7 @@ class CLITests(unittest.TestCase):
                 "result": "inspect and apply retained work",
                 "candidate": "materialize and inspect trusted candidates",
                 "gate": "manage exact-input integration gates",
-                "integration": "order, refold, and manually land exact candidates",
+                "integration": "order, refold, and land exact candidates",
             },
         )
         expected_nested = {
@@ -1780,6 +1844,14 @@ class CLITests(unittest.TestCase):
                     "replace a lost plan nonce without releasing its lane"
                 ),
                 "receipt": "record one nonce-bound landed or not-landed outcome",
+                "provider-issue": (
+                    "issue exact landing authority to the bound provider"
+                ),
+                "provider-show": (
+                    "show one provider landing and its service operation"
+                ),
+                "provider-execute": "execute and settle one provider landing",
+                "provider-settle": ("settle one externally completed provider landing"),
             },
         }
         for command, expected_help in expected_nested.items():
@@ -2493,6 +2565,7 @@ class CLITests(unittest.TestCase):
         fold_id = "ifd_" + "3" * 32
         dependency_id = "ldp_" + "4" * 32
         plan_id = "lpl_" + "5" * 32
+        provider_landing_id = "plr_" + "9" * 32
         receipt_path = Path(self.temporary.name) / "receipt.json"
         receipt_document = {
             "schema_version": 1,
@@ -2693,6 +2766,76 @@ class CLITests(unittest.TestCase):
                     {
                         "request": receipt_document,
                         "recorded_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "provider-issue",
+                    queue_id,
+                    "--owner",
+                    "supervisor",
+                    "--expected-version",
+                    "4",
+                    "--resource-id",
+                    "42",
+                    "--merge-method",
+                    "squash",
+                    "--issued-by",
+                    "operator",
+                ],
+                (
+                    "integration.provider-issue",
+                    {
+                        "queue_item_id": queue_id,
+                        "owner_id": "supervisor",
+                        "expected_version": 4,
+                        "resource_id": "42",
+                        "merge_method": "squash",
+                        "issued_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                ["integration", "provider-show", provider_landing_id],
+                (
+                    "integration.provider-show",
+                    {"provider_landing_id": provider_landing_id},
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "provider-execute",
+                    provider_landing_id,
+                    "--owner",
+                    "supervisor",
+                    "--settled-by",
+                    "operator",
+                ],
+                (
+                    "integration.provider-execute",
+                    {
+                        "provider_landing_id": provider_landing_id,
+                        "owner_id": "supervisor",
+                        "settled_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "integration",
+                    "provider-settle",
+                    provider_landing_id,
+                    "--settled-by",
+                    "operator",
+                ],
+                (
+                    "integration.provider-settle",
+                    {
+                        "provider_landing_id": provider_landing_id,
+                        "settled_by_handle": "operator",
                     },
                 ),
             ),

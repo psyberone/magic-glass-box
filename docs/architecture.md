@@ -47,7 +47,8 @@ A user may explicitly expose a local configuration directory such as
 container or copied into control-plane state. Magic Glass Box owns durable
 operation identity and decides whether a specific deployment, mapping,
 account, scope, capability, limit, repository, and exact revision are
-authorized. Provider-specific implementations begin in M11. See
+authorized. The first provider-specific implementation is M11's out-of-process
+GitHub reference provider. See [github-provider.md](github-provider.md) and
 [capability-providers.md](capability-providers.md).
 
 The first routing slice is implemented in schema v24. The core owns each
@@ -434,16 +435,17 @@ assignment, profiles, credentials, network policy, and lifecycle remain trusted
 local decisions. Imported content is therefore never an authority channel.
 
 Provider-specific operations remain outside the core. M10 implements their
-provider-neutral actuator boundary and explicit project-to-controller routing,
-but the integration queue is not yet bound to a provider add-on. A worker may
-provide a result or review, but cannot turn it into landing authority. The core
-checks the exact candidate or fold,
-dependencies, current ref, gates, lane lease, and optimistic versions before
-issuing a structured manual Git plan. It holds no remote credential and runs
-no network command. A nonce-bound receipt records the assurance that the
-manual actuator actually established. M11 will translate that same bounded
-authority into GitHub service operations without giving a worker raw `gh`,
-provider credentials, or a sidecar endpoint.
+provider-neutral actuator boundary and explicit project-to-controller routing.
+M11 now binds that boundary to the integration queue for `landing.invoke` and
+supplies the first out-of-process GitHub implementation. Its bounded read
+receipts can carry normalized work/change results without retaining raw GitHub
+payloads; `work.get` emits the existing forge-neutral work-item envelope. A
+worker may provide a result or review, but cannot turn it into landing
+authority. The core checks
+the exact candidate or fold, dependencies, current ref, gates, lane lease, and
+optimistic versions before issuing either a structured manual Git plan or one
+atomically pinned provider operation. It holds no remote credential and gives
+workers no raw `git`, raw `gh`, provider credential, or sidecar endpoint.
 
 ## Planned slices
 
@@ -458,11 +460,14 @@ materialization, exact-input gates, dependency/refold queue, and manual landing
 flow are implemented. The credential-isolated inference connector, its
 real-account proof, provider usage/budget authority, quota-aware recovery, and
 destructive replacement continuity are implemented. The provider-neutral
-service-sidecar protocol and uncertain-effect recovery are implemented; the
-GitHub reference add-on is the next numbered checkpoint. See
+service-sidecar protocol and uncertain-effect recovery are implemented. The
+GitHub reference add-on, normalized read surface, and provider-landing ledger
+are implemented locally; the live GitHub exit proof is the remaining M11
+checkpoint. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),
+[github-provider.md](github-provider.md),
 [capability-providers.md](capability-providers.md),
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 [runtime-adapters.md](runtime-adapters.md), [supervision.md](supervision.md),

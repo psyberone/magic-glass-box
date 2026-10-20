@@ -60,16 +60,29 @@ enforces exact registration/operation authority, recursive credential-field
 rejection, UTF-8 input limits, revision lengths by Git object format, response
 correlation, and outcome/receipt consistency. Control-plane schema v23 adds
 immutable registrations and operations plus one-way durable invoke/reconcile
-attempts; raw provider payloads are never part of that ledger.
+attempts; raw provider payloads are never part of that ledger. A successful
+receipt may optionally carry one bounded normalized JSON object or array. The
+result is stored with the receipt and covered by its durable digest; receipts
+without a result retain their original canonical shape.
 
 Control-plane schema v24 adds append-preserving project capability bindings,
 binding events, and immutable operation-to-binding pins. Binding creation
 requires a core-defined capability version and mode plus an exact advertised
 sidecar mapping. Unbinding disables new project-routed operations; it does not
 rewrite existing operation authority. Published service schemas enforce the
-core-owned modes for the currently defined `change.open` v1, `checks.read` v1,
-and `landing.invoke` v1 capabilities while still permitting operator-only
-extension names that cannot be project-bound.
+core-owned modes for the currently defined `work.get`/`work.list` v1,
+`change.get`/`change.list` v1, and `checks.read` v1 reads plus `refs.publish`
+v1, `change.open` v1, and `landing.invoke` v1 effects while still permitting
+operator-only extension names that cannot be project-bound.
+
+Milestone 11 adds `provider-landing-v1.schema.json` and
+`provider-landing-receipt-v1.schema.json`. The authority binds one queue/policy/
+candidate/evidence snapshot to the exact project capability binding and service
+operation. The receipt binds the provider's normalized service receipt, actual
+observed integration revision, closed-reference set, and truthful
+`head_enforced` assurance. Control-plane schema v25 stores those documents and
+allows a landing receipt to originate from exactly one manual plan or provider
+landing.
 
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and

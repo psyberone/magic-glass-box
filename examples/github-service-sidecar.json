@@ -1,0 +1,66 @@
+{
+  "capabilities": [
+    {
+      "mode": "read",
+      "name": "work.get",
+      "version": 1
+    },
+    {
+      "mode": "read",
+      "name": "work.list",
+      "version": 1
+    },
+    {
+      "mode": "read",
+      "name": "change.get",
+      "version": 1
+    },
+    {
+      "mode": "read",
+      "name": "change.list",
+      "version": 1
+    },
+    {
+      "mode": "effect",
+      "name": "refs.publish",
+      "version": 1
+    },
+    {
+      "mode": "effect",
+      "name": "change.open",
+      "version": 1
+    },
+    {
+      "mode": "read",
+      "name": "checks.read",
+      "version": 1
+    },
+    {
+      "mode": "effect",
+      "name": "landing.invoke",
+      "version": 1
+    }
+  ],
+  "connector_protocol_version": 1,
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "mappings": [
+    {
+      "account": "your-github-login",
+      "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "host": "github.com",
+      "name": "primary",
+      "repository": "owner/repository",
+      "service": "github"
+    }
+  ],
+  "max_concurrency": 2,
+  "max_requests_per_minute": 60,
+  "request_bytes": 131072,
+  "response_bytes": 524288,
+  "schema_version": 1,
+  "timeout_ms": 30000,
+  "transport": {
+    "kind": "unix",
+    "socket_path": "/var/run/magic-glass-box/github.sock"
+  }
+}

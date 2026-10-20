@@ -30,7 +30,11 @@ from magic_glass_box.provider import (
     ProviderError,
     ProviderUpstreamError,
 )
-from magic_glass_box.service import AcceptedProviderResponse, ControlPlane
+from magic_glass_box.service import (
+    AcceptedProviderResponse,
+    ControlPlane,
+    _ProviderDispatchLeaseMonitor,
+)
 
 
 def policy() -> InferenceGrantSpec:
@@ -593,6 +597,24 @@ class ProviderServiceTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(len(outcomes), 1)
         self.assertIsInstance(outcomes[0], AcceptedProviderResponse)
+
+    def test_dispatch_lease_monitor_never_renews_after_stop_signal(self) -> None:
+        database = mock.Mock()
+        database.renew_provider_dispatch.side_effect = RuntimeError(
+            "renewal after stop"
+        )
+        monitor = _ProviderDispatchLeaseMonitor(
+            database,
+            "pdr_" + "1" * 32,
+            lease_seconds=30,
+            interval=60.0,
+        )
+
+        monitor.start()
+        monitor.close()
+
+        database.renew_provider_dispatch.assert_not_called()
+        monitor.check()
 
     def test_provider_dispatch_renewal_failure_fails_closed_and_releases(self) -> None:
         run = self.create_run()

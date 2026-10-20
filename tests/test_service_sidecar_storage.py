@@ -26,7 +26,17 @@ from magic_glass_box.service_sidecar import (
 from tests.test_service_sidecars import operation_spec, sidecar_spec
 
 
-def successful_response(request: ServiceOperationRequest) -> ServiceOperationResponse:
+def successful_response(
+    request: ServiceOperationRequest, *, result: object | None = None
+) -> ServiceOperationResponse:
+    receipt = {
+        "remote_identity": "change-42",
+        "observed_revision": "d" * 40,
+        "evidence_sha256": "e" * 64,
+        "closed_references": [],
+    }
+    if result is not None:
+        receipt["result"] = result
     value = request.correlation_dict()
     value.update(
         {
@@ -36,12 +46,7 @@ def successful_response(request: ServiceOperationRequest) -> ServiceOperationRes
             "response_bytes": 128,
             "error_code": None,
             "retry_after_seconds": None,
-            "receipt": {
-                "remote_identity": "change-42",
-                "observed_revision": "d" * 40,
-                "evidence_sha256": "e" * 64,
-                "closed_references": [],
-            },
+            "receipt": receipt,
         }
     )
     return ServiceOperationResponse.from_mapping(value)
@@ -100,7 +105,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         )
 
     def test_schema_twenty_four_registers_immutable_redacted_authority(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 24)
+        self.assertEqual(SCHEMA_VERSION, 25)
         self.assertIn("CREATE TABLE service_sidecars", SERVICE_SIDECAR_SCHEMA)
         self.assertIn(
             "CREATE TABLE project_capability_bindings", CAPABILITY_BINDING_SCHEMA
@@ -137,6 +142,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
 
     def test_schema_twenty_four_migrates_schema_twenty_two_once(self) -> None:
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE integration_provider_landings")
             connection.execute("DROP TABLE service_operation_capability_bindings")
             connection.execute("DROP TABLE project_capability_binding_events")
             connection.execute("DROP TABLE project_capability_bindings")
@@ -248,7 +254,10 @@ class ServiceSidecarStorageTests(unittest.TestCase):
             dispatch["attempt"]["id"],
             owner_id="supervisor-one",
             expected_operation_version=2,
-            response=successful_response(request),
+            response=successful_response(
+                request,
+                result={"items": [{"external_id": "42", "title": "Candidate 42"}]},
+            ),
         )
         self.assertEqual(completed["state"], "succeeded")
         self.assertEqual(completed["version"], 3)
@@ -275,6 +284,12 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         )
         self.assertEqual(
             completed["attempts"][0]["receipt"]["remote_identity"], "change-42"
+        )
+        self.assertEqual(
+            self.database.get_service_operation(operation["id"])["attempts"][0][
+                "receipt"
+            ]["result"],
+            {"items": [{"external_id": "42", "title": "Candidate 42"}]},
         )
         with self.assertRaises(ConflictError):
             self.database.begin_service_operation_attempt(

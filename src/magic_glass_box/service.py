@@ -607,6 +607,77 @@ class ControlPlane:
             receipt_request, recorded_by=recorder["id"]
         )
 
+    def issue_provider_landing(
+        self,
+        queue_item_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+        resource_id: str,
+        merge_method: str,
+        issued_by_handle: str,
+    ) -> dict[str, Any]:
+        issuer = self.database.get_user(issued_by_handle)
+        queue = self.database.get_integration_queue_item(queue_item_id)
+        return self.database.issue_provider_landing(
+            queue_item_id,
+            owner_id=owner_id,
+            expected_version=expected_version,
+            resource_id=resource_id,
+            parameters={
+                "assurance": "head_enforced",
+                "integration_ref": queue["integration_ref"],
+                "merge_method": merge_method,
+            },
+            issued_by=issuer["id"],
+        )
+
+    def get_provider_landing(self, provider_landing_id: str) -> dict[str, Any]:
+        landing = self.database.get_provider_landing(provider_landing_id)
+        return {
+            "provider_landing": landing,
+            "operation": self.database.get_service_operation(
+                landing["service_operation_id"]
+            ),
+        }
+
+    def settle_provider_landing(
+        self, provider_landing_id: str, *, settled_by_handle: str
+    ) -> dict[str, Any]:
+        settler = self.database.get_user(settled_by_handle)
+        return self.database.settle_provider_landing(
+            provider_landing_id, settled_by=settler["id"]
+        )
+
+    def execute_provider_landing(
+        self,
+        provider_landing_id: str,
+        *,
+        owner_id: str,
+        settled_by_handle: str,
+    ) -> dict[str, Any]:
+        landing = self.database.get_provider_landing(provider_landing_id)
+        if landing["state"] != "pending":
+            raise ConflictError("provider landing is already resolved")
+        operation = self.database.get_service_operation(landing["service_operation_id"])
+        if operation["state"] in {"pending", "retryable", "throttled"}:
+            operation = self.execute_service_operation(
+                operation["id"],
+                owner_id=owner_id,
+                expected_version=operation["version"],
+            )
+        elif operation["state"] == "uncertain":
+            operation = self.reconcile_service_operation(
+                operation["id"],
+                owner_id=owner_id,
+                expected_version=operation["version"],
+            )
+        if operation["state"] not in {"succeeded", "denied", "conflict"}:
+            raise ConflictError("provider landing operation is not settled")
+        return self.settle_provider_landing(
+            provider_landing_id, settled_by_handle=settled_by_handle
+        )
+
     def get_integration_queue_item(self, queue_item_id: str) -> dict[str, Any]:
         return self.database.get_integration_queue_item(queue_item_id)
 

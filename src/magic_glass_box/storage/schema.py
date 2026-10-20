@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -3367,6 +3367,176 @@ BEGIN
 END;
 """
 
+PROVIDER_LANDING_SCHEMA = """
+DROP TRIGGER integration_queue_event_immutable_update;
+DROP TRIGGER integration_queue_event_immutable_delete;
+DROP INDEX integration_queue_event_stream;
+
+CREATE TABLE integration_queue_events_v25 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_item_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'queue.created', 'queue.claimed', 'queue.claim_expired',
+            'queue.claim_released', 'queue.plan_issued',
+            'queue.provider_landing_issued', 'queue.provider_landing_failed',
+            'queue.not_landed', 'queue.refolded',
+            'queue.refold_required', 'queue.landed', 'queue.cancelled'
+        )
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (queue_item_id, sequence),
+    FOREIGN KEY (queue_item_id)
+        REFERENCES integration_queue_items(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO integration_queue_events_v25 (
+    id, queue_item_id, sequence, kind, from_state, to_state, actor,
+    metadata_json, created_at
+)
+SELECT
+    id, queue_item_id, sequence, kind, from_state, to_state, actor,
+    metadata_json, created_at
+FROM integration_queue_events;
+
+DROP TABLE integration_queue_events;
+ALTER TABLE integration_queue_events_v25 RENAME TO integration_queue_events;
+
+CREATE INDEX integration_queue_event_stream
+    ON integration_queue_events(queue_item_id, sequence);
+CREATE TRIGGER integration_queue_event_immutable_update
+BEFORE UPDATE ON integration_queue_events
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue events are immutable');
+END;
+CREATE TRIGGER integration_queue_event_immutable_delete
+BEFORE DELETE ON integration_queue_events
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue events cannot be deleted');
+END;
+
+CREATE TABLE integration_provider_landings (
+    id TEXT PRIMARY KEY,
+    queue_item_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    request_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    evidence_snapshot_json TEXT NOT NULL,
+    evidence_snapshot_sha256 TEXT NOT NULL,
+    service_operation_id TEXT NOT NULL UNIQUE,
+    capability_binding_id TEXT NOT NULL,
+    assurance TEXT NOT NULL CHECK (assurance = 'head_enforced'),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'landed', 'not_landed', 'failed')
+    ),
+    issued_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (queue_item_id, sequence),
+    FOREIGN KEY (queue_item_id)
+        REFERENCES integration_queue_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (service_operation_id)
+        REFERENCES service_operations(id) ON DELETE RESTRICT,
+    FOREIGN KEY (capability_binding_id)
+        REFERENCES project_capability_bindings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (issued_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'pending' AND resolved_at IS NULL)
+        OR (state IN ('landed', 'not_landed', 'failed')
+            AND resolved_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX integration_provider_one_pending
+    ON integration_provider_landings(queue_item_id) WHERE state = 'pending';
+CREATE INDEX integration_provider_landing_created
+    ON integration_provider_landings(created_at DESC, id DESC);
+
+CREATE TRIGGER integration_provider_landing_identity_immutable
+BEFORE UPDATE OF
+    id, queue_item_id, sequence, schema_version, request_json, content_sha256,
+    evidence_snapshot_json, evidence_snapshot_sha256, service_operation_id,
+    capability_binding_id, assurance, issued_by, created_at
+ON integration_provider_landings
+BEGIN
+    SELECT RAISE(ABORT, 'provider landing identity is immutable');
+END;
+CREATE TRIGGER integration_provider_landing_transition
+BEFORE UPDATE ON integration_provider_landings
+WHEN
+    OLD.state != 'pending'
+    OR NEW.state NOT IN ('landed', 'not_landed', 'failed')
+    OR NEW.resolved_at IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'provider landing transition is invalid');
+END;
+CREATE TRIGGER integration_provider_landing_immutable_delete
+BEFORE DELETE ON integration_provider_landings
+BEGIN
+    SELECT RAISE(ABORT, 'provider landings cannot be deleted');
+END;
+
+DROP TRIGGER integration_landing_receipt_immutable_update;
+DROP TRIGGER integration_landing_receipt_immutable_delete;
+DROP INDEX integration_receipt_created;
+
+CREATE TABLE integration_landing_receipts_v25 (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT UNIQUE,
+    provider_landing_id TEXT UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    receipt_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    outcome TEXT NOT NULL CHECK (outcome IN ('landed', 'not_landed')),
+    observed_revision TEXT NOT NULL,
+    assurance TEXT NOT NULL CHECK (
+        assurance IN (
+            'base_and_head_enforced', 'head_enforced', 'operator_attested'
+        )
+    ),
+    recorded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (plan_id)
+        REFERENCES integration_landing_plans(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_landing_id)
+        REFERENCES integration_provider_landings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (recorded_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK ((plan_id IS NULL) != (provider_landing_id IS NULL))
+) STRICT;
+
+INSERT INTO integration_landing_receipts_v25 (
+    id, plan_id, provider_landing_id, schema_version, receipt_json,
+    content_sha256, outcome, observed_revision, assurance, recorded_by, created_at
+)
+SELECT
+    id, plan_id, NULL, schema_version, receipt_json, content_sha256,
+    outcome, observed_revision, assurance, recorded_by, created_at
+FROM integration_landing_receipts;
+
+DROP TABLE integration_landing_receipts;
+ALTER TABLE integration_landing_receipts_v25
+    RENAME TO integration_landing_receipts;
+
+CREATE INDEX integration_receipt_created
+    ON integration_landing_receipts(created_at DESC, id DESC);
+CREATE TRIGGER integration_landing_receipt_immutable_update
+BEFORE UPDATE ON integration_landing_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'landing receipts are immutable');
+END;
+CREATE TRIGGER integration_landing_receipt_immutable_delete
+BEFORE DELETE ON integration_landing_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'landing receipts cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -3394,6 +3564,7 @@ SCHEMA = (
     + PROVIDER_REPORTED_OVERRUN_SCHEMA
     + SERVICE_SIDECAR_SCHEMA
     + CAPABILITY_BINDING_SCHEMA
+    + PROVIDER_LANDING_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -3419,4 +3590,5 @@ MIGRATIONS = {
     21: LANDING_PLAN_NONCE_SCHEMA + PROVIDER_REPORTED_OVERRUN_SCHEMA,
     22: SERVICE_SIDECAR_SCHEMA,
     23: CAPABILITY_BINDING_SCHEMA,
+    24: PROVIDER_LANDING_SCHEMA,
 }

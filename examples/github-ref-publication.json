@@ -1,0 +1,32 @@
+{
+  "capability": {
+    "mode": "effect",
+    "name": "refs.publish",
+    "version": 1
+  },
+  "connector_name": "github-main",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "candidate-cnd_11111111111111111111111111111111-publish",
+  "mapping": {
+    "account": "your-github-login",
+    "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "host": "github.com",
+    "name": "primary",
+    "repository": "owner/repository",
+    "service": "github"
+  },
+  "parameters": {
+    "source_repository": "/private/mgb/candidates/projects/project/sha1/repository.git"
+  },
+  "request_bytes": 131072,
+  "response_bytes": 524288,
+  "schema_version": 1,
+  "target": {
+    "desired_revision": "dddddddddddddddddddddddddddddddddddddddd",
+    "expected_revision": null,
+    "object_format": "sha1",
+    "repository": "owner/repository",
+    "resource_id": "refs/heads/mgb/candidate-11111111111111111111111111111111"
+  },
+  "timeout_ms": 30000
+}

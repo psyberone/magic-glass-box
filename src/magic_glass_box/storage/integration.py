@@ -8,15 +8,26 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..domain import canonical_json, content_sha256, require_string
+from ..domain import ValidationError, canonical_json, content_sha256, require_string
 from ..gates import GatePolicyManifest
 from ..integration import (
     FoldManifest,
     IntegrationError,
+    LandingAssurance,
     LandingOutcome,
     LandingPlan,
     LandingReceipt,
     LandingReceiptRequest,
+    ProviderLandingReceipt,
+    ProviderLandingRequest,
+)
+from ..service_sidecar import (
+    ServiceCapability,
+    ServiceMapping,
+    ServiceOperationReceipt,
+    ServiceOperationSpec,
+    ServiceSidecarSpec,
+    core_service_capability,
 )
 from .errors import ConcurrentUpdateError, ConflictError, NotFoundError, StorageError
 
@@ -26,7 +37,7 @@ MAX_VISIBLE_LANDING_NONCE_GENERATIONS = 32
 
 
 class IntegrationStorage:
-    """Durable dependency, refold, and manual-landing authority."""
+    """Durable dependency, refold, and landing authority."""
 
     @staticmethod
     def _expected_version(value: object) -> int:
@@ -1388,9 +1399,679 @@ class IntegrationStorage:
         return result
 
     @staticmethod
+    def _provider_landing_row(
+        connection: sqlite3.Connection, provider_landing_id: str
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT id, queue_item_id, sequence, schema_version, request_json, "
+            "content_sha256, evidence_snapshot_json, evidence_snapshot_sha256, "
+            "service_operation_id, capability_binding_id, assurance, state, "
+            "issued_by, created_at, resolved_at "
+            "FROM integration_provider_landings WHERE id = ?",
+            (provider_landing_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _provider_landing_record(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            request = ProviderLandingRequest.from_mapping(
+                json.loads(row["request_json"])
+            )
+            evidence = json.loads(row["evidence_snapshot_json"])
+        except (IntegrationError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageError("stored provider landing is invalid") from exc
+        if (
+            request.digest != row["content_sha256"]
+            or request.service_operation_id != row["service_operation_id"]
+            or request.capability_binding_id != row["capability_binding_id"]
+            or request.assurance.value != row["assurance"]
+            or content_sha256(canonical_json(evidence))
+            != row["evidence_snapshot_sha256"]
+            or request.evidence_snapshot_sha256 != row["evidence_snapshot_sha256"]
+        ):
+            raise StorageError("stored provider landing digest does not match")
+        return {
+            "id": row["id"],
+            "queue_item_id": row["queue_item_id"],
+            "sequence": row["sequence"],
+            "request": request.to_dict(),
+            "content_sha256": row["content_sha256"],
+            "evidence_snapshot": evidence,
+            "evidence_snapshot_sha256": row["evidence_snapshot_sha256"],
+            "service_operation_id": row["service_operation_id"],
+            "capability_binding_id": row["capability_binding_id"],
+            "assurance": row["assurance"],
+            "state": row["state"],
+            "issued_by": row["issued_by"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    def _provider_landing_binding(
+        self, connection: sqlite3.Connection, project_id: str
+    ) -> tuple[sqlite3.Row, ServiceSidecarSpec, ServiceMapping, ServiceCapability]:
+        capability = core_service_capability("landing.invoke", 1)
+        row = connection.execute(
+            "SELECT b.id, b.mapping_name, b.state, b.service_sidecar_id, "
+            "b.sidecar_content_sha256, b.deployment_sha256, "
+            "b.capability_name, b.capability_version, b.capability_mode, "
+            "s.name AS sidecar_name, s.state AS sidecar_state, "
+            "s.spec_json AS sidecar_spec_json, "
+            "s.content_sha256 AS sidecar_content_sha256, "
+            "p.active AS project_active "
+            "FROM project_capability_bindings b "
+            "JOIN service_sidecars s ON s.id = b.service_sidecar_id "
+            "JOIN projects p ON p.id = b.project_id "
+            "WHERE b.project_id = ? AND b.capability_name = ? "
+            "AND b.capability_version = ? AND b.state = 'active'",
+            (project_id, capability.name, capability.version),
+        ).fetchone()
+        if row is None or not row["project_active"] or row["sidecar_state"] != "active":
+            raise ConflictError("project landing capability is unavailable")
+        sidecar_spec = self._parse_stored_sidecar(row)
+        if (
+            row["sidecar_content_sha256"] != sidecar_spec.digest
+            or row["deployment_sha256"] != sidecar_spec.deployment_sha256
+            or row["capability_name"] != capability.name
+            or row["capability_version"] != capability.version
+            or row["capability_mode"] != capability.mode
+        ):
+            raise StorageError("stored landing capability binding is invalid")
+        mapping = next(
+            (
+                item
+                for item in sidecar_spec.mappings
+                if item.name == row["mapping_name"]
+            ),
+            None,
+        )
+        advertised = next(
+            (
+                item
+                for item in sidecar_spec.capabilities
+                if (item.name, item.version) == (capability.name, capability.version)
+            ),
+            None,
+        )
+        if mapping is None or advertised != capability:
+            raise StorageError("stored landing capability binding is invalid")
+        return row, sidecar_spec, mapping, capability
+
+    def issue_provider_landing(
+        self,
+        queue_item_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+        resource_id: str,
+        parameters: dict[str, Any],
+        issued_by: str,
+    ) -> dict[str, Any]:
+        queue_item_id = require_string(
+            queue_item_id, field="queue_item_id", max_bytes=64
+        )
+        owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
+        resource_id = require_string(
+            resource_id, field="provider landing resource_id", max_bytes=512
+        )
+        issued_by = require_string(issued_by, field="issued_by", max_bytes=64)
+        expected_version = self._expected_version(expected_version)
+        if not isinstance(parameters, dict) or set(parameters) != {
+            "assurance",
+            "integration_ref",
+            "merge_method",
+        }:
+            raise IntegrationError("provider landing parameters are invalid")
+        if parameters[
+            "assurance"
+        ] != LandingAssurance.HEAD_ENFORCED.value or parameters["merge_method"] not in {
+            "merge",
+            "rebase",
+            "squash",
+        }:
+            raise IntegrationError("provider landing parameters are invalid")
+        landing_id = self.new_id("plr")
+        operation_id = self.new_id("sop")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, issued_by, role="provider landing issuer")
+                queue = self._queue_row(connection, queue_item_id)
+                if queue is None:
+                    raise NotFoundError(
+                        f"integration queue item not found: {queue_item_id}"
+                    )
+                if queue["version"] != expected_version:
+                    raise ConcurrentUpdateError("integration queue version changed")
+                if queue["state"] != "claimed" or queue["owner_id"] != owner_id:
+                    raise ConflictError("integration claim is not owned by caller")
+                if queue["lease_expires_at"] <= now:
+                    raise ConflictError("integration claim lease expired")
+                if parameters["integration_ref"] != queue["integration_ref"]:
+                    raise ConflictError("provider landing ref does not match queue")
+                readiness = self._assert_queue_authority_ready(connection, queue)
+                policy_row = connection.execute(
+                    f"SELECT {self._policy_columns()} "  # noqa: S608
+                    "FROM integration_gate_policies WHERE id = ?",
+                    (queue["current_policy_id"],),
+                ).fetchone()
+                assert policy_row is not None
+                policy = GatePolicyManifest.from_mapping(
+                    self._policy_record(policy_row)["manifest"]
+                )
+                binding, sidecar_spec, mapping, capability = (
+                    self._provider_landing_binding(connection, queue["project_id"])
+                )
+                operation_spec = ServiceOperationSpec.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "connector_name": binding["sidecar_name"],
+                        "deployment_sha256": sidecar_spec.deployment_sha256,
+                        "mapping": mapping.to_dict(),
+                        "capability": capability.to_dict(),
+                        "idempotency_key": (
+                            f"integration:{queue_item_id}:{expected_version}:landing"
+                        ),
+                        "target": {
+                            "repository": mapping.repository,
+                            "resource_id": resource_id,
+                            "object_format": policy.object_format,
+                            "expected_revision": policy.expected_base_revision,
+                            "desired_revision": policy.head_revision,
+                        },
+                        "parameters": dict(parameters),
+                        "request_bytes": sidecar_spec.request_bytes,
+                        "response_bytes": sidecar_spec.response_bytes,
+                        "timeout_ms": sidecar_spec.timeout_ms,
+                    }
+                )
+                selected_operation_id = self._create_service_operation_in_transaction(
+                    connection,
+                    spec=operation_spec,
+                    created_by=issued_by,
+                    project_capability_binding_id=binding["id"],
+                    operation_id=operation_id,
+                    now=now,
+                )
+                if selected_operation_id != operation_id:
+                    raise ConflictError("provider landing operation already exists")
+                evidence_json = canonical_json(readiness)
+                evidence_sha256 = content_sha256(evidence_json)
+                awaiting_version = expected_version + 1
+                request = ProviderLandingRequest(
+                    schema_version=1,
+                    queue_item_id=queue_item_id,
+                    queue_version=awaiting_version,
+                    policy_id=queue["current_policy_id"],
+                    policy_revision=policy.policy_revision,
+                    candidate_id=queue["candidate_id"],
+                    fold_id=queue["current_fold_id"],
+                    repository_identity=queue["project_id"],
+                    integration_ref=queue["integration_ref"],
+                    expected_base_revision=policy.expected_base_revision,
+                    head_revision=policy.head_revision,
+                    tree_revision=policy.tree_revision,
+                    object_format=policy.object_format,
+                    evidence_snapshot_sha256=evidence_sha256,
+                    service_operation_id=operation_id,
+                    service_operation_sha256=operation_spec.digest,
+                    capability_binding_id=binding["id"],
+                    assurance=LandingAssurance.HEAD_ENFORCED,
+                )
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+                    "FROM integration_provider_landings WHERE queue_item_id = ?",
+                    (queue_item_id,),
+                ).fetchone()["sequence"]
+                connection.execute(
+                    "INSERT INTO integration_provider_landings "
+                    "(id, queue_item_id, sequence, schema_version, request_json, "
+                    "content_sha256, evidence_snapshot_json, "
+                    "evidence_snapshot_sha256, service_operation_id, "
+                    "capability_binding_id, assurance, state, issued_by, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                    (
+                        landing_id,
+                        queue_item_id,
+                        sequence,
+                        request.schema_version,
+                        request.canonical,
+                        request.digest,
+                        evidence_json,
+                        evidence_sha256,
+                        operation_id,
+                        binding["id"],
+                        request.assurance.value,
+                        issued_by,
+                        now,
+                    ),
+                )
+                event_sequence = queue["event_sequence"] + 1
+                connection.execute(
+                    "UPDATE integration_queue_items SET state = 'awaiting_receipt', "
+                    "version = ?, event_sequence = ?, owner_id = NULL, "
+                    "lease_expires_at = NULL, updated_at = ? WHERE id = ?",
+                    (awaiting_version, event_sequence, now, queue_item_id),
+                )
+                self._queue_event(
+                    connection,
+                    queue_item_id=queue_item_id,
+                    sequence=event_sequence,
+                    kind="queue.provider_landing_issued",
+                    from_state="claimed",
+                    to_state="awaiting_receipt",
+                    actor=issued_by,
+                    metadata={
+                        "provider_landing_id": landing_id,
+                        "service_operation_id": operation_id,
+                        "request_sha256": request.digest,
+                        "evidence_snapshot_sha256": evidence_sha256,
+                    },
+                    created_at=now,
+                )
+                landing_row = self._provider_landing_row(connection, landing_id)
+                updated_queue = self._queue_row(connection, queue_item_id)
+                assert landing_row is not None and updated_queue is not None
+                result = {
+                    "provider_landing": self._provider_landing_record(landing_row),
+                    "operation": self._service_operation_record(
+                        connection, operation_id
+                    ),
+                    "queue_item": self._queue_record(connection, updated_queue),
+                }
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                IntegrationError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("provider landing could not be issued") from exc
+        return result
+
+    def get_provider_landing(self, provider_landing_id: str) -> dict[str, Any]:
+        provider_landing_id = require_string(
+            provider_landing_id, field="provider_landing_id", max_bytes=64
+        )
+        with self._read_snapshot() as connection:
+            row = self._provider_landing_row(connection, provider_landing_id)
+            if row is None:
+                raise NotFoundError(
+                    f"provider landing not found: {provider_landing_id}"
+                )
+            return self._provider_landing_record(row)
+
+    @staticmethod
+    def _provider_service_receipt(
+        connection: sqlite3.Connection, operation_id: str
+    ) -> ServiceOperationReceipt:
+        row = connection.execute(
+            "SELECT receipt_json, receipt_sha256 "
+            "FROM service_operation_attempts WHERE operation_id = ? "
+            "AND outcome = 'succeeded' ORDER BY sequence DESC LIMIT 1",
+            (operation_id,),
+        ).fetchone()
+        if row is None or row["receipt_json"] is None:
+            raise StorageError("provider landing service receipt is unavailable")
+        try:
+            receipt = ServiceOperationReceipt.from_mapping(
+                json.loads(row["receipt_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored provider service receipt is invalid") from exc
+        if content_sha256(canonical_json(receipt.to_dict())) != row["receipt_sha256"]:
+            raise StorageError("stored provider service receipt digest does not match")
+        return receipt
+
+    def settle_provider_landing(
+        self, provider_landing_id: str, *, settled_by: str
+    ) -> dict[str, Any]:
+        provider_landing_id = require_string(
+            provider_landing_id, field="provider_landing_id", max_bytes=64
+        )
+        settled_by = require_string(settled_by, field="settled_by", max_bytes=64)
+        receipt_id = self.new_id("lrc")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, settled_by, role="provider landing settler"
+                )
+                landing_row = self._provider_landing_row(
+                    connection, provider_landing_id
+                )
+                if landing_row is None:
+                    raise NotFoundError(
+                        f"provider landing not found: {provider_landing_id}"
+                    )
+                if landing_row["state"] != "pending":
+                    raise ConflictError("provider landing is already resolved")
+                landing_record = self._provider_landing_record(landing_row)
+                request = ProviderLandingRequest.from_mapping(landing_record["request"])
+                queue = self._queue_row(connection, request.queue_item_id)
+                if queue is None:
+                    raise StorageError("provider landing queue item is unavailable")
+                if (
+                    queue["state"] != "awaiting_receipt"
+                    or queue["version"] != request.queue_version
+                    or queue["current_policy_id"] != request.policy_id
+                    or queue["current_fold_id"] != request.fold_id
+                    or queue["current_revision"] != request.expected_base_revision
+                    or queue["candidate_id"] != request.candidate_id
+                ):
+                    raise ConflictError("provider landing authority is stale")
+                operation = self._service_operation_record(
+                    connection, request.service_operation_id
+                )
+                if (
+                    operation["content_sha256"] != request.service_operation_sha256
+                    or operation["project_capability_binding_id"]
+                    != request.capability_binding_id
+                ):
+                    raise StorageError("provider landing operation does not match")
+                if operation["state"] in {"denied", "conflict"}:
+                    connection.execute(
+                        "UPDATE integration_provider_landings SET state = 'failed', "
+                        "resolved_at = ? WHERE id = ? AND state = 'pending'",
+                        (now, provider_landing_id),
+                    )
+                    version = queue["version"] + 1
+                    sequence = queue["event_sequence"] + 1
+                    connection.execute(
+                        "UPDATE integration_queue_items SET state = 'queued', "
+                        "version = ?, event_sequence = ?, updated_at = ? WHERE id = ?",
+                        (version, sequence, now, queue["id"]),
+                    )
+                    self._queue_event(
+                        connection,
+                        queue_item_id=queue["id"],
+                        sequence=sequence,
+                        kind="queue.provider_landing_failed",
+                        from_state="awaiting_receipt",
+                        to_state="queued",
+                        actor=settled_by,
+                        metadata={
+                            "provider_landing_id": provider_landing_id,
+                            "service_operation_id": request.service_operation_id,
+                            "operation_state": operation["state"],
+                        },
+                        created_at=now,
+                    )
+                    updated_landing = self._provider_landing_row(
+                        connection, provider_landing_id
+                    )
+                    updated_queue = self._queue_row(connection, queue["id"])
+                    updated_ref = self._integration_ref_row(
+                        connection, queue["integration_ref_id"]
+                    )
+                    assert (
+                        updated_landing is not None
+                        and updated_queue is not None
+                        and updated_ref is not None
+                    )
+                    result = {
+                        "provider_landing": self._provider_landing_record(
+                            updated_landing
+                        ),
+                        "operation": operation,
+                        "receipt": None,
+                        "queue_item": self._queue_record(connection, updated_queue),
+                        "integration_ref": self._integration_ref_record(updated_ref),
+                    }
+                    connection.commit()
+                    return result
+                if operation["state"] != "succeeded":
+                    raise ConflictError("provider landing operation is not settled")
+                service_receipt = self._provider_service_receipt(
+                    connection, request.service_operation_id
+                )
+                receipt = ProviderLandingReceipt.from_service_receipt(
+                    provider_landing_id, request, service_receipt
+                )
+                connection.execute(
+                    "INSERT INTO integration_landing_receipts "
+                    "(id, plan_id, provider_landing_id, schema_version, receipt_json, "
+                    "content_sha256, outcome, observed_revision, assurance, "
+                    "recorded_by, created_at) "
+                    "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        receipt_id,
+                        provider_landing_id,
+                        receipt.schema_version,
+                        receipt.canonical,
+                        receipt.digest,
+                        receipt.outcome.value,
+                        receipt.observed_revision,
+                        receipt.assurance.value,
+                        settled_by,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE integration_provider_landings SET state = ?, "
+                    "resolved_at = ? WHERE id = ? AND state = 'pending'",
+                    (receipt.outcome.value, now, provider_landing_id),
+                )
+                version = queue["version"] + 1
+                sequence = queue["event_sequence"] + 1
+                if receipt.outcome is LandingOutcome.NOT_LANDED:
+                    if receipt.observed_revision == request.expected_base_revision:
+                        connection.execute(
+                            "UPDATE integration_queue_items SET state = 'queued', "
+                            "version = ?, event_sequence = ?, updated_at = ? "
+                            "WHERE id = ?",
+                            (version, sequence, now, queue["id"]),
+                        )
+                        self._queue_event(
+                            connection,
+                            queue_item_id=queue["id"],
+                            sequence=sequence,
+                            kind="queue.not_landed",
+                            from_state="awaiting_receipt",
+                            to_state="queued",
+                            actor=settled_by,
+                            metadata={
+                                "provider_landing_id": provider_landing_id,
+                                "receipt_id": receipt_id,
+                            },
+                            created_at=now,
+                        )
+                    else:
+                        self._advance_provider_ref(
+                            connection,
+                            queue=queue,
+                            request=request,
+                            receipt=receipt,
+                            now=now,
+                        )
+                        connection.execute(
+                            "UPDATE integration_queue_items SET "
+                            "state = 'refold_required', current_fold_id = NULL, "
+                            "version = ?, event_sequence = ?, updated_at = ? "
+                            "WHERE id = ?",
+                            (version, sequence, now, queue["id"]),
+                        )
+                        self._queue_event(
+                            connection,
+                            queue_item_id=queue["id"],
+                            sequence=sequence,
+                            kind="queue.refold_required",
+                            from_state="awaiting_receipt",
+                            to_state="refold_required",
+                            actor=settled_by,
+                            metadata={
+                                "new_base_revision": receipt.observed_revision,
+                                "provider_landing_id": provider_landing_id,
+                                "receipt_id": receipt_id,
+                            },
+                            created_at=now,
+                        )
+                        self._provider_refold_siblings(
+                            connection,
+                            queue=queue,
+                            new_revision=receipt.observed_revision,
+                            cause_key="drifted_queue_item_id",
+                            now=now,
+                        )
+                else:
+                    self._advance_provider_ref(
+                        connection,
+                        queue=queue,
+                        request=request,
+                        receipt=receipt,
+                        now=now,
+                    )
+                    connection.execute(
+                        "UPDATE integration_queue_items SET state = 'landed', "
+                        "version = ?, event_sequence = ?, landed_receipt_id = ?, "
+                        "landed_at = ?, updated_at = ? WHERE id = ?",
+                        (version, sequence, receipt_id, now, now, queue["id"]),
+                    )
+                    self._queue_event(
+                        connection,
+                        queue_item_id=queue["id"],
+                        sequence=sequence,
+                        kind="queue.landed",
+                        from_state="awaiting_receipt",
+                        to_state="landed",
+                        actor=settled_by,
+                        metadata={
+                            "provider_landing_id": provider_landing_id,
+                            "receipt_id": receipt_id,
+                        },
+                        created_at=now,
+                    )
+                    self._provider_refold_siblings(
+                        connection,
+                        queue=queue,
+                        new_revision=receipt.observed_revision,
+                        cause_key="landed_queue_item_id",
+                        now=now,
+                    )
+                receipt_row = connection.execute(
+                    "SELECT id, plan_id, provider_landing_id, schema_version, "
+                    "receipt_json, content_sha256, outcome, observed_revision, "
+                    "assurance, recorded_by, created_at "
+                    "FROM integration_landing_receipts WHERE id = ?",
+                    (receipt_id,),
+                ).fetchone()
+                updated_landing = self._provider_landing_row(
+                    connection, provider_landing_id
+                )
+                updated_queue = self._queue_row(connection, queue["id"])
+                updated_ref = self._integration_ref_row(
+                    connection, queue["integration_ref_id"]
+                )
+                assert (
+                    receipt_row is not None
+                    and updated_landing is not None
+                    and updated_queue is not None
+                    and updated_ref is not None
+                )
+                result = {
+                    "provider_landing": self._provider_landing_record(updated_landing),
+                    "operation": operation,
+                    "receipt": self._receipt_record(receipt_row),
+                    "queue_item": self._queue_record(connection, updated_queue),
+                    "integration_ref": self._integration_ref_record(updated_ref),
+                }
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                IntegrationError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except (json.JSONDecodeError, sqlite3.IntegrityError) as exc:
+                connection.rollback()
+                raise ConflictError("provider landing could not be settled") from exc
+        return result
+
+    @staticmethod
+    def _advance_provider_ref(
+        connection: sqlite3.Connection,
+        *,
+        queue: sqlite3.Row,
+        request: ProviderLandingRequest,
+        receipt: ProviderLandingReceipt,
+        now: str,
+    ) -> None:
+        updated = connection.execute(
+            "UPDATE integration_refs SET current_revision = ?, "
+            "version = version + 1, updated_at = ? WHERE id = ? "
+            "AND current_revision = ? AND version = ?",
+            (
+                receipt.observed_revision,
+                now,
+                queue["integration_ref_id"],
+                request.expected_base_revision,
+                queue["integration_ref_version"],
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ConcurrentUpdateError("integration ref changed")
+
+    def _provider_refold_siblings(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        queue: sqlite3.Row,
+        new_revision: str,
+        cause_key: str,
+        now: str,
+    ) -> None:
+        siblings = connection.execute(
+            "SELECT id FROM integration_queue_items "
+            "WHERE integration_ref_id = ? AND id != ? "
+            "AND state IN ('queued', 'refold_required')",
+            (queue["integration_ref_id"], queue["id"]),
+        ).fetchall()
+        for sibling_id in siblings:
+            sibling = self._queue_row(connection, sibling_id["id"])
+            assert sibling is not None
+            sibling_version = sibling["version"] + 1
+            sibling_sequence = sibling["event_sequence"] + 1
+            connection.execute(
+                "UPDATE integration_queue_items SET "
+                "state = 'refold_required', current_fold_id = NULL, "
+                "version = ?, event_sequence = ?, updated_at = ? WHERE id = ?",
+                (sibling_version, sibling_sequence, now, sibling["id"]),
+            )
+            self._queue_event(
+                connection,
+                queue_item_id=sibling["id"],
+                sequence=sibling_sequence,
+                kind="queue.refold_required",
+                from_state=sibling["state"],
+                to_state="refold_required",
+                actor="system",
+                metadata={
+                    cause_key: queue["id"],
+                    "new_base_revision": new_revision,
+                },
+                created_at=now,
+            )
+
+    @staticmethod
     def _receipt_record(row: sqlite3.Row) -> dict[str, Any]:
         try:
-            receipt = LandingReceipt.from_mapping(json.loads(row["receipt_json"]))
+            raw_receipt = json.loads(row["receipt_json"])
+            receipt = (
+                LandingReceipt.from_mapping(raw_receipt)
+                if row["plan_id"] is not None
+                else ProviderLandingReceipt.from_mapping(raw_receipt)
+            )
         except (IntegrationError, TypeError, json.JSONDecodeError) as exc:
             raise StorageError("stored landing receipt is invalid") from exc
         if receipt.digest != row["content_sha256"]:
@@ -1398,6 +2079,7 @@ class IntegrationStorage:
         return {
             "id": row["id"],
             "plan_id": row["plan_id"],
+            "provider_landing_id": row["provider_landing_id"],
             "receipt": receipt.to_dict(),
             "content_sha256": row["content_sha256"],
             "outcome": row["outcome"],
@@ -1642,7 +2324,8 @@ class IntegrationStorage:
                             created_at=now,
                         )
                 receipt_row = connection.execute(
-                    "SELECT id, plan_id, schema_version, receipt_json, "
+                    "SELECT id, plan_id, provider_landing_id, schema_version, "
+                    "receipt_json, "
                     "content_sha256, outcome, observed_revision, assurance, "
                     "recorded_by, created_at FROM integration_landing_receipts "
                     "WHERE id = ?",

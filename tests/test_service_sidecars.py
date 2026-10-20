@@ -154,6 +154,13 @@ class ServiceSidecarContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "core-defined mode"):
             ServiceSidecarSpec.from_mapping(advertised)
 
+        ref_publication = sidecar_spec(self.socket_path).to_dict()
+        ref_publication["capabilities"].append(
+            {"name": "refs.publish", "version": 1, "mode": "read"}
+        )
+        with self.assertRaisesRegex(ValidationError, "core-defined mode"):
+            ServiceSidecarSpec.from_mapping(ref_publication)
+
         extension = sidecar_spec(self.socket_path).to_dict()
         extension["capabilities"].append(
             {"name": "work.operator_extension", "version": 1, "mode": "effect"}
@@ -296,13 +303,38 @@ class ServiceSidecarContractTests(unittest.TestCase):
                     "observed_revision": "d" * 40,
                     "evidence_sha256": "e" * 64,
                     "closed_references": [],
+                    "result": {
+                        "items": [{"external_id": "42", "title": "Candidate 42"}],
+                        "next_cursor": None,
+                    },
                 },
             }
         )
         response = ServiceOperationResponse.from_mapping(response_value)
         response.validate_correlation(request)
         self.assertEqual(response.receipt.remote_identity, "change-42")
+        self.assertEqual(
+            response.receipt.result,
+            {
+                "items": [{"external_id": "42", "title": "Candidate 42"}],
+                "next_cursor": None,
+            },
+        )
+        self.assertEqual(
+            ServiceOperationResponse.from_mapping(response.to_dict()), response
+        )
         self.assertNotIn("body", response.to_dict())
+
+        scalar_result = copy.deepcopy(response_value)
+        scalar_result["receipt"]["result"] = "unbounded"
+        with self.assertRaisesRegex(ValidationError, "result"):
+            ServiceOperationResponse.from_mapping(scalar_result)
+
+        over_budget_result = copy.deepcopy(response_value)
+        over_budget_result["response_limit_bytes"] = 1
+        over_budget_result["response_bytes"] = 1
+        with self.assertRaisesRegex(ValidationError, "result"):
+            ServiceOperationResponse.from_mapping(over_budget_result)
 
         wrong = copy.deepcopy(response_value)
         wrong["input_sha256"] = "f" * 64

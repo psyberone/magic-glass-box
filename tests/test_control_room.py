@@ -384,6 +384,7 @@ class ControlRoomTests(unittest.TestCase):
                 "integration_queue",
                 "landing_dependencies",
                 "pending_landing_plans",
+                "pending_provider_landings",
                 "supervisor_actions",
                 "escalations",
                 "attention",

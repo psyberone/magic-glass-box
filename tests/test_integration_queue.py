@@ -18,6 +18,7 @@ from magic_glass_box.candidates import (
     GitCandidateStore,
     MaterializedCandidate,
 )
+from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import (
     INTEGRATION_SCHEMA,
     SCHEMA,
@@ -26,7 +27,12 @@ from magic_glass_box.db import (
     ConflictError,
     Database,
 )
-from magic_glass_box.domain import AgentProfileSpec, ProjectContext, WorkItemEnvelope
+from magic_glass_box.domain import (
+    AgentProfileSpec,
+    ProjectContext,
+    WorkItemEnvelope,
+    canonical_json,
+)
 from magic_glass_box.gates import (
     GATE_EVIDENCE_SCHEMA_VERSION,
     ExactGateInputs,
@@ -40,6 +46,8 @@ from magic_glass_box.integration import (
     INTEGRATION_FOLD_SCHEMA_VERSION,
     LANDING_PLAN_SCHEMA_VERSION,
     LANDING_RECEIPT_SCHEMA_VERSION,
+    PROVIDER_LANDING_RECEIPT_SCHEMA_VERSION,
+    PROVIDER_LANDING_SCHEMA_VERSION,
     FoldManifest,
     IntegrationError,
     LandingAssurance,
@@ -47,11 +55,20 @@ from magic_glass_box.integration import (
     LandingPlan,
     LandingReceipt,
     LandingReceiptRequest,
+    ProviderLandingReceipt,
+    ProviderLandingRequest,
 )
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import CandidateReviewWorkspaces
 from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
+from magic_glass_box.service_sidecar import (
+    ServiceOperationReceipt,
+    ServiceOperationRequest,
+    ServiceOperationResponse,
+    ServiceSidecarAmbiguousError,
+    ServiceSidecarSpec,
+)
 from magic_glass_box.workspace import GitSnapshotter, WorkspaceManager
 
 
@@ -137,6 +154,172 @@ class IntegrationContractTests(unittest.TestCase):
             document = {**valid, field: value}
             with self.subTest(field=field), self.assertRaises(IntegrationError):
                 FoldManifest.from_mapping(document)
+
+    def test_provider_landing_receipt_preserves_actual_revision_and_assurance(
+        self,
+    ) -> None:
+        request = ProviderLandingRequest(
+            schema_version=PROVIDER_LANDING_SCHEMA_VERSION,
+            queue_item_id="iqm_" + "1" * 32,
+            queue_version=4,
+            policy_id="gpl_" + "2" * 32,
+            policy_revision="3" * 64,
+            candidate_id="cnd_" + "4" * 32,
+            fold_id=None,
+            repository_identity="boxp_" + "5" * 32,
+            integration_ref="refs/heads/main",
+            expected_base_revision="6" * 40,
+            head_revision="7" * 40,
+            tree_revision="8" * 40,
+            object_format="sha1",
+            evidence_snapshot_sha256="9" * 64,
+            service_operation_id="sop_" + "a" * 32,
+            service_operation_sha256="b" * 64,
+            capability_binding_id="cpb_" + "c" * 32,
+            assurance=LandingAssurance.HEAD_ENFORCED,
+        )
+        identity = "github:github.com/acme/widgets/pull/42"
+        service_receipt = ServiceOperationReceipt.from_mapping(
+            {
+                "remote_identity": identity,
+                "observed_revision": "d" * 40,
+                "evidence_sha256": "e" * 64,
+                "closed_references": [identity],
+            }
+        )
+
+        receipt = ProviderLandingReceipt.from_service_receipt(
+            "plr_" + "f" * 32,
+            request,
+            service_receipt,
+        )
+
+        self.assertEqual(
+            receipt.schema_version, PROVIDER_LANDING_RECEIPT_SCHEMA_VERSION
+        )
+        self.assertEqual(receipt.outcome, LandingOutcome.LANDED)
+        self.assertEqual(receipt.observed_revision, "d" * 40)
+        self.assertEqual(receipt.assurance, LandingAssurance.HEAD_ENFORCED)
+        self.assertEqual(
+            ProviderLandingReceipt.from_mapping(receipt.to_dict()), receipt
+        )
+
+        not_landed = ProviderLandingReceipt.from_service_receipt(
+            "plr_" + "f" * 32,
+            request,
+            ServiceOperationReceipt.from_mapping(
+                {
+                    **service_receipt.to_dict(),
+                    "closed_references": [],
+                }
+            ),
+        )
+        self.assertEqual(not_landed.outcome, LandingOutcome.NOT_LANDED)
+
+    def test_provider_landing_contract_rejects_malformed_authority_and_receipts(
+        self,
+    ) -> None:
+        request = ProviderLandingRequest(
+            schema_version=PROVIDER_LANDING_SCHEMA_VERSION,
+            queue_item_id="iqm_" + "1" * 32,
+            queue_version=4,
+            policy_id="gpl_" + "2" * 32,
+            policy_revision="3" * 64,
+            candidate_id="cnd_" + "4" * 32,
+            fold_id=None,
+            repository_identity="boxp_" + "5" * 32,
+            integration_ref="refs/heads/main",
+            expected_base_revision="6" * 40,
+            head_revision="7" * 40,
+            tree_revision="8" * 40,
+            object_format="sha1",
+            evidence_snapshot_sha256="9" * 64,
+            service_operation_id="sop_" + "a" * 32,
+            service_operation_sha256="b" * 64,
+            capability_binding_id="cpb_" + "c" * 32,
+            assurance=LandingAssurance.HEAD_ENFORCED,
+        )
+        valid_request = request.to_dict()
+        invalid_requests = (
+            {**valid_request, "schema_version": 2},
+            {**valid_request, "queue_item_id": "bad"},
+            {**valid_request, "queue_version": True},
+            {**valid_request, "queue_version": 0},
+            {**valid_request, "policy_revision": "0" * 63},
+            {**valid_request, "fold_id": "bad"},
+            {**valid_request, "integration_ref": "refs/heads/../main"},
+            {**valid_request, "object_format": "sha256"},
+            {**valid_request, "evidence_snapshot_sha256": "0" * 63},
+            {**valid_request, "service_operation_id": "bad"},
+            {**valid_request, "capability_binding_id": "bad"},
+            {**valid_request, "assurance": "operator_attested"},
+            {**valid_request, "unexpected": True},
+            {key: value for key, value in valid_request.items() if key != "policy_id"},
+        )
+        for document in invalid_requests:
+            with self.subTest(request=document), self.assertRaises(IntegrationError):
+                ProviderLandingRequest.from_mapping(document)
+
+        identity = "github:github.com/acme/widgets/pull/42"
+        service_receipt = ServiceOperationReceipt.from_mapping(
+            {
+                "remote_identity": identity,
+                "observed_revision": "d" * 40,
+                "evidence_sha256": "e" * 64,
+                "closed_references": [identity],
+            }
+        )
+        receipt = ProviderLandingReceipt.from_service_receipt(
+            "plr_" + "f" * 32,
+            request,
+            service_receipt,
+        )
+        valid_receipt = receipt.to_dict()
+        invalid_receipts = (
+            {**valid_receipt, "schema_version": 2},
+            {**valid_receipt, "provider_landing_id": "bad"},
+            {**valid_receipt, "request_sha256": "0" * 63},
+            {**valid_receipt, "outcome": "not_landed"},
+            {**valid_receipt, "observed_revision": "0" * 64},
+            {**valid_receipt, "remote_identity": ""},
+            {**valid_receipt, "closed_references": []},
+            {**valid_receipt, "closed_references": [identity, identity]},
+            {**valid_receipt, "closed_references": "not-a-list"},
+            {**valid_receipt, "actuator": "manual-git-v1"},
+            {**valid_receipt, "assurance": "base_and_head_enforced"},
+            {**valid_receipt, "unexpected": True},
+            {
+                key: value
+                for key, value in valid_receipt.items()
+                if key != "service_receipt_sha256"
+            },
+        )
+        for document in invalid_receipts:
+            with self.subTest(receipt=document), self.assertRaises(IntegrationError):
+                ProviderLandingReceipt.from_mapping(document)
+
+        missing_observation = ServiceOperationReceipt.from_mapping(
+            {**service_receipt.to_dict(), "observed_revision": None}
+        )
+        with self.assertRaises(IntegrationError):
+            ProviderLandingReceipt.from_service_receipt(
+                "plr_" + "f" * 32,
+                request,
+                missing_observation,
+            )
+        for bad_request, bad_receipt in (
+            (object(), service_receipt),
+            (request, object()),
+        ):
+            with (
+                self.subTest(types=(type(bad_request), type(bad_receipt))),
+                self.assertRaises(IntegrationError),
+            ):
+                ProviderLandingReceipt.from_service_receipt(
+                    "plr_" + "f" * 32,
+                    bad_request,  # type: ignore[arg-type]
+                    bad_receipt,  # type: ignore[arg-type]
+                )
 
     def test_fold_binds_a_fresh_gate_policy_to_its_exact_revision(self) -> None:
         candidate = self.candidate()
@@ -371,7 +554,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 24)
+        self.assertEqual(SCHEMA_VERSION, 25)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -391,6 +574,7 @@ class IntegrationMigrationTests(unittest.TestCase):
             "integration_queue_events",
             "integration_landing_plans",
             "integration_landing_plan_nonces",
+            "integration_provider_landings",
             "integration_landing_receipts",
         ):
             self.assertIn(("table", table), objects)
@@ -402,6 +586,7 @@ class IntegrationMigrationTests(unittest.TestCase):
             "integration_queue_state_created",
             "integration_fold_item_generation",
             "integration_plan_one_pending",
+            "integration_provider_one_pending",
         ):
             self.assertIn(("index", index), objects)
 
@@ -1279,6 +1464,7 @@ class IntegrationLedgerTests(unittest.TestCase):
             issued_by=self.user["id"],
         )
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE integration_provider_landings")
             connection.execute("DROP TABLE service_operation_capability_bindings")
             connection.execute("DROP TABLE project_capability_binding_events")
             connection.execute("DROP TABLE project_capability_bindings")
@@ -1303,6 +1489,94 @@ class IntegrationLedgerTests(unittest.TestCase):
             shown["nonce_sha256"],
             hashlib.sha256(issued["nonce"].encode("ascii")).hexdigest(),
         )
+
+    def test_schema_twenty_five_preserves_manual_receipts_from_twenty_four(
+        self,
+    ) -> None:
+        queue = self.database.enqueue_integration(
+            self._policy(self.candidate_a)["id"], created_by=self.user["id"]
+        )
+        landed = self._land(queue)
+        receipt = landed["receipt"]
+
+        with closing(self.database.connect()) as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.executescript(
+                """
+                DROP TRIGGER integration_landing_receipt_immutable_update;
+                DROP TRIGGER integration_landing_receipt_immutable_delete;
+                DROP INDEX integration_receipt_created;
+                CREATE TABLE integration_landing_receipts_v25_fixture AS
+                    SELECT * FROM integration_landing_receipts;
+                DROP TABLE integration_landing_receipts;
+                CREATE TABLE integration_landing_receipts (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL UNIQUE,
+                    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                    receipt_json TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL UNIQUE,
+                    outcome TEXT NOT NULL CHECK (
+                        outcome IN ('landed', 'not_landed')
+                    ),
+                    observed_revision TEXT NOT NULL,
+                    assurance TEXT NOT NULL CHECK (
+                        assurance IN (
+                            'base_and_head_enforced', 'operator_attested'
+                        )
+                    ),
+                    recorded_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (plan_id)
+                        REFERENCES integration_landing_plans(id)
+                        ON DELETE RESTRICT,
+                    FOREIGN KEY (recorded_by)
+                        REFERENCES users(id) ON DELETE RESTRICT
+                ) STRICT;
+                INSERT INTO integration_landing_receipts (
+                    id, plan_id, schema_version, receipt_json, content_sha256,
+                    outcome, observed_revision, assurance, recorded_by,
+                    created_at
+                )
+                SELECT
+                    id, plan_id, schema_version, receipt_json, content_sha256,
+                    outcome, observed_revision, assurance, recorded_by,
+                    created_at
+                FROM integration_landing_receipts_v25_fixture;
+                DROP TABLE integration_landing_receipts_v25_fixture;
+                CREATE INDEX integration_receipt_created
+                    ON integration_landing_receipts(created_at DESC, id DESC);
+                CREATE TRIGGER integration_landing_receipt_immutable_update
+                BEFORE UPDATE ON integration_landing_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'landing receipts are immutable');
+                END;
+                CREATE TRIGGER integration_landing_receipt_immutable_delete
+                BEFORE DELETE ON integration_landing_receipts
+                BEGIN
+                    SELECT RAISE(ABORT, 'landing receipts cannot be deleted');
+                END;
+                DROP TABLE integration_provider_landings;
+                PRAGMA user_version = 24;
+                """
+            )
+
+        migrated = Database(self.database.path)
+        self.assertEqual(migrated.initialize()["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(
+            migrated.get_integration_queue_item(queue["id"])["state"], "landed"
+        )
+        with closing(migrated.connect()) as connection:
+            stored = connection.execute(
+                "SELECT plan_id, provider_landing_id, receipt_json, content_sha256 "
+                "FROM integration_landing_receipts WHERE id = ?",
+                (receipt["id"],),
+            ).fetchone()
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored["plan_id"], receipt["plan_id"])
+            self.assertIsNone(stored["provider_landing_id"])
+            self.assertEqual(stored["receipt_json"], canonical_json(receipt["receipt"]))
+            self.assertEqual(stored["content_sha256"], receipt["content_sha256"])
+            self.assertIsNone(connection.execute("PRAGMA foreign_key_check").fetchone())
 
     def test_lane_is_serialized_and_an_expired_preplan_claim_is_reclaimed(
         self,
@@ -1896,6 +2170,641 @@ class IntegrationLedgerTests(unittest.TestCase):
             request, recorded_by=self.user["id"]
         )
         self.assertEqual(accepted["queue_item"]["state"], "landed")
+
+
+class ProviderLandingLedgerTests(unittest.TestCase):
+    setUp = IntegrationLedgerTests.setUp
+    _work_item = IntegrationLedgerTests._work_item
+    _candidate = IntegrationLedgerTests._candidate
+    policy_spec = staticmethod(IntegrationLedgerTests.policy_spec)
+    _policy = IntegrationLedgerTests._policy
+
+    def _landing_provider(self) -> dict[str, object]:
+        spec = ServiceSidecarSpec.from_mapping(
+            {
+                "schema_version": 1,
+                "connector_protocol_version": 1,
+                "deployment_sha256": "1" * 64,
+                "transport": {
+                    "kind": "unix",
+                    "socket_path": str(self.root / "github.sock"),
+                },
+                "capabilities": [
+                    {"name": "landing.invoke", "version": 1, "mode": "effect"}
+                ],
+                "mappings": [
+                    {
+                        "name": "primary",
+                        "service": "github",
+                        "host": "github.com",
+                        "repository": "acme/widgets",
+                        "account": "mgb-bot",
+                        "credential_scope_sha256": "2" * 64,
+                    }
+                ],
+                "request_bytes": 128 * 1024,
+                "response_bytes": 512 * 1024,
+                "timeout_ms": 30000,
+                "max_concurrency": 2,
+                "max_requests_per_minute": 60,
+            }
+        )
+        self.database.register_service_sidecar(
+            name="github-main",
+            spec=spec,
+            created_by=self.user["id"],
+        )
+        return self.database.bind_project_capability(
+            project_key="project",
+            capability_name="landing.invoke",
+            capability_version=1,
+            sidecar_name="github-main",
+            mapping_name="primary",
+            bound_by=self.user["id"],
+        )
+
+    def _issue_provider_landing(self) -> dict[str, object]:
+        policy = self._policy(self.candidate_a)
+        queue = self.database.enqueue_integration(
+            policy["id"], created_by=self.user["id"]
+        )
+        claimed = self.database.claim_integration_item(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=queue["version"],
+            lease_seconds=60,
+        )
+        return self.database.issue_provider_landing(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=claimed["version"],
+            resource_id="42",
+            parameters={
+                "assurance": "head_enforced",
+                "integration_ref": "refs/heads/main",
+                "merge_method": "squash",
+            },
+            issued_by=self.user["id"],
+        )
+
+    def _complete_provider_operation(
+        self,
+        issued: dict[str, object],
+        *,
+        observed_revision: str,
+        landed: bool,
+    ) -> dict[str, object]:
+        operation = issued["operation"]
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="provider-supervisor",
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        identity = "github:github.com/acme/widgets/pull/42"
+        response = ServiceOperationResponse.from_mapping(
+            {
+                **request.correlation_dict(),
+                "outcome": "succeeded",
+                "provider_status": 200,
+                "request_bytes": 64,
+                "response_bytes": 128,
+                "error_code": None,
+                "retry_after_seconds": None,
+                "receipt": {
+                    "remote_identity": identity,
+                    "observed_revision": observed_revision,
+                    "evidence_sha256": "3" * 64,
+                    "closed_references": [identity] if landed else [],
+                },
+            }
+        )
+        return self.database.complete_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id="provider-supervisor",
+            expected_operation_version=dispatch["operation"]["version"],
+            response=response,
+        )
+
+    def _complete_provider_failure(
+        self, issued: dict[str, object], *, outcome: str
+    ) -> dict[str, object]:
+        operation = issued["operation"]
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="provider-supervisor",
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        response = ServiceOperationResponse.from_mapping(
+            {
+                **request.correlation_dict(),
+                "outcome": outcome,
+                "provider_status": {
+                    "conflict": 409,
+                    "denied": 403,
+                    "retryable": 503,
+                    "throttled": 429,
+                }[outcome],
+                "request_bytes": 64,
+                "response_bytes": 128,
+                "error_code": f"github-{outcome}",
+                "retry_after_seconds": (
+                    1 if outcome in {"retryable", "throttled"} else None
+                ),
+                "receipt": None,
+            }
+        )
+        return self.database.complete_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id="provider-supervisor",
+            expected_operation_version=dispatch["operation"]["version"],
+            response=response,
+        )
+
+    def test_provider_landing_pins_binding_and_advances_actual_remote_revision(
+        self,
+    ) -> None:
+        binding = self._landing_provider()
+        issued = self._issue_provider_landing()
+
+        operation = issued["operation"]
+        self.assertEqual(
+            set(issued["provider_landing"]),
+            {
+                "assurance",
+                "capability_binding_id",
+                "content_sha256",
+                "created_at",
+                "evidence_snapshot",
+                "evidence_snapshot_sha256",
+                "id",
+                "issued_by",
+                "queue_item_id",
+                "request",
+                "resolved_at",
+                "sequence",
+                "service_operation_id",
+                "state",
+            },
+        )
+        self.assertEqual(operation["project_capability_binding_id"], binding["id"])
+        self.assertEqual(operation["spec"]["target"]["expected_revision"], self.base)
+        self.assertEqual(
+            operation["spec"]["target"]["desired_revision"],
+            self.candidate_a["head_revision"],
+        )
+        self.assertEqual(operation["spec"]["target"]["resource_id"], "42")
+        self.assertEqual(issued["queue_item"]["state"], "awaiting_receipt")
+        self.assertEqual(
+            issued["provider_landing"]["request"]["assurance"], "head_enforced"
+        )
+        shown = ControlPlane(self.database).get_provider_landing(
+            issued["provider_landing"]["id"]
+        )
+        self.assertEqual(shown["provider_landing"], issued["provider_landing"])
+        self.assertEqual(shown["operation"]["id"], operation["id"])
+
+        snapshot = ControlRoom(self.database).snapshot(history_limit=10)
+        projected = next(
+            item
+            for item in snapshot["integration_queue"]
+            if item["id"] == issued["queue_item"]["id"]
+        )
+        self.assertIsNone(projected["pending_plan_id"])
+        self.assertEqual(
+            projected["pending_provider_landing_id"],
+            issued["provider_landing"]["id"],
+        )
+        self.assertEqual(projected["provider_service_operation_id"], operation["id"])
+        self.assertEqual(projected["provider_operation_state"], "pending")
+        self.assertEqual(snapshot["summary"]["pending_provider_landings"], 1)
+        provider_attention = next(
+            item
+            for item in snapshot["attention"]
+            if item["kind"] == "integration.provider_landing_pending"
+        )
+        self.assertEqual(
+            provider_attention["provider_landing_id"],
+            issued["provider_landing"]["id"],
+        )
+        self.assertEqual(provider_attention["service_operation_id"], operation["id"])
+
+        merged_revision = "f" * 40
+        self._complete_provider_operation(
+            issued,
+            observed_revision=merged_revision,
+            landed=True,
+        )
+        settled = ControlPlane(self.database).execute_provider_landing(
+            issued["provider_landing"]["id"],
+            owner_id="provider-supervisor",
+            settled_by_handle="operator",
+        )
+
+        self.assertEqual(settled["queue_item"]["state"], "landed")
+        self.assertEqual(
+            settled["integration_ref"]["current_revision"], merged_revision
+        )
+        self.assertEqual(settled["receipt"]["assurance"], "head_enforced")
+        self.assertEqual(
+            settled["receipt"]["receipt"]["observed_revision"], merged_revision
+        )
+        self.assertEqual(settled["receipt"]["receipt"]["outcome"], "landed")
+
+    def test_provider_landing_requires_queued_siblings_to_refold(self) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        sibling_policy = self._policy(self.candidate_b)
+        sibling = self.database.enqueue_integration(
+            sibling_policy["id"], created_by=self.user["id"]
+        )
+        merged_revision = "f" * 40
+
+        self._complete_provider_operation(
+            issued,
+            observed_revision=merged_revision,
+            landed=True,
+        )
+        self.database.settle_provider_landing(
+            issued["provider_landing"]["id"],
+            settled_by=self.user["id"],
+        )
+
+        updated = self.database.get_integration_queue_item(sibling["id"])
+        self.assertEqual(updated["state"], "refold_required")
+        self.assertIsNone(updated["current_fold_id"])
+        self.assertEqual(updated["version"], sibling["version"] + 1)
+        self.assertEqual(updated["event_sequence"], sibling["event_sequence"] + 1)
+        event = updated["events"][-1]
+        self.assertEqual(event["kind"], "queue.refold_required")
+        self.assertEqual(event["from_state"], "queued")
+        self.assertEqual(event["to_state"], "refold_required")
+        self.assertEqual(event["actor"], "system")
+        self.assertEqual(
+            event["metadata"],
+            {
+                "landed_queue_item_id": issued["queue_item"]["id"],
+                "new_base_revision": merged_revision,
+            },
+        )
+
+    def test_provider_not_landed_drift_requires_a_fresh_fold(self) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        sibling_policy = self._policy(self.candidate_b)
+        sibling = self.database.enqueue_integration(
+            sibling_policy["id"], created_by=self.user["id"]
+        )
+        drift = "e" * 40
+        self._complete_provider_operation(
+            issued,
+            observed_revision=drift,
+            landed=False,
+        )
+
+        settled = ControlPlane(self.database).execute_provider_landing(
+            issued["provider_landing"]["id"],
+            owner_id="provider-supervisor",
+            settled_by_handle="operator",
+        )
+
+        self.assertEqual(settled["queue_item"]["state"], "refold_required")
+        self.assertEqual(settled["integration_ref"]["current_revision"], drift)
+        self.assertEqual(settled["receipt"]["receipt"]["outcome"], "not_landed")
+        updated_sibling = self.database.get_integration_queue_item(sibling["id"])
+        self.assertEqual(updated_sibling["state"], "refold_required")
+        self.assertIsNone(updated_sibling["current_fold_id"])
+        self.assertEqual(
+            updated_sibling["events"][-1]["metadata"],
+            {
+                "drifted_queue_item_id": issued["queue_item"]["id"],
+                "new_base_revision": drift,
+            },
+        )
+
+    def test_provider_not_landed_at_unchanged_base_returns_to_queue(self) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        self._complete_provider_operation(
+            issued,
+            observed_revision=self.base,
+            landed=False,
+        )
+
+        settled = self.database.settle_provider_landing(
+            issued["provider_landing"]["id"],
+            settled_by=self.user["id"],
+        )
+
+        self.assertEqual(settled["provider_landing"]["state"], "not_landed")
+        self.assertEqual(settled["queue_item"]["state"], "queued")
+        self.assertEqual(settled["integration_ref"]["current_revision"], self.base)
+        self.assertEqual(settled["receipt"]["receipt"]["outcome"], "not_landed")
+        self.assertEqual(
+            settled["queue_item"]["events"][-1]["kind"], "queue.not_landed"
+        )
+
+    def _assert_provider_failure_requeues(self, outcome: str) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        self._complete_provider_failure(issued, outcome=outcome)
+
+        settled = ControlPlane(self.database).execute_provider_landing(
+            issued["provider_landing"]["id"],
+            owner_id="provider-supervisor",
+            settled_by_handle="operator",
+        )
+
+        self.assertEqual(settled["provider_landing"]["state"], "failed")
+        self.assertEqual(settled["operation"]["state"], outcome)
+        self.assertEqual(settled["queue_item"]["state"], "queued")
+        self.assertIsNone(settled["receipt"])
+        event = settled["queue_item"]["events"][-1]
+        self.assertEqual(event["kind"], "queue.provider_landing_failed")
+        self.assertEqual(event["metadata"]["operation_state"], outcome)
+
+    def test_denied_provider_landing_fails_and_releases_queue(self) -> None:
+        self._assert_provider_failure_requeues("denied")
+
+    def test_conflicted_provider_landing_fails_and_releases_queue(self) -> None:
+        self._assert_provider_failure_requeues("conflict")
+
+    def _assert_provider_retries_then_lands(self, outcome: str) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        self._complete_provider_failure(issued, outcome=outcome)
+        with closing(self.database.connect()) as connection, connection:
+            connection.execute(
+                "UPDATE service_operations SET eligible_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00.000000+00:00", issued["operation"]["id"]),
+            )
+        identity = "github:github.com/acme/widgets/pull/42"
+        merged_revision = "f" * 40
+
+        class LandingSidecar:
+            def invoke(
+                self, request: ServiceOperationRequest
+            ) -> ServiceOperationResponse:
+                return ServiceOperationResponse.from_mapping(
+                    {
+                        **request.correlation_dict(),
+                        "outcome": "succeeded",
+                        "provider_status": 200,
+                        "request_bytes": 64,
+                        "response_bytes": 128,
+                        "error_code": None,
+                        "retry_after_seconds": None,
+                        "receipt": {
+                            "remote_identity": identity,
+                            "observed_revision": merged_revision,
+                            "evidence_sha256": "3" * 64,
+                            "closed_references": [identity],
+                        },
+                    }
+                )
+
+        control = ControlPlane(
+            self.database, service_client_factory=lambda _path: LandingSidecar()
+        )
+        settled = control.execute_provider_landing(
+            issued["provider_landing"]["id"],
+            owner_id="replacement-supervisor",
+            settled_by_handle="operator",
+        )
+
+        self.assertEqual(settled["queue_item"]["state"], "landed")
+        self.assertEqual(settled["operation"]["state"], "succeeded")
+        self.assertEqual(
+            settled["integration_ref"]["current_revision"], merged_revision
+        )
+
+    def test_retryable_provider_landing_is_reinvoked_and_settled(self) -> None:
+        self._assert_provider_retries_then_lands("retryable")
+
+    def test_throttled_provider_landing_is_reinvoked_and_settled(self) -> None:
+        self._assert_provider_retries_then_lands("throttled")
+
+    def test_provider_landing_requires_settled_and_current_authority(self) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        landing_id = issued["provider_landing"]["id"]
+
+        with self.assertRaisesRegex(ConflictError, "not settled"):
+            self.database.settle_provider_landing(
+                landing_id,
+                settled_by=self.user["id"],
+            )
+
+        self._complete_provider_operation(
+            issued,
+            observed_revision="f" * 40,
+            landed=True,
+        )
+        queue = self.database.get_integration_queue_item(issued["queue_item"]["id"])
+        with closing(self.database.connect()) as connection, connection:
+            connection.execute(
+                "UPDATE integration_queue_items SET version = ? WHERE id = ?",
+                (queue["version"] + 1, queue["id"]),
+            )
+        with self.assertRaisesRegex(ConflictError, "authority is stale"):
+            self.database.settle_provider_landing(
+                landing_id,
+                settled_by=self.user["id"],
+            )
+
+    def test_control_plane_executes_and_settles_provider_landing(self) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        identity = "github:github.com/acme/widgets/pull/42"
+        merged_revision = "f" * 40
+
+        class LandingSidecar:
+            def invoke(
+                self, request: ServiceOperationRequest
+            ) -> ServiceOperationResponse:
+                return ServiceOperationResponse.from_mapping(
+                    {
+                        **request.correlation_dict(),
+                        "outcome": "succeeded",
+                        "provider_status": 200,
+                        "request_bytes": 64,
+                        "response_bytes": 128,
+                        "error_code": None,
+                        "retry_after_seconds": None,
+                        "receipt": {
+                            "remote_identity": identity,
+                            "observed_revision": merged_revision,
+                            "evidence_sha256": "3" * 64,
+                            "closed_references": [identity],
+                        },
+                    }
+                )
+
+        control = ControlPlane(
+            self.database, service_client_factory=lambda _path: LandingSidecar()
+        )
+        settled = control.execute_provider_landing(
+            issued["provider_landing"]["id"],
+            owner_id="provider-supervisor",
+            settled_by_handle="operator",
+        )
+
+        self.assertEqual(settled["queue_item"]["state"], "landed")
+        self.assertEqual(settled["operation"]["state"], "succeeded")
+        self.assertEqual(
+            settled["integration_ref"]["current_revision"], merged_revision
+        )
+
+    def test_replacement_control_plane_reconciles_a_lost_landing_reply(self) -> None:
+        self._landing_provider()
+        issued = self._issue_provider_landing()
+        identity = "github:github.com/acme/widgets/pull/42"
+        merged_revision = "f" * 40
+
+        class LostReplyLandingSidecar:
+            def __init__(self) -> None:
+                self.calls: list[ServiceOperationRequest] = []
+                self.remote_effects = 0
+
+            def invoke(
+                self, request: ServiceOperationRequest
+            ) -> ServiceOperationResponse:
+                self.calls.append(request)
+                if request.phase == "invoke":
+                    self.remote_effects += 1
+                    raise ServiceSidecarAmbiguousError("simulated lost landing reply")
+                return ServiceOperationResponse.from_mapping(
+                    {
+                        **request.correlation_dict(),
+                        "outcome": "succeeded",
+                        "provider_status": 200,
+                        "request_bytes": 64,
+                        "response_bytes": 128,
+                        "error_code": None,
+                        "retry_after_seconds": None,
+                        "receipt": {
+                            "remote_identity": identity,
+                            "observed_revision": merged_revision,
+                            "evidence_sha256": "3" * 64,
+                            "closed_references": [identity],
+                        },
+                    }
+                )
+
+        sidecar = LostReplyLandingSidecar()
+        first = ControlPlane(
+            self.database, service_client_factory=lambda _path: sidecar
+        )
+        with self.assertRaises(ServiceSidecarAmbiguousError):
+            first.execute_provider_landing(
+                issued["provider_landing"]["id"],
+                owner_id="provider-supervisor-one",
+                settled_by_handle="operator",
+            )
+
+        uncertain = self.database.get_service_operation(issued["operation"]["id"])
+        self.assertEqual(uncertain["state"], "uncertain")
+        self.assertEqual(
+            self.database.get_provider_landing(issued["provider_landing"]["id"])[
+                "state"
+            ],
+            "pending",
+        )
+
+        replacement = ControlPlane(
+            self.database, service_client_factory=lambda _path: sidecar
+        )
+        settled = replacement.execute_provider_landing(
+            issued["provider_landing"]["id"],
+            owner_id="provider-supervisor-two",
+            settled_by_handle="operator",
+        )
+
+        self.assertEqual(
+            [call.phase for call in sidecar.calls], ["invoke", "reconcile"]
+        )
+        self.assertEqual(sidecar.remote_effects, 1)
+        self.assertEqual(settled["queue_item"]["state"], "landed")
+        self.assertEqual(settled["operation"]["state"], "succeeded")
+        self.assertEqual(
+            settled["integration_ref"]["current_revision"], merged_revision
+        )
+
+    def test_missing_project_binding_rolls_back_provider_authority(self) -> None:
+        policy = self._policy(self.candidate_a)
+        queue = self.database.enqueue_integration(
+            policy["id"], created_by=self.user["id"]
+        )
+        claimed = self.database.claim_integration_item(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=queue["version"],
+            lease_seconds=60,
+        )
+
+        with self.assertRaisesRegex(ConflictError, "capability"):
+            self.database.issue_provider_landing(
+                queue["id"],
+                owner_id="supervisor",
+                expected_version=claimed["version"],
+                resource_id="42",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                },
+                issued_by=self.user["id"],
+            )
+
+        unchanged = self.database.get_integration_queue_item(queue["id"])
+        self.assertEqual(unchanged["state"], "claimed")
+        self.assertEqual(self.database.status()["counts"]["service_operations"], 0)
+        self.assertEqual(
+            self.database.status()["counts"]["integration_provider_landings"], 0
+        )
+
+    def test_inactive_project_cannot_issue_provider_landing(self) -> None:
+        self._landing_provider()
+        policy = self._policy(self.candidate_a)
+        queue = self.database.enqueue_integration(
+            policy["id"], created_by=self.user["id"]
+        )
+        claimed = self.database.claim_integration_item(
+            queue["id"],
+            owner_id="supervisor",
+            expected_version=queue["version"],
+            lease_seconds=60,
+        )
+        with closing(self.database.connect()) as connection, connection:
+            connection.execute(
+                "UPDATE projects SET active = 0 WHERE id = ?", (self.project["id"],)
+            )
+
+        with self.assertRaisesRegex(ConflictError, "capability"):
+            self.database.issue_provider_landing(
+                queue["id"],
+                owner_id="supervisor",
+                expected_version=claimed["version"],
+                resource_id="42",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                },
+                issued_by=self.user["id"],
+            )
+
+        unchanged = self.database.get_integration_queue_item(queue["id"])
+        self.assertEqual(unchanged["state"], "claimed")
+        self.assertEqual(self.database.status()["counts"]["service_operations"], 0)
+        self.assertEqual(
+            self.database.status()["counts"]["integration_provider_landings"], 0
+        )
 
 
 class IntegrationGoldenPathTests(unittest.TestCase):

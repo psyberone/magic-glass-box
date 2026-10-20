@@ -460,6 +460,10 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM integration_landing_plan_nonces",
                 ),
                 (
+                    "integration_provider_landings",
+                    "SELECT COUNT(*) FROM integration_provider_landings",
+                ),
+                (
                     "integration_landing_receipts",
                     "SELECT COUNT(*) FROM integration_landing_receipts",
                 ),

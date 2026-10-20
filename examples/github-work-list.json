@@ -1,0 +1,34 @@
+{
+  "capability": {
+    "mode": "read",
+    "name": "work.list",
+    "version": 1
+  },
+  "connector_name": "github-main",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "github-work-open-page-1",
+  "mapping": {
+    "account": "your-github-login",
+    "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "host": "github.com",
+    "name": "primary",
+    "repository": "owner/repository",
+    "service": "github"
+  },
+  "parameters": {
+    "cursor": 1,
+    "limit": 100,
+    "state": "open"
+  },
+  "request_bytes": 131072,
+  "response_bytes": 524288,
+  "schema_version": 1,
+  "target": {
+    "desired_revision": null,
+    "expected_revision": null,
+    "object_format": null,
+    "repository": "owner/repository",
+    "resource_id": "issues"
+  },
+  "timeout_ms": 30000
+}

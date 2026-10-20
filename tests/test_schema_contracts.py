@@ -39,6 +39,8 @@ from magic_glass_box.integration import (
     LandingPlan,
     LandingReceipt,
     LandingReceiptRequest,
+    ProviderLandingReceipt,
+    ProviderLandingRequest,
 )
 from magic_glass_box.openai_chatgpt import OpenAIResponsesClient
 from magic_glass_box.results import ResultError, ResultManifest
@@ -411,6 +413,8 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             "landing-plan": LandingPlan.from_mapping,
             "landing-receipt-request": LandingReceiptRequest.from_mapping,
             "landing-receipt": LandingReceipt.from_mapping,
+            "provider-landing": ProviderLandingRequest.from_mapping,
+            "provider-landing-receipt": ProviderLandingReceipt.from_mapping,
         }
         for name, factory in factories.items():
             with self.subTest(name=name):
@@ -465,6 +469,21 @@ class ArtifactSchemaContractTests(unittest.TestCase):
         legacy_actuator_assurance["assurance"] = "base_and_head_enforced"
         validator.validate(legacy_actuator_assurance)
         LandingReceipt.from_mapping(legacy_actuator_assurance)
+
+        provider_validator, provider_landing = self.load("provider-landing")
+        false_provider_assurance = copy.deepcopy(provider_landing)
+        false_provider_assurance["assurance"] = "operator_attested"
+        with self.assertRaises(SchemaValidationError):
+            provider_validator.validate(false_provider_assurance)
+        with self.assertRaises(IntegrationError):
+            ProviderLandingRequest.from_mapping(false_provider_assurance)
+
+        receipt_validator, provider_receipt = self.load("provider-landing-receipt")
+        inconsistent_outcome = copy.deepcopy(provider_receipt)
+        inconsistent_outcome["closed_references"] = []
+        receipt_validator.validate(inconsistent_outcome)
+        with self.assertRaises(IntegrationError):
+            ProviderLandingReceipt.from_mapping(inconsistent_outcome)
 
         validator, fold = self.load("integration-fold")
         wrong_format = copy.deepcopy(fold)
@@ -780,6 +799,25 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ServiceOperationResponse.from_mapping(oversized)
 
+        normalized_result = copy.deepcopy(response)
+        normalized_result["receipt"]["result"] = {
+            "items": [{"external_id": "42", "title": "Candidate 42"}],
+            "next_cursor": None,
+        }
+        validator.validate(normalized_result)
+        parsed = ServiceOperationResponse.from_mapping(normalized_result)
+        self.assertEqual(
+            parsed.receipt.result,
+            normalized_result["receipt"]["result"],
+        )
+
+        scalar_result = copy.deepcopy(normalized_result)
+        scalar_result["receipt"]["result"] = "unbounded"
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(scalar_result)
+        with self.assertRaises(ValidationError):
+            ServiceOperationResponse.from_mapping(scalar_result)
+
     def test_published_contracts_enforce_core_capability_modes(self) -> None:
         contracts = (
             ("service-sidecar", ServiceSidecarSpec.from_mapping),
@@ -801,6 +839,41 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
                     validator.validate(wrong_mode)
                 with self.assertRaises(ValidationError):
                     factory(wrong_mode)
+
+                wrong_ref_mode = copy.deepcopy(example)
+                capability = (
+                    wrong_ref_mode["capabilities"][0]
+                    if name == "service-sidecar"
+                    else wrong_ref_mode["capability"]
+                )
+                capability.update(
+                    {"mode": "read", "name": "refs.publish", "version": 1}
+                )
+                with self.assertRaises(SchemaValidationError):
+                    validator.validate(wrong_ref_mode)
+                with self.assertRaises(ValidationError):
+                    factory(wrong_ref_mode)
+
+                for read_name in (
+                    "work.get",
+                    "work.list",
+                    "change.get",
+                    "change.list",
+                ):
+                    wrong_read_mode = copy.deepcopy(example)
+                    capability = (
+                        wrong_read_mode["capabilities"][0]
+                        if name == "service-sidecar"
+                        else wrong_read_mode["capability"]
+                    )
+                    capability.update(
+                        {"mode": "effect", "name": read_name, "version": 1}
+                    )
+                    with self.subTest(name=name, read_name=read_name):
+                        with self.assertRaises(SchemaValidationError):
+                            validator.validate(wrong_read_mode)
+                        with self.assertRaises(ValidationError):
+                            factory(wrong_read_mode)
 
 
 if __name__ == "__main__":

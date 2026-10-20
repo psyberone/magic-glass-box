@@ -166,16 +166,19 @@ attempts, typed outcomes, and uncertain-effect reconciliation. Its v1 service
 contract deliberately begins with `work.*`, `change.*`, `checks.*`, `refs.*`,
 and `landing.*` plus repository-shaped mappings.
 
-The bounded M10.1 stabilization pass implements only the M11-facing seams: the
+The bounded M10.1 stabilization pass implemented only the M11-facing seams: the
 core owns bindable capability modes; projects explicitly bind exact capability
 versions to one sidecar mapping; project-routed operations atomically pin that
 binding; and ambiguous or expired reads become retryable while effects retain
 the reconciliation path. Provider naming, v1 repository-shaped payloads, Unix
 transport, and operator-only extension registration remain unchanged.
 
-Milestone 11 remains the GitHub reference provider and integration-queue
-binding. It proves exact authorized GitHub operations, truthful assurance,
-lost-response reconciliation, and credential containment. It does not add
+Milestone 11 is now implementing the GitHub reference provider and
+integration-queue binding. The local implementation covers exact candidate-ref
+publication, bounded normalized work/change reads, deterministic change
+creation, named checks and approvals, truthful landing assurance, lost-response
+reconciliation, and credential containment; its live repository exit proof
+remains pending. It does not add
 Jira, GitLab, remote runners, dynamic plugin loading, a provider marketplace,
 or a universal resource schema.
 

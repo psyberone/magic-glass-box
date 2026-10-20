@@ -755,7 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate_readiness.add_argument("policy_id")
 
     integration = commands.add_parser(
-        "integration", help="order, refold, and manually land exact candidates"
+        "integration", help="order, refold, and land exact candidates"
     )
     integration_commands = integration.add_subparsers(
         dest="integration_command", required=True
@@ -861,6 +861,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     receipt.add_argument("--document", required=True, type=Path)
     receipt.add_argument("--recorded-by", required=True)
+    provider_issue = integration_commands.add_parser(
+        "provider-issue",
+        help="issue exact landing authority to the bound provider",
+    )
+    provider_issue.add_argument("queue_item_id")
+    provider_issue.add_argument("--owner", required=True)
+    provider_issue.add_argument("--expected-version", required=True, type=int)
+    provider_issue.add_argument("--resource-id", required=True)
+    provider_issue.add_argument(
+        "--merge-method", required=True, choices=("merge", "rebase", "squash")
+    )
+    provider_issue.add_argument("--issued-by", required=True)
+    provider_show = integration_commands.add_parser(
+        "provider-show",
+        help="show one provider landing and its service operation",
+    )
+    provider_show.add_argument("provider_landing_id")
+    provider_execute = integration_commands.add_parser(
+        "provider-execute", help="execute and settle one provider landing"
+    )
+    provider_execute.add_argument("provider_landing_id")
+    provider_execute.add_argument("--owner", required=True)
+    provider_execute.add_argument("--settled-by", required=True)
+    provider_settle = integration_commands.add_parser(
+        "provider-settle",
+        help="settle one externally completed provider landing",
+    )
+    provider_settle.add_argument("provider_landing_id")
+    provider_settle.add_argument("--settled-by", required=True)
     return parser
 
 
@@ -1433,6 +1462,28 @@ def _dispatch(
         if args.integration_command == "receipt":
             return control.record_landing_receipt(
                 _json_file(args.document), recorded_by_handle=args.recorded_by
+            )
+        if args.integration_command == "provider-issue":
+            return control.issue_provider_landing(
+                args.queue_item_id,
+                owner_id=args.owner,
+                expected_version=args.expected_version,
+                resource_id=args.resource_id,
+                merge_method=args.merge_method,
+                issued_by_handle=args.issued_by,
+            )
+        if args.integration_command == "provider-show":
+            return control.get_provider_landing(args.provider_landing_id)
+        if args.integration_command == "provider-execute":
+            return control.execute_provider_landing(
+                args.provider_landing_id,
+                owner_id=args.owner,
+                settled_by_handle=args.settled_by,
+            )
+        if args.integration_command == "provider-settle":
+            return control.settle_provider_landing(
+                args.provider_landing_id,
+                settled_by_handle=args.settled_by,
             )
     raise RuntimeError("unreachable command")
 

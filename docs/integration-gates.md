@@ -220,8 +220,10 @@ base, head/tree, and policy revision in one authority decision.
 
 Until a provider add-on is explicitly bound to the integration queue, the state
 machine stops at a structured human-executable plan. M10's generic service-
-sidecar ledger does not by itself confer landing authority; M11 must translate
-this queue's already-verified exact inputs into a GitHub operation. Arguments
+sidecar ledger does not by itself confer landing authority. M11's provider
+landing path now translates this queue's already-verified exact inputs into a
+project-bound service operation; the manual path remains available when no
+provider is configured. Arguments
 and body files are represented separately; MGB does not emit an interpolated
 shell program containing untrusted text. The plan contains the evidence/request
 digest and every revision known at authorization time. Its issuance response
@@ -235,15 +237,16 @@ model distinguishes these levels:
 
 - **base-and-head enforced** — the actuator atomically required both expected
   values;
-- **head enforced** — reserved for a future actuator that fixes the candidate
-  head but not the base; or
+- **head enforced** — a provider actuator fixed the candidate head but could
+  not atomically compare the expected base; or
 - **operator attested** — the provider offered no machine-verifiable
   precondition through the selected path.
 
-Receipt schema v1 recognizes `base_and_head_enforced` for legacy or future
-machine-observed imports and `operator_attested` for the current manual path;
-`head_enforced` requires a future actuator and schema revision. These levels
-are not interchangeable. In particular, GitHub CLI's
+Manual receipt schema v1 recognizes `base_and_head_enforced` for legacy or
+future machine-observed imports and `operator_attested` for the current manual
+path. The separate provider-landing receipt v1 contract records
+`head_enforced`. These levels are not interchangeable. In particular, GitHub
+CLI's
 `--match-head-commit` requires the pull-request head to match; its documented
 contract does not include an expected-base parameter. A plan using that option
 must not claim base-and-head compare-and-swap. See the
@@ -265,6 +268,23 @@ not observe the remote ref. The plan's **base-and-head enforced** value describe
 the generated `--force-with-lease` actuator contract; it is not promoted into a
 claim that MGB independently verified execution.
 
+## Provider actuator
+
+When a project binds `landing.invoke` v1, `integration provider-issue`
+atomically rechecks the lane, dependencies, gates, expected base, candidate
+head/tree, and policy revision; resolves the active project binding; creates
+the exact service operation; and moves the queue item to `awaiting_receipt`.
+The binding and service operation are immutable pins, so a later unbind cannot
+retarget already-issued authority.
+
+`integration provider-execute` drives the ordinary invoke/reconcile lifecycle
+and settles its normalized receipt. A denied or conflicting operation releases
+the queue back to `queued`. A successful provider response is considered
+landed only when its own remote identity appears in its provider-confirmed
+closed-reference set. The queue advances to the provider's actual observed base
+revision, not blindly to the candidate head. See
+[github-provider.md](github-provider.md).
+
 ## Receipts
 
 A landing receipt is bounded, immutable metadata containing the request digest,
@@ -280,13 +300,14 @@ expected base, the item returns to `queued` without advancing the ref. When it
 reports a third revision, MGB records that revision as the newly observed
 integration baseline and moves the item and every queued sibling to
 `refold_required`. The receipt therefore resolves issued authority truthfully
-without calling drift either success or an unchanged failure. Future provider
-actuators may add bounded asynchronous reconciliation.
+without calling drift either success or an unchanged failure. Provider
+landings apply the same drift/refold rule using the sidecar's normalized actual
+revision and retain uncertain effects for bounded reconciliation.
 
 ## Deliberate deferrals
 
-- Remote CI, provider approvals, and provider-confirmed closed references wait
-  for a connector implementing the relevant semantic capabilities.
+- Additional provider CI, approval, and closed-reference implementations wait
+  for connectors implementing the same bounded semantic capabilities.
 - Selective sibling invalidation and cost-aware ordering wait until the strict
   serialized/refold-all path is proven.
 - Multi-operator role policy is not implied by the current single-operator

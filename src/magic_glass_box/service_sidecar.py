@@ -28,6 +28,7 @@ SUPPORTED_SERVICE_SIDECAR_PROTOCOL_VERSIONS = frozenset({1})
 MAX_SERVICE_CAPABILITIES = 64
 MAX_SERVICE_MAPPINGS = 64
 MAX_OPERATION_PARAMETERS_BYTES = 256 * 1024
+MAX_SERVICE_RESULT_BYTES = 4 * 1024 * 1024
 MAX_SERVICE_FRAME_OVERHEAD = 64 * 1024
 MAX_UNIX_SOCKET_PATH_BYTES = 100
 MAX_RETRY_AFTER_SECONDS = 30 * 24 * 60 * 60
@@ -65,8 +66,13 @@ FORBIDDEN_PARAMETER_FIELDS = frozenset(
 )
 CORE_SERVICE_CAPABILITY_MODES: Mapping[tuple[str, int], str] = MappingProxyType(
     {
+        ("work.get", 1): "read",
+        ("work.list", 1): "read",
+        ("change.get", 1): "read",
+        ("change.list", 1): "read",
         ("change.open", 1): "effect",
         ("checks.read", 1): "read",
+        ("refs.publish", 1): "effect",
         ("landing.invoke", 1): "effect",
     }
 )
@@ -97,8 +103,10 @@ def _exact_fields(
     *,
     expected: set[str],
     subject: str,
+    optional: set[str] | None = None,
 ) -> None:
-    unknown = set(value) - expected
+    optional = optional or set()
+    unknown = set(value) - expected - optional
     if unknown:
         raise ValidationError(
             f"{subject} contains unknown fields: " + ", ".join(sorted(unknown))
@@ -879,6 +887,7 @@ class ServiceOperationReceipt:
     observed_revision: str | None
     evidence_sha256: str
     closed_references: tuple[str, ...]
+    _result_json: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> ServiceOperationReceipt:
@@ -893,6 +902,7 @@ class ServiceOperationReceipt:
                 "closed_references",
             },
             subject="service operation receipt",
+            optional={"result"},
         )
         observed_revision = value["observed_revision"]
         if observed_revision is not None and (
@@ -911,6 +921,16 @@ class ServiceOperationReceipt:
         )
         if len(set(closed)) != len(closed):
             raise ValidationError("service operation closed references must be unique")
+        result_json: str | None = None
+        if "result" in value:
+            result = value["result"]
+            if not isinstance(result, (dict, list)):
+                raise ValidationError(
+                    "service operation result must be an object or list"
+                )
+            result_json = canonical_json(result)
+            if len(result_json.encode("utf-8")) > MAX_SERVICE_RESULT_BYTES:
+                raise ValidationError("service operation result exceeds its byte limit")
         return cls(
             remote_identity=_nonblank(
                 value["remote_identity"],
@@ -922,15 +942,23 @@ class ServiceOperationReceipt:
                 value["evidence_sha256"], field="service operation evidence"
             ),
             closed_references=closed,
+            _result_json=result_json,
         )
 
+    @property
+    def result(self) -> object | None:
+        return None if self._result_json is None else json.loads(self._result_json)
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "closed_references": list(self.closed_references),
             "evidence_sha256": self.evidence_sha256,
             "observed_revision": self.observed_revision,
             "remote_identity": self.remote_identity,
         }
+        if self._result_json is not None:
+            result["result"] = json.loads(self._result_json)
+        return result
 
 
 @dataclass(frozen=True)
@@ -1033,6 +1061,10 @@ class ServiceOperationResponse:
             if receipt_value is None
             else ServiceOperationReceipt.from_mapping(receipt_value)
         )
+        if receipt is not None and receipt.result is not None:
+            result_bytes = len(canonical_json(receipt.result).encode("utf-8"))
+            if result_bytes > authority["response_limit_bytes"]:
+                raise ValidationError("service operation result exceeds response limit")
         if outcome == "succeeded":
             if (
                 provider_status is None

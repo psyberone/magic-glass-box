@@ -1265,7 +1265,12 @@ class ControlRoom:
             "r.integration_ref, r.current_revision, r.object_format, "
             "r.version AS integration_ref_version, "
             "u.handle AS created_by_handle, wiv.content_json, "
-            "lp.id AS pending_plan_id, lp.created_at AS plan_issued_at "
+            "lp.id AS pending_plan_id, lp.created_at AS plan_issued_at, "
+            "pl.id AS pending_provider_landing_id, "
+            "pl.created_at AS provider_landing_issued_at, "
+            "pl.capability_binding_id AS provider_capability_binding_id, "
+            "pl.service_operation_id AS provider_service_operation_id, "
+            "so.state AS provider_operation_state "
             "FROM visible v JOIN integration_queue_items q ON q.id = v.id "
             "JOIN integration_refs r ON r.id = q.integration_ref_id "
             "JOIN projects p ON p.id = q.project_id "
@@ -1276,6 +1281,9 @@ class ControlRoom:
             "ORDER BY latest.version DESC LIMIT 1) "
             "LEFT JOIN integration_landing_plans lp "
             "ON lp.queue_item_id = q.id AND lp.state = 'pending' "
+            "LEFT JOIN integration_provider_landings pl "
+            "ON pl.queue_item_id = q.id AND pl.state = 'pending' "
+            "LEFT JOIN service_operations so ON so.id = pl.service_operation_id "
             "ORDER BY v.group_order, q.updated_at DESC, q.id",
             (history_limit,),
         ).fetchall()
@@ -1498,6 +1506,10 @@ class ControlRoom:
             },
             "pending_landing_plans": connection.execute(
                 "SELECT COUNT(*) FROM integration_landing_plans WHERE state = 'pending'"
+            ).fetchone()[0],
+            "pending_provider_landings": connection.execute(
+                "SELECT COUNT(*) FROM integration_provider_landings "
+                "WHERE state = 'pending'"
             ).fetchone()[0],
         }
 
@@ -1763,16 +1775,34 @@ class ControlRoom:
                     item["updated_at"],
                 )
             elif item["state"] == "awaiting_receipt":
-                add(
-                    {
-                        **common,
-                        "kind": "integration.receipt_pending",
-                        "severity": "action",
-                        "plan_id": item["pending_plan_id"],
-                        "plan_issued_at": item["plan_issued_at"],
-                    },
-                    item["plan_issued_at"] or item["updated_at"],
-                )
+                if item["pending_provider_landing_id"] is not None:
+                    add(
+                        {
+                            **common,
+                            "kind": "integration.provider_landing_pending",
+                            "severity": "action",
+                            "provider_landing_id": item["pending_provider_landing_id"],
+                            "service_operation_id": item[
+                                "provider_service_operation_id"
+                            ],
+                            "service_operation_state": item["provider_operation_state"],
+                            "provider_landing_issued_at": item[
+                                "provider_landing_issued_at"
+                            ],
+                        },
+                        item["provider_landing_issued_at"] or item["updated_at"],
+                    )
+                else:
+                    add(
+                        {
+                            **common,
+                            "kind": "integration.receipt_pending",
+                            "severity": "action",
+                            "plan_id": item["pending_plan_id"],
+                            "plan_issued_at": item["plan_issued_at"],
+                        },
+                        item["plan_issued_at"] or item["updated_at"],
+                    )
             elif item["state"] == "claimed" and item["lease_expired"]:
                 add(
                     {

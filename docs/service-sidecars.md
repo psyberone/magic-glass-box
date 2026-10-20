@@ -3,8 +3,9 @@
 Milestone 10 implements the credential-free core half of the service-sidecar
 boundary: immutable registration, exact semantic operation authority, a bounded
 Unix-socket protocol, a durable attempt ledger, and uncertain-effect
-reconciliation. No provider-specific add-on ships in the core. GitHub mechanics
-and `GH_CONFIG_DIR` handling remain Milestone 11 work.
+reconciliation. Provider-specific code does not execute in the core. Milestone
+11 now supplies the first out-of-process reference provider for GitHub; its live
+repository exit proof remains pending.
 
 Service sidecars are optional credential-bearing add-ons. They execute
 already-authorized provider mechanics; they do not own candidate readiness,
@@ -68,11 +69,14 @@ The protocol advertises a version and a subset of bounded families such as:
 - `refs.*` — inspect or create exact repository refs; and
 - `landing.*` — invoke and reconcile one authorized landing.
 
-Operations are individually versioned and paginated or otherwise bounded. The
-sidecar normalizes provider responses; raw payloads and unrestricted issue or
-message bodies do not cross into the core. Existing work-item imports remain
-the authority-neutral content intake path, and no connector silently exports or
-synchronizes imported text.
+Operations are individually versioned and paginated or otherwise bounded. A
+successful read receipt may carry one bounded normalized JSON result in
+addition to its identity and evidence digest. The sidecar normalizes provider
+responses; raw payloads, comments, transcripts, and unrestricted message bodies
+do not cross into the core. `work.get` may return the existing bounded
+forge-neutral work-item envelope, including its execution brief, so it can be
+fed deliberately into the ordinary import path. No connector silently imports,
+exports, or synchronizes work.
 
 Provider routing is an explicit allowlist. If a project does not bind a
 capability to a provider, that surface is unavailable and is not advertised to
@@ -81,11 +85,13 @@ provider client. Bindings may be granular enough to allow a read while
 disabling a related mutation, but remain semantic operations rather than a
 mirror of every vendor endpoint.
 
-The core currently defines `change.open` v1 and `landing.invoke` v1 as effects,
-and `checks.read` v1 as a read. A provider must advertise the matching version
-and mode before it can be bound. Syntactically valid experimental capability
-names may still be registered for deliberate operator-only use, but cannot be
-project-bound until the core defines their durable meaning.
+The core currently defines `refs.publish` v1, `change.open` v1, and
+`landing.invoke` v1 as effects. `work.get`, `work.list`, `change.get`,
+`change.list`, and `checks.read` v1 are reads. A provider must advertise the
+matching version and mode before it can be bound. Syntactically valid
+experimental capability names may still be registered for deliberate
+operator-only use, but cannot be project-bound until the core defines their
+durable meaning.
 
 ## Registration and authority
 
@@ -183,10 +189,15 @@ existing object, and assert that the remote create count is one.
 
 ## Reference add-ons
 
-Milestone 11 supplies a separately packaged GitHub reference add-on using the
-user's existing `GH_CONFIG_DIR` and binds applicable operations to the existing
-integration authority. GitLab, Jira, and future services remain independent
-add-ons implementing only the families they support.
+Milestone 11's separately executed
+[GitHub reference provider](github-provider.md) uses the user's selected
+`GH_CONFIG_DIR`, lists bounded normalized work/change metadata, returns exact
+import-ready work, publishes exact candidate refs from an allowlisted candidate
+root, opens deterministic changes, reads named checks/approvals, and binds
+head-enforced landing to the existing integration authority. The credential
+directory and candidate root are process configuration, not worker-visible or
+stored operation credentials. GitLab, Jira, and future services remain
+independent add-ons implementing only the families they support.
 
 This capability-provider direction does not expand M10 or M11. M10 proves the
 credential-free operation and reconciliation kernel; M11 proves one GitHub

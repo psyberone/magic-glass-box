@@ -856,10 +856,8 @@ before the score was accepted.
 
 ## Milestone 11: GitHub reference sidecar
 
-**Status: planned**
-
-> **DESIGN ONLY — NOT IMPLEMENTED:** No GitHub add-on or `GH_CONFIG_DIR`
-> integration exists yet.
+**Status: local implementation and quality gate complete; authorized live exit
+proof pending**
 
 - Package GitHub mechanics outside the control-plane core and mount the user's
   explicitly approved `GH_CONFIG_DIR` only into that add-on.
@@ -872,6 +870,32 @@ before the score was accepted.
 - Consume schema v24 project bindings and atomically pinned operations rather
   than adding GitHub-specific routing state or resolving a controller in a
   separate transaction.
+
+The current local implementation provides the separate
+`magic-glass-box-github-provider` process, strict `GH_CONFIG_DIR` identity
+fingerprinting, bounded `gh api` transport, exact candidate publication through
+an allowlisted candidate root and `gh auth git-credential`, deterministic
+change creation, paginated work/change metadata, import-ready exact work reads,
+named latest checks/legacy statuses and reviewer decisions, and head-enforced
+landing with actual-ref observation. Successful read receipts carry only a
+bounded normalized result, never a raw GitHub response. Schema v25 atomically
+binds integration authority to `landing.invoke`, records provider landing
+requests/receipts, advances the actual provider revision, refolds on drift, and
+projects pending operation state into the control room. Unit, schema,
+migration, storage, CLI, and real-Unix carrier proofs are green. The milestone
+is not complete until one authorized sacrificial live-repository run passes.
+
+The completed local checkpoint passes 974 tests and Ruff format/lint with 86%
+aggregate statement-plus-branch coverage; the GitHub provider itself is at 90%.
+The first focused provider/carrier/service-sidecar mutation wave killed an
+effective 3,576 of 4,428 mutants (80.76%) after direct reruns of four timeout
+mutants. The landing-ledger/service/storage wave killed an effective 5,304 of
+5,943 (89.25%) after survivor-driven tests and direct reruns. A final clean pass
+over the current GitHub provider killed 2,267 of 2,720 mutants (83.35%) with no
+timeouts, uncovered mutants, suspicious results, skips, interruptions, or
+crashes. Mutation-driven malformed-review tests then killed nine additional
+semantic survivors directly, for an effective 2,276 of 2,720 (83.68%); the
+remaining review-normalizer survivors change diagnostic wording only.
 
 **Exit proof:** the reference add-on advances one exact authorized candidate,
 survives a lost response without duplication, and returns provider-verified

@@ -1,0 +1,16 @@
+{
+  "actuator": "service-sidecar-v1",
+  "assurance": "head_enforced",
+  "closed_references": [
+    "github:github.com/acme/widgets/pull/42"
+  ],
+  "object_format": "sha1",
+  "observed_revision": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "outcome": "landed",
+  "provider_landing_id": "plr_ffffffffffffffffffffffffffffffff",
+  "remote_identity": "github:github.com/acme/widgets/pull/42",
+  "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema_version": 1,
+  "service_operation_id": "sop_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "service_receipt_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}

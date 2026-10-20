@@ -75,3 +75,7 @@ magic-glass-box run create \
 
 Provider-specific adapters can live in separate packages or user-contributed
 repositories. They need no privileged plugin interface inside the orchestrator.
+M11's optional GitHub capability provider also returns the same envelope as the
+normalized result of an explicitly authorized `work.get` read. That result is
+still imported only by a deliberate operator action; listing or reading remote
+work never mutates the local work-item ledger by itself.

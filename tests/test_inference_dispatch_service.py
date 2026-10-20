@@ -1488,6 +1488,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 DROP TABLE attempt_recovery_checkpoints;
                 DROP INDEX attempt_result_identity;
                 DROP TABLE provider_recoveries;
+                DROP TABLE integration_provider_landings;
                 DROP TRIGGER provider_invocation_immutable_update;
                 DROP TRIGGER provider_invocation_immutable_delete;
                 DROP INDEX provider_invocation_run;

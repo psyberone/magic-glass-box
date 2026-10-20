@@ -84,6 +84,16 @@
         {
           "if": {
             "properties": {
+              "name": { "enum": ["work.get", "work.list", "change.get", "change.list"] },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "read" } } }
+        },
+        {
+          "if": {
+            "properties": {
               "name": { "const": "change.open" },
               "version": { "const": 1 }
             },
@@ -105,6 +115,16 @@
           "if": {
             "properties": {
               "name": { "const": "landing.invoke" },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "effect" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": { "const": "refs.publish" },
               "version": { "const": 1 }
             },
             "required": ["name", "version"]

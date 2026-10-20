@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from magic_glass_box.inference import (
+    InferenceConnectorUnavailableError,
     InferenceInvocationRequest,
     InferenceInvocationResponse,
     UnixInferenceConnectorClient,
@@ -136,6 +137,24 @@ def connect_when_ready(
             client.connect(str(socket_path))
             return
         except (ConnectionRefusedError, FileNotFoundError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def invoke_when_ready(
+    client: UnixInferenceConnectorClient,
+    request: InferenceInvocationRequest,
+    *,
+    timeout: float = PROCESS_TIMEOUT_SECONDS,
+) -> InferenceInvocationResponse:
+    """Retry only pre-dispatch connection failures while the listener starts."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return client.invoke(request)
+        except InferenceConnectorUnavailableError:
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.01)
@@ -283,13 +302,9 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
 
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
-        deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
-        while time.monotonic() < deadline and not socket_path.exists():
-            time.sleep(0.01)
-        self.assertTrue(socket_path.exists())
 
         request = invocation(self.session.credential_scope_sha256)
-        response = UnixInferenceConnectorClient(socket_path).invoke(request)
+        response = invoke_when_ready(UnixInferenceConnectorClient(socket_path), request)
         thread.join(PROCESS_TIMEOUT_SECONDS)
 
         self.assertEqual(failure, [])

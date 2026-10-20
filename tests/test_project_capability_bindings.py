@@ -329,6 +329,7 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
 
     def test_schema_twenty_four_migrates_schema_twenty_three_once(self) -> None:
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE integration_provider_landings")
             connection.execute("DROP TABLE service_operation_capability_bindings")
             connection.execute("DROP TABLE project_capability_binding_events")
             connection.execute("DROP TABLE project_capability_bindings")
@@ -337,7 +338,7 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
         first = self.database.initialize()
         second = self.database.initialize()
 
-        self.assertEqual(first["schema_version"], 24)
+        self.assertEqual(first["schema_version"], 25)
         self.assertEqual(second, first)
         with closing(self.database.connect()) as connection:
             tables = {

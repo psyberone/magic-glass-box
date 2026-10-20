@@ -192,11 +192,14 @@ atomically pins the exact binding; unbinding stops new operations without
 invalidating already-created work. An authorized operator or supervisor invokes
 the returned operation ID and, if an effect reply is lost, reconciles that same
 durable ID instead of replaying the effect. Lost read replies are safely
-retryable and never enter effect reconciliation. M10 intentionally includes no
-GitHub client or `GH_CONFIG_DIR` access; the reference provider add-on is the
-next milestone. See
+retryable and never enter effect reconciliation. MGB's core contains no GitHub
+credential or unrestricted provider client; M11's separately executed
+reference provider implements exact ref publication, change creation, checks,
+provider-verified landing, bounded work/change lists, and exact normalized reads
+from an explicitly selected `GH_CONFIG_DIR`. See
 [docs/service-sidecars.md](docs/service-sidecars.md) for the implemented
-operation boundary and
+operation boundary, [docs/github-provider.md](docs/github-provider.md) for the
+reference add-on, and
 [docs/capability-providers.md](docs/capability-providers.md) for the broader
 provider-routing model.
 

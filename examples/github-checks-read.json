@@ -1,0 +1,35 @@
+{
+  "capability": {
+    "mode": "read",
+    "name": "checks.read",
+    "version": 1
+  },
+  "connector_name": "github-main",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "candidate-cnd_11111111111111111111111111111111-checks",
+  "mapping": {
+    "account": "your-github-login",
+    "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "host": "github.com",
+    "name": "primary",
+    "repository": "owner/repository",
+    "service": "github"
+  },
+  "parameters": {
+    "required_approvals": 1,
+    "required_checks": [
+      "unit"
+    ]
+  },
+  "request_bytes": 131072,
+  "response_bytes": 524288,
+  "schema_version": 1,
+  "target": {
+    "desired_revision": "dddddddddddddddddddddddddddddddddddddddd",
+    "expected_revision": "cccccccccccccccccccccccccccccccccccccccc",
+    "object_format": "sha1",
+    "repository": "owner/repository",
+    "resource_id": "42"
+  },
+  "timeout_ms": 30000
+}

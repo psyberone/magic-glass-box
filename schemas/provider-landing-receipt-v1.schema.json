@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:provider-landing-receipt:v1",
+  "title": "Magic Glass Box Provider Landing Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "actuator",
+    "assurance",
+    "closed_references",
+    "object_format",
+    "observed_revision",
+    "outcome",
+    "provider_landing_id",
+    "remote_identity",
+    "request_sha256",
+    "schema_version",
+    "service_operation_id",
+    "service_receipt_sha256"
+  ],
+  "properties": {
+    "actuator": { "const": "service-sidecar-v1" },
+    "assurance": { "const": "head_enforced" },
+    "closed_references": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "object_format": { "enum": ["sha1", "sha256"] },
+    "observed_revision": { "$ref": "#/$defs/objectId" },
+    "outcome": { "enum": ["landed", "not_landed"] },
+    "provider_landing_id": { "type": "string", "pattern": "^plr_[0-9a-f]{32}$" },
+    "remote_identity": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "request_sha256": { "$ref": "#/$defs/sha256" },
+    "schema_version": { "const": 1 },
+    "service_operation_id": { "type": "string", "pattern": "^sop_[0-9a-f]{32}$" },
+    "service_receipt_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "object_format": { "const": "sha1" } }, "required": ["object_format"] },
+      "then": { "properties": { "observed_revision": { "pattern": "^[0-9a-f]{40}$" } } },
+      "else": { "properties": { "observed_revision": { "pattern": "^[0-9a-f]{64}$" } } }
+    }
+  ],
+  "$defs": {
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

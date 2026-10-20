@@ -50,13 +50,14 @@ contains:
   result summaries, run-bound provider authorities, pinned supervision
   policies, candidate-backed review bindings, redacted exact-input gate
   readiness, hard landing dependencies, serialized integration queue state,
-  folded policy identity, pending landing-plan IDs, durable supervisor actions,
-  and threshold escalation records; and
+  folded policy identity, pending manual-plan or provider-landing IDs, pinned
+  provider service-operation state, durable supervisor actions, and threshold
+  escalation records; and
 - an attention queue for pending interactions, open or expired assignments,
   blocker evidence, expired attempt leases, cancellation requests, inconsistent
   active runs, paused provider recovery, unavailable authorities, required
-  refolds, pending landing receipts, expired integration claims, and exhausted
-  supervisor work. Every
+  refolds, pending manual receipts or provider landings, expired integration
+  claims, and exhausted supervisor work. Every
   current attention entry includes its age in seconds at the snapshot's
   consistency timestamp.
 

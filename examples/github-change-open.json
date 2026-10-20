@@ -1,0 +1,36 @@
+{
+  "capability": {
+    "mode": "effect",
+    "name": "change.open",
+    "version": 1
+  },
+  "connector_name": "github-main",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "candidate-cnd_11111111111111111111111111111111-open",
+  "mapping": {
+    "account": "your-github-login",
+    "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "host": "github.com",
+    "name": "primary",
+    "repository": "owner/repository",
+    "service": "github"
+  },
+  "parameters": {
+    "base_ref": "refs/heads/main",
+    "body": "Candidate produced and gated by Magic Glass Box.",
+    "draft": true,
+    "head_ref": "refs/heads/mgb/candidate-11111111111111111111111111111111",
+    "title": "Candidate 11111111111111111111111111111111"
+  },
+  "request_bytes": 131072,
+  "response_bytes": 524288,
+  "schema_version": 1,
+  "target": {
+    "desired_revision": "dddddddddddddddddddddddddddddddddddddddd",
+    "expected_revision": "cccccccccccccccccccccccccccccccccccccccc",
+    "object_format": "sha1",
+    "repository": "owner/repository",
+    "resource_id": "refs/heads/mgb/candidate-11111111111111111111111111111111"
+  },
+  "timeout_ms": 30000
+}
