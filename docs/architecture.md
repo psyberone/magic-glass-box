@@ -34,15 +34,21 @@ Git commands use a fresh private environment, disable global/system config,
 hooks, fsmonitor, replacements, prompting, lazy fetching, and transports, and
 bound output, tree entries, total blob bytes, and command execution time.
 
-Optional service sidecars are trusted credential actuators, not workers. The
-implemented v1 core protocol places provider-specific GitHub, GitLab, Jira, or
-other mechanics behind small versioned semantic capabilities and one bounded
-local Unix transport. A user may explicitly expose a local configuration
-directory such as `GH_CONFIG_DIR` to a selected provider add-on only; it is
-never mounted into an agent container or copied into control-plane state.
-Magic Glass Box owns durable operation identity and decides whether a specific
-connector deployment, mapping, account, scope, capability, limit, repository,
-and exact revision are authorized. Provider-specific add-ons begin in M11.
+Optional capability providers are trusted credential actuators, not workers.
+A provider implements a small versioned semantic surface; a sidecar is its
+out-of-process deployment and isolation boundary. Explicit project bindings
+route each enabled operation to one controller, a configured provider
+instance. With no binding, the
+operation is disabled rather than discovered, defaulted, or routed through a
+raw client. The implemented v1 service protocol places provider-specific
+GitHub and future service mechanics behind one bounded local Unix transport.
+A user may explicitly expose a local configuration directory such as
+`GH_CONFIG_DIR` to a selected provider only; it is never mounted into an agent
+container or copied into control-plane state. Magic Glass Box owns durable
+operation identity and decides whether a specific deployment, mapping,
+account, scope, capability, limit, repository, and exact revision are
+authorized. Provider-specific implementations begin in M11. See
+[capability-providers.md](capability-providers.md).
 
 Milestone 7D extracts AI-provider authentication and transport into a
 credential-isolated inference connector. M7D.2 makes this the exclusive normal
@@ -103,7 +109,7 @@ Magic Glass Box ------ stable IDs / metadata ----> imitation-krab
       |                                              v
       |                                         AI provider
       |
-      +---- durable authorized action -----> optional service sidecar
+      +---- durable authorized action -----> capability provider sidecar
                                                     |
                                                     v
                                           GitHub / GitLab / Jira / service
@@ -448,6 +454,7 @@ GitHub reference add-on is the next numbered checkpoint. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),
+[capability-providers.md](capability-providers.md),
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 [runtime-adapters.md](runtime-adapters.md), [supervision.md](supervision.md),
 and [work-memory.md](work-memory.md).

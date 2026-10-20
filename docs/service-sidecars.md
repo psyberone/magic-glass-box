@@ -8,7 +8,11 @@ and `GH_CONFIG_DIR` handling remain Milestone 11 work.
 
 Service sidecars are optional credential-bearing add-ons. They execute
 already-authorized provider mechanics; they do not own candidate readiness,
-dependency order, budget policy, or landing policy.
+dependency order, budget policy, or landing policy. “Sidecar” describes their
+deployment and isolation. The broader extension model calls them
+**capability providers**: project policy maps small core-owned semantic surfaces
+to explicit controllers—configured provider instances. See
+[capability-providers.md](capability-providers.md).
 
 They are distinct from Milestone 7D
 [inference connectors](inference-connectors.md). Both isolate upstream
@@ -69,6 +73,13 @@ sidecar normalizes provider responses; raw payloads and unrestricted issue or
 message bodies do not cross into the core. Existing work-item imports remain
 the authority-neutral content intake path, and no connector silently exports or
 synchronizes imported text.
+
+Provider routing is an explicit allowlist. If a project does not bind a
+capability to a provider, that surface is unavailable and is not advertised to
+an agent. MGB never discovers a default controller or falls back to a raw
+provider client. Bindings may be granular enough to allow a read while
+disabling a related mutation, but remain semantic operations rather than a
+mirror of every vendor endpoint.
 
 ## Registration and authority
 
@@ -161,6 +172,12 @@ Milestone 11 supplies a separately packaged GitHub reference add-on using the
 user's existing `GH_CONFIG_DIR` and binds applicable operations to the existing
 integration authority. GitLab, Jira, and future services remain independent
 add-ons implementing only the families they support.
+
+This capability-provider direction does not expand M10 or M11. M10 proves the
+credential-free operation and reconciliation kernel; M11 proves one GitHub
+provider against it. Later heterogeneous providers may require a new versioned
+resource-binding shape rather than forcing Jira projects, runners, or other
+resources into v1's repository-shaped mapping.
 
 No provider-specific SDK, CLI, credential, configuration path, status vocabulary,
 or merge quirk belongs in the Magic Glass Box core.

@@ -846,6 +846,13 @@ bounded evidence while its reusable credential remains absent from the worker,
 core database, and logs. GitLab, Jira, and other services remain independent
 add-ons that implement only the capability families they support.
 
+The broader [capability-provider model](capability-providers.md) does not expand
+the M10 or M11 MVP. It names the semantic surface, provider implementation,
+explicit project binding, and sidecar deployment separately. M11 remains one
+GitHub provider. If a project binds no provider to an operation, that operation
+is disabled; later Jira, GitLab, runner, or other providers are added only when
+their real use cases justify a versioned capability contract.
+
 ## Optional provider-auth track: Anthropic Console OAuth connector
 
 **Status: planned, non-blocking — does not gate or reorder Milestones 8B–11**

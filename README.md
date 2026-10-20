@@ -187,7 +187,10 @@ An authorized operator or supervisor invokes the returned operation ID and,
 if the reply is lost, reconciles that same durable ID instead of replaying the
 effect. M10 intentionally includes no GitHub client or `GH_CONFIG_DIR` access;
 the reference provider add-on is the next milestone. See
-[docs/service-sidecars.md](docs/service-sidecars.md).
+[docs/service-sidecars.md](docs/service-sidecars.md) for the implemented
+operation boundary and
+[docs/capability-providers.md](docs/capability-providers.md) for the broader
+provider-routing model.
 
 The optional OpenAI connector owns its own Sign in with ChatGPT profile. Keep
 that profile outside both the checkout and MGB state:

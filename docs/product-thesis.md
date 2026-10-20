@@ -48,10 +48,14 @@ silently synchronize work items back to their source.
 
 Magic Glass Box owns integration semantics: candidate revisions, dependencies,
 exact-head gates, authorization, and durable receipts. It does not bake a forge
-client or forge credential into the core. Optional provider sidecars may perform
-explicitly authorized effects using user-supplied configuration that is mounted
-only into that sidecar. Agents receive narrow capabilities, never the
-configuration directory or reusable credential.
+client or forge credential into the core. Optional capability providers may
+perform explicitly authorized effects using user-supplied configuration that
+is mounted only into their out-of-process sidecar. Projects explicitly bind
+semantic operations to controllers—configured provider instances; an unbound
+operation is disabled,
+not auto-discovered. Agents receive narrow capabilities, never a provider
+endpoint, configuration directory, or reusable credential. See
+[capability-providers.md](capability-providers.md).
 
 AI inference follows the same separation with a distinct narrow contract. MGB
 pins and authorizes the run, model, limits, concurrency, and a versioned budget;
