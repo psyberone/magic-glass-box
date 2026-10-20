@@ -218,12 +218,14 @@ base, head/tree, and policy revision in one authority decision.
 
 ## Manual actuator and truthful assurance
 
-With no service sidecar configured, the state machine stops at a structured
-human-executable plan. Arguments and body files are represented separately; MGB
-does not emit an interpolated shell program containing untrusted text. The plan
-contains the evidence/request digest and every revision known at authorization
-time. Its issuance response carries a separate one-time nonce; only the nonce
-hash is retained.
+Until a provider add-on is explicitly bound to the integration queue, the state
+machine stops at a structured human-executable plan. M10's generic service-
+sidecar ledger does not by itself confer landing authority; M11 must translate
+this queue's already-verified exact inputs into a GitHub operation. Arguments
+and body files are represented separately; MGB does not emit an interpolated
+shell program containing untrusted text. The plan contains the evidence/request
+digest and every revision known at authorization time. Its issuance response
+carries a separate one-time nonce; only the nonce hash is retained.
 
 The imported receipt must bind that nonce and report what the actuator says it
 did. MGB validates the receipt against the issued authority and records the

@@ -52,6 +52,16 @@ successful outcomes; failed and ambiguous outcomes must carry `null` usage.
 Connector-owned request expansion remains bounded separately from the worker's
 request-byte authority.
 
+Milestone 10 publishes `service-sidecar-v1.schema.json`,
+`service-operation-v1.schema.json`,
+`service-operation-request-v1.schema.json`, and
+`service-operation-response-v1.schema.json`. Runtime validation additionally
+enforces exact registration/operation authority, recursive credential-field
+rejection, UTF-8 input limits, revision lengths by Git object format, response
+correlation, and outcome/receipt consistency. Control-plane schema v23 adds
+immutable registrations and operations plus one-way durable invoke/reconcile
+attempts; raw provider payloads are never part of that ledger.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

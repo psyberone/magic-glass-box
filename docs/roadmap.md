@@ -780,10 +780,7 @@ and none were suspicious, skipped, interrupted, or crashed.
 
 ## Milestone 10: provider-neutral service sidecars
 
-**Status: planned**
-
-> **DESIGN ONLY — NOT IMPLEMENTED:** No sidecar protocol, registration,
-> transport, capability invocation, or reconciliation state exists yet.
+**Status: completed 2026-10-19**
 
 These service sidecars reuse the isolation pattern proven by the M7D inference
 connector but expose different semantic capabilities and durable-effect
@@ -808,6 +805,24 @@ a replacement supervisor reconciles the already-created remote object rather
 than duplicating it. Wrong connector, account, scope, repository, revision, or
 capability requests fail before invocation. See
 [service-sidecars.md](service-sidecars.md).
+
+Schema v23 now carries immutable sidecar authority, durable semantic
+operations, bounded dispatch attempts, leases, optimistic versions, typed
+outcomes, rate/concurrency enforcement, and normalized receipts. Both the
+deterministic client seam and the real Unix transport pass the lost-success
+replacement proof with exactly one remote creation. The provider-specific
+GitHub actuator and integration-queue binding intentionally remain M11.
+
+Schema v23 and M10 passed 877 tests, Ruff format and lint, and 86% aggregate
+statement-plus-branch coverage. The focused service-sidecar proof passed 33
+tests and 24 subtests. The identical production source passed a
+clean-from-scratch 83.23% mutation gate (34,506/41,459): 6,883 survived, 34
+timed out, 36 had no selected tests, and none were suspicious, skipped,
+interrupted, or crashed. A post-run survivor audit changed tests only and
+reran all 1,291 mutants in the two M10 modules, killing 1,091 (84.51%) with
+zero timeouts, uncovered mutants, suspicious results, skips, or crashes. This
+killed meaningful authority, deadline, socket-boundary, retry, lease,
+terminal-state, and reconciliation survivors.
 
 ## Milestone 11: GitHub reference sidecar
 

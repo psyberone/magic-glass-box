@@ -1,0 +1,33 @@
+{
+  "capability": {
+    "mode": "effect",
+    "name": "change.open",
+    "version": 1
+  },
+  "connector_name": "example-sidecar",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "open-candidate-42",
+  "mapping": {
+    "account": "automation",
+    "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "host": "forge.example.test",
+    "name": "primary",
+    "repository": "acme/widgets",
+    "service": "example-forge"
+  },
+  "parameters": {
+    "draft": true,
+    "title": "Candidate 42"
+  },
+  "request_bytes": 16384,
+  "response_bytes": 32768,
+  "schema_version": 1,
+  "target": {
+    "desired_revision": "dddddddddddddddddddddddddddddddddddddddd",
+    "expected_revision": "cccccccccccccccccccccccccccccccccccccccc",
+    "object_format": "sha1",
+    "repository": "acme/widgets",
+    "resource_id": "candidate-42"
+  },
+  "timeout_ms": 10000
+}

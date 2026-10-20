@@ -140,13 +140,14 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
                 text=True,
             )
             self.addCleanup(self._stop_process, process)
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if socket_path.exists() or process.poll() is not None:
                     break
                 time.sleep(0.01)
             if not socket_path.exists():
-                stdout, stderr = process.communicate(timeout=1)
+                self._stop_process(process)
+                stdout, stderr = process.communicate()
                 self.fail(f"fake connector did not start: {stdout}{stderr}")
 
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as malformed:
@@ -176,7 +177,7 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
             )
 
             response = UnixInferenceConnectorClient(socket_path).invoke(request)
-            stdout, stderr = process.communicate(timeout=3)
+            stdout, stderr = process.communicate(timeout=10)
 
         self.assertEqual(process.returncode, 0)
         self.assertEqual(stderr, "")

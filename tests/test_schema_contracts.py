@@ -42,6 +42,12 @@ from magic_glass_box.integration import (
 )
 from magic_glass_box.openai_chatgpt import OpenAIResponsesClient
 from magic_glass_box.results import ResultError, ResultManifest
+from magic_glass_box.service_sidecar import (
+    ServiceOperationRequest,
+    ServiceOperationResponse,
+    ServiceOperationSpec,
+    ServiceSidecarSpec,
+)
 
 
 class PublishedSchemaContractTests(unittest.TestCase):
@@ -695,6 +701,84 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             response_validator.validate(inconsistent)
         with self.assertRaises(ValidationError):
             InferenceInvocationResponse.from_mapping(inconsistent)
+
+
+class ServiceSidecarSchemaContractTests(unittest.TestCase):
+    repository = Path(__file__).resolve().parents[1]
+
+    def load(self, name: str) -> tuple[Draft202012Validator, dict[str, Any]]:
+        schema = json.loads(
+            (self.repository / "schemas" / f"{name}-v1.schema.json").read_text()
+        )
+        example = json.loads(
+            (self.repository / "examples" / f"{name}.json").read_text()
+        )
+        Draft202012Validator.check_schema(schema)
+        return (
+            Draft202012Validator(schema, format_checker=FormatChecker()),
+            example,
+        )
+
+    def test_service_sidecar_examples_match_runtime_contracts(self) -> None:
+        contracts = (
+            ("service-sidecar", ServiceSidecarSpec.from_mapping),
+            ("service-operation", ServiceOperationSpec.from_mapping),
+            ("service-operation-request", ServiceOperationRequest.from_mapping),
+            ("service-operation-response", ServiceOperationResponse.from_mapping),
+        )
+        parsed: dict[str, object] = {}
+        for name, factory in contracts:
+            with self.subTest(name=name):
+                validator, example = self.load(name)
+                validator.validate(example)
+                value = factory(example)
+                validator.validate(value.to_dict())
+                self.assertEqual(value.to_dict(), example)
+                parsed[name] = value
+        response = parsed["service-operation-response"]
+        request = parsed["service-operation-request"]
+        assert isinstance(response, ServiceOperationResponse)
+        assert isinstance(request, ServiceOperationRequest)
+        response.validate_correlation(request)
+
+    def test_schema_and_runtime_reject_unsafe_service_authority(self) -> None:
+        validator, sidecar = self.load("service-sidecar")
+        duplicate = copy.deepcopy(sidecar)
+        duplicate["mappings"].append(copy.deepcopy(duplicate["mappings"][0]))
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(duplicate)
+        with self.assertRaises(ValidationError):
+            ServiceSidecarSpec.from_mapping(duplicate)
+
+        credentialed_repository = copy.deepcopy(sidecar)
+        credentialed_repository["mappings"][0]["repository"] = (
+            "https://operator:secret@forge.example.test/acme/widgets"
+        )
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(credentialed_repository)
+        with self.assertRaises(ValidationError):
+            ServiceSidecarSpec.from_mapping(credentialed_repository)
+
+        validator, operation = self.load("service-operation")
+        credential = copy.deepcopy(operation)
+        credential["parameters"]["access_token"] = "forbidden"  # noqa: S105
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(credential)
+        with self.assertRaises(ValidationError):
+            ServiceOperationSpec.from_mapping(credential)
+
+        wrong_repository = copy.deepcopy(operation)
+        wrong_repository["target"]["repository"] = "acme/other"
+        validator.validate(wrong_repository)
+        with self.assertRaises(ValidationError):
+            ServiceOperationSpec.from_mapping(wrong_repository)
+
+        validator, response = self.load("service-operation-response")
+        oversized = copy.deepcopy(response)
+        oversized["response_bytes"] = oversized["response_limit_bytes"] + 1
+        validator.validate(oversized)
+        with self.assertRaises(ValidationError):
+            ServiceOperationResponse.from_mapping(oversized)
 
 
 if __name__ == "__main__":

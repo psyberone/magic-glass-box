@@ -388,6 +388,10 @@ class CLITests(unittest.TestCase):
                         "inference-connector",
                         "manage credential-isolated inference connectors",
                     ),
+                    (
+                        "service-sidecar",
+                        "manage provider-neutral service sidecars and operations",
+                    ),
                     ("provider", "manage scoped provider grants"),
                     ("work-item", "manage durable work items"),
                     ("interaction", "resolve durable agent interactions"),
@@ -463,6 +467,42 @@ class CLITests(unittest.TestCase):
                     ),
                     ("list", "list connector authority and lifecycle metadata"),
                     ("revoke", "revoke an inference connector"),
+                ),
+            ),
+            ("service-sidecar",): (
+                "service_sidecar_command",
+                True,
+                (
+                    (
+                        "register",
+                        "register immutable service-sidecar authority",
+                    ),
+                    (
+                        "show",
+                        "show service-sidecar authority and lifecycle metadata",
+                    ),
+                    (
+                        "list",
+                        "list service-sidecar authority and lifecycle metadata",
+                    ),
+                    ("revoke", "revoke a service sidecar"),
+                    (
+                        "operation-create",
+                        "create one exact durable service operation",
+                    ),
+                    ("operation-show", "show one durable service operation"),
+                    (
+                        "operation-list",
+                        "list recent durable service operations",
+                    ),
+                    (
+                        "operation-execute",
+                        "invoke one authorized service operation",
+                    ),
+                    (
+                        "operation-reconcile",
+                        "reconcile one uncertain service operation",
+                    ),
                 ),
             ),
             ("work-item",): (
@@ -683,6 +723,26 @@ class CLITests(unittest.TestCase):
                 ("inference-connector", "revoke"): (
                     "--expected-version",
                     "--revoked-by",
+                ),
+                ("service-sidecar", "register"): (
+                    "--spec",
+                    "--created-by",
+                ),
+                ("service-sidecar", "revoke"): (
+                    "--expected-version",
+                    "--revoked-by",
+                ),
+                ("service-sidecar", "operation-create"): (
+                    "--request",
+                    "--created-by",
+                ),
+                ("service-sidecar", "operation-execute"): (
+                    "--owner",
+                    "--expected-version",
+                ),
+                ("service-sidecar", "operation-reconcile"): (
+                    "--owner",
+                    "--expected-version",
                 ),
                 ("provider", "connector-add"): (
                     "--policy",
@@ -1574,6 +1634,9 @@ class CLITests(unittest.TestCase):
                 "inference-connector": (
                     "manage credential-isolated inference connectors"
                 ),
+                "service-sidecar": (
+                    "manage provider-neutral service sidecars and operations"
+                ),
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "interaction": "resolve durable agent interactions",
@@ -1614,6 +1677,17 @@ class CLITests(unittest.TestCase):
                 "show": "show connector authority and lifecycle metadata",
                 "list": "list connector authority and lifecycle metadata",
                 "revoke": "revoke an inference connector",
+            },
+            "service-sidecar": {
+                "register": "register immutable service-sidecar authority",
+                "show": "show service-sidecar authority and lifecycle metadata",
+                "list": "list service-sidecar authority and lifecycle metadata",
+                "revoke": "revoke a service sidecar",
+                "operation-create": "create one exact durable service operation",
+                "operation-show": "show one durable service operation",
+                "operation-list": "list recent durable service operations",
+                "operation-execute": "invoke one authorized service operation",
+                "operation-reconcile": ("reconcile one uncertain service operation"),
             },
             "work-item": {
                 "import": "create or update a normalized work item",
@@ -3021,6 +3095,67 @@ class CLITests(unittest.TestCase):
             "inference-connector",
             "revoke",
             "openai-personal",
+            "--expected-version",
+            "1",
+            "--revoked-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(revoked["state"], "revoked")
+
+    def test_service_sidecar_commands_manage_durable_operations(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        sidecar_document = json.loads(
+            (repository / "examples/service-sidecar.json").read_text()
+        )
+        sidecar_document["transport"]["socket_path"] = str(
+            Path(self.temporary.name) / "service.sock"
+        )
+        sidecar_path = Path(self.temporary.name) / "service-sidecar.json"
+        sidecar_path.write_text(json.dumps(sidecar_document), encoding="utf-8")
+        operation_path = repository / "examples/service-operation.json"
+
+        self.assertEqual(self.invoke("init")[0], 0)
+        self.assertEqual(
+            self.invoke("user", "add", "operator", "--display-name", "Operator")[0],
+            0,
+        )
+        status, sidecar, error = self.invoke(
+            "service-sidecar",
+            "register",
+            "example-sidecar",
+            "--spec",
+            str(sidecar_path),
+            "--created-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(sidecar["state"], "active")
+
+        status, operation, error = self.invoke(
+            "service-sidecar",
+            "operation-create",
+            "--request",
+            str(operation_path),
+            "--created-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(operation["state"], "pending")
+
+        status, shown, error = self.invoke(
+            "service-sidecar", "operation-show", operation["id"]
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(shown, operation)
+        status, operations, error = self.invoke("service-sidecar", "operation-list")
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual([item["id"] for item in operations], [operation["id"]])
+
+        status, revoked, error = self.invoke(
+            "service-sidecar",
+            "revoke",
+            "example-sidecar",
             "--expected-version",
             "1",
             "--revoked-by",

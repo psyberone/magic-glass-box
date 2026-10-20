@@ -1,0 +1,36 @@
+{
+  "capabilities": [
+    {
+      "mode": "effect",
+      "name": "change.open",
+      "version": 1
+    },
+    {
+      "mode": "read",
+      "name": "checks.read",
+      "version": 1
+    }
+  ],
+  "connector_protocol_version": 1,
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "mappings": [
+    {
+      "account": "automation",
+      "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "host": "forge.example.test",
+      "name": "primary",
+      "repository": "acme/widgets",
+      "service": "example-forge"
+    }
+  ],
+  "max_concurrency": 2,
+  "max_requests_per_minute": 30,
+  "request_bytes": 32768,
+  "response_bytes": 65536,
+  "schema_version": 1,
+  "timeout_ms": 30000,
+  "transport": {
+    "kind": "unix",
+    "socket_path": "/var/run/magic-glass-box/example-service.sock"
+  }
+}

@@ -82,12 +82,24 @@ from .provider import (
 )
 from .results import WorkspaceResultStore
 from .runtime import RuntimeLaunch
+from .service_sidecar import (
+    ServiceOperationRequest,
+    ServiceOperationResponse,
+    ServiceOperationSpec,
+    ServiceSidecarAmbiguousError,
+    ServiceSidecarClient,
+    ServiceSidecarError,
+    ServiceSidecarSpec,
+    ServiceSidecarUnavailableError,
+    UnixServiceSidecarClient,
+)
 
 if TYPE_CHECKING:
     from .executor import DockerExecutor
 
 ClientFactory = Callable[..., KrabClient]
 InferenceClientFactory = Callable[[Path], InferenceConnectorClient]
+ServiceClientFactory = Callable[[Path], ServiceSidecarClient]
 PROVIDER_DISPATCH_LEASE_SECONDS = 30
 PROVIDER_DISPATCH_RENEW_INTERVAL_SECONDS = 10.0
 
@@ -185,6 +197,7 @@ class ControlPlane:
         credential_resolver: CredentialResolver | None = None,
         client_factory: ClientFactory | None = None,
         inference_client_factory: InferenceClientFactory | None = None,
+        service_client_factory: ServiceClientFactory | None = None,
     ):
         self.database = database
         self.credential_resolver = (
@@ -194,6 +207,7 @@ class ControlPlane:
         self.inference_client_factory = (
             inference_client_factory or UnixInferenceConnectorClient
         )
+        self.service_client_factory = service_client_factory or UnixServiceSidecarClient
 
     def initialize(self) -> dict[str, Any]:
         return self.database.initialize()
@@ -867,6 +881,188 @@ class ControlPlane:
             spec=spec,
             created_by=creator["id"],
         )
+
+    def register_service_sidecar(
+        self,
+        *,
+        name: str,
+        spec: ServiceSidecarSpec,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.register_service_sidecar(
+            name=name,
+            spec=spec,
+            created_by=creator["id"],
+        )
+
+    def revoke_service_sidecar(
+        self,
+        name: str,
+        *,
+        expected_version: int,
+        revoked_by_handle: str,
+    ) -> dict[str, Any]:
+        revoker = self.database.get_user(revoked_by_handle)
+        return self.database.revoke_service_sidecar(
+            name,
+            expected_version=expected_version,
+            revoked_by=revoker["id"],
+        )
+
+    def create_service_operation(
+        self,
+        *,
+        spec: ServiceOperationSpec,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.create_service_operation(
+            spec=spec,
+            created_by=creator["id"],
+        )
+
+    def execute_service_operation(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return self._dispatch_service_operation(
+            operation_id,
+            phase="invoke",
+            owner_id=owner_id,
+            expected_version=expected_version,
+        )
+
+    def reconcile_service_operation(
+        self,
+        operation_id: str,
+        *,
+        owner_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return self._dispatch_service_operation(
+            operation_id,
+            phase="reconcile",
+            owner_id=owner_id,
+            expected_version=expected_version,
+        )
+
+    def _dispatch_service_operation(
+        self,
+        operation_id: str,
+        *,
+        phase: str,
+        owner_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        operation = self.database.get_service_operation(operation_id)
+        try:
+            spec = ServiceOperationSpec.from_mapping(operation["spec"])
+        except (KeyError, TypeError, ValidationError) as exc:
+            raise ConflictError("service operation authority is unavailable") from exc
+        lease_seconds = max(30, (spec.timeout_ms + 999) // 1000 + 5)
+        dispatch = self.database.begin_service_operation_attempt(
+            operation_id,
+            phase=phase,
+            owner_id=owner_id,
+            expected_version=expected_version,
+            lease_seconds=lease_seconds,
+        )
+        attempt_id = dispatch["attempt"]["id"]
+        dispatch_version = dispatch["operation"]["version"]
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        socket_path = Path(
+            dispatch["operation"]["sidecar"]["spec"]["transport"]["socket_path"]
+        )
+        try:
+            client = self.service_client_factory(socket_path)
+        except Exception as exc:
+            unavailable = ServiceSidecarUnavailableError(
+                "service sidecar is unavailable"
+            )
+            self.database.fail_service_operation_attempt(
+                attempt_id,
+                owner_id=owner_id,
+                expected_operation_version=dispatch_version,
+                outcome="unavailable",
+                error_code="sidecar_unavailable",
+            )
+            raise unavailable from exc
+        try:
+            received = client.invoke(request)
+            if not isinstance(received, ServiceOperationResponse):
+                raise ServiceSidecarAmbiguousError(
+                    "service sidecar returned an invalid response type"
+                )
+            try:
+                response = ServiceOperationResponse.from_mapping(received.to_dict())
+                response.validate_correlation(request)
+            except ValidationError as exc:
+                raise ServiceSidecarAmbiguousError(
+                    "service sidecar returned an invalid response"
+                ) from exc
+        except ServiceSidecarUnavailableError:
+            self.database.fail_service_operation_attempt(
+                attempt_id,
+                owner_id=owner_id,
+                expected_operation_version=dispatch_version,
+                outcome="unavailable",
+                error_code="sidecar_unavailable",
+            )
+            raise
+        except ServiceSidecarAmbiguousError:
+            self.database.fail_service_operation_attempt(
+                attempt_id,
+                owner_id=owner_id,
+                expected_operation_version=dispatch_version,
+                outcome="ambiguous",
+                error_code="sidecar_ambiguous",
+            )
+            raise
+        except ServiceSidecarError as exc:
+            self.database.fail_service_operation_attempt(
+                attempt_id,
+                owner_id=owner_id,
+                expected_operation_version=dispatch_version,
+                outcome="ambiguous",
+                error_code="sidecar_error",
+            )
+            raise ServiceSidecarAmbiguousError(
+                "service sidecar outcome is ambiguous"
+            ) from exc
+        except Exception as exc:
+            self.database.fail_service_operation_attempt(
+                attempt_id,
+                owner_id=owner_id,
+                expected_operation_version=dispatch_version,
+                outcome="ambiguous",
+                error_code="sidecar_failure",
+            )
+            raise ServiceSidecarAmbiguousError(
+                "service sidecar outcome is ambiguous"
+            ) from exc
+        try:
+            return self.database.complete_service_operation_attempt(
+                attempt_id,
+                owner_id=owner_id,
+                expected_operation_version=dispatch_version,
+                response=response,
+            )
+        except Exception as exc:
+            with suppress(Exception):
+                self.database.fail_service_operation_attempt(
+                    attempt_id,
+                    owner_id=owner_id,
+                    expected_operation_version=dispatch_version,
+                    outcome="ambiguous",
+                    error_code="finalization_failed",
+                )
+            raise ServiceSidecarAmbiguousError(
+                "service sidecar outcome could not be finalized"
+            ) from exc
 
     def add_connector_provider_grant(
         self,

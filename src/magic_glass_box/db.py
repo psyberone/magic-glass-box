@@ -52,12 +52,14 @@ from .storage.schema import (
     SCHEMA,
     SCHEMA_V1,
     SCHEMA_VERSION,
+    SERVICE_SIDECAR_SCHEMA,
     STATE_DIRECTORY_NAME,
     SUPERVISION_SCHEMA,
     WORK_ITEM_SCHEMA,
     WORK_MEMORY_SCHEMA,
     WORK_THREAD_LIFECYCLE_SCHEMA,
 )
+from .storage.service_sidecars import ServiceSidecarStorage
 from .storage.supervision import SupervisionStorage
 from .storage.work import WorkStorage
 from .storage.work_items import WorkItemStorage
@@ -98,6 +100,7 @@ __all__ = [
     "SCHEMA",
     "SCHEMA_V1",
     "SCHEMA_VERSION",
+    "SERVICE_SIDECAR_SCHEMA",
     "STATE_DIRECTORY_NAME",
     "StorageError",
     "SUPERVISION_SCHEMA",
@@ -110,6 +113,7 @@ __all__ = [
 
 class Database(
     SupervisionStorage,
+    ServiceSidecarStorage,
     QueryStorage,
     RecoveryStorage,
     IntegrationStorage,

@@ -34,15 +34,15 @@ Git commands use a fresh private environment, disable global/system config,
 hooks, fsmonitor, replacements, prompting, lazy fetching, and transports, and
 bound output, tree entries, total blob bytes, and command execution time.
 
-Planned optional service sidecars are trusted credential actuators, not
-workers; no provider-neutral service-sidecar protocol is implemented today.
-The design places provider-specific GitHub, GitLab, Jira, or other service
-mechanics behind a small versioned semantic-capability protocol. A user could
-explicitly expose a local configuration directory such as `GH_CONFIG_DIR` to
-the selected sidecar only; it would never be mounted into an agent container
-or copied into control-plane state. Magic Glass Box would remain responsible
-for deciding whether a specific operation, mapping, account, scope, and exact
-revision are authorized.
+Optional service sidecars are trusted credential actuators, not workers. The
+implemented v1 core protocol places provider-specific GitHub, GitLab, Jira, or
+other mechanics behind small versioned semantic capabilities and one bounded
+local Unix transport. A user may explicitly expose a local configuration
+directory such as `GH_CONFIG_DIR` to a selected provider add-on only; it is
+never mounted into an agent container or copied into control-plane state.
+Magic Glass Box owns durable operation identity and decides whether a specific
+connector deployment, mapping, account, scope, capability, limit, repository,
+and exact revision are authorized. Provider-specific add-ons begin in M11.
 
 Milestone 7D extracts AI-provider authentication and transport into a
 credential-isolated inference connector. M7D.2 makes this the exclusive normal
@@ -282,6 +282,8 @@ normalized usage accounting advance it to schema v19. Quota-aware paused-run
 recovery advances it to schema v20. Immutable attempt recovery selections and
 application receipts advance it to schema v21. Append-only landing-nonce
 generations and honest reported provider overruns advance it to schema v22.
+Provider-neutral service-sidecar registrations, durable operations, and
+dispatch/reconciliation attempts advance it to schema v23.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -417,15 +419,16 @@ run outside the control plane and may only submit content; project selection,
 assignment, profiles, credentials, network policy, and lifecycle remain trusted
 local decisions. Imported content is therefore never an authority channel.
 
-Provider-specific operations remain planned optional service sidecars. The
-provider-neutral integration state is implemented: a worker may provide a
-result or review, but cannot turn it into landing authority. The core checks
-the exact candidate or fold, dependencies, current ref, gates, lane lease, and
-optimistic versions before issuing a structured manual Git plan. It holds no
-remote credential and runs no network command. A nonce-bound receipt records
-the assurance that the manual actuator actually established. A future sidecar
-will consume the same bounded authority rather than receiving raw `gh`, `glab`,
-or provider credentials inside the worker.
+Provider-specific operations remain outside the core. M10 implements their
+provider-neutral actuator boundary, but the integration queue is not yet bound
+to a provider add-on. A worker may provide a result or review, but cannot turn
+it into landing authority. The core checks the exact candidate or fold,
+dependencies, current ref, gates, lane lease, and optimistic versions before
+issuing a structured manual Git plan. It holds no remote credential and runs
+no network command. A nonce-bound receipt records the assurance that the
+manual actuator actually established. M11 will translate that same bounded
+authority into GitHub service operations without giving a worker raw `gh`,
+provider credentials, or a sidecar endpoint.
 
 ## Planned slices
 
@@ -439,8 +442,9 @@ autonomous supervision, and aging escalation are complete. Trusted candidate
 materialization, exact-input gates, dependency/refold queue, and manual landing
 flow are implemented. The credential-isolated inference connector, its
 real-account proof, provider usage/budget authority, quota-aware recovery, and
-destructive replacement continuity are implemented. Optional
-provider-neutral service sidecars are the next numbered checkpoint. See
+destructive replacement continuity are implemented. The provider-neutral
+service-sidecar protocol and uncertain-effect recovery are implemented; the
+GitHub reference add-on is the next numbered checkpoint. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),

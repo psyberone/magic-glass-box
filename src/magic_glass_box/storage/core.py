@@ -372,6 +372,18 @@ class DatabaseCore:
                     "inference_connectors",
                     "SELECT COUNT(*) FROM inference_connectors",
                 ),
+                (
+                    "service_sidecars",
+                    "SELECT COUNT(*) FROM service_sidecars",
+                ),
+                (
+                    "service_operations",
+                    "SELECT COUNT(*) FROM service_operations",
+                ),
+                (
+                    "service_operation_attempts",
+                    "SELECT COUNT(*) FROM service_operation_attempts",
+                ),
                 ("provider_grants", "SELECT COUNT(*) FROM provider_grants"),
                 (
                     "provider_connector_bindings",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -3008,6 +3008,243 @@ BEGIN
 END;
 """
 
+SERVICE_SIDECAR_SCHEMA = """
+CREATE TABLE service_sidecars (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    connector_protocol_version INTEGER NOT NULL CHECK (
+        connector_protocol_version = 1
+    ),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE CHECK (length(content_sha256) = 64),
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    transport_kind TEXT NOT NULL CHECK (transport_kind = 'unix'),
+    socket_path TEXT NOT NULL,
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 1),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 1),
+    timeout_ms INTEGER NOT NULL CHECK (timeout_ms >= 100),
+    max_concurrency INTEGER NOT NULL CHECK (
+        max_concurrency BETWEEN 1 AND 16
+    ),
+    max_requests_per_minute INTEGER NOT NULL CHECK (
+        max_requests_per_minute BETWEEN 1 AND 10000
+    ),
+    created_by TEXT NOT NULL,
+    revoked_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (revoked_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND revoked_by IS NULL AND revoked_at IS NULL)
+        OR
+        (state = 'revoked' AND revoked_by IS NOT NULL AND revoked_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE service_sidecar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_sidecar_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('service_sidecar.created', 'service_sidecar.revoked')
+    ),
+    actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (service_sidecar_id, sequence),
+    FOREIGN KEY (service_sidecar_id)
+        REFERENCES service_sidecars(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE service_operations (
+    id TEXT PRIMARY KEY,
+    service_sidecar_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'pending', 'dispatching', 'uncertain', 'retryable', 'throttled',
+            'succeeded', 'denied', 'conflict', 'cancelled'
+        )
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    sidecar_content_sha256 TEXT NOT NULL CHECK (
+        length(sidecar_content_sha256) = 64
+    ),
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    mapping_name TEXT NOT NULL,
+    service TEXT NOT NULL,
+    host TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    account TEXT NOT NULL,
+    credential_scope_sha256 TEXT NOT NULL CHECK (
+        length(credential_scope_sha256) = 64
+    ),
+    capability_name TEXT NOT NULL,
+    capability_version INTEGER NOT NULL CHECK (capability_version >= 1),
+    capability_mode TEXT NOT NULL CHECK (capability_mode IN ('read', 'effect')),
+    idempotency_key TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 1),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 1),
+    timeout_ms INTEGER NOT NULL CHECK (timeout_ms >= 100),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    eligible_at TEXT,
+    completed_at TEXT,
+    UNIQUE (service_sidecar_id, idempotency_key),
+    FOREIGN KEY (service_sidecar_id)
+        REFERENCES service_sidecars(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state IN ('pending', 'dispatching', 'uncertain')
+            AND eligible_at IS NULL AND completed_at IS NULL)
+        OR
+        (state IN ('retryable', 'throttled')
+            AND eligible_at IS NOT NULL AND completed_at IS NULL)
+        OR
+        (state IN ('succeeded', 'denied', 'conflict', 'cancelled')
+            AND eligible_at IS NULL AND completed_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE service_operation_attempts (
+    id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    phase TEXT NOT NULL CHECK (phase IN ('invoke', 'reconcile')),
+    outcome TEXT NOT NULL CHECK (
+        outcome IN (
+            'dispatching', 'succeeded', 'denied', 'conflict', 'retryable',
+            'throttled', 'uncertain', 'not_found', 'unavailable',
+            'ambiguous', 'abandoned'
+        )
+    ),
+    owner_id TEXT NOT NULL,
+    deadline TEXT NOT NULL,
+    lease_expires_at TEXT NOT NULL,
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 0),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+    provider_status INTEGER CHECK (provider_status BETWEEN 100 AND 599),
+    error_code TEXT,
+    retry_after_seconds INTEGER CHECK (
+        retry_after_seconds BETWEEN 1 AND 2592000
+    ),
+    receipt_json TEXT,
+    receipt_sha256 TEXT CHECK (length(receipt_sha256) = 64),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (operation_id, sequence),
+    FOREIGN KEY (operation_id)
+        REFERENCES service_operations(id) ON DELETE RESTRICT,
+    CHECK (
+        (outcome = 'dispatching'
+            AND request_bytes = 0 AND response_bytes = 0
+            AND provider_status IS NULL AND error_code IS NULL
+            AND retry_after_seconds IS NULL
+            AND receipt_json IS NULL AND receipt_sha256 IS NULL
+            AND finished_at IS NULL)
+        OR
+        (outcome = 'succeeded'
+            AND provider_status BETWEEN 200 AND 299
+            AND error_code IS NULL AND retry_after_seconds IS NULL
+            AND receipt_json IS NOT NULL AND receipt_sha256 IS NOT NULL
+            AND finished_at IS NOT NULL)
+        OR
+        (outcome NOT IN ('dispatching', 'succeeded')
+            AND error_code IS NOT NULL
+            AND receipt_json IS NULL AND receipt_sha256 IS NULL
+            AND finished_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE INDEX service_sidecar_state
+    ON service_sidecars(state, created_at, id);
+CREATE INDEX service_sidecar_event_stream
+    ON service_sidecar_events(service_sidecar_id, sequence);
+CREATE INDEX service_operation_state
+    ON service_operations(state, eligible_at, created_at, id);
+CREATE INDEX service_operation_sidecar
+    ON service_operations(service_sidecar_id, created_at, id);
+CREATE INDEX service_operation_attempt_stream
+    ON service_operation_attempts(operation_id, sequence);
+CREATE INDEX service_operation_attempt_dispatch
+    ON service_operation_attempts(outcome, lease_expires_at, started_at);
+CREATE UNIQUE INDEX service_operation_one_dispatch
+    ON service_operation_attempts(operation_id) WHERE outcome = 'dispatching';
+
+CREATE TRIGGER service_sidecar_identity_immutable
+BEFORE UPDATE OF
+    id, name, schema_version, connector_protocol_version, spec_json,
+    content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency,
+    max_requests_per_minute, created_by, created_at
+ON service_sidecars
+BEGIN
+    SELECT RAISE(ABORT, 'service sidecar identity is immutable');
+END;
+CREATE TRIGGER service_sidecar_immutable_delete
+BEFORE DELETE ON service_sidecars
+BEGIN
+    SELECT RAISE(ABORT, 'service sidecars cannot be deleted');
+END;
+CREATE TRIGGER service_sidecar_event_immutable_update
+BEFORE UPDATE ON service_sidecar_events
+BEGIN
+    SELECT RAISE(ABORT, 'service sidecar events are immutable');
+END;
+CREATE TRIGGER service_sidecar_event_immutable_delete
+BEFORE DELETE ON service_sidecar_events
+BEGIN
+    SELECT RAISE(ABORT, 'service sidecar events are immutable');
+END;
+CREATE TRIGGER service_operation_identity_immutable
+BEFORE UPDATE OF
+    id, service_sidecar_id, schema_version, spec_json, content_sha256,
+    sidecar_content_sha256, deployment_sha256, mapping_name, service, host,
+    repository, account, credential_scope_sha256, capability_name,
+    capability_version, capability_mode, idempotency_key, input_sha256,
+    request_bytes, response_bytes, timeout_ms, created_by, created_at
+ON service_operations
+BEGIN
+    SELECT RAISE(ABORT, 'service operation identity is immutable');
+END;
+CREATE TRIGGER service_operation_immutable_delete
+BEFORE DELETE ON service_operations
+BEGIN
+    SELECT RAISE(ABORT, 'service operations cannot be deleted');
+END;
+CREATE TRIGGER service_operation_attempt_immutable_update
+BEFORE UPDATE ON service_operation_attempts
+WHEN
+    OLD.outcome != 'dispatching'
+    OR NEW.outcome = 'dispatching'
+    OR NEW.finished_at IS NULL
+    OR NEW.id IS NOT OLD.id
+    OR NEW.operation_id IS NOT OLD.operation_id
+    OR NEW.sequence IS NOT OLD.sequence
+    OR NEW.phase IS NOT OLD.phase
+    OR NEW.owner_id IS NOT OLD.owner_id
+    OR NEW.deadline IS NOT OLD.deadline
+    OR NEW.lease_expires_at IS NOT OLD.lease_expires_at
+    OR NEW.started_at IS NOT OLD.started_at
+BEGIN
+    SELECT RAISE(ABORT, 'service operation attempts are immutable');
+END;
+CREATE TRIGGER service_operation_attempt_immutable_delete
+BEFORE DELETE ON service_operation_attempts
+BEGIN
+    SELECT RAISE(ABORT, 'service operation attempts are immutable');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -3033,6 +3270,7 @@ SCHEMA = (
     + RECOVERY_CHECKPOINT_SCHEMA
     + LANDING_PLAN_NONCE_SCHEMA
     + PROVIDER_REPORTED_OVERRUN_SCHEMA
+    + SERVICE_SIDECAR_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -3056,4 +3294,5 @@ MIGRATIONS = {
     19: RUN_PAUSED_STATE_MIGRATION + PROVIDER_RECOVERY_SCHEMA,
     20: RECOVERY_CHECKPOINT_SCHEMA,
     21: LANDING_PLAN_NONCE_SCHEMA + PROVIDER_REPORTED_OVERRUN_SCHEMA,
+    22: SERVICE_SIDECAR_SCHEMA,
 }

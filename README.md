@@ -51,6 +51,10 @@ This repository currently contains the first executable vertical slice:
   retry timing, interrupts its disposable worker safely, and lets the
   supervisor requeue eligible work without changing its pinned authority or
   budget;
+- schema-v23 provider-neutral service-sidecar authority with exact semantic
+  capabilities and mappings, bounded Unix transport, durable invoke/reconcile
+  attempts, rate and concurrency limits, and conservative lost-response
+  recovery without storing credentials or raw provider payloads;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;
@@ -166,6 +170,24 @@ direct grants remain readable and revocable for migration, but cannot be
 created through the operator surface or dispatched. The boundary and current
 checkpoint are documented in
 [docs/inference-connectors.md](docs/inference-connectors.md).
+
+Registering a service sidecar similarly stores only credential-free authority.
+The provider add-on itself is launched separately and owns its credential:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  service-sidecar register example \
+  --spec examples/service-sidecar.json --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  service-sidecar operation-create \
+  --request examples/service-operation.json --created-by operator
+```
+
+An authorized operator or supervisor invokes the returned operation ID and,
+if the reply is lost, reconciles that same durable ID instead of replaying the
+effect. M10 intentionally includes no GitHub client or `GH_CONFIG_DIR` access;
+the reference provider add-on is the next milestone. See
+[docs/service-sidecars.md](docs/service-sidecars.md).
 
 The optional OpenAI connector owns its own Sign in with ChatGPT profile. Keep
 that profile outside both the checkout and MGB state:

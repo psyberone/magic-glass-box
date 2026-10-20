@@ -1,0 +1,36 @@
+{
+  "capability": {
+    "mode": "effect",
+    "name": "change.open",
+    "version": 1
+  },
+  "connector_id": "ssc_22222222222222222222222222222222",
+  "connector_protocol_version": 1,
+  "deadline": "2026-10-18T18:00:00.000000+00:00",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "input_sha256": "aa08035edfe94a255382f87a0c838b1f80598a418df4b5999db428511142e84d",
+  "mapping": {
+    "account": "automation",
+    "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "host": "forge.example.test",
+    "name": "primary",
+    "repository": "acme/widgets",
+    "service": "example-forge"
+  },
+  "operation_id": "sop_11111111111111111111111111111111",
+  "parameters": {
+    "draft": true,
+    "title": "Candidate 42"
+  },
+  "phase": "invoke",
+  "request_limit_bytes": 16384,
+  "response_limit_bytes": 32768,
+  "schema_version": 1,
+  "target": {
+    "desired_revision": "dddddddddddddddddddddddddddddddddddddddd",
+    "expected_revision": "cccccccccccccccccccccccccccccccccccccccc",
+    "object_format": "sha1",
+    "repository": "acme/widgets",
+    "resource_id": "candidate-42"
+  }
+}

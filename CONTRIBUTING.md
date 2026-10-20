@@ -42,6 +42,13 @@ Run the fast gate while developing:
 make quality
 ```
 
+Provider-neutral service-sidecar changes also have a focused contract,
+persistence, orchestration, and real-Unix proof:
+
+```console
+make service-sidecar-test
+```
+
 The project requires at least **85% aggregate statement-and-branch coverage**
 over the `magic_glass_box` package, using Coverage.py's combined percentage
 with branch measurement enabled. Coverage is a floor and a gap-finding tool,

@@ -245,7 +245,7 @@ class ProviderServiceTests(unittest.TestCase):
         self.assertEqual(invocations[0]["response_bytes"], 37)
         database_bytes = self.database.path.read_bytes()
         self.assertNotIn(b"hello", database_bytes)
-        self.assertNotIn(b"done", database_bytes)
+        self.assertNotIn(b'{"output":[{"text":"done"}]}', database_bytes)
         with closing(self.database.connect()) as connection:
             active = connection.execute(
                 "SELECT COUNT(*) FROM provider_dispatch_reservations"

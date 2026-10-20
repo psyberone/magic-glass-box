@@ -1,7 +1,7 @@
 PYTHON ?= .venv/bin/python
 MUTMUT_RUN_ARGS ?=
 
-.PHONY: test lint coverage mutation mutation-clean quality candidate-test gate-test integration-test live-supervisor
+.PHONY: test lint coverage mutation mutation-clean quality candidate-test gate-test integration-test service-sidecar-test live-supervisor
 
 test:
 	PYTHONPATH=src "$(PYTHON)" -m unittest discover -s tests -v
@@ -36,6 +36,13 @@ gate-test:
 
 integration-test:
 	PYTHONPATH=src "$(PYTHON)" -m unittest tests.test_integration_queue -v
+
+service-sidecar-test:
+	PYTHONPATH=src "$(PYTHON)" -m unittest \
+		tests.test_service_sidecars \
+		tests.test_service_sidecar_storage \
+		tests.test_service_sidecar_service \
+		tests.test_live_service_sidecar -v
 
 live-supervisor:
 	PYTHONPATH=src "$(PYTHON)" scripts/check_live_supervisor.py

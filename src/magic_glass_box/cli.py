@@ -53,6 +53,11 @@ from .provider import ProviderError
 from .results import ResultError, WorkspaceResultStore, default_result_root
 from .runtime import RuntimeAdapterError
 from .service import ControlPlane, activity_to_dict
+from .service_sidecar import (
+    ServiceOperationSpec,
+    ServiceSidecarError,
+    ServiceSidecarSpec,
+)
 from .supervision import Supervisor, SupervisorError
 from .worker_transport import WorkerTransportError
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
@@ -353,6 +358,58 @@ def build_parser() -> argparse.ArgumentParser:
     connector_revoke.add_argument("name")
     connector_revoke.add_argument("--expected-version", required=True, type=int)
     connector_revoke.add_argument("--revoked-by", required=True)
+
+    service_sidecar = commands.add_parser(
+        "service-sidecar",
+        help="manage provider-neutral service sidecars and operations",
+    )
+    service_sidecar_commands = service_sidecar.add_subparsers(
+        dest="service_sidecar_command", required=True
+    )
+    service_register = service_sidecar_commands.add_parser(
+        "register", help="register immutable service-sidecar authority"
+    )
+    service_register.add_argument("name")
+    service_register.add_argument("--spec", required=True, type=Path)
+    service_register.add_argument("--created-by", required=True)
+    service_show = service_sidecar_commands.add_parser(
+        "show", help="show service-sidecar authority and lifecycle metadata"
+    )
+    service_show.add_argument("name")
+    service_sidecar_commands.add_parser(
+        "list", help="list service-sidecar authority and lifecycle metadata"
+    )
+    service_revoke = service_sidecar_commands.add_parser(
+        "revoke", help="revoke a service sidecar"
+    )
+    service_revoke.add_argument("name")
+    service_revoke.add_argument("--expected-version", required=True, type=int)
+    service_revoke.add_argument("--revoked-by", required=True)
+    operation_create = service_sidecar_commands.add_parser(
+        "operation-create", help="create one exact durable service operation"
+    )
+    operation_create.add_argument("--request", required=True, type=Path)
+    operation_create.add_argument("--created-by", required=True)
+    operation_show = service_sidecar_commands.add_parser(
+        "operation-show", help="show one durable service operation"
+    )
+    operation_show.add_argument("operation_id")
+    operation_list = service_sidecar_commands.add_parser(
+        "operation-list", help="list recent durable service operations"
+    )
+    operation_list.add_argument("--limit", type=_candidate_limit, default=100)
+    operation_execute = service_sidecar_commands.add_parser(
+        "operation-execute", help="invoke one authorized service operation"
+    )
+    operation_execute.add_argument("operation_id")
+    operation_execute.add_argument("--owner", required=True)
+    operation_execute.add_argument("--expected-version", required=True, type=int)
+    operation_reconcile = service_sidecar_commands.add_parser(
+        "operation-reconcile", help="reconcile one uncertain service operation"
+    )
+    operation_reconcile.add_argument("operation_id")
+    operation_reconcile.add_argument("--owner", required=True)
+    operation_reconcile.add_argument("--expected-version", required=True, type=int)
 
     provider = commands.add_parser("provider", help="manage scoped provider grants")
     provider_commands = provider.add_subparsers(dest="provider_command", required=True)
@@ -999,6 +1056,44 @@ def _dispatch(
                 expected_version=args.expected_version,
                 revoked_by_handle=args.revoked_by,
             )
+    if args.command == "service-sidecar":
+        if args.service_sidecar_command == "register":
+            return control.register_service_sidecar(
+                name=args.name,
+                spec=ServiceSidecarSpec.from_mapping(_json_file(args.spec)),
+                created_by_handle=args.created_by,
+            )
+        if args.service_sidecar_command == "show":
+            return control.database.get_service_sidecar(args.name)
+        if args.service_sidecar_command == "list":
+            return control.database.list_service_sidecars()
+        if args.service_sidecar_command == "revoke":
+            return control.revoke_service_sidecar(
+                args.name,
+                expected_version=args.expected_version,
+                revoked_by_handle=args.revoked_by,
+            )
+        if args.service_sidecar_command == "operation-create":
+            return control.create_service_operation(
+                spec=ServiceOperationSpec.from_mapping(_json_file(args.request)),
+                created_by_handle=args.created_by,
+            )
+        if args.service_sidecar_command == "operation-show":
+            return control.database.get_service_operation(args.operation_id)
+        if args.service_sidecar_command == "operation-list":
+            return control.database.list_service_operations(limit=args.limit)
+        if args.service_sidecar_command == "operation-execute":
+            return control.execute_service_operation(
+                args.operation_id,
+                owner_id=args.owner,
+                expected_version=args.expected_version,
+            )
+        if args.service_sidecar_command == "operation-reconcile":
+            return control.reconcile_service_operation(
+                args.operation_id,
+                owner_id=args.owner,
+                expected_version=args.expected_version,
+            )
     if args.command == "work-item":
         if args.work_item_command == "import":
             return control.import_work_item(
@@ -1388,6 +1483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ResultError,
         RuntimeAdapterError,
         RunOrchestrationError,
+        ServiceSidecarError,
         SupervisorError,
         StorageError,
         ValidationError,

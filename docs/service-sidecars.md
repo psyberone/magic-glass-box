@@ -1,13 +1,14 @@
 # Provider-neutral service sidecars
 
-> **DESIGN ONLY — NOT IMPLEMENTED:** Magic Glass Box currently has no service
-> sidecar protocol, registration, connector transport, provider read, push,
-> change-opening, check-query, comment, close, or landing operation. Everything
-> below is planned architecture for Milestone 10 and later.
+Milestone 10 implements the credential-free core half of the service-sidecar
+boundary: immutable registration, exact semantic operation authority, a bounded
+Unix-socket protocol, a durable attempt ledger, and uncertain-effect
+reconciliation. No provider-specific add-on ships in the core. GitHub mechanics
+and `GH_CONFIG_DIR` handling remain Milestone 11 work.
 
-Service sidecars are optional credential-bearing add-ons planned for Milestone
-10 and later. They execute already-authorized provider mechanics; they do not
-own candidate readiness, dependency order, budget policy, or landing policy.
+Service sidecars are optional credential-bearing add-ons. They execute
+already-authorized provider mechanics; they do not own candidate readiness,
+dependency order, budget policy, or landing policy.
 
 They are distinct from Milestone 7D
 [inference connectors](inference-connectors.md). Both isolate upstream
@@ -47,9 +48,10 @@ supervisor -- durable action ---------+
 ```
 
 Integration effects such as opening a change, pushing a ref, reading gates for
-readiness, or landing a candidate are supervisor-driven durable actions. A
-worker may receive separately authorized bounded service reads or propose an
-operation, but it cannot convert that proposal into integration authority.
+readiness, or landing a candidate are trusted control-plane actions. The M10
+operator surface creates, invokes, and reconciles them; no worker gateway
+capability exposes the sidecar transport. A future worker read capability may
+be added separately, but a worker proposal cannot become integration authority.
 
 ## Semantic capabilities
 
@@ -78,9 +80,12 @@ Before use, a sidecar registers:
 - an effective credential-scope fingerprint without the credential value; and
 - transport, response-size, duration, rate, and concurrency limits.
 
-The transport is local and authenticated—for example, an operator-owned Unix
-socket or loopback channel with a per-process capability. Worker-supplied hosts,
-repositories, account names, or socket paths never select the connector.
+Protocol v1 uses an operator-owned Unix socket beneath a mode-`0700` directory,
+with a mode-`0600` socket. Frames are length-prefixed, JSON is strict and
+duplicate-free, and one absolute deadline bounds connect, send, and receive.
+An external carrier would need its own revocable client authentication; public
+reachability is not authentication. Worker-supplied hosts, repositories,
+account names, or socket paths never select the connector.
 
 Every invocation binds the operation, mapping, account, scope fingerprint,
 exact revisions or work-object IDs, limits, and durable operation ID. Credential
@@ -101,9 +106,21 @@ was lost, a replacement supervisor asks the connector to discover that effect
 and return the existing receipt rather than issuing it again.
 
 Typed outcomes distinguish denial, conflict, retryable transport failure,
-provider throttling, uncertain effect, and confirmed success. Logs contain
-operation IDs and bounded classifications, never credential values or raw
-provider bodies.
+provider throttling, uncertain effect, and confirmed success. A failure before
+dispatch becomes retryable; a lost or malformed reply after dispatch becomes
+uncertain and cannot be invoked again. An expired dispatch lease is also
+conservatively abandoned into the uncertain state before its concurrency lane
+is reused. Only reconciliation may then report success, continued uncertainty,
+or absence of the remote effect. Logs and SQLite records contain operation IDs,
+bounded classifications, normalized receipts, and digests—never credential
+values or raw provider bodies.
+
+Every registration pins request and response byte limits, timeout, concurrency,
+and attempts per minute. Each operation may narrow but never expand those
+limits. Exact duplicate idempotency keys resolve to the existing operation;
+reuse with different authority or input fails closed. Revocation, optimistic
+versions, concurrency, rate, connector deployment, mapping, account, scope,
+repository, revision, capability, and mode are rechecked before dispatch.
 
 ## Reads carry credentials too
 
@@ -113,13 +130,37 @@ sidecar. The core receives only normalized evidence bound to the exact request
 and candidate tuple; workers receive only fields allowed by their own named
 capability.
 
+## Operator surface and published contracts
+
+Registration and operation documents are published as Draft 2020-12 schemas in
+`schemas/service-sidecar-v1.schema.json` and
+`schemas/service-operation-v1.schema.json`. The on-wire correlated envelopes
+are `service-operation-request-v1.schema.json` and
+`service-operation-response-v1.schema.json`; runnable examples live in
+`examples/`.
+
+```console
+magic-glass-box service-sidecar register example \
+  --spec examples/service-sidecar.json --created-by operator
+magic-glass-box service-sidecar operation-create \
+  --request examples/service-operation.json --created-by operator
+magic-glass-box service-sidecar operation-execute sop_<id> \
+  --owner supervisor --expected-version 1
+magic-glass-box service-sidecar operation-reconcile sop_<id> \
+  --owner replacement-supervisor --expected-version 2
+```
+
+`show`, `list`, `operation-show`, `operation-list`, and `revoke` expose only
+bounded authority and lifecycle metadata. The deterministic and real-Unix
+golden proofs both lose a successful invoke response, replace the supervisor,
+reconcile the existing object, and assert that the remote create count is one.
+
 ## Reference add-ons
 
-Milestone 10 proves the protocol and recovery behavior against a deterministic
-fake connector. Milestone 11 supplies a separately packaged GitHub reference
-add-on using the user's existing `GH_CONFIG_DIR`. GitLab, Jira, and future
-services remain independent add-ons implementing only the families they
-support.
+Milestone 11 supplies a separately packaged GitHub reference add-on using the
+user's existing `GH_CONFIG_DIR` and binds applicable operations to the existing
+integration authority. GitLab, Jira, and future services remain independent
+add-ons implementing only the families they support.
 
 No provider-specific SDK, CLI, credential, configuration path, status vocabulary,
 or merge quirk belongs in the Magic Glass Box core.

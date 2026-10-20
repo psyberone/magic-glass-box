@@ -371,7 +371,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 22)
+        self.assertEqual(SCHEMA_VERSION, 23)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -1279,6 +1279,10 @@ class IntegrationLedgerTests(unittest.TestCase):
             issued_by=self.user["id"],
         )
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE service_operation_attempts")
+            connection.execute("DROP TABLE service_operations")
+            connection.execute("DROP TABLE service_sidecar_events")
+            connection.execute("DROP TABLE service_sidecars")
             connection.execute(
                 "DROP TRIGGER integration_landing_plan_nonce_immutable_update"
             )
@@ -1289,7 +1293,7 @@ class IntegrationLedgerTests(unittest.TestCase):
             connection.execute("PRAGMA user_version = 21")
 
         migrated = Database(self.database.path)
-        self.assertEqual(migrated.initialize()["schema_version"], 22)
+        self.assertEqual(migrated.initialize()["schema_version"], SCHEMA_VERSION)
         shown = migrated.get_landing_plan(issued["id"])
         self.assertEqual(shown["nonce_generation"], 1)
         self.assertEqual(

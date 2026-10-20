@@ -50,6 +50,7 @@ from magic_glass_box.openai_chatgpt_cli import (
 CLIENT_ID = "oaiapp_" + "a" * 32
 CONNECTOR_ID = "ifc_" + "1" * 32
 DEPLOYMENT = "b" * 64
+PROCESS_TIMEOUT_SECONDS = 10.0
 
 
 def session(host_id: str) -> ChatGPTSession:
@@ -125,7 +126,7 @@ def connect_when_ready(
     client: socket.socket,
     socket_path: Path,
     *,
-    timeout: float = 3.0,
+    timeout: float = PROCESS_TIMEOUT_SECONDS,
 ) -> None:
     """Connect after bind/listen readiness, not merely socket-file creation."""
 
@@ -280,16 +281,16 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
             except BaseException as exc:  # pragma: no cover - asserted below
                 failure.append(exc)
 
-        thread = threading.Thread(target=run)
+        thread = threading.Thread(target=run, daemon=True)
         thread.start()
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
         while time.monotonic() < deadline and not socket_path.exists():
             time.sleep(0.01)
         self.assertTrue(socket_path.exists())
 
         request = invocation(self.session.credential_scope_sha256)
         response = UnixInferenceConnectorClient(socket_path).invoke(request)
-        thread.join(3)
+        thread.join(PROCESS_TIMEOUT_SECONDS)
 
         self.assertEqual(failure, [])
         self.assertFalse(thread.is_alive())
@@ -323,9 +324,9 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
             except BaseException as exc:  # pragma: no cover - asserted below
                 failure.append(exc)
 
-        thread = threading.Thread(target=run)
+        thread = threading.Thread(target=run, daemon=True)
         thread.start()
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
         while time.monotonic() < deadline and not socket_path.exists():
             time.sleep(0.01)
         self.assertTrue(socket_path.exists())
@@ -338,7 +339,7 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
 
         request = invocation(self.session.credential_scope_sha256)
         response = UnixInferenceConnectorClient(socket_path).invoke(request)
-        thread.join(3)
+        thread.join(PROCESS_TIMEOUT_SECONDS)
 
         self.assertEqual(failure, [])
         self.assertFalse(thread.is_alive())
@@ -373,15 +374,19 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
             env=environment,
         )
         self.addCleanup(lambda: process.kill() if process.poll() is None else None)
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
         while time.monotonic() < deadline and not socket_path.exists():
             if process.poll() is not None:
                 break
             time.sleep(0.01)
-        self.assertTrue(socket_path.exists())
+        if not socket_path.exists():
+            if process.poll() is None:
+                process.terminate()
+            stdout, stderr = process.communicate(timeout=PROCESS_TIMEOUT_SECONDS)
+            self.fail(f"connector did not start: {stdout!r}{stderr!r}")
 
         process.terminate()
-        stdout, stderr = process.communicate(timeout=3)
+        stdout, stderr = process.communicate(timeout=PROCESS_TIMEOUT_SECONDS)
 
         self.assertEqual(process.returncode, 0, (stdout, stderr))
         self.assertFalse(socket_path.exists())

@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:service-operation-response:v1",
+  "title": "Magic Glass Box Service Operation Response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capability",
+    "connector_id",
+    "connector_protocol_version",
+    "deadline",
+    "deployment_sha256",
+    "error_code",
+    "input_sha256",
+    "mapping",
+    "operation_id",
+    "outcome",
+    "phase",
+    "provider_status",
+    "receipt",
+    "request_bytes",
+    "request_limit_bytes",
+    "response_bytes",
+    "response_limit_bytes",
+    "retry_after_seconds",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "connector_protocol_version": { "const": 1 },
+    "operation_id": { "type": "string", "pattern": "^sop_[0-9a-f]{32}$" },
+    "connector_id": { "type": "string", "pattern": "^ssc_[0-9a-f]{32}$" },
+    "deployment_sha256": { "$ref": "#/$defs/sha256" },
+    "mapping": { "$ref": "#/$defs/mapping" },
+    "capability": { "$ref": "#/$defs/capability" },
+    "phase": { "enum": ["invoke", "reconcile"] },
+    "input_sha256": { "$ref": "#/$defs/sha256" },
+    "deadline": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "request_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2097152
+    },
+    "response_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4194304
+    },
+    "outcome": {
+      "enum": [
+        "succeeded",
+        "denied",
+        "conflict",
+        "retryable",
+        "throttled",
+        "uncertain",
+        "not_found"
+      ]
+    },
+    "provider_status": {
+      "type": ["integer", "null"],
+      "minimum": 100,
+      "maximum": 599
+    },
+    "request_bytes": { "type": "integer", "minimum": 0 },
+    "response_bytes": { "type": "integer", "minimum": 0 },
+    "error_code": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "retry_after_seconds": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 2592000
+    },
+    "receipt": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/receipt" }
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": ".*\\S.*"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?=.*\\S)[^:@?#\\u0000-\\u001f\\u007f]+$"
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "name", "version"],
+      "properties": {
+        "mode": { "enum": ["read", "effect"] },
+        "name": {
+          "type": "string",
+          "pattern": "^(work|change|checks|refs|landing)\\.[a-z][a-z0-9_-]{0,63}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "credential_scope_sha256",
+        "host",
+        "name",
+        "repository",
+        "service"
+      ],
+      "properties": {
+        "account": { "$ref": "#/$defs/text" },
+        "credential_scope_sha256": { "$ref": "#/$defs/sha256" },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/@?#\\u0000-\\u001f\\u007f]+$"
+        },
+        "name": { "$ref": "#/$defs/name" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "service": { "$ref": "#/$defs/name" }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "closed_references",
+        "evidence_sha256",
+        "observed_revision",
+        "remote_identity"
+      ],
+      "properties": {
+        "closed_references": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/text" }
+        },
+        "evidence_sha256": { "$ref": "#/$defs/sha256" },
+        "observed_revision": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "remote_identity": { "$ref": "#/$defs/text" }
+      }
+    }
+  }
+}

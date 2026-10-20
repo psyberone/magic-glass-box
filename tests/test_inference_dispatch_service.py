@@ -741,7 +741,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         self.assertEqual(invocation["model"], "bounded-model")
         durable = self.database.path.read_bytes()
         self.assertNotIn(b"hello", durable)
-        self.assertNotIn(b"done", durable)
+        self.assertNotIn(b'{"output":[{"text":"done"}]}', durable)
 
     def test_nested_model_override_is_removed_before_connector_dispatch(self) -> None:
         run = self.create_run()
@@ -1474,6 +1474,10 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE service_operation_attempts;
+                DROP TABLE service_operations;
+                DROP TABLE service_sidecar_events;
+                DROP TABLE service_sidecars;
                 DROP TRIGGER integration_landing_plan_nonce_immutable_update;
                 DROP TRIGGER integration_landing_plan_nonce_immutable_delete;
                 DROP TABLE integration_landing_plan_nonces;

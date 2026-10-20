@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:service-operation-request:v1",
+  "title": "Magic Glass Box Service Operation Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capability",
+    "connector_id",
+    "connector_protocol_version",
+    "deadline",
+    "deployment_sha256",
+    "input_sha256",
+    "mapping",
+    "operation_id",
+    "parameters",
+    "phase",
+    "request_limit_bytes",
+    "response_limit_bytes",
+    "schema_version",
+    "target"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "connector_protocol_version": { "const": 1 },
+    "operation_id": { "type": "string", "pattern": "^sop_[0-9a-f]{32}$" },
+    "connector_id": { "type": "string", "pattern": "^ssc_[0-9a-f]{32}$" },
+    "deployment_sha256": { "$ref": "#/$defs/sha256" },
+    "mapping": { "$ref": "#/$defs/mapping" },
+    "capability": { "$ref": "#/$defs/capability" },
+    "phase": { "enum": ["invoke", "reconcile"] },
+    "input_sha256": { "$ref": "#/$defs/sha256" },
+    "deadline": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "request_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2097152
+    },
+    "response_limit_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4194304
+    },
+    "target": { "$ref": "#/$defs/target" },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "access_token",
+            "accessToken",
+            "api_key",
+            "apiKey",
+            "api_token",
+            "apiToken",
+            "authorization",
+            "bearer_token",
+            "bearerToken",
+            "credential",
+            "credential-ref",
+            "credential_ref",
+            "credentialRef",
+            "credentials",
+            "password",
+            "private_key",
+            "privateKey",
+            "refresh_token",
+            "refreshToken",
+            "secret",
+            "token"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": ".*\\S.*"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?=.*\\S)[^:@?#\\u0000-\\u001f\\u007f]+$"
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "name", "version"],
+      "properties": {
+        "mode": { "enum": ["read", "effect"] },
+        "name": {
+          "type": "string",
+          "pattern": "^(work|change|checks|refs|landing)\\.[a-z][a-z0-9_-]{0,63}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "credential_scope_sha256",
+        "host",
+        "name",
+        "repository",
+        "service"
+      ],
+      "properties": {
+        "account": { "$ref": "#/$defs/text" },
+        "credential_scope_sha256": { "$ref": "#/$defs/sha256" },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/@?#\\u0000-\\u001f\\u007f]+$"
+        },
+        "name": { "$ref": "#/$defs/name" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "service": { "$ref": "#/$defs/name" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "desired_revision",
+        "expected_revision",
+        "object_format",
+        "repository",
+        "resource_id"
+      ],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository" },
+        "resource_id": { "$ref": "#/$defs/text" },
+        "object_format": { "enum": [null, "sha1", "sha256"] },
+        "expected_revision": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "desired_revision": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        }
+      }
+    }
+  }
+}
