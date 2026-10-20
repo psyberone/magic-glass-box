@@ -176,17 +176,25 @@ The provider add-on itself is launched separately and owns its credential:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
-  service-sidecar register example \
+  service-sidecar register example-sidecar \
   --spec examples/service-sidecar.json --created-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box \
+  capability bind demo-project change.open --version 1 \
+  --sidecar example-sidecar --mapping primary --bound-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
   service-sidecar operation-create \
-  --request examples/service-operation.json --created-by operator
+  --request examples/service-operation.json --binding cpb_<id> \
+  --created-by operator
 ```
 
-An authorized operator or supervisor invokes the returned operation ID and,
-if the reply is lost, reconciles that same durable ID instead of replaying the
-effect. M10 intentionally includes no GitHub client or `GH_CONFIG_DIR` access;
-the reference provider add-on is the next milestone. See
+Project bindings are explicit and absent by default. A project-routed operation
+atomically pins the exact binding; unbinding stops new operations without
+invalidating already-created work. An authorized operator or supervisor invokes
+the returned operation ID and, if an effect reply is lost, reconciles that same
+durable ID instead of replaying the effect. Lost read replies are safely
+retryable and never enter effect reconciliation. M10 intentionally includes no
+GitHub client or `GH_CONFIG_DIR` access; the reference provider add-on is the
+next milestone. See
 [docs/service-sidecars.md](docs/service-sidecars.md) for the implemented
 operation boundary and
 [docs/capability-providers.md](docs/capability-providers.md) for the broader

@@ -26,7 +26,7 @@ from magic_glass_box.cli import (
     build_parser,
     main,
 )
-from magic_glass_box.db import SCHEMA_VERSION
+from magic_glass_box.db import SCHEMA_VERSION, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
@@ -392,6 +392,10 @@ class CLITests(unittest.TestCase):
                         "service-sidecar",
                         "manage provider-neutral service sidecars and operations",
                     ),
+                    (
+                        "capability",
+                        "bind project capabilities to explicit controllers",
+                    ),
                     ("provider", "manage scoped provider grants"),
                     ("work-item", "manage durable work items"),
                     ("interaction", "resolve durable agent interactions"),
@@ -503,6 +507,16 @@ class CLITests(unittest.TestCase):
                         "operation-reconcile",
                         "reconcile one uncertain service operation",
                     ),
+                ),
+            ),
+            ("capability",): (
+                "capability_command",
+                True,
+                (
+                    ("bind", "bind one project capability to a controller"),
+                    ("show", "show one project capability binding"),
+                    ("list", "list project capability bindings"),
+                    ("unbind", "disable one project capability binding"),
                 ),
             ),
             ("work-item",): (
@@ -743,6 +757,16 @@ class CLITests(unittest.TestCase):
                 ("service-sidecar", "operation-reconcile"): (
                     "--owner",
                     "--expected-version",
+                ),
+                ("capability", "bind"): (
+                    "--version",
+                    "--sidecar",
+                    "--mapping",
+                    "--bound-by",
+                ),
+                ("capability", "unbind"): (
+                    "--expected-version",
+                    "--unbound-by",
                 ),
                 ("provider", "connector-add"): (
                     "--policy",
@@ -1637,6 +1661,7 @@ class CLITests(unittest.TestCase):
                 "service-sidecar": (
                     "manage provider-neutral service sidecars and operations"
                 ),
+                "capability": ("bind project capabilities to explicit controllers"),
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "interaction": "resolve durable agent interactions",
@@ -1688,6 +1713,12 @@ class CLITests(unittest.TestCase):
                 "operation-list": "list recent durable service operations",
                 "operation-execute": "invoke one authorized service operation",
                 "operation-reconcile": ("reconcile one uncertain service operation"),
+            },
+            "capability": {
+                "bind": "bind one project capability to a controller",
+                "show": "show one project capability binding",
+                "list": "list project capability bindings",
+                "unbind": "disable one project capability binding",
             },
             "work-item": {
                 "import": "create or update a normalized work item",
@@ -3132,16 +3163,78 @@ class CLITests(unittest.TestCase):
         self.assertEqual((status, error), (0, ""))
         self.assertEqual(sidecar["state"], "active")
 
+        database = Database(self.database)
+        operator = database.get_user("operator")
+        instance = database.create_krab_instance("local", "http://localhost:8765")
+        database.create_project(
+            instance_id=instance["id"],
+            krab_project_id="prj_" + "1" * 32,
+            krab_project_key="demo-project",
+            display_name="Demo Project",
+            context=ProjectContext.from_mapping({"purpose": "Prove routing"}),
+            created_by=operator["id"],
+        )
+        status, binding, error = self.invoke(
+            "capability",
+            "bind",
+            "demo-project",
+            "change.open",
+            "--version",
+            "1",
+            "--sidecar",
+            "example-sidecar",
+            "--mapping",
+            "primary",
+            "--bound-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(binding["state"], "active")
+        self.assertEqual(binding["controller"]["sidecar_name"], "example-sidecar")
+
+        status, shown_binding, error = self.invoke("capability", "show", binding["id"])
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(shown_binding, binding)
+        status, bindings, error = self.invoke(
+            "capability", "list", "--project", "demo-project"
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(bindings, [binding])
+
         status, operation, error = self.invoke(
             "service-sidecar",
             "operation-create",
             "--request",
             str(operation_path),
+            "--binding",
+            binding["id"],
             "--created-by",
             "operator",
         )
         self.assertEqual((status, error), (0, ""))
         self.assertEqual(operation["state"], "pending")
+        self.assertEqual(operation["project_capability_binding_id"], binding["id"])
+
+        status, unbound, error = self.invoke(
+            "capability",
+            "unbind",
+            binding["id"],
+            "--expected-version",
+            "1",
+            "--unbound-by",
+            "operator",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(unbound["state"], "unbound")
+        status, bindings, error = self.invoke(
+            "capability",
+            "list",
+            "--project",
+            "demo-project",
+            "--include-unbound",
+        )
+        self.assertEqual((status, error), (0, ""))
+        self.assertEqual(bindings, [unbound])
 
         status, shown, error = self.invoke(
             "service-sidecar", "operation-show", operation["id"]

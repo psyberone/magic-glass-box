@@ -62,6 +62,15 @@ correlation, and outcome/receipt consistency. Control-plane schema v23 adds
 immutable registrations and operations plus one-way durable invoke/reconcile
 attempts; raw provider payloads are never part of that ledger.
 
+Control-plane schema v24 adds append-preserving project capability bindings,
+binding events, and immutable operation-to-binding pins. Binding creation
+requires a core-defined capability version and mode plus an exact advertised
+sidecar mapping. Unbinding disables new project-routed operations; it does not
+rewrite existing operation authority. Published service schemas enforce the
+core-owned modes for the currently defined `change.open` v1, `checks.read` v1,
+and `landing.invoke` v1 capabilities while still permitting operator-only
+extension names that cannot be project-bound.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

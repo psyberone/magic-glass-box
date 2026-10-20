@@ -99,7 +99,39 @@
           "pattern": "^(work|change|checks|refs|landing)\\.[a-z][a-z0-9_-]{0,63}$"
         },
         "version": { "type": "integer", "minimum": 1, "maximum": 1000000 }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "name": { "const": "change.open" },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "effect" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": { "const": "checks.read" },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "read" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": { "const": "landing.invoke" },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "effect" } } }
+        }
+      ]
     },
     "mapping": {
       "type": "object",

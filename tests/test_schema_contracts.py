@@ -780,6 +780,28 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ServiceOperationResponse.from_mapping(oversized)
 
+    def test_published_contracts_enforce_core_capability_modes(self) -> None:
+        contracts = (
+            ("service-sidecar", ServiceSidecarSpec.from_mapping),
+            ("service-operation", ServiceOperationSpec.from_mapping),
+            ("service-operation-request", ServiceOperationRequest.from_mapping),
+            ("service-operation-response", ServiceOperationResponse.from_mapping),
+        )
+        for name, factory in contracts:
+            with self.subTest(name=name):
+                validator, example = self.load(name)
+                wrong_mode = copy.deepcopy(example)
+                capability = (
+                    wrong_mode["capabilities"][0]
+                    if name == "service-sidecar"
+                    else wrong_mode["capability"]
+                )
+                capability["mode"] = "read"
+                with self.assertRaises(SchemaValidationError):
+                    validator.validate(wrong_mode)
+                with self.assertRaises(ValidationError):
+                    factory(wrong_mode)
+
 
 if __name__ == "__main__":
     unittest.main()

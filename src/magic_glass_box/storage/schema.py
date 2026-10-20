@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -3245,6 +3245,128 @@ BEGIN
 END;
 """
 
+CAPABILITY_BINDING_SCHEMA = """
+CREATE TABLE project_capability_bindings (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    capability_name TEXT NOT NULL,
+    capability_version INTEGER NOT NULL CHECK (capability_version >= 1),
+    capability_mode TEXT NOT NULL CHECK (capability_mode IN ('read', 'effect')),
+    service_sidecar_id TEXT NOT NULL,
+    sidecar_content_sha256 TEXT NOT NULL CHECK (
+        length(sidecar_content_sha256) = 64
+    ),
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    mapping_name TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'unbound')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    bound_by TEXT NOT NULL,
+    unbound_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    unbound_at TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (service_sidecar_id)
+        REFERENCES service_sidecars(id) ON DELETE RESTRICT,
+    FOREIGN KEY (bound_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (unbound_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND version = 1
+            AND unbound_by IS NULL AND unbound_at IS NULL)
+        OR
+        (state = 'unbound' AND version = 2
+            AND unbound_by IS NOT NULL AND unbound_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE project_capability_binding_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    binding_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('capability.bound', 'capability.unbound')
+    ),
+    actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (binding_id, sequence),
+    FOREIGN KEY (binding_id)
+        REFERENCES project_capability_bindings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE service_operation_capability_bindings (
+    operation_id TEXT PRIMARY KEY,
+    project_capability_binding_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (operation_id)
+        REFERENCES service_operations(id) ON DELETE RESTRICT,
+    FOREIGN KEY (project_capability_binding_id)
+        REFERENCES project_capability_bindings(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE UNIQUE INDEX project_capability_one_active_controller
+    ON project_capability_bindings(
+        project_id, capability_name, capability_version
+    ) WHERE state = 'active';
+CREATE INDEX project_capability_binding_project
+    ON project_capability_bindings(project_id, state, created_at, id);
+CREATE INDEX project_capability_binding_sidecar
+    ON project_capability_bindings(service_sidecar_id, state, created_at, id);
+CREATE INDEX project_capability_binding_event_stream
+    ON project_capability_binding_events(binding_id, sequence);
+CREATE INDEX service_operation_capability_binding
+    ON service_operation_capability_bindings(
+        project_capability_binding_id, operation_id
+    );
+
+CREATE TRIGGER project_capability_binding_identity_immutable
+BEFORE UPDATE OF
+    id, project_id, capability_name, capability_version, capability_mode,
+    service_sidecar_id, sidecar_content_sha256, deployment_sha256,
+    mapping_name, bound_by, created_at
+ON project_capability_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'project capability binding identity is immutable');
+END;
+CREATE TRIGGER project_capability_binding_transition
+BEFORE UPDATE ON project_capability_bindings
+WHEN
+    OLD.state != 'active'
+    OR NEW.state != 'unbound'
+    OR NEW.version != OLD.version + 1
+    OR NEW.unbound_by IS NULL
+    OR NEW.unbound_at IS NULL
+    OR NEW.updated_at IS NOT NEW.unbound_at
+BEGIN
+    SELECT RAISE(ABORT, 'project capability binding transition is invalid');
+END;
+CREATE TRIGGER project_capability_binding_immutable_delete
+BEFORE DELETE ON project_capability_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'project capability bindings cannot be deleted');
+END;
+CREATE TRIGGER project_capability_binding_event_immutable_update
+BEFORE UPDATE ON project_capability_binding_events
+BEGIN
+    SELECT RAISE(ABORT, 'project capability binding events are immutable');
+END;
+CREATE TRIGGER project_capability_binding_event_immutable_delete
+BEFORE DELETE ON project_capability_binding_events
+BEGIN
+    SELECT RAISE(ABORT, 'project capability binding events cannot be deleted');
+END;
+CREATE TRIGGER service_operation_capability_binding_immutable_update
+BEFORE UPDATE ON service_operation_capability_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'service operation capability bindings are immutable');
+END;
+CREATE TRIGGER service_operation_capability_binding_immutable_delete
+BEFORE DELETE ON service_operation_capability_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'service operation capability bindings cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -3271,6 +3393,7 @@ SCHEMA = (
     + LANDING_PLAN_NONCE_SCHEMA
     + PROVIDER_REPORTED_OVERRUN_SCHEMA
     + SERVICE_SIDECAR_SCHEMA
+    + CAPABILITY_BINDING_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -3295,4 +3418,5 @@ MIGRATIONS = {
     20: RECOVERY_CHECKPOINT_SCHEMA,
     21: LANDING_PLAN_NONCE_SCHEMA + PROVIDER_REPORTED_OVERRUN_SCHEMA,
     22: SERVICE_SIDECAR_SCHEMA,
+    23: CAPABILITY_BINDING_SCHEMA,
 }

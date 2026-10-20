@@ -3,6 +3,12 @@
 **Status: architectural direction; this does not expand the Milestone 10 or
 Milestone 11 MVP exit proofs.**
 
+Schema v24 implements the first narrow routing seam: core-owned capability
+modes, explicit single-controller project bindings, audited unbinding, and an
+atomic operation-to-binding pin. Profile/run grants and heterogeneous resource
+bindings remain later work; their absence does not widen the implemented
+surface.
+
 Magic Glass Box exposes small, versioned semantic capabilities rather than
 provider-native clients. An agent asks for a kind of work to be performed; it
 does not select Jira, GitHub, an SSH host, a model endpoint, a credential, or a
@@ -159,6 +165,13 @@ registration, exact operation authority, bounded local transport, durable
 attempts, typed outcomes, and uncertain-effect reconciliation. Its v1 service
 contract deliberately begins with `work.*`, `change.*`, `checks.*`, `refs.*`,
 and `landing.*` plus repository-shaped mappings.
+
+The bounded M10.1 stabilization pass implements only the M11-facing seams: the
+core owns bindable capability modes; projects explicitly bind exact capability
+versions to one sidecar mapping; project-routed operations atomically pin that
+binding; and ambiguous or expired reads become retryable while effects retain
+the reconciliation path. Provider naming, v1 repository-shaped payloads, Unix
+transport, and operator-only extension registration remain unchanged.
 
 Milestone 11 remains the GitHub reference provider and integration-queue
 binding. It proves exact authorized GitHub operations, truthful assurance,

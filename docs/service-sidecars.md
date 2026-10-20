@@ -81,6 +81,12 @@ provider client. Bindings may be granular enough to allow a read while
 disabling a related mutation, but remain semantic operations rather than a
 mirror of every vendor endpoint.
 
+The core currently defines `change.open` v1 and `landing.invoke` v1 as effects,
+and `checks.read` v1 as a read. A provider must advertise the matching version
+and mode before it can be bound. Syntactically valid experimental capability
+names may still be registered for deliberate operator-only use, but cannot be
+project-bound until the core defines their durable meaning.
+
 ## Registration and authority
 
 Before use, a sidecar registers:
@@ -99,9 +105,10 @@ reachability is not authentication. Worker-supplied hosts, repositories,
 account names, or socket paths never select the connector.
 
 Every invocation binds the operation, mapping, account, scope fingerprint,
-exact revisions or work-object IDs, limits, and durable operation ID. Credential
-rotation changes the fingerprint and invalidates authority that required the
-old scope.
+exact revisions or work-object IDs, limits, and durable operation ID. A
+project-routed operation additionally pins its active capability binding in the
+same SQLite transaction that creates the operation. Credential rotation changes
+the fingerprint and invalidates authority that required the old scope.
 
 ## Effects, retries, and reconciliation
 
@@ -118,13 +125,14 @@ and return the existing receipt rather than issuing it again.
 
 Typed outcomes distinguish denial, conflict, retryable transport failure,
 provider throttling, uncertain effect, and confirmed success. A failure before
-dispatch becomes retryable; a lost or malformed reply after dispatch becomes
-uncertain and cannot be invoked again. An expired dispatch lease is also
-conservatively abandoned into the uncertain state before its concurrency lane
-is reused. Only reconciliation may then report success, continued uncertainty,
-or absence of the remote effect. Logs and SQLite records contain operation IDs,
-bounded classifications, normalized receipts, and digests—never credential
-values or raw provider bodies.
+dispatch becomes retryable. For an effect, a lost or malformed reply after
+dispatch becomes uncertain and cannot be invoked again; an expired effect lease
+is likewise abandoned into the uncertain state. Only reconciliation may then
+report success, continued uncertainty, or absence of the remote effect. A read
+cannot create a duplicate external effect, so an ambiguous reply or expired
+lease becomes retryable and never enters reconciliation. Logs and SQLite
+records contain operation IDs, bounded classifications, normalized receipts,
+and digests—never credential values or raw provider bodies.
 
 Every registration pins request and response byte limits, timeout, concurrency,
 and attempts per minute. Each operation may narrow but never expand those
@@ -153,18 +161,25 @@ are `service-operation-request-v1.schema.json` and
 ```console
 magic-glass-box service-sidecar register example \
   --spec examples/service-sidecar.json --created-by operator
+magic-glass-box capability bind demo-project change.open --version 1 \
+  --sidecar example --mapping primary --bound-by operator
 magic-glass-box service-sidecar operation-create \
-  --request examples/service-operation.json --created-by operator
+  --request examples/service-operation.json --binding cpb_<id> \
+  --created-by operator
 magic-glass-box service-sidecar operation-execute sop_<id> \
   --owner supervisor --expected-version 1
 magic-glass-box service-sidecar operation-reconcile sop_<id> \
   --owner replacement-supervisor --expected-version 2
 ```
 
-`show`, `list`, `operation-show`, `operation-list`, and `revoke` expose only
-bounded authority and lifecycle metadata. The deterministic and real-Unix
-golden proofs both lose a successful invoke response, replace the supervisor,
-reconcile the existing object, and assert that the remote create count is one.
+`capability show/list/unbind` expose the project route and its append-only
+lifecycle. Unbinding stops new bound operations without rewriting existing
+ones. `service-sidecar show`, `list`, `operation-show`, `operation-list`, and
+`revoke` expose only bounded authority and lifecycle metadata. Omitting
+`--binding` creates a deliberate operator-only operation and is not the path
+M11 automation will use. The deterministic and real-Unix golden proofs both
+lose a successful invoke response, replace the supervisor, reconcile the
+existing object, and assert that the remote create count is one.
 
 ## Reference add-ons
 

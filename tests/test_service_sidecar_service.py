@@ -227,6 +227,46 @@ class ServiceSidecarServiceTests(unittest.TestCase):
         self.assertEqual(operation["attempts"][0]["outcome"], "ambiguous")
         self.assertEqual(operation["attempts"][0]["error_code"], "sidecar_ambiguous")
 
+    def test_post_dispatch_read_failure_is_durably_retryable(self) -> None:
+        clients = (
+            (InvalidResponseSidecar(), "sidecar_ambiguous"),
+            (MismatchedResponseSidecar(), "sidecar_ambiguous"),
+            (FailedSidecar(), "sidecar_error"),
+            (CrashingSidecar(), "sidecar_failure"),
+        )
+        for index, (client, error_code) in enumerate(clients, start=1):
+            with self.subTest(client=type(client).__name__):
+                operation = self.database.create_service_operation(
+                    spec=operation_spec(
+                        capability={
+                            "name": "checks.read",
+                            "version": 1,
+                            "mode": "read",
+                        },
+                        idempotency_key=f"read-failure-{index}",
+                        parameters={"check_suite": f"suite-{index}"},
+                    ),
+                    created_by=self.user["id"],
+                )
+                control = ControlPlane(
+                    self.database,
+                    service_client_factory=lambda _path, client=client: client,
+                )
+                with self.assertRaises(ServiceSidecarError) as raised:
+                    control.execute_service_operation(
+                        operation["id"],
+                        owner_id="supervisor-one",
+                        expected_version=1,
+                    )
+
+                self.assertEqual(
+                    type(raised.exception).__name__, "ServiceSidecarRetryableError"
+                )
+                stored = self.database.get_service_operation(operation["id"])
+                self.assertEqual(stored["state"], "retryable")
+                self.assertEqual(stored["attempts"][0]["outcome"], "ambiguous")
+                self.assertEqual(stored["attempts"][0]["error_code"], error_code)
+
     def test_typed_response_with_wrong_correlation_is_durably_uncertain(self) -> None:
         control = ControlPlane(
             self.database,
@@ -313,6 +353,42 @@ class ServiceSidecarServiceTests(unittest.TestCase):
         self.assertEqual(operation["state"], "uncertain")
         self.assertEqual(operation["attempts"][0]["outcome"], "ambiguous")
         self.assertEqual(operation["attempts"][0]["error_code"], "finalization_failed")
+
+    def test_read_finalization_failure_is_durably_retryable(self) -> None:
+        operation = self.database.create_service_operation(
+            spec=operation_spec(
+                capability={"name": "checks.read", "version": 1, "mode": "read"},
+                idempotency_key="read-finalization-failure",
+                parameters={"check_suite": "required"},
+            ),
+            created_by=self.user["id"],
+        )
+        control = ControlPlane(
+            self.database,
+            service_client_factory=lambda _path: SuccessfulSidecar(),
+        )
+
+        with (
+            mock.patch.object(
+                self.database,
+                "complete_service_operation_attempt",
+                side_effect=RuntimeError("database write failed"),
+            ),
+            self.assertRaises(ServiceSidecarError) as raised,
+        ):
+            control.execute_service_operation(
+                operation["id"],
+                owner_id="supervisor-one",
+                expected_version=1,
+            )
+
+        self.assertEqual(
+            type(raised.exception).__name__, "ServiceSidecarRetryableError"
+        )
+        stored = self.database.get_service_operation(operation["id"])
+        self.assertEqual(stored["state"], "retryable")
+        self.assertEqual(stored["attempts"][0]["outcome"], "ambiguous")
+        self.assertEqual(stored["attempts"][0]["error_code"], "finalization_failed")
 
     def test_attempt_lease_preserves_timeout_buffer_exactly(self) -> None:
         control = ControlPlane(

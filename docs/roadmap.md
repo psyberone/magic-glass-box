@@ -824,6 +824,36 @@ zero timeouts, uncovered mutants, suspicious results, skips, or crashes. This
 killed meaningful authority, deadline, socket-boundary, retry, lease,
 terminal-state, and reconciliation survivors.
 
+### M10.1: M11-facing capability seams
+
+**Status: completed 2026-10-19**
+
+One bounded stabilization wave implemented the abstractions that the GitHub
+reference provider immediately needs without introducing a generic plugin SDK:
+
+- core-owned capability versions and read/effect modes, while leaving unknown
+  syntactically valid extensions operator-only;
+- explicit audited `(project, capability, version) -> sidecar mapping`
+  bindings, with absence meaning disabled and no discovery or fallback;
+- atomic operation-to-binding pins so unbinding cannot race new project-routed
+  work into existence while already-created operations retain their history;
+  and
+- mode-aware recovery: ambiguous or expired reads are retryable, while effects
+  remain uncertain and require reconciliation.
+
+Schema v24 carries the bindings, append-only lifecycle events, and immutable
+operation pins. The v1 repository mapping, provider-neutral transport, current
+names, and direct operator-only operation path remain intact. M11 must use the
+bound-operation path; it does not get a GitHub-specific project field.
+
+Schema v24 and M10.1 passed 893 tests, Ruff format and lint, and 86% aggregate
+statement-plus-branch coverage. A focused combined mutation pass over the two
+changed service-sidecar contract/storage modules killed 170 of 212 selected
+mutants (80.18%) with no timeouts, uncovered mutants, suspicious results,
+skips, interruptions, or crashes. Survivor-driven tests closed project-scope,
+inactive-project, protocol-version, identifier, and exact authorization gaps
+before the score was accepted.
+
 ## Milestone 11: GitHub reference sidecar
 
 **Status: planned**
@@ -839,6 +869,9 @@ terminal-state, and reconciliation survivors.
   revision and closed-reference set after the operation settles.
 - Report the guarantee a GitHub operation can actually enforce. Head-only merge
   preconditions are not represented as expected-base-and-head compare-and-swap.
+- Consume schema v24 project bindings and atomically pinned operations rather
+  than adding GitHub-specific routing state or resolving a controller in a
+  separate transaction.
 
 **Exit proof:** the reference add-on advances one exact authorized candidate,
 survives a lost response without duplication, and returns provider-verified

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Protocol, cast
 
 from .domain import (
@@ -34,6 +35,7 @@ MAX_RETRY_AFTER_SECONDS = 30 * 24 * 60 * 60
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SERVICE_SIDECAR_ID_RE = re.compile(r"^ssc_[0-9a-f]{32}$")
 SERVICE_OPERATION_ID_RE = re.compile(r"^sop_[0-9a-f]{32}$")
+CAPABILITY_BINDING_ID_RE = re.compile(r"^cpb_[0-9a-f]{32}$")
 CAPABILITY_RE = re.compile(
     r"^(?:work|change|checks|refs|landing)\.[a-z][a-z0-9_-]{0,63}$"
 )
@@ -61,6 +63,13 @@ FORBIDDEN_PARAMETER_FIELDS = frozenset(
         "token",
     }
 )
+CORE_SERVICE_CAPABILITY_MODES: Mapping[tuple[str, int], str] = MappingProxyType(
+    {
+        ("change.open", 1): "effect",
+        ("checks.read", 1): "read",
+        ("landing.invoke", 1): "effect",
+    }
+)
 
 
 class ServiceSidecarError(RuntimeError):
@@ -73,6 +82,10 @@ class ServiceSidecarUnavailableError(ServiceSidecarError):
 
 class ServiceSidecarAmbiguousError(ServiceSidecarError):
     """The sidecar may have performed an effect before transport failed."""
+
+
+class ServiceSidecarRetryableError(ServiceSidecarError):
+    """A dispatched read failed without risking a duplicated external effect."""
 
 
 class ServiceSidecarClient(Protocol):
@@ -273,22 +286,44 @@ class ServiceCapability:
             expected={"name", "version", "mode"},
             subject="service capability",
         )
+        name = _capability_name(value["name"])
+        version = _bounded_integer(
+            value["version"],
+            field="service capability version",
+            minimum=1,
+            maximum=1_000_000,
+        )
         mode = value["mode"]
         if mode not in {"read", "effect"}:
             raise ValidationError("service capability mode must be read or effect")
-        return cls(
-            name=_capability_name(value["name"]),
-            version=_bounded_integer(
-                value["version"],
-                field="service capability version",
-                minimum=1,
-                maximum=1_000_000,
-            ),
-            mode=mode,
-        )
+        core_mode = CORE_SERVICE_CAPABILITY_MODES.get((name, version))
+        if core_mode is not None and mode != core_mode:
+            raise ValidationError(
+                f"service capability {name} v{version} has core-defined mode "
+                f"{core_mode}"
+            )
+        return cls(name=name, version=version, mode=mode)
 
     def to_dict(self) -> dict[str, Any]:
         return {"mode": self.mode, "name": self.name, "version": self.version}
+
+
+def core_service_capability(name: object, version: object) -> ServiceCapability:
+    """Return one core-owned capability or reject an operator-only extension."""
+
+    parsed_name = _capability_name(name)
+    parsed_version = _bounded_integer(
+        version,
+        field="service capability version",
+        minimum=1,
+        maximum=1_000_000,
+    )
+    mode = CORE_SERVICE_CAPABILITY_MODES.get((parsed_name, parsed_version))
+    if mode is None:
+        raise ValidationError(
+            f"service capability {parsed_name} v{parsed_version} is not core-defined"
+        )
+    return ServiceCapability(parsed_name, parsed_version, mode)
 
 
 @dataclass(frozen=True)
@@ -953,6 +988,11 @@ class ServiceOperationResponse:
             raise ValidationError("service operation outcome is invalid")
         if outcome == "not_found" and authority["phase"] != "reconcile":
             raise ValidationError("not_found is valid only while reconciling")
+        if authority["capability"].mode == "read" and outcome in {
+            "uncertain",
+            "not_found",
+        }:
+            raise ValidationError(f"{outcome} is invalid for a read service operation")
         provider_status = value["provider_status"]
         if provider_status is not None and (
             isinstance(provider_status, bool)

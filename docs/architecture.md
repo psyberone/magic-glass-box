@@ -50,6 +50,14 @@ account, scope, capability, limit, repository, and exact revision are
 authorized. Provider-specific implementations begin in M11. See
 [capability-providers.md](capability-providers.md).
 
+The first routing slice is implemented in schema v24. The core owns each
+bindable capability's version and read/effect mode; a sidecar may advertise an
+operator-only extension but cannot make it agent-facing or redefine its safety
+semantics. A project-routed operation and its active binding are checked and
+pinned in one transaction, so an unbind cannot race a new operation into
+existence. Existing operations retain their original authority for settlement;
+sidecar revocation remains the hard stop.
+
 Milestone 7D extracts AI-provider authentication and transport into a
 credential-isolated inference connector. M7D.2 makes this the exclusive normal
 dispatch path. The core authorizes the exact run, grant, connector deployment,
@@ -426,9 +434,10 @@ assignment, profiles, credentials, network policy, and lifecycle remain trusted
 local decisions. Imported content is therefore never an authority channel.
 
 Provider-specific operations remain outside the core. M10 implements their
-provider-neutral actuator boundary, but the integration queue is not yet bound
-to a provider add-on. A worker may provide a result or review, but cannot turn
-it into landing authority. The core checks the exact candidate or fold,
+provider-neutral actuator boundary and explicit project-to-controller routing,
+but the integration queue is not yet bound to a provider add-on. A worker may
+provide a result or review, but cannot turn it into landing authority. The core
+checks the exact candidate or fold,
 dependencies, current ref, gates, lane lease, and optimistic versions before
 issuing a structured manual Git plan. It holds no remote credential and runs
 no network command. A nonce-bound receipt records the assurance that the

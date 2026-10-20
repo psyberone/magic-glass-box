@@ -147,6 +147,32 @@ class ServiceSidecarContractTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     connector.validate_operation("example-sidecar", changed)
 
+    def test_core_capabilities_own_their_safety_mode(self) -> None:
+        advertised = sidecar_spec(self.socket_path).to_dict()
+        advertised["capabilities"][0]["mode"] = "read"
+
+        with self.assertRaisesRegex(ValidationError, "core-defined mode"):
+            ServiceSidecarSpec.from_mapping(advertised)
+
+        extension = sidecar_spec(self.socket_path).to_dict()
+        extension["capabilities"].append(
+            {"name": "work.operator_extension", "version": 1, "mode": "effect"}
+        )
+        parsed = ServiceSidecarSpec.from_mapping(extension)
+        self.assertEqual(parsed.capabilities[-1].name, "work.operator_extension")
+
+    def test_protocol_version_rejects_boolean_and_numeric_lookalikes(self) -> None:
+        for invalid in (True, 1.0):
+            candidate = sidecar_spec(self.socket_path).to_dict()
+            candidate["connector_protocol_version"] = invalid
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(
+                    ValidationError, "connector_protocol_version must be one of"
+                ),
+            ):
+                ServiceSidecarSpec.from_mapping(candidate)
+
     def test_contracts_reject_ambiguous_or_credential_bearing_shapes(self) -> None:
         base = sidecar_spec(self.socket_path).to_dict()
         cases = []
@@ -300,6 +326,34 @@ class ServiceSidecarContractTests(unittest.TestCase):
         )
         reconciled = ServiceOperationResponse.from_mapping(not_found)
         self.assertEqual(reconciled.outcome, "not_found")
+
+        read_operation = operation_spec(
+            capability={"name": "checks.read", "version": 1, "mode": "read"},
+            idempotency_key="read-checks-response",
+            parameters={"check_suite": "required"},
+        )
+        read_request = ServiceOperationRequest.create(
+            operation_id="sop_" + "3" * 32,
+            connector_id="ssc_" + "4" * 32,
+            connector_protocol_version=1,
+            operation=read_operation,
+            phase="invoke",
+            deadline=deadline,
+        )
+        read_uncertain = read_request.correlation_dict()
+        read_uncertain.update(
+            {
+                "outcome": "uncertain",
+                "provider_status": None,
+                "request_bytes": 128,
+                "response_bytes": 64,
+                "error_code": "response_lost",
+                "retry_after_seconds": None,
+                "receipt": None,
+            }
+        )
+        with self.assertRaisesRegex(ValidationError, "invalid for a read"):
+            ServiceOperationResponse.from_mapping(read_uncertain)
 
     def test_unix_transport_is_bounded_and_post_dispatch_loss_is_ambiguous(
         self,

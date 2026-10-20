@@ -371,7 +371,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 23)
+        self.assertEqual(SCHEMA_VERSION, 24)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -1279,6 +1279,9 @@ class IntegrationLedgerTests(unittest.TestCase):
             issued_by=self.user["id"],
         )
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE service_operation_capability_bindings")
+            connection.execute("DROP TABLE project_capability_binding_events")
+            connection.execute("DROP TABLE project_capability_bindings")
             connection.execute("DROP TABLE service_operation_attempts")
             connection.execute("DROP TABLE service_operations")
             connection.execute("DROP TABLE service_sidecar_events")

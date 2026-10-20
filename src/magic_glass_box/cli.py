@@ -389,6 +389,7 @@ def build_parser() -> argparse.ArgumentParser:
         "operation-create", help="create one exact durable service operation"
     )
     operation_create.add_argument("--request", required=True, type=Path)
+    operation_create.add_argument("--binding")
     operation_create.add_argument("--created-by", required=True)
     operation_show = service_sidecar_commands.add_parser(
         "operation-show", help="show one durable service operation"
@@ -410,6 +411,38 @@ def build_parser() -> argparse.ArgumentParser:
     operation_reconcile.add_argument("operation_id")
     operation_reconcile.add_argument("--owner", required=True)
     operation_reconcile.add_argument("--expected-version", required=True, type=int)
+
+    capability = commands.add_parser(
+        "capability",
+        help="bind project capabilities to explicit controllers",
+    )
+    capability_commands = capability.add_subparsers(
+        dest="capability_command", required=True
+    )
+    capability_bind = capability_commands.add_parser(
+        "bind", help="bind one project capability to a controller"
+    )
+    capability_bind.add_argument("project_key")
+    capability_bind.add_argument("capability_name")
+    capability_bind.add_argument("--version", required=True, type=int)
+    capability_bind.add_argument("--sidecar", required=True)
+    capability_bind.add_argument("--mapping", required=True)
+    capability_bind.add_argument("--bound-by", required=True)
+    capability_show = capability_commands.add_parser(
+        "show", help="show one project capability binding"
+    )
+    capability_show.add_argument("binding_id")
+    capability_list = capability_commands.add_parser(
+        "list", help="list project capability bindings"
+    )
+    capability_list.add_argument("--project", dest="project_key")
+    capability_list.add_argument("--include-unbound", action="store_true")
+    capability_unbind = capability_commands.add_parser(
+        "unbind", help="disable one project capability binding"
+    )
+    capability_unbind.add_argument("binding_id")
+    capability_unbind.add_argument("--expected-version", required=True, type=int)
+    capability_unbind.add_argument("--unbound-by", required=True)
 
     provider = commands.add_parser("provider", help="manage scoped provider grants")
     provider_commands = provider.add_subparsers(dest="provider_command", required=True)
@@ -1077,6 +1110,7 @@ def _dispatch(
             return control.create_service_operation(
                 spec=ServiceOperationSpec.from_mapping(_json_file(args.request)),
                 created_by_handle=args.created_by,
+                project_capability_binding_id=args.binding,
             )
         if args.service_sidecar_command == "operation-show":
             return control.database.get_service_operation(args.operation_id)
@@ -1093,6 +1127,29 @@ def _dispatch(
                 args.operation_id,
                 owner_id=args.owner,
                 expected_version=args.expected_version,
+            )
+    if args.command == "capability":
+        if args.capability_command == "bind":
+            return control.bind_project_capability(
+                project_key=args.project_key,
+                capability_name=args.capability_name,
+                capability_version=args.version,
+                sidecar_name=args.sidecar,
+                mapping_name=args.mapping,
+                bound_by_handle=args.bound_by,
+            )
+        if args.capability_command == "show":
+            return control.database.get_project_capability_binding(args.binding_id)
+        if args.capability_command == "list":
+            return control.database.list_project_capability_bindings(
+                project_key=args.project_key,
+                include_unbound=args.include_unbound,
+            )
+        if args.capability_command == "unbind":
+            return control.unbind_project_capability(
+                args.binding_id,
+                expected_version=args.expected_version,
+                unbound_by_handle=args.unbound_by,
             )
     if args.command == "work-item":
         if args.work_item_command == "import":

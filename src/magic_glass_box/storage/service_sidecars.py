@@ -6,14 +6,23 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..domain import ValidationError, canonical_json, content_sha256, require_string
+from ..domain import (
+    ValidationError,
+    canonical_json,
+    content_sha256,
+    require_string,
+    validate_project_key,
+    validate_provider_name,
+)
 from ..service_sidecar import (
+    CAPABILITY_BINDING_ID_RE,
     SERVICE_OPERATION_ID_RE,
     ServiceOperationReceipt,
     ServiceOperationRequest,
     ServiceOperationResponse,
     ServiceOperationSpec,
     ServiceSidecarSpec,
+    core_service_capability,
 )
 from .errors import (
     ConcurrentUpdateError,
@@ -37,6 +46,12 @@ def _positive_version(value: object, *, field: str) -> int:
 def _operation_id(value: object) -> str:
     if not isinstance(value, str) or SERVICE_OPERATION_ID_RE.fullmatch(value) is None:
         raise ValidationError("service operation id is invalid")
+    return value
+
+
+def _capability_binding_id(value: object) -> str:
+    if not isinstance(value, str) or CAPABILITY_BINDING_ID_RE.fullmatch(value) is None:
+        raise ValidationError("project capability binding id is invalid")
     return value
 
 
@@ -216,6 +231,361 @@ class ServiceSidecarStorage:
                 raise ConflictError("service sidecar could not be revoked") from exc
         return self.get_service_sidecar(name)
 
+    def _project_capability_binding_record(
+        self,
+        connection: sqlite3.Connection,
+        binding_id: str,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT b.id, b.state, b.version, b.capability_name, "
+            "b.capability_version, b.capability_mode, "
+            "b.sidecar_content_sha256 AS pinned_sidecar_content_sha256, "
+            "b.deployment_sha256 AS pinned_deployment_sha256, b.mapping_name, "
+            "b.created_at, b.updated_at, b.unbound_at, "
+            "p.id AS project_id, p.krab_project_key AS project_key, "
+            "p.active AS project_active, s.id AS sidecar_id, "
+            "s.name AS sidecar_name, s.state AS sidecar_state, "
+            "s.version AS sidecar_version, s.connector_protocol_version, "
+            "s.spec_json AS sidecar_spec_json, "
+            "s.content_sha256 AS sidecar_content_sha256, "
+            "creator.handle AS bound_by, unbinder.handle AS unbound_by "
+            "FROM project_capability_bindings b "
+            "JOIN projects p ON p.id = b.project_id "
+            "JOIN service_sidecars s ON s.id = b.service_sidecar_id "
+            "JOIN users creator ON creator.id = b.bound_by "
+            "LEFT JOIN users unbinder ON unbinder.id = b.unbound_by "
+            "WHERE b.id = ?",
+            (binding_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"project capability binding not found: {binding_id}")
+        sidecar_spec = self._parse_stored_sidecar(row)
+        try:
+            capability = core_service_capability(
+                row["capability_name"], row["capability_version"]
+            )
+        except ValidationError as exc:
+            raise StorageError(
+                "stored project capability binding is not core-defined"
+            ) from exc
+        if capability.mode != row["capability_mode"]:
+            raise StorageError("stored project capability mode does not match")
+        advertised = next(
+            (
+                item
+                for item in sidecar_spec.capabilities
+                if (item.name, item.version) == (capability.name, capability.version)
+            ),
+            None,
+        )
+        if advertised != capability:
+            raise StorageError(
+                "stored project capability is not advertised by its sidecar"
+            )
+        mapping = next(
+            (
+                item
+                for item in sidecar_spec.mappings
+                if item.name == row["mapping_name"]
+            ),
+            None,
+        )
+        if mapping is None:
+            raise StorageError("stored project capability mapping is unavailable")
+        if (
+            row["pinned_sidecar_content_sha256"] != row["sidecar_content_sha256"]
+            or row["pinned_sidecar_content_sha256"] != sidecar_spec.digest
+            or row["pinned_deployment_sha256"] != sidecar_spec.deployment_sha256
+        ):
+            raise StorageError("stored project capability controller does not match")
+        events = connection.execute(
+            "SELECT e.sequence, e.kind, u.handle AS actor, e.created_at "
+            "FROM project_capability_binding_events e "
+            "JOIN users u ON u.id = e.actor_id "
+            "WHERE e.binding_id = ? ORDER BY e.sequence",
+            (binding_id,),
+        ).fetchall()
+        return {
+            "id": row["id"],
+            "state": row["state"],
+            "version": row["version"],
+            "project": {
+                "id": row["project_id"],
+                "key": row["project_key"],
+                "active": row["project_active"],
+            },
+            "capability": capability.to_dict(),
+            "controller": {
+                "sidecar_id": row["sidecar_id"],
+                "sidecar_name": row["sidecar_name"],
+                "sidecar_state": row["sidecar_state"],
+                "sidecar_version": row["sidecar_version"],
+                "connector_protocol_version": row["connector_protocol_version"],
+                "sidecar_content_sha256": row["pinned_sidecar_content_sha256"],
+                "deployment_sha256": row["pinned_deployment_sha256"],
+                "mapping": mapping.to_dict(),
+            },
+            "bound_by": row["bound_by"],
+            "unbound_by": row["unbound_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "unbound_at": row["unbound_at"],
+            "events": [dict(event) for event in events],
+        }
+
+    def bind_project_capability(
+        self,
+        *,
+        project_key: str,
+        capability_name: str,
+        capability_version: int,
+        sidecar_name: str,
+        mapping_name: str,
+        bound_by: str,
+    ) -> dict[str, Any]:
+        project_key = validate_project_key(project_key)
+        capability = core_service_capability(capability_name, capability_version)
+        sidecar_name = validate_provider_name(
+            sidecar_name, field="service sidecar name"
+        )
+        mapping_name = validate_provider_name(
+            mapping_name, field="service mapping name"
+        )
+        binding_id = self.new_id("cpb")
+        selected_id: str | None = None
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, bound_by, role="capability binder")
+                project = connection.execute(
+                    "SELECT id, active FROM projects WHERE krab_project_key = ?",
+                    (project_key,),
+                ).fetchone()
+                if project is None:
+                    raise NotFoundError(f"project not found: {project_key}")
+                if not project["active"]:
+                    raise ConflictError("project capability is unavailable")
+                sidecar = connection.execute(
+                    "SELECT id, state, spec_json AS sidecar_spec_json, "
+                    "content_sha256 AS sidecar_content_sha256 "
+                    "FROM service_sidecars WHERE name = ?",
+                    (sidecar_name,),
+                ).fetchone()
+                if sidecar is None or sidecar["state"] != "active":
+                    raise ConflictError("service sidecar is unavailable")
+                sidecar_spec = self._parse_stored_sidecar(sidecar)
+                advertised = next(
+                    (
+                        item
+                        for item in sidecar_spec.capabilities
+                        if (item.name, item.version)
+                        == (capability.name, capability.version)
+                    ),
+                    None,
+                )
+                if advertised != capability:
+                    raise ConflictError(
+                        "service sidecar does not advertise the core capability"
+                    )
+                mapping = next(
+                    (
+                        item
+                        for item in sidecar_spec.mappings
+                        if item.name == mapping_name
+                    ),
+                    None,
+                )
+                if mapping is None:
+                    raise ConflictError("service sidecar mapping is unavailable")
+                existing = connection.execute(
+                    "SELECT id, service_sidecar_id, sidecar_content_sha256, "
+                    "deployment_sha256, mapping_name, capability_mode "
+                    "FROM project_capability_bindings WHERE project_id = ? "
+                    "AND capability_name = ? AND capability_version = ? "
+                    "AND state = 'active'",
+                    (project["id"], capability.name, capability.version),
+                ).fetchone()
+                if existing is not None:
+                    exact = (
+                        existing["service_sidecar_id"] == sidecar["id"]
+                        and existing["sidecar_content_sha256"] == sidecar_spec.digest
+                        and existing["deployment_sha256"]
+                        == sidecar_spec.deployment_sha256
+                        and existing["mapping_name"] == mapping.name
+                        and existing["capability_mode"] == capability.mode
+                    )
+                    if not exact:
+                        raise ConflictError(
+                            "project capability is already bound to another controller"
+                        )
+                    selected_id = existing["id"]
+                    connection.commit()
+                else:
+                    connection.execute(
+                        "INSERT INTO project_capability_bindings "
+                        "(id, project_id, capability_name, capability_version, "
+                        "capability_mode, service_sidecar_id, "
+                        "sidecar_content_sha256, deployment_sha256, mapping_name, "
+                        "state, version, bound_by, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)",
+                        (
+                            binding_id,
+                            project["id"],
+                            capability.name,
+                            capability.version,
+                            capability.mode,
+                            sidecar["id"],
+                            sidecar_spec.digest,
+                            sidecar_spec.deployment_sha256,
+                            mapping.name,
+                            bound_by,
+                            now,
+                            now,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO project_capability_binding_events "
+                        "(binding_id, sequence, kind, actor_id, created_at) "
+                        "VALUES (?, 1, 'capability.bound', ?, ?)",
+                        (binding_id, bound_by, now),
+                    )
+                    selected_id = binding_id
+                    connection.commit()
+            except (
+                NotFoundError,
+                ConflictError,
+                ConcurrentUpdateError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("project capability could not be bound") from exc
+        assert selected_id is not None
+        return self.get_project_capability_binding(selected_id)
+
+    def get_project_capability_binding(self, binding_id: str) -> dict[str, Any]:
+        binding_id = _capability_binding_id(binding_id)
+        with self._connection() as connection:
+            return self._project_capability_binding_record(connection, binding_id)
+
+    def list_project_capability_bindings(
+        self,
+        *,
+        project_key: str | None = None,
+        include_unbound: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(include_unbound, bool):
+            raise ValidationError("include_unbound must be a boolean")
+        if project_key is not None:
+            project_key = validate_project_key(project_key)
+        with self._read_snapshot() as connection:
+            project_id: str | None = None
+            if project_key is not None:
+                project = connection.execute(
+                    "SELECT id FROM projects WHERE krab_project_key = ?",
+                    (project_key,),
+                ).fetchone()
+                if project is None:
+                    raise NotFoundError(f"project not found: {project_key}")
+                project_id = project["id"]
+            rows = connection.execute(
+                "SELECT id FROM project_capability_bindings "
+                "WHERE (? IS NULL OR project_id = ?) "
+                "AND (? = 1 OR state = 'active') "
+                "ORDER BY created_at, id",
+                (project_id, project_id, int(include_unbound)),
+            ).fetchall()
+            return [
+                self._project_capability_binding_record(connection, row["id"])
+                for row in rows
+            ]
+
+    def resolve_project_capability(
+        self,
+        project_key: str,
+        capability_name: str,
+        capability_version: int,
+    ) -> dict[str, Any]:
+        project_key = validate_project_key(project_key)
+        capability = core_service_capability(capability_name, capability_version)
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT b.id, p.active AS project_active, "
+                "s.state AS sidecar_state "
+                "FROM projects p LEFT JOIN project_capability_bindings b "
+                "ON b.project_id = p.id AND b.capability_name = ? "
+                "AND b.capability_version = ? AND b.state = 'active' "
+                "LEFT JOIN service_sidecars s ON s.id = b.service_sidecar_id "
+                "WHERE p.krab_project_key = ?",
+                (capability.name, capability.version, project_key),
+            ).fetchone()
+            if (
+                row is None
+                or not row["project_active"]
+                or row["id"] is None
+                or row["sidecar_state"] != "active"
+            ):
+                raise ConflictError("project capability is unavailable")
+            return self._project_capability_binding_record(connection, row["id"])
+
+    def unbind_project_capability(
+        self,
+        binding_id: str,
+        *,
+        expected_version: int,
+        unbound_by: str,
+    ) -> dict[str, Any]:
+        binding_id = _capability_binding_id(binding_id)
+        expected_version = _positive_version(expected_version, field="expected_version")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, unbound_by, role="capability unbinder")
+                current = connection.execute(
+                    "SELECT state, version FROM project_capability_bindings "
+                    "WHERE id = ?",
+                    (binding_id,),
+                ).fetchone()
+                if current is None:
+                    raise NotFoundError(
+                        f"project capability binding not found: {binding_id}"
+                    )
+                if current["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        f"project capability binding version is "
+                        f"{current['version']}, expected {expected_version}"
+                    )
+                if current["state"] != "active":
+                    raise ConflictError("project capability is already unbound")
+                changed = connection.execute(
+                    "UPDATE project_capability_bindings SET state = 'unbound', "
+                    "version = version + 1, unbound_by = ?, unbound_at = ?, "
+                    "updated_at = ? WHERE id = ? AND version = ?",
+                    (unbound_by, now, now, binding_id, expected_version),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "project capability binding changed concurrently"
+                    )
+                connection.execute(
+                    "INSERT INTO project_capability_binding_events "
+                    "(binding_id, sequence, kind, actor_id, created_at) "
+                    "VALUES (?, 2, 'capability.unbound', ?, ?)",
+                    (binding_id, unbound_by, now),
+                )
+                connection.commit()
+            except (NotFoundError, ConflictError, ConcurrentUpdateError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("project capability could not be unbound") from exc
+        return self.get_project_capability_binding(binding_id)
+
     @staticmethod
     def _parse_stored_sidecar(row: sqlite3.Row) -> ServiceSidecarSpec:
         try:
@@ -251,10 +621,13 @@ class ServiceSidecarStorage:
             "u.handle AS created_by, s.id AS sidecar_id, s.name AS sidecar_name, "
             "s.state AS sidecar_state, s.version AS sidecar_version, "
             "s.connector_protocol_version, s.spec_json AS sidecar_spec_json, "
-            "s.content_sha256 AS sidecar_content_sha256 "
+            "s.content_sha256 AS sidecar_content_sha256, "
+            "ob.project_capability_binding_id "
             "FROM service_operations o "
             "JOIN service_sidecars s ON s.id = o.service_sidecar_id "
-            "JOIN users u ON u.id = o.created_by WHERE o.id = ?",
+            "JOIN users u ON u.id = o.created_by "
+            "LEFT JOIN service_operation_capability_bindings ob "
+            "ON ob.operation_id = o.id WHERE o.id = ?",
             (operation_id,),
         ).fetchone()
         if row is None:
@@ -268,6 +641,7 @@ class ServiceSidecarStorage:
             "schema_version": row["schema_version"],
             "content_sha256": row["operation_content_sha256"],
             "input_sha256": row["input_sha256"],
+            "project_capability_binding_id": row["project_capability_binding_id"],
             "spec": operation_spec.to_dict(),
             "sidecar": {
                 "id": row["sidecar_id"],
@@ -323,9 +697,14 @@ class ServiceSidecarStorage:
         *,
         spec: ServiceOperationSpec,
         created_by: str,
+        project_capability_binding_id: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(spec, ServiceOperationSpec):
             raise ValidationError("spec must be a ServiceOperationSpec")
+        if project_capability_binding_id is not None:
+            project_capability_binding_id = _capability_binding_id(
+                project_capability_binding_id
+            )
         operation_id = self.new_id("sop")
         now = self.now()
         existing_id: str | None = None
@@ -346,13 +725,52 @@ class ServiceSidecarStorage:
                     sidecar_spec.validate_operation(spec.connector_name, spec)
                 except ValidationError as exc:
                     raise ConflictError(str(exc)) from exc
+                if project_capability_binding_id is not None:
+                    binding = connection.execute(
+                        "SELECT b.state, b.capability_name, "
+                        "b.capability_version, b.capability_mode, "
+                        "b.service_sidecar_id, b.sidecar_content_sha256, "
+                        "b.deployment_sha256, b.mapping_name, "
+                        "p.active AS project_active "
+                        "FROM project_capability_bindings b "
+                        "JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
+                        (project_capability_binding_id,),
+                    ).fetchone()
+                    if (
+                        binding is None
+                        or binding["state"] != "active"
+                        or not binding["project_active"]
+                    ):
+                        raise ConflictError("project capability is unavailable")
+                    binding_authorizes = (
+                        binding["service_sidecar_id"] == sidecar_row["id"]
+                        and binding["sidecar_content_sha256"] == sidecar_spec.digest
+                        and binding["deployment_sha256"]
+                        == sidecar_spec.deployment_sha256
+                        and binding["mapping_name"] == spec.mapping.name
+                        and binding["capability_name"] == spec.capability.name
+                        and binding["capability_version"] == spec.capability.version
+                        and binding["capability_mode"] == spec.capability.mode
+                    )
+                    if not binding_authorizes:
+                        raise ConflictError(
+                            "project capability binding does not authorize operation"
+                        )
                 existing = connection.execute(
-                    "SELECT id, content_sha256 FROM service_operations "
-                    "WHERE service_sidecar_id = ? AND idempotency_key = ?",
+                    "SELECT o.id, o.content_sha256, "
+                    "ob.project_capability_binding_id "
+                    "FROM service_operations o "
+                    "LEFT JOIN service_operation_capability_bindings ob "
+                    "ON ob.operation_id = o.id "
+                    "WHERE o.service_sidecar_id = ? AND o.idempotency_key = ?",
                     (sidecar_row["id"], spec.idempotency_key),
                 ).fetchone()
                 if existing is not None:
-                    if existing["content_sha256"] != spec.digest:
+                    if (
+                        existing["content_sha256"] != spec.digest
+                        or existing["project_capability_binding_id"]
+                        != project_capability_binding_id
+                    ):
                         raise ConflictError(
                             "service operation idempotency key was reused with changes"
                         )
@@ -397,6 +815,13 @@ class ServiceSidecarStorage:
                             now,
                         ),
                     )
+                    if project_capability_binding_id is not None:
+                        connection.execute(
+                            "INSERT INTO service_operation_capability_bindings "
+                            "(operation_id, project_capability_binding_id, created_at) "
+                            "VALUES (?, ?, ?)",
+                            (operation_id, project_capability_binding_id, now),
+                        )
                     connection.commit()
             except (ConflictError, StorageError):
                 connection.rollback()
@@ -431,24 +856,41 @@ class ServiceSidecarStorage:
         now: str,
     ) -> None:
         expired = connection.execute(
-            "SELECT a.id, a.operation_id FROM service_operation_attempts a "
+            "SELECT a.id, a.operation_id, o.capability_mode "
+            "FROM service_operation_attempts a "
             "JOIN service_operations o ON o.id = a.operation_id "
             "WHERE o.service_sidecar_id = ? AND a.outcome = 'dispatching' "
             "AND a.lease_expires_at <= ?",
             (sidecar_id, now),
         ).fetchall()
         for attempt in expired:
-            connection.execute(
-                "UPDATE service_operation_attempts SET outcome = 'abandoned', "
-                "error_code = 'lease_expired', finished_at = ? WHERE id = ? "
-                "AND outcome = 'dispatching'",
-                (now, attempt["id"]),
+            retryable = attempt["capability_mode"] == "read"
+            retry_after = DEFAULT_SERVICE_OPERATION_RETRY_SECONDS if retryable else None
+            eligible_at = (
+                (
+                    datetime.fromisoformat(now)
+                    + timedelta(seconds=DEFAULT_SERVICE_OPERATION_RETRY_SECONDS)
+                ).isoformat(timespec="microseconds")
+                if retryable
+                else None
             )
             connection.execute(
-                "UPDATE service_operations SET state = 'uncertain', "
-                "version = version + 1, eligible_at = NULL, updated_at = ? "
+                "UPDATE service_operation_attempts SET outcome = 'abandoned', "
+                "error_code = 'lease_expired', retry_after_seconds = ?, "
+                "finished_at = ? WHERE id = ? "
+                "AND outcome = 'dispatching'",
+                (retry_after, now, attempt["id"]),
+            )
+            connection.execute(
+                "UPDATE service_operations SET state = ?, "
+                "version = version + 1, eligible_at = ?, updated_at = ? "
                 "WHERE id = ? AND state = 'dispatching'",
-                (now, attempt["operation_id"]),
+                (
+                    "retryable" if retryable else "uncertain",
+                    eligible_at,
+                    now,
+                    attempt["operation_id"],
+                ),
             )
 
     def begin_service_operation_attempt(
@@ -475,6 +917,7 @@ class ServiceSidecarStorage:
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
                     "SELECT o.id, o.state, o.version, o.eligible_at, "
+                    "o.capability_mode, "
                     "o.spec_json AS operation_spec_json, "
                     "o.content_sha256 AS operation_content_sha256, o.input_sha256, "
                     "s.id AS sidecar_id, s.state AS sidecar_state, "
@@ -493,6 +936,7 @@ class ServiceSidecarStorage:
                 )
                 row = connection.execute(
                     "SELECT o.id, o.state, o.version, o.eligible_at, "
+                    "o.capability_mode, "
                     "o.spec_json AS operation_spec_json, "
                     "o.content_sha256 AS operation_content_sha256, o.input_sha256, "
                     "s.id AS sidecar_id, s.state AS sidecar_state, "
@@ -512,6 +956,8 @@ class ServiceSidecarStorage:
                     )
                 if row["sidecar_state"] != "active":
                     raise ConflictError("service sidecar is unavailable")
+                sidecar_spec = self._parse_stored_sidecar(row)
+                operation_spec = self._parse_stored_operation(row)
                 if phase == "invoke":
                     if row["state"] not in {"pending", "retryable", "throttled"}:
                         raise ConflictError(
@@ -519,12 +965,15 @@ class ServiceSidecarStorage:
                         )
                     if row["eligible_at"] is not None and row["eligible_at"] > now:
                         raise ConflictError("service operation is not eligible yet")
-                elif row["state"] != "uncertain":
-                    raise ConflictError(
-                        "only an uncertain service operation can be reconciled"
-                    )
-                sidecar_spec = self._parse_stored_sidecar(row)
-                operation_spec = self._parse_stored_operation(row)
+                else:
+                    if operation_spec.capability.mode == "read":
+                        raise ConflictError(
+                            "a read operation cannot enter reconciliation"
+                        )
+                    if row["state"] != "uncertain":
+                        raise ConflictError(
+                            "only an uncertain service operation can be reconciled"
+                        )
                 try:
                     sidecar_spec.validate_operation(
                         operation_spec.connector_name, operation_spec
@@ -639,7 +1088,8 @@ class ServiceSidecarStorage:
         row = connection.execute(
             "SELECT a.id, a.operation_id, a.phase, a.outcome, a.owner_id, "
             "a.deadline, o.state AS operation_state, "
-            "o.version AS operation_version, o.spec_json AS operation_spec_json, "
+            "o.version AS operation_version, o.capability_mode, "
+            "o.spec_json AS operation_spec_json, "
             "o.content_sha256 AS operation_content_sha256, o.input_sha256, "
             "s.id AS sidecar_id, s.connector_protocol_version, "
             "s.spec_json AS sidecar_spec_json, "
@@ -795,17 +1245,6 @@ class ServiceSidecarStorage:
         )
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat(timespec="microseconds")
-        state = "retryable" if outcome == "unavailable" else "uncertain"
-        retry_after = (
-            DEFAULT_SERVICE_OPERATION_RETRY_SECONDS
-            if outcome == "unavailable"
-            else None
-        )
-        eligible_at = (
-            (now_dt + timedelta(seconds=retry_after)).isoformat(timespec="microseconds")
-            if retry_after is not None
-            else None
-        )
         operation_id: str | None = None
         with self._connection() as connection:
             try:
@@ -817,6 +1256,20 @@ class ServiceSidecarStorage:
                     expected_operation_version=expected_operation_version,
                 )
                 operation_id = row["operation_id"]
+                retryable = outcome == "unavailable" or (
+                    outcome == "ambiguous" and row["capability_mode"] == "read"
+                )
+                state = "retryable" if retryable else "uncertain"
+                retry_after = (
+                    DEFAULT_SERVICE_OPERATION_RETRY_SECONDS if retryable else None
+                )
+                eligible_at = (
+                    (now_dt + timedelta(seconds=retry_after)).isoformat(
+                        timespec="microseconds"
+                    )
+                    if retry_after is not None
+                    else None
+                )
                 connection.execute(
                     "UPDATE service_operation_attempts SET outcome = ?, "
                     "error_code = ?, retry_after_seconds = ?, finished_at = ? "

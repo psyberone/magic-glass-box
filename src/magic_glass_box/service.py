@@ -89,6 +89,7 @@ from .service_sidecar import (
     ServiceSidecarAmbiguousError,
     ServiceSidecarClient,
     ServiceSidecarError,
+    ServiceSidecarRetryableError,
     ServiceSidecarSpec,
     ServiceSidecarUnavailableError,
     UnixServiceSidecarClient,
@@ -910,16 +911,62 @@ class ControlPlane:
             revoked_by=revoker["id"],
         )
 
+    def bind_project_capability(
+        self,
+        *,
+        project_key: str,
+        capability_name: str,
+        capability_version: int,
+        sidecar_name: str,
+        mapping_name: str,
+        bound_by_handle: str,
+    ) -> dict[str, Any]:
+        binder = self.database.get_user(bound_by_handle)
+        return self.database.bind_project_capability(
+            project_key=project_key,
+            capability_name=capability_name,
+            capability_version=capability_version,
+            sidecar_name=sidecar_name,
+            mapping_name=mapping_name,
+            bound_by=binder["id"],
+        )
+
+    def unbind_project_capability(
+        self,
+        binding_id: str,
+        *,
+        expected_version: int,
+        unbound_by_handle: str,
+    ) -> dict[str, Any]:
+        unbinder = self.database.get_user(unbound_by_handle)
+        return self.database.unbind_project_capability(
+            binding_id,
+            expected_version=expected_version,
+            unbound_by=unbinder["id"],
+        )
+
+    def resolve_project_capability(
+        self,
+        project_key: str,
+        capability_name: str,
+        capability_version: int,
+    ) -> dict[str, Any]:
+        return self.database.resolve_project_capability(
+            project_key, capability_name, capability_version
+        )
+
     def create_service_operation(
         self,
         *,
         spec: ServiceOperationSpec,
         created_by_handle: str,
+        project_capability_binding_id: str | None = None,
     ) -> dict[str, Any]:
         creator = self.database.get_user(created_by_handle)
         return self.database.create_service_operation(
             spec=spec,
             created_by=creator["id"],
+            project_capability_binding_id=project_capability_binding_id,
         )
 
     def execute_service_operation(
@@ -1013,7 +1060,7 @@ class ControlPlane:
                 error_code="sidecar_unavailable",
             )
             raise
-        except ServiceSidecarAmbiguousError:
+        except ServiceSidecarAmbiguousError as exc:
             self.database.fail_service_operation_attempt(
                 attempt_id,
                 owner_id=owner_id,
@@ -1021,6 +1068,10 @@ class ControlPlane:
                 outcome="ambiguous",
                 error_code="sidecar_ambiguous",
             )
+            if request.capability.mode == "read":
+                raise ServiceSidecarRetryableError(
+                    "service sidecar read is retryable"
+                ) from exc
             raise
         except ServiceSidecarError as exc:
             self.database.fail_service_operation_attempt(
@@ -1030,6 +1081,10 @@ class ControlPlane:
                 outcome="ambiguous",
                 error_code="sidecar_error",
             )
+            if request.capability.mode == "read":
+                raise ServiceSidecarRetryableError(
+                    "service sidecar read is retryable"
+                ) from exc
             raise ServiceSidecarAmbiguousError(
                 "service sidecar outcome is ambiguous"
             ) from exc
@@ -1041,6 +1096,10 @@ class ControlPlane:
                 outcome="ambiguous",
                 error_code="sidecar_failure",
             )
+            if request.capability.mode == "read":
+                raise ServiceSidecarRetryableError(
+                    "service sidecar read is retryable"
+                ) from exc
             raise ServiceSidecarAmbiguousError(
                 "service sidecar outcome is ambiguous"
             ) from exc
@@ -1060,6 +1119,10 @@ class ControlPlane:
                     outcome="ambiguous",
                     error_code="finalization_failed",
                 )
+            if request.capability.mode == "read":
+                raise ServiceSidecarRetryableError(
+                    "service sidecar read result could not be finalized"
+                ) from exc
             raise ServiceSidecarAmbiguousError(
                 "service sidecar outcome could not be finalized"
             ) from exc

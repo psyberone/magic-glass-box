@@ -26,6 +26,7 @@ from .storage.runs import RunStorage
 from .storage.schema import (
     ATTEMPT_SCHEMA,
     CANDIDATE_SCHEMA,
+    CAPABILITY_BINDING_SCHEMA,
     DATABASE_FILENAME,
     EXECUTION_INTEGRITY_SCHEMA,
     GATE_SCHEMA,
@@ -66,6 +67,7 @@ from .storage.work_items import WorkItemStorage
 
 __all__ = [
     "ATTEMPT_SCHEMA",
+    "CAPABILITY_BINDING_SCHEMA",
     "CANDIDATE_SCHEMA",
     "BudgetExceededError",
     "ConcurrentUpdateError",

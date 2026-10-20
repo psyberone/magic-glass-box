@@ -384,6 +384,18 @@ class DatabaseCore:
                     "service_operation_attempts",
                     "SELECT COUNT(*) FROM service_operation_attempts",
                 ),
+                (
+                    "project_capability_bindings",
+                    "SELECT COUNT(*) FROM project_capability_bindings",
+                ),
+                (
+                    "project_capability_binding_events",
+                    "SELECT COUNT(*) FROM project_capability_binding_events",
+                ),
+                (
+                    "service_operation_capability_bindings",
+                    "SELECT COUNT(*) FROM service_operation_capability_bindings",
+                ),
                 ("provider_grants", "SELECT COUNT(*) FROM provider_grants"),
                 (
                     "provider_connector_bindings",

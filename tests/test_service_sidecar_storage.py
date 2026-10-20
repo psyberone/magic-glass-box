@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from magic_glass_box.db import (
+    CAPABILITY_BINDING_SCHEMA,
     SCHEMA_VERSION,
     SERVICE_SIDECAR_SCHEMA,
     ConcurrentUpdateError,
@@ -98,9 +99,12 @@ class ServiceSidecarStorageTests(unittest.TestCase):
             created_by=self.user["id"],
         )
 
-    def test_schema_twenty_three_registers_immutable_redacted_authority(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 23)
+    def test_schema_twenty_four_registers_immutable_redacted_authority(self) -> None:
+        self.assertEqual(SCHEMA_VERSION, 24)
         self.assertIn("CREATE TABLE service_sidecars", SERVICE_SIDECAR_SCHEMA)
+        self.assertIn(
+            "CREATE TABLE project_capability_bindings", CAPABILITY_BINDING_SCHEMA
+        )
 
         sidecar = self.register()
         self.assertTrue(str(sidecar["id"]).startswith("ssc_"))
@@ -131,8 +135,11 @@ class ServiceSidecarStorageTests(unittest.TestCase):
                     (sidecar["id"],),
                 )
 
-    def test_schema_twenty_three_migrates_schema_twenty_two_once(self) -> None:
+    def test_schema_twenty_four_migrates_schema_twenty_two_once(self) -> None:
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE service_operation_capability_bindings")
+            connection.execute("DROP TABLE project_capability_binding_events")
+            connection.execute("DROP TABLE project_capability_bindings")
             connection.execute("DROP TABLE service_operation_attempts")
             connection.execute("DROP TABLE service_operations")
             connection.execute("DROP TABLE service_sidecar_events")
@@ -157,6 +164,9 @@ class ServiceSidecarStorageTests(unittest.TestCase):
                 "service_sidecar_events",
                 "service_operations",
                 "service_operation_attempts",
+                "project_capability_bindings",
+                "project_capability_binding_events",
+                "service_operation_capability_bindings",
             }.issubset(tables)
         )
 
@@ -181,6 +191,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
                 "eligible_at",
                 "id",
                 "input_sha256",
+                "project_capability_binding_id",
                 "schema_version",
                 "sidecar",
                 "spec",
@@ -326,6 +337,58 @@ class ServiceSidecarStorageTests(unittest.TestCase):
             [attempt["outcome"] for attempt in recovered["attempts"]],
             ["ambiguous", "succeeded"],
         )
+
+    def test_ambiguous_read_is_retryable_and_cannot_be_reconciled(self) -> None:
+        self.register()
+        operation = self.create_operation(
+            operation_spec(
+                capability={"name": "checks.read", "version": 1, "mode": "read"},
+                idempotency_key="read-checks-42",
+                parameters={"check_suite": "required"},
+            )
+        )
+        started_at = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+        with mock.patch(
+            "magic_glass_box.storage.service_sidecars.datetime", wraps=datetime
+        ) as clock:
+            clock.now.return_value = started_at
+            first = self.database.begin_service_operation_attempt(
+                operation["id"],
+                phase="invoke",
+                owner_id="supervisor-one",
+                expected_version=1,
+                lease_seconds=30,
+            )
+            retryable = self.database.fail_service_operation_attempt(
+                first["attempt"]["id"],
+                owner_id="supervisor-one",
+                expected_operation_version=2,
+                outcome="ambiguous",
+                error_code="response_lost",
+            )
+            self.assertEqual(retryable["state"], "retryable")
+            self.assertEqual(retryable["attempts"][0]["outcome"], "ambiguous")
+            self.assertEqual(
+                retryable["eligible_at"],
+                (started_at + timedelta(seconds=5)).isoformat(timespec="microseconds"),
+            )
+            with self.assertRaisesRegex(ConflictError, "read operation"):
+                self.database.begin_service_operation_attempt(
+                    operation["id"],
+                    phase="reconcile",
+                    owner_id="supervisor-two",
+                    expected_version=3,
+                    lease_seconds=30,
+                )
+            clock.now.return_value = started_at + timedelta(seconds=5)
+            resumed = self.database.begin_service_operation_attempt(
+                operation["id"],
+                phase="invoke",
+                owner_id="supervisor-two",
+                expected_version=3,
+                lease_seconds=30,
+            )
+        self.assertEqual(resumed["operation"]["state"], "dispatching")
 
     def test_reconciliation_not_found_reauthorizes_one_fresh_invoke(self) -> None:
         self.register()
@@ -724,6 +787,54 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         self.assertEqual(expired["state"], "uncertain")
         self.assertEqual(expired["version"], 3)
         self.assertEqual(expired["attempts"][0]["outcome"], "abandoned")
+        self.assertEqual(claimed["operation"]["state"], "dispatching")
+
+    def test_expired_read_lease_becomes_retryable_before_lane_reuse(self) -> None:
+        self.register()
+        first = self.create_operation(
+            operation_spec(
+                capability={"name": "checks.read", "version": 1, "mode": "read"},
+                idempotency_key="read-checks-expiring",
+                parameters={"check_suite": "required"},
+                timeout_ms=100,
+            )
+        )
+        second = self.create_operation(
+            operation_spec(
+                idempotency_key="open-after-read-expiry",
+                target={
+                    **operation_spec().target.to_dict(),
+                    "resource_id": "candidate-after-read-expiry",
+                },
+                timeout_ms=100,
+            )
+        )
+        started_at = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
+        with mock.patch(
+            "magic_glass_box.storage.service_sidecars.datetime", wraps=datetime
+        ) as clock:
+            clock.now.return_value = started_at
+            self.database.begin_service_operation_attempt(
+                first["id"],
+                phase="invoke",
+                owner_id="supervisor-one",
+                expected_version=1,
+                lease_seconds=5,
+            )
+            clock.now.return_value = started_at + timedelta(seconds=6)
+            claimed = self.database.begin_service_operation_attempt(
+                second["id"],
+                phase="invoke",
+                owner_id="supervisor-two",
+                expected_version=1,
+                lease_seconds=5,
+            )
+
+        expired = self.database.get_service_operation(first["id"])
+        self.assertEqual(expired["state"], "retryable")
+        self.assertEqual(expired["version"], 3)
+        self.assertEqual(expired["attempts"][0]["outcome"], "abandoned")
+        self.assertIsNotNone(expired["eligible_at"])
         self.assertEqual(claimed["operation"]["state"], "dispatching")
 
 
