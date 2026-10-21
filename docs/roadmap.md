@@ -856,8 +856,7 @@ before the score was accepted.
 
 ## Milestone 11: GitHub reference sidecar
 
-**Status: local implementation and quality gate complete; authorized live exit
-proof pending**
+**Status: completed 2026-10-21**
 
 - Package GitHub mechanics outside the control-plane core and mount the user's
   explicitly approved `GH_CONFIG_DIR` only into that add-on.
@@ -882,8 +881,7 @@ bounded normalized result, never a raw GitHub response. Schema v25 atomically
 binds integration authority to `landing.invoke`, records provider landing
 requests/receipts, advances the actual provider revision, refolds on drift, and
 projects pending operation state into the control room. Unit, schema,
-migration, storage, CLI, and real-Unix carrier proofs are green. The milestone
-is not complete until one authorized sacrificial live-repository run passes.
+migration, storage, CLI, and real-Unix carrier proofs are green.
 
 The completed local checkpoint passes 974 tests and Ruff format/lint with 86%
 aggregate statement-plus-branch coverage; the GitHub provider itself is at 90%.
@@ -897,11 +895,31 @@ crashes. Mutation-driven malformed-review tests then killed nine additional
 semantic survivors directly, for an effective 2,276 of 2,720 (83.68%); the
 remaining review-normalizer survivors change diagnostic wording only.
 
-**Exit proof:** the reference add-on advances one exact authorized candidate,
-survives a lost response without duplication, and returns provider-verified
-bounded evidence while its reusable credential remains absent from the worker,
-core database, and logs. GitLab, Jira, and other services remain independent
-add-ons that implement only the capability families they support.
+The authorized live proof used `psyberone/imitation-krab` at exact base
+`50fcd1e55e8034e8ea3a931de0714e710e912b06`. The reference add-on published
+candidate `f5c8d1fe58229a8e08515a0e07fba187a1758b33`, opened PR 1, passed its
+bounded reads and zero-required-check gate, and squash-merged it. The harness
+discarded the landing response and reconciled the already-landed PR to actual
+base `83eaec71d6047e06f6a249852159c897871fc680` without issuing a second merge.
+The first attempt found and then RED-first closed a carrier mismatch in which
+`change.get` attached its head SHA to a metadata-only target; the head remains
+available in the normalized result while the receipt now obeys the generic
+target contract.
+
+The post-live regression checkpoint passes 982 tests and Ruff format/lint with
+86% aggregate statement-plus-branch coverage; the GitHub provider remains at
+90%. A clean pass over the current provider killed 2,272 of 2,717 mutants
+(83.62%) with no timeouts, unchecked mutants, crashes, or suspicious outcomes.
+Survivor-driven assertions bind the exact-read HTTP status and require the
+provider's merged-state field. The only surviving `change.get` mutants alter
+its human-readable diagnostic label.
+
+**Exit proof passed:** the reference add-on advanced one exact authorized
+candidate, survived a lost response without duplication, and returned
+provider-verified bounded evidence while its reusable credential remained
+absent from the worker, core database, and logs. GitLab, Jira, and other
+services remain independent add-ons that implement only the capability
+families they support.
 
 The broader [capability-provider model](capability-providers.md) does not expand
 the M10 or M11 MVP. It names the semantic surface, provider implementation,

@@ -1,6 +1,6 @@
 # GitHub reference provider
 
-**Status: implemented locally; live GitHub exit proof pending.**
+**Status: completed 2026-10-21.**
 
 Milestone 11 supplies a separate `magic-glass-box-github-provider` process. It
 uses the operator's explicitly selected `GH_CONFIG_DIR`, exposes only the
@@ -150,6 +150,53 @@ is unchanged, or advances the observed baseline and requires refolds when it
 drifted. A confirmed landing advances MGB to GitHub's actual observed base
 revision, which may be a merge or squash commit rather than the candidate head.
 
+## Live exit proof
+
+The destructive proof harness requires an exact clean clone, base revision,
+repository, account, branch namespace, and explicit acknowledgment:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_github_provider.py \
+  --gh-config-dir /absolute/private/gh-config \
+  --repository owner/sacrificial-repository \
+  --source-repository /absolute/clean/sacrificial-clone \
+  --expected-base-revision <40-character-sha1> \
+  --base-ref refs/heads/main \
+  --proof-id <unique-lowercase-id> \
+  --expected-account <github-login> \
+  --i-understand-this-publishes-a-branch-opens-and-merges-a-pr
+```
+
+It constructs a deterministic child commit in a temporary bare candidate
+store without modifying the source checkout. It then exercises `work.list`,
+`refs.publish`, `change.open`, `change.get`, `change.list`, `checks.read`, and
+`landing.invoke` through the Unix sidecar. The landing request is sent and its
+response deliberately discarded; the same operation is reconciled by reading
+the exact pull request and base ref. Output is a bounded report containing no
+raw provider response, issue/PR title, token, or configuration path.
+
+The accepted M11 run targeted `psyberone/imitation-krab` at base
+`50fcd1e55e8034e8ea3a931de0714e710e912b06`. It published candidate
+`f5c8d1fe58229a8e08515a0e07fba187a1758b33`, opened and squash-merged PR 1,
+discarded the successful landing response, and reconciled the provider-observed
+base `83eaec71d6047e06f6a249852159c897871fc680` without a second merge. The first
+attempt exposed a real wire-contract defect: `change.get` put a head revision
+on a metadata-only target. A RED regression test now requires the revision to
+remain in the normalized result while the generic receipt revision stays null.
+
+The post-live regression checkpoint passes 982 tests with 86% aggregate
+statement-plus-branch coverage and 90% coverage for the provider module. Ruff
+format and lint are clean. A clean current-provider mutation pass killed 2,272
+of 2,717 mutants (83.62%) with no timeouts, unchecked mutants, crashes, or
+suspicious outcomes. Mutation-driven assertions now bind the exact-read HTTP
+status and require GitHub's `merged` field; the only surviving `change.get`
+mutants alter its human-readable diagnostic label.
+
+The proof intentionally leaves the merged pull request and published branch as
+audit artifacts. Cleanup is operator-owned because branch deletion and pull
+request closure are not capabilities exposed by this provider. The harness
+also refuses to target `psyberone/magic-glass-box`.
+
 ## Deliberate limits
 
 - The provider does not expose raw `gh`, raw `git`, arbitrary REST endpoints,
@@ -159,5 +206,5 @@ revision, which may be a merge or squash commit rather than the candidate head.
   corresponding read operation is explicitly invoked.
 - GitHub repository publication supports SHA-1 candidates because GitHub's Git
   object IDs are SHA-1 in this v1 contract.
-- The local deterministic and real-Unix tests are implemented. A sacrificial
-  live-repository run is still required before Milestone 11 is marked complete.
+- The local deterministic, real-Unix, and explicitly authorized live-repository
+  proofs are implemented.

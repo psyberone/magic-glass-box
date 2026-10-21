@@ -736,7 +736,7 @@ class GitHubProvider:
             invocation,
             provider_status=200,
             remote_identity=identity,
-            observed_revision=result["head_revision"],
+            observed_revision=None,
             evidence={"kind": "change-read", **result},
             closed_references=(identity,) if result["merged"] else (),
             result=result,

@@ -461,9 +461,8 @@ flow are implemented. The credential-isolated inference connector, its
 real-account proof, provider usage/budget authority, quota-aware recovery, and
 destructive replacement continuity are implemented. The provider-neutral
 service-sidecar protocol and uncertain-effect recovery are implemented. The
-GitHub reference add-on, normalized read surface, and provider-landing ledger
-are implemented locally; the live GitHub exit proof is the remaining M11
-checkpoint. See
+GitHub reference add-on, normalized read surface, provider-landing ledger, and
+lost-response live GitHub exit proof are complete. See
 [inference-connectors.md](inference-connectors.md),
 [integration-gates.md](integration-gates.md),
 [service-sidecars.md](service-sidecars.md),

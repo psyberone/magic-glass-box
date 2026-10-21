@@ -446,6 +446,25 @@ PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
 
 Use `--image` to select another local, volume-free image with Python installed.
 
+The GitHub reference provider has a separate destructive proof. It requires a
+sacrificial repository, a clean clone pinned to its exact base, the expected
+GitHub account, and an explicit acknowledgment; it leaves a merged pull request
+and proof branch as audit artifacts:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_github_provider.py \
+  --gh-config-dir /absolute/private/gh-config \
+  --repository owner/sacrificial-repository \
+  --source-repository /absolute/clean/sacrificial-clone \
+  --expected-base-revision <40-character-sha1> \
+  --proof-id <unique-lowercase-id> \
+  --expected-account <github-login> \
+  --i-understand-this-publishes-a-branch-opens-and-merges-a-pr
+```
+
+See [docs/github-provider.md](docs/github-provider.md) for its bounded output,
+lost-response reconciliation, and cleanup boundary.
+
 The live runtime proof builds an intentionally narrow image with pinned Codex
 and Claude Code CLIs, then runs three real networkless containers through the
 Docker, provider-gateway, and separate inference-connector path against a

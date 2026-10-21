@@ -531,13 +531,24 @@ class GitHubProviderTests(unittest.TestCase):
             )
         )
         self.assertEqual(get_response.outcome, "succeeded")
+        self.assertEqual(get_response.provider_status, 200)
         self.assertEqual(get_response.receipt.result, change_summary())
         self.assertEqual(
             get_response.receipt.remote_identity,
             "github:github.com/acme/widgets/pull/42",
         )
-        self.assertEqual(get_response.receipt.observed_revision, HEAD)
+        self.assertIsNone(get_response.receipt.observed_revision)
         self.assertEqual(get_response.receipt.closed_references, ())
+        get_response.validate_correlation(
+            request(
+                self.socket_path,
+                "change.get",
+                resource_id="42",
+                expected_revision=None,
+                desired_revision=None,
+                object_format=None,
+            )
+        )
         self.assertEqual(
             get_api.calls,
             [expected_api_call("GET", "repos/acme/widgets/pulls/42")],
@@ -566,6 +577,7 @@ class GitHubProviderTests(unittest.TestCase):
             list_response.receipt.result,
             {"items": [change_summary()], "next_cursor": None},
         )
+
         self.assertEqual(
             list_response.receipt.remote_identity,
             "github:github.com/acme/widgets/pulls",
@@ -588,6 +600,24 @@ class GitHubProviderTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_change_get_requires_exact_merged_state(self) -> None:
+        document = change()
+        document.pop("merged")
+        response = GitHubProvider(
+            self.spec, FakeGitHubAPI([api_response(200, document)])
+        ).invoke(
+            request(
+                self.socket_path,
+                "change.get",
+                resource_id="42",
+                expected_revision=None,
+                desired_revision=None,
+                object_format=None,
+            )
+        )
+
+        self.assertEqual(response.outcome, "denied")
 
     def test_read_targets_pagination_and_provider_documents_fail_closed(self) -> None:
         invalid_operations = (
