@@ -84,6 +84,13 @@ observed integration revision, closed-reference set, and truthful
 allows a landing receipt to originate from exactly one manual plan or provider
 landing.
 
+Control-plane schema v26 adds an internal immutable binding for
+changes-requested runs. The binding joins one run to the rejected policy and
+candidate, the current failed independent-review evidence, and the exact
+candidate-pinned `review` work-log entry authored by that reviewer attempt. It
+is a relational control-plane invariant rather than a portable interchange
+document, so it adds no public JSON Schema.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

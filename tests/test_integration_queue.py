@@ -554,7 +554,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 25)
+        self.assertEqual(SCHEMA_VERSION, 26)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -1464,6 +1464,7 @@ class IntegrationLedgerTests(unittest.TestCase):
             issued_by=self.user["id"],
         )
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE integration_gate_change_runs")
             connection.execute("DROP TABLE integration_provider_landings")
             connection.execute("DROP TABLE service_operation_capability_bindings")
             connection.execute("DROP TABLE project_capability_binding_events")
@@ -1503,6 +1504,7 @@ class IntegrationLedgerTests(unittest.TestCase):
             connection.execute("PRAGMA foreign_keys = OFF")
             connection.executescript(
                 """
+                DROP TABLE integration_gate_change_runs;
                 DROP TRIGGER integration_landing_receipt_immutable_update;
                 DROP TRIGGER integration_landing_receipt_immutable_delete;
                 DROP INDEX integration_receipt_created;

@@ -643,7 +643,11 @@ class ControlRoom:
             "wiv.content_json AS pinned_content_json, "
             "wiv.content_sha256 AS pinned_content_sha256, r.work_thread_id, "
             "grr.policy_id AS gate_policy_id, "
-            "grr.candidate_id AS review_candidate_id "
+            "grr.candidate_id AS review_candidate_id, "
+            "gcr.policy_id AS change_policy_id, "
+            "gcr.candidate_id AS change_candidate_id, "
+            "gcr.review_evidence_id AS change_review_evidence_id, "
+            "gcr.review_entry_id AS change_review_entry_id "
             "FROM visible JOIN runs r ON r.id = visible.id "
             "JOIN projects p ON p.id = r.project_id "
             "JOIN project_context_versions c ON c.id = r.context_version_id "
@@ -653,6 +657,7 @@ class ControlRoom:
             "LEFT JOIN work_item_versions wiv ON wiv.id = r.work_item_version_id "
             "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
             "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
+            "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
             "ORDER BY visible.group_order, r.updated_at DESC, r.id",
             (history_limit,),
         ).fetchall()
@@ -686,6 +691,10 @@ class ControlRoom:
                     "work_thread_id": row["work_thread_id"],
                     "gate_policy_id": row["gate_policy_id"],
                     "review_candidate_id": row["review_candidate_id"],
+                    "change_policy_id": row["change_policy_id"],
+                    "change_candidate_id": row["change_candidate_id"],
+                    "change_review_evidence_id": row["change_review_evidence_id"],
+                    "change_review_entry_id": row["change_review_entry_id"],
                     "untrusted_work_item_title": title,
                     "source_revision": row["source_revision"],
                     "predecessor_run_id": row["predecessor_run_id"],
@@ -873,9 +882,12 @@ class ControlRoom:
             f"WHERE ic.producer_run_id IN ({placeholders}) OR EXISTS ("
             "SELECT 1 FROM integration_gate_review_runs grr "
             "WHERE grr.policy_id = gp.id AND grr.run_id IN ("
+            f"{placeholders})) OR EXISTS ("
+            "SELECT 1 FROM integration_gate_change_runs gcr "
+            "WHERE gcr.policy_id = gp.id AND gcr.run_id IN ("
             f"{placeholders})) ORDER BY gp.created_at DESC, gp.id"
         )
-        rows = connection.execute(query, (*run_ids, *run_ids)).fetchall()
+        rows = connection.execute(query, (*run_ids, *run_ids, *run_ids)).fetchall()
         if not rows:
             return []
         manifests: dict[str, GatePolicyManifest] = {}
@@ -1481,6 +1493,9 @@ class ControlRoom:
             ).fetchone()[0],
             "integration_gate_review_runs": connection.execute(
                 "SELECT COUNT(*) FROM integration_gate_review_runs"
+            ).fetchone()[0],
+            "integration_gate_change_runs": connection.execute(
+                "SELECT COUNT(*) FROM integration_gate_change_runs"
             ).fetchone()[0],
             "integration_gate_evidence": connection.execute(
                 "SELECT COUNT(*) FROM integration_gate_evidence"

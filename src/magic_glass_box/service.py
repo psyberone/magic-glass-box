@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .candidate_recovery import ensure_candidate_revision
 from .candidates import (
     CANDIDATE_SCHEMA_VERSION,
     CandidateError,
@@ -264,13 +265,49 @@ class ControlPlane:
         )
         if result != source["result"]:
             raise ConflictError("candidate result does not match durable state")
-        if existing is None:
-            materialized = candidate_store.materialize(
-                source["project_id"],
-                Path(repository_path),
-                result,
-                blobs,
+        change_base = None
+        if source["change_policy_id"] is not None:
+            revision = self.database.get_gate_revision(source["change_policy_id"])
+            change_base = CandidateManifest.from_mapping(revision["manifest"])
+            if (
+                change_base.project_id != source["project_id"]
+                or change_base.context_version_id != source["context_version_id"]
+                or change_base.work_thread_id != source["work_thread_id"]
+                or change_base.head_revision != result.source_revision
+                or revision["policy"]["candidate_id"] != source["change_candidate_id"]
+            ):
+                raise ConflictError(
+                    "changes-requested candidate base does not match durable state"
+                )
+            base_repository_path = revision["repository_path"]
+            if base_repository_path is None:
+                raise ConflictError(
+                    "changes-requested candidate has no recovery repository"
+                )
+            ensure_candidate_revision(
+                self.database,
+                result_store,
+                candidate_store,
+                change_base,
+                Path(base_repository_path),
             )
+        if existing is None:
+            if change_base is None:
+                materialized = candidate_store.materialize(
+                    source["project_id"],
+                    Path(repository_path),
+                    result,
+                    blobs,
+                )
+            else:
+                materialized = candidate_store.materialize_revision(
+                    source["project_id"],
+                    Path(repository_path),
+                    result,
+                    blobs,
+                    base_revision=change_base.head_revision,
+                    object_format=change_base.object_format,
+                )
         else:
             assert recorded is not None
             materialized = candidate_store.recover(
@@ -312,24 +349,15 @@ class ControlPlane:
 
         candidate = self.database.get_candidate(candidate_id)
         manifest = CandidateManifest.from_mapping(candidate["manifest"])
-        try:
-            candidate_store.inspect(manifest)
-        except CandidateError:
-            pass
-        else:
-            return candidate
         repository_path = self.database.get_candidate_repository_path(candidate_id)
         if repository_path is None:
             raise ConflictError("candidate project has no repository path")
-        result, blobs = result_store.load_bundle(
-            manifest.attempt_id,
-            expected_digest=manifest.result_content_sha256,
-        )
-        candidate_store.recover(
+        ensure_candidate_revision(
+            self.database,
+            result_store,
+            candidate_store,
             manifest,
             Path(repository_path),
-            result,
-            blobs,
         )
         return candidate
 
@@ -569,24 +597,16 @@ class ControlPlane:
         queue = self.database.get_integration_queue_item(queue_item_id)
         revision = self.database.get_gate_revision(queue["current_policy_id"])
         manifest = CandidateManifest.from_mapping(revision["manifest"])
-        try:
-            candidate_store.inspect(manifest)
-        except CandidateError:
-            repository_path = revision["repository_path"]
-            if repository_path is None:
-                raise ConflictError(
-                    "integration candidate has no recovery repository"
-                ) from None
-            result, blobs = result_store.load_bundle(
-                manifest.attempt_id,
-                expected_digest=manifest.result_content_sha256,
-            )
-            candidate_store.recover_revision(
-                manifest,
-                Path(repository_path),
-                result,
-                blobs,
-            )
+        repository_path = revision["repository_path"]
+        if repository_path is None:
+            raise ConflictError("integration candidate has no recovery repository")
+        ensure_candidate_revision(
+            self.database,
+            result_store,
+            candidate_store,
+            manifest,
+            Path(repository_path),
+        )
         return self.database.issue_landing_plan(
             queue_item_id,
             owner_id=owner_id,
@@ -797,6 +817,43 @@ class ControlPlane:
             gate_policy_id=policy_id,
         )
 
+    def create_changes_run(
+        self,
+        policy_id: str,
+        *,
+        review_evidence_id: str,
+        review_entry_id: str,
+        profile_name: str,
+        requested_by_handle: str,
+        expected_policy_revision: str,
+        krab_session_id: str | None = None,
+        krab_claim_id: str | None = None,
+        supervision_policy: SupervisionPolicy | None = None,
+    ) -> dict[str, Any]:
+        """Return a rejected candidate and its review note to a developer run."""
+
+        requester = self.database.get_user(requested_by_handle)
+        if requester["active"] != 1:
+            raise ConflictError("changes-requested run requester is inactive")
+        target = self.database.get_gate_review_target(policy_id)
+        if target["policy_revision"] != expected_policy_revision:
+            raise ConflictError("gate policy revision changed")
+        if target["review_separation"] is None:
+            raise ConflictError("gate policy does not require independent review")
+        return self.database.create_run(
+            project_key=target["project_key"],
+            profile_name=profile_name,
+            work_item_id=target["work_item_id"],
+            requested_by=requester["id"],
+            source_revision=target["head_revision"],
+            krab_session_id=krab_session_id,
+            krab_claim_id=krab_claim_id,
+            supervision_policy=supervision_policy,
+            change_policy_id=policy_id,
+            change_review_evidence_id=review_evidence_id,
+            change_review_entry_id=review_entry_id,
+        )
+
     def gate_readiness(self, policy_id: str) -> dict[str, Any]:
         return self.database.gate_readiness(policy_id)
 
@@ -837,24 +894,16 @@ class ControlPlane:
             or candidate.object_format != policy.object_format
         ):
             raise ConflictError("gate policy candidate identity changed")
-        try:
-            candidate_store.inspect(candidate)
-        except CandidateError:
-            repository_path = revision["repository_path"]
-            if repository_path is None:
-                raise ConflictError(
-                    "gate policy candidate has no recovery repository"
-                ) from None
-            result, blobs = result_store.load_bundle(
-                candidate.attempt_id,
-                expected_digest=candidate.result_content_sha256,
-            )
-            candidate_store.recover_revision(
-                candidate,
-                Path(repository_path),
-                result,
-                blobs,
-            )
+        repository_path = revision["repository_path"]
+        if repository_path is None:
+            raise ConflictError("gate policy candidate has no recovery repository")
+        ensure_candidate_revision(
+            self.database,
+            result_store,
+            candidate_store,
+            candidate,
+            Path(repository_path),
+        )
 
         workspace_root = self.database.path.parent / "gate-workspaces"
         try:

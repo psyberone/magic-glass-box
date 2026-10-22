@@ -200,6 +200,11 @@ project-activity projection.
   and receive its private snapshot; local validation runs networkless and
   credentialless against a read-only snapshot. Append-only bounded evidence
   derives readiness without retaining review transcripts or command output.
+- Schema v26 adds immutable changes-requested run bindings. A correction run
+  requires the current failed independent-review evidence plus an exact-head
+  review work-log entry from that reviewer attempt, receives the rejected
+  candidate snapshot, and can produce a new child candidate without mutating
+  the rejected gate tuple.
 - Schema v14 adds hard work-item landing dependencies, one serialized lane per
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks

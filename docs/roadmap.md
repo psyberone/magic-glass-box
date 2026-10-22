@@ -921,6 +921,68 @@ absent from the worker, core database, and logs. GitLab, Jira, and other
 services remain independent add-ons that implement only the capability
 families they support.
 
+### First hands-on beta: producer/reviewer correction loop
+
+**Status: complete, including live Imitation Krab exercise**
+
+The first agent-written-code exercise uses `psyberone/imitation-krab` and two
+ordinary durable runs: a producer and an independent reviewer with a different
+profile and Krab identity. This remains an interim choreography rather than the
+future workflow-template system.
+
+Schema v26 closes the one missing return path. A rejecting reviewer must append
+an actionable `review` work-log entry pinned to the exact candidate before the
+attempt exits. `gate changes-create` accepts only the current failed
+independent-review evidence and that exact reviewer-authored entry, then gives
+a developer profile a fresh workspace rooted at the rejected candidate.
+Retries and reassignments keep the binding. A successful correction produces a
+new child candidate with fresh gates; the rejected candidate, policy, and
+evidence are never rewritten. Reviewer profiles are structurally read-only,
+and durable ancestry reconstructs corrected candidates after private-cache
+loss.
+
+The live proof must exercise both branches: reject once and return the requested
+changes to the developer seat, then accept a freshly gated corrected candidate.
+It must also retain the producer/reviewer negative preflight documented in the
+internal beta contract.
+
+The 2026-10-21 live proof did exactly that against Imitation Krab commit
+`83eaec7`. The producer created a three-file health-command candidate. A
+read-only reviewer rejected its test fixture because it attempted to create
+temporary state inside the read-only source checkout. The developer correction
+run began at that exact rejected head and changed only the test fixture. A new
+reviewer approved the child, and the independent-review plus full-suite gates
+became ready after all 102 tests passed. The negative preflight rejected both
+the producer profile and a distinct profile sharing the producer identity.
+Workers had no direct network or credential access; no branch, push, or pull
+request operation ran. Accounted usage was $0.523237 against the $5 ceiling.
+
+The exercise also proved restart recovery. The first connector process reached
+an incorrectly configured 20-turn lifetime cap after the producer completed,
+so the initial reviewer failed closed. MGB retained the producer candidate and
+the failed policy-bound run; a fresh connector process and audited reviewer
+retry resumed the exact candidate without rerunning the producer. The live
+harness now defaults the connector lifetime cap to 64 turns while the durable
+$5 budget remains the resource authority, and supports an explicit failed-
+review resume path.
+
+The completed local checkpoint passes 1,002 tests and Ruff format/lint with 86%
+aggregate statement-plus-branch coverage. A focused mutation wave over the
+correction-run binding, replacement propagation, candidate creation and
+recovery call site, review workspace, gate evidence, and execution projection
+killed 82 of 98 mutants (83.67%). Survivor-driven tests added a genuinely cold
+parent-cache recovery, the 64-byte work-item boundary, and exact review-evidence
+metadata on replacement events. The 16 remaining mutants change diagnostic
+labels or capitalization only; there were no timeouts, uncovered mutants,
+suspicious outcomes, skips, interruptions, or crashes.
+
+Because covered-line discovery did not instrument the newly imported recovery
+module, a second isolated run deliberately mutated every one of its lines. The
+first wave killed 73 of 92; direct survivor tests for cycles, the 32-ancestor
+ceiling, every parent-identity field, recovery order, and exact result digests
+killed ten more, for an effective 83 of 92 (90.22%). Its nine remaining
+survivors change only `CandidateError` diagnostic text.
+
 The broader [capability-provider model](capability-providers.md) does not expand
 the M10 or M11 MVP. It names the semantic surface, provider implementation,
 explicit project binding, and sidecar deployment separately. M11 remains one

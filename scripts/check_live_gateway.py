@@ -128,6 +128,8 @@ class ProofDatabase:
             "work_item": None,
             "handoff": None,
             "recovery_checkpoint": None,
+            "review_assignment": None,
+            "changes_requested": None,
             "work_memory": None,
         }
 

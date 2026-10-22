@@ -187,6 +187,9 @@ class FakeControlPlane:
     ) -> dict[str, object]:
         return self._called("gate.review-record", policy_id=policy_id, **kwargs)
 
+    def create_changes_run(self, policy_id: str, **kwargs: object) -> dict[str, object]:
+        return self._called("gate.changes-create", policy_id=policy_id, **kwargs)
+
     def run_local_validation(
         self, policy_id: str, **kwargs: object
     ) -> dict[str, object]:
@@ -630,6 +633,10 @@ class CLITests(unittest.TestCase):
                         "create a candidate-backed independent review run",
                     ),
                     ("review-record", "record independent-review evidence"),
+                    (
+                        "changes-create",
+                        "return a failed candidate and review note to a developer run",
+                    ),
                     ("validate", "run one pinned local validation gate"),
                     ("evidence-list", "list append-only gate evidence"),
                     ("readiness", "derive current exact-input readiness"),
@@ -865,6 +872,13 @@ class CLITests(unittest.TestCase):
                     "--reviewer-attempt",
                     "--outcome",
                     "--recorded-by",
+                    "--expected-policy-revision",
+                ),
+                ("gate", "changes-create"): (
+                    "--review-evidence",
+                    "--review-entry",
+                    "--profile",
+                    "--requested-by",
                     "--expected-policy-revision",
                 ),
                 ("gate", "validate"): (
@@ -1820,6 +1834,9 @@ class CLITests(unittest.TestCase):
                 "policy-list": "list recent immutable gate policies",
                 "review-create": "create a candidate-backed independent review run",
                 "review-record": "record independent-review evidence",
+                "changes-create": (
+                    "return a failed candidate and review note to a developer run"
+                ),
                 "validate": "run one pinned local validation gate",
                 "evidence-list": "list append-only gate evidence",
                 "readiness": "derive current exact-input readiness",
@@ -2554,6 +2571,49 @@ class CLITests(unittest.TestCase):
                     "outcome": "passed",
                     "recorded_by_handle": "operator",
                     "expected_policy_revision": "a" * 64,
+                },
+            ),
+        )
+
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "changes-create",
+                    policy_id,
+                    "--review-evidence",
+                    "gev_" + "a" * 32,
+                    "--review-entry",
+                    "wle_" + "b" * 32,
+                    "--profile",
+                    "Producer",
+                    "--requested-by",
+                    "operator",
+                    "--expected-policy-revision",
+                    "a" * 64,
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "gate.changes-create",
+                {
+                    "policy_id": policy_id,
+                    "review_evidence_id": "gev_" + "a" * 32,
+                    "review_entry_id": "wle_" + "b" * 32,
+                    "profile_name": "Producer",
+                    "requested_by_handle": "operator",
+                    "expected_policy_revision": "a" * 64,
+                    "krab_session_id": None,
+                    "krab_claim_id": None,
+                    "supervision_policy": None,
                 },
             ),
         )

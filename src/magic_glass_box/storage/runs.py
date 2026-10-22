@@ -10,6 +10,9 @@ from ..domain import (
     RunState,
     SupervisionPolicy,
     ValidationError,
+    WorkLogEntry,
+    WorkLogKind,
+    WorkspaceMode,
     canonical_json,
     require_string,
     validate_krab_id,
@@ -38,6 +41,9 @@ class RunStorage:
         krab_claim_id: str | None = None,
         supervision_policy: SupervisionPolicy | None = None,
         gate_policy_id: str | None = None,
+        change_policy_id: str | None = None,
+        change_review_evidence_id: str | None = None,
+        change_review_entry_id: str | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
@@ -49,6 +55,31 @@ class RunStorage:
         if gate_policy_id is not None:
             gate_policy_id = require_string(
                 gate_policy_id, field="gate_policy_id", max_bytes=64
+            )
+        change_values = (
+            change_policy_id,
+            change_review_evidence_id,
+            change_review_entry_id,
+        )
+        if any(value is not None for value in change_values):
+            if not all(value is not None for value in change_values):
+                raise ValidationError("change-request binding is incomplete")
+            if gate_policy_id is not None:
+                raise ValidationError(
+                    "a run cannot be both a review and changes-requested run"
+                )
+            change_policy_id = require_string(
+                change_policy_id, field="change_policy_id", max_bytes=64
+            )
+            change_review_evidence_id = require_string(
+                change_review_evidence_id,
+                field="change_review_evidence_id",
+                max_bytes=64,
+            )
+            change_review_entry_id = require_string(
+                change_review_entry_id,
+                field="change_review_entry_id",
+                max_bytes=64,
             )
         if krab_session_id is not None:
             krab_session_id = validate_krab_id(krab_session_id, "ses")
@@ -72,7 +103,9 @@ class RunStorage:
                 if project is None or not project["active"]:
                     raise NotFoundError(f"active project not found: {project_key}")
                 gate_policy = None
-                if gate_policy_id is not None:
+                change_target = None
+                bound_policy_id = gate_policy_id or change_policy_id
+                if bound_policy_id is not None:
                     gate_policy = connection.execute(
                         "SELECT gp.id, gp.candidate_id, gp.project_id, "
                         "gp.context_version_id, gp.work_thread_id, "
@@ -88,14 +121,12 @@ class RunStorage:
                         "JOIN agent_profile_versions producer_profile "
                         "ON producer_profile.id = producer_attempt.profile_version_id "
                         "WHERE gp.id = ?",
-                        (gate_policy_id,),
+                        (bound_policy_id,),
                     ).fetchone()
                     if gate_policy is None:
-                        raise NotFoundError(f"gate policy not found: {gate_policy_id}")
+                        raise NotFoundError(f"gate policy not found: {bound_policy_id}")
                     if gate_policy["project_id"] != project["id"]:
-                        raise ConflictError(
-                            "gate review policy belongs to another project"
-                        )
+                        raise ConflictError("gate policy belongs to another project")
                     if gate_policy["review_separation"] is None:
                         raise ConflictError(
                             "gate policy does not require independent review"
@@ -104,11 +135,102 @@ class RunStorage:
                         source_revision is not None
                         and source_revision != gate_policy["head_revision"]
                     ):
-                        raise ConflictError(
-                            "gate review source revision must match the exact head"
-                        )
+                        raise ConflictError("run source revision must match exact head")
                     source_revision = gate_policy["head_revision"]
                     context = {"id": gate_policy["context_version_id"]}
+                    if change_policy_id is not None:
+                        evidence = connection.execute(
+                            "SELECT id, policy_id, candidate_id, kind, gate_name, "
+                            "outcome, reviewer_run_id, reviewer_attempt_id "
+                            "FROM integration_gate_evidence WHERE id = ?",
+                            (change_review_evidence_id,),
+                        ).fetchone()
+                        if evidence is None:
+                            raise NotFoundError(
+                                "gate review evidence not found: "
+                                + change_review_evidence_id
+                            )
+                        if (
+                            evidence["policy_id"] != gate_policy["id"]
+                            or evidence["candidate_id"] != gate_policy["candidate_id"]
+                            or evidence["kind"] != "independent_review"
+                            or evidence["gate_name"] != "independent-review"
+                        ):
+                            raise ConflictError(
+                                "review evidence does not match the policy candidate"
+                            )
+                        if evidence["outcome"] != "failed":
+                            raise ConflictError(
+                                "changes requested require failed review evidence"
+                            )
+                        latest = connection.execute(
+                            "SELECT id FROM integration_gate_evidence "
+                            "WHERE policy_id = ? AND gate_name = "
+                            "'independent-review' ORDER BY sequence DESC LIMIT 1",
+                            (gate_policy["id"],),
+                        ).fetchone()
+                        if latest is None or latest["id"] != evidence["id"]:
+                            raise ConflictError(
+                                "changes requested require the current review evidence"
+                            )
+                        entry_row = connection.execute(
+                            "SELECT id, work_thread_id, kind, content_json, "
+                            "content_sha256, author_run_id, author_attempt_id "
+                            "FROM work_log_entries WHERE id = ?",
+                            (change_review_entry_id,),
+                        ).fetchone()
+                        if entry_row is None:
+                            raise NotFoundError(
+                                "work-log entry not found: " + change_review_entry_id
+                            )
+                        try:
+                            review_entry = WorkLogEntry.from_mapping(
+                                json.loads(entry_row["content_json"])
+                            )
+                        except (
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValidationError,
+                        ) as exc:
+                            raise StorageError(
+                                "stored review work-log entry is invalid"
+                            ) from exc
+                        if (
+                            review_entry.digest != entry_row["content_sha256"]
+                            or entry_row["kind"] != WorkLogKind.REVIEW.value
+                            or review_entry.kind is not WorkLogKind.REVIEW
+                        ):
+                            raise ConflictError(
+                                "changes requested require a review work-log entry"
+                            )
+                        if (
+                            not review_entry.summary.strip()
+                            .upper()
+                            .startswith("CHANGES REQUESTED")
+                            or not review_entry.details
+                        ):
+                            raise ConflictError(
+                                "changes requested require an actionable "
+                                "changes-requested note"
+                            )
+                        if (
+                            entry_row["work_thread_id"] != gate_policy["work_thread_id"]
+                            or entry_row["author_run_id"] != evidence["reviewer_run_id"]
+                            or entry_row["author_attempt_id"]
+                            != evidence["reviewer_attempt_id"]
+                        ):
+                            raise ConflictError(
+                                "review work-log entry does not match review evidence"
+                            )
+                        if (
+                            review_entry.candidate_revision
+                            != gate_policy["head_revision"]
+                        ):
+                            raise ConflictError(
+                                "review work-log entry is not pinned to the exact "
+                                "candidate"
+                            )
+                        change_target = evidence
                 else:
                     context = connection.execute(
                         "SELECT id FROM project_context_versions "
@@ -165,7 +287,7 @@ class RunStorage:
                     raise ConflictError(
                         "agent profile and project belong to different Krab instances"
                     )
-                if gate_policy is not None:
+                if gate_policy_id is not None:
                     separation = gate_policy["review_separation"]
                     if (
                         separation
@@ -194,6 +316,13 @@ class RunStorage:
                     )
                 except (json.JSONDecodeError, TypeError, ValidationError) as exc:
                     raise StorageError("stored agent profile is invalid") from exc
+                if (
+                    gate_policy_id is not None
+                    and profile_spec.workspace_mode is not WorkspaceMode.READ_ONLY
+                ):
+                    raise ConflictError(
+                        "independent reviewer profile must use a read-only workspace"
+                    )
                 provider_grants = self._available_provider_grants(
                     connection, profile_spec
                 )
@@ -222,18 +351,40 @@ class RunStorage:
                     ),
                 )
                 if gate_policy is not None:
-                    connection.execute(
-                        "INSERT INTO integration_gate_review_runs "
-                        "(run_id, policy_id, candidate_id, created_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (
-                            run_id,
-                            gate_policy["id"],
-                            gate_policy["candidate_id"],
-                            now,
-                        ),
+                    binding_table = (
+                        "integration_gate_review_runs"
+                        if gate_policy_id is not None
+                        else "integration_gate_change_runs"
                     )
-                event_metadata: dict[str, str] = {}
+                    if binding_table == "integration_gate_review_runs":
+                        connection.execute(
+                            "INSERT INTO integration_gate_review_runs "
+                            "(run_id, policy_id, candidate_id, created_at) "
+                            "VALUES (?, ?, ?, ?)",
+                            (
+                                run_id,
+                                gate_policy["id"],
+                                gate_policy["candidate_id"],
+                                now,
+                            ),
+                        )
+                    else:
+                        assert change_target is not None
+                        connection.execute(
+                            "INSERT INTO integration_gate_change_runs "
+                            "(run_id, policy_id, candidate_id, "
+                            "review_evidence_id, review_entry_id, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                run_id,
+                                gate_policy["id"],
+                                gate_policy["candidate_id"],
+                                change_target["id"],
+                                change_review_entry_id,
+                                now,
+                            ),
+                        )
+                event_metadata: dict[str, Any] = {}
                 if supervision_policy != SupervisionPolicy.disabled():
                     event_metadata["supervision_policy_sha256"] = (
                         supervision_policy.digest
@@ -241,6 +392,10 @@ class RunStorage:
                 if gate_policy is not None:
                     event_metadata["gate_policy_id"] = gate_policy["id"]
                     event_metadata["candidate_id"] = gate_policy["candidate_id"]
+                if change_target is not None:
+                    event_metadata["changes_requested"] = True
+                    event_metadata["review_evidence_id"] = change_target["id"]
+                    event_metadata["review_entry_id"] = change_review_entry_id
                 connection.execute(
                     "INSERT INTO run_events "
                     "(run_id, sequence, kind, from_state, to_state, metadata_json, "
@@ -343,7 +498,9 @@ class RunStorage:
                     "p.krab_instance_id, wt.state AS thread_state, "
                     "ap.id AS profile_id, ap.active AS profile_active, "
                     "ap.name AS profile_name, "
-                    "av.krab_identity_id AS profile_identity_id "
+                    "av.krab_identity_id AS profile_identity_id, "
+                    "av.spec_json AS profile_spec_json, "
+                    "av.content_sha256 AS profile_content_sha256 "
                     "FROM runs r JOIN projects p ON p.id = r.project_id "
                     "JOIN work_threads wt ON wt.id = r.work_thread_id "
                     "JOIN agent_profile_versions av "
@@ -390,10 +547,32 @@ class RunStorage:
                     "WHERE grr.run_id = ?",
                     (run_id,),
                 ).fetchone()
+                change_target = connection.execute(
+                    "SELECT policy_id, candidate_id, review_evidence_id, "
+                    "review_entry_id FROM integration_gate_change_runs "
+                    "WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if review_target is not None and change_target is not None:
+                    raise StorageError(
+                        "run has conflicting review and changes-requested bindings"
+                    )
 
                 if replacement_kind == "retry":
                     if not source["profile_active"]:
                         raise ConflictError("run profile is not active")
+                    try:
+                        selected_profile_spec = AgentProfileSpec.from_mapping(
+                            json.loads(source["profile_spec_json"])
+                        )
+                    except (
+                        json.JSONDecodeError,
+                        TypeError,
+                        ValidationError,
+                    ) as exc:
+                        raise StorageError("stored agent profile is invalid") from exc
+                    if selected_profile_spec.digest != source["profile_content_sha256"]:
+                        raise StorageError("stored agent profile digest does not match")
                     profile_version_id = source["profile_version_id"]
                     authority_rows = connection.execute(
                         "SELECT rpg.authority_name, pg.id, pg.state, "
@@ -467,6 +646,7 @@ class RunStorage:
                         raise StorageError("stored agent profile is invalid") from exc
                     if target_spec.digest != target["content_sha256"]:
                         raise StorageError("stored agent profile digest does not match")
+                    selected_profile_spec = target_spec
                     profile_version_id = target["profile_version_id"]
                     profile_id = target["profile_id"]
                     profile_identity_id = target["krab_identity_id"]
@@ -476,6 +656,14 @@ class RunStorage:
                     authorities = [(row["name"], row["id"]) for row in authority_rows]
 
                 if review_target is not None:
+                    if (
+                        selected_profile_spec.workspace_mode
+                        is not WorkspaceMode.READ_ONLY
+                    ):
+                        raise ConflictError(
+                            "independent reviewer profile must use a read-only "
+                            "workspace"
+                        )
                     separation = review_target["review_separation"]
                     if (
                         separation
@@ -538,6 +726,20 @@ class RunStorage:
                             now,
                         ),
                     )
+                if change_target is not None:
+                    connection.execute(
+                        "INSERT INTO integration_gate_change_runs "
+                        "(run_id, policy_id, candidate_id, review_evidence_id, "
+                        "review_entry_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            replacement_run_id,
+                            change_target["policy_id"],
+                            change_target["candidate_id"],
+                            change_target["review_evidence_id"],
+                            change_target["review_entry_id"],
+                            now,
+                        ),
+                    )
                 try:
                     source_policy = SupervisionPolicy.from_mapping(
                         json.loads(source["supervision_policy_json"])
@@ -551,6 +753,14 @@ class RunStorage:
                 if review_target is not None:
                     created_event["gate_policy_id"] = review_target["policy_id"]
                     created_event["candidate_id"] = review_target["candidate_id"]
+                if change_target is not None:
+                    created_event["gate_policy_id"] = change_target["policy_id"]
+                    created_event["candidate_id"] = change_target["candidate_id"]
+                    created_event["changes_requested"] = True
+                    created_event["review_evidence_id"] = change_target[
+                        "review_evidence_id"
+                    ]
+                    created_event["review_entry_id"] = change_target["review_entry_id"]
                 if source_policy != SupervisionPolicy.disabled():
                     created_event["supervision_policy_sha256"] = source_policy.digest
                 created_metadata = canonical_json(created_event)

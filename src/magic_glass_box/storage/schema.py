@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1347,6 +1347,40 @@ CREATE TRIGGER integration_gate_evidence_immutable_delete
 BEFORE DELETE ON integration_gate_evidence
 BEGIN
     SELECT RAISE(ABORT, 'integration gate evidence cannot be deleted');
+END;
+"""
+
+GATE_CHANGE_SCHEMA = """
+CREATE TABLE integration_gate_change_runs (
+    run_id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    review_evidence_id TEXT NOT NULL,
+    review_entry_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (review_evidence_id)
+        REFERENCES integration_gate_evidence(id) ON DELETE RESTRICT,
+    FOREIGN KEY (review_entry_id)
+        REFERENCES work_log_entries(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX integration_gate_change_evidence
+    ON integration_gate_change_runs(review_evidence_id, created_at DESC);
+
+CREATE TRIGGER integration_gate_change_run_immutable_update
+BEFORE UPDATE ON integration_gate_change_runs
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate change runs are immutable');
+END;
+CREATE TRIGGER integration_gate_change_run_immutable_delete
+BEFORE DELETE ON integration_gate_change_runs
+BEGIN
+    SELECT RAISE(ABORT, 'integration gate change runs cannot be deleted');
 END;
 """
 
@@ -3565,6 +3599,7 @@ SCHEMA = (
     + SERVICE_SIDECAR_SCHEMA
     + CAPABILITY_BINDING_SCHEMA
     + PROVIDER_LANDING_SCHEMA
+    + GATE_CHANGE_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -3591,4 +3626,5 @@ MIGRATIONS = {
     22: SERVICE_SIDECAR_SCHEMA,
     23: CAPABILITY_BINDING_SCHEMA,
     24: PROVIDER_LANDING_SCHEMA,
+    25: GATE_CHANGE_SCHEMA,
 }

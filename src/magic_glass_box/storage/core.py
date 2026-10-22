@@ -430,6 +430,10 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM integration_gate_review_runs",
                 ),
                 (
+                    "integration_gate_change_runs",
+                    "SELECT COUNT(*) FROM integration_gate_change_runs",
+                ),
+                (
                     "integration_gate_evidence",
                     "SELECT COUNT(*) FROM integration_gate_evidence",
                 ),

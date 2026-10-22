@@ -43,7 +43,14 @@ class QueryStorage:
                 "wiv.content_json AS work_item_json, "
                 "wiv.content_sha256 AS work_item_sha256, "
                 "grr.policy_id AS gate_policy_id, "
-                "grr.candidate_id AS review_candidate_id "
+                "grr.candidate_id AS review_candidate_id, "
+                "review_policy.head_revision AS review_head_revision, "
+                "review_policy.policy_revision AS review_policy_revision, "
+                "review_policy.review_separation AS review_separation, "
+                "gcr.policy_id AS change_policy_id, "
+                "gcr.candidate_id AS change_candidate_id, "
+                "gcr.review_evidence_id AS change_review_evidence_id, "
+                "gcr.review_entry_id AS change_review_entry_id "
                 "FROM runs r JOIN projects p ON p.id = r.project_id "
                 "JOIN project_context_versions c ON c.id = r.context_version_id "
                 "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
@@ -52,6 +59,9 @@ class QueryStorage:
                 "ON wiv.id = r.work_item_version_id "
                 "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
                 "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
+                "LEFT JOIN integration_gate_policies review_policy "
+                "ON review_policy.id = grr.policy_id "
+                "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
@@ -144,6 +154,30 @@ class QueryStorage:
             after_sequence=None,
             limit=16,
         )
+        result["review_assignment"] = (
+            None
+            if result["review_candidate_id"] is None
+            else {
+                "policy_id": result["gate_policy_id"],
+                "candidate_id": result["review_candidate_id"],
+                "head_revision": result["review_head_revision"],
+                "policy_revision": result["review_policy_revision"],
+                "review_separation": result["review_separation"],
+            }
+        )
+        change_entry_id = result["change_review_entry_id"]
+        result["changes_requested"] = (
+            None
+            if change_entry_id is None
+            else {
+                "policy_id": result["change_policy_id"],
+                "candidate_id": result["change_candidate_id"],
+                "review_evidence_id": result["change_review_evidence_id"],
+                "review_entry": self._work_log_record(
+                    self._work_log_row(connection, change_entry_id)
+                ),
+            }
+        )
         return result
 
     def get_run_transport(self, run_id: str) -> dict[str, Any]:
@@ -186,6 +220,10 @@ class QueryStorage:
                 "r.started_at, r.finished_at, p.krab_project_key AS project_key, "
                 "grr.policy_id AS gate_policy_id, "
                 "grr.candidate_id AS review_candidate_id, "
+                "gcr.policy_id AS change_policy_id, "
+                "gcr.candidate_id AS change_candidate_id, "
+                "gcr.review_evidence_id AS change_review_evidence_id, "
+                "gcr.review_entry_id AS change_review_entry_id, "
                 "c.id AS context_version_id, c.version AS context_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
                 "av.version AS profile_version, u.handle AS requested_by, "
@@ -201,6 +239,7 @@ class QueryStorage:
                 "ON wiv.id = r.work_item_version_id "
                 "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
                 "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
+                "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()

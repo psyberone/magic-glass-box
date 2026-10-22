@@ -1363,6 +1363,32 @@ class GitCandidateStore:
     ) -> MaterializedCandidate:
         return self._materialize(project_id, repository, result, blobs, expected=None)
 
+    def materialize_revision(
+        self,
+        project_id: str,
+        repository: Path,
+        result: ResultManifest,
+        blobs: Mapping[str, bytes],
+        *,
+        base_revision: str,
+        object_format: str,
+    ) -> MaterializedCandidate:
+        """Create a child candidate from a revision retained in this store."""
+
+        if result.source_revision != base_revision:
+            raise CandidateError(
+                "candidate result does not start from the requested revision"
+            )
+        return self._materialize(
+            project_id,
+            repository,
+            result,
+            blobs,
+            expected=None,
+            requested_base=base_revision,
+            requested_object_format=object_format,
+        )
+
     def _materialize(
         self,
         project_id: str,

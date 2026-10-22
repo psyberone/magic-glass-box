@@ -133,6 +133,8 @@ class FakeGatewayDatabase:
                 "pending_interaction_ids": [INTERACTION_ID],
             },
             "recovery_checkpoint": self.recovery_checkpoint,
+            "review_assignment": None,
+            "changes_requested": None,
             "work_memory": {
                 "thread_id": "wth_" + "8" * 32,
                 "work_item_id": "wki_" + "4" * 32,
@@ -399,6 +401,8 @@ class RunGatewayTests(unittest.TestCase):
         self.assertEqual(result["context"]["purpose"], "Build the box")
         self.assertEqual(result["handoff"]["id"], HANDOFF_ID)
         self.assertIsNone(result["recovery_checkpoint"])
+        self.assertIsNone(result["review_assignment"])
+        self.assertIsNone(result["changes_requested"])
         self.assertEqual(result["work_memory"]["version"], 3)
         self.assertEqual(
             result["authority"],

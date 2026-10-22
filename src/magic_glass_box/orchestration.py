@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from .candidate_recovery import ensure_candidate_revision
 from .candidates import CandidateError, CandidateManifest, GitCandidateStore
 from .db import ConflictError, Database, NotFoundError, StorageError
 from .domain import (
@@ -90,7 +91,7 @@ class CandidateReviewWorkspaceProvider(Protocol):
 
 
 class CandidateReviewWorkspaces:
-    """Recover and materialize the exact private candidate bound to a review."""
+    """Recover and materialize an exact private candidate bound to a run."""
 
     def __init__(
         self,
@@ -110,26 +111,25 @@ class CandidateReviewWorkspaces:
             manifest = CandidateManifest.from_mapping(revision["manifest"])
         except (CandidateError, TypeError) as exc:
             raise RunOrchestrationError(
-                "candidate-backed review has invalid durable identity"
+                "candidate-backed run has invalid durable identity"
             ) from exc
         try:
-            self.candidate_store.inspect(manifest)
-        except CandidateError:
             repository_path = revision["repository_path"]
             if repository_path is None:
                 raise RunOrchestrationError(
-                    "candidate-backed review has no recovery repository"
-                ) from None
-            result, blobs = self.result_store.load_bundle(
-                manifest.attempt_id,
-                expected_digest=manifest.result_content_sha256,
-            )
-            self.candidate_store.recover_revision(
+                    "candidate-backed run has no recovery repository"
+                )
+            ensure_candidate_revision(
+                self.database,
+                self.result_store,
+                self.candidate_store,
                 manifest,
                 Path(repository_path),
-                result,
-                blobs,
             )
+        except CandidateError as exc:
+            raise RunOrchestrationError(
+                "candidate-backed run could not recover its exact revision"
+            ) from exc
         return self.workspaces.prepare_materialized(
             run_id,
             lambda destination: self.candidate_store.snapshot(manifest, destination),
@@ -336,13 +336,24 @@ class RunCoordinator:
                 context = ProjectContext.from_mapping(inputs["context"])
                 profile = AgentProfileSpec.from_mapping(inputs["profile"])
                 review_candidate_id = inputs["review_candidate_id"]
-                if review_candidate_id is not None:
+                change_candidate_id = inputs["change_candidate_id"]
+                if review_candidate_id is not None and change_candidate_id is not None:
+                    raise RunOrchestrationError(
+                        "run has conflicting candidate-backed bindings"
+                    )
+                candidate_id = review_candidate_id or change_candidate_id
+                candidate_policy_id = (
+                    inputs["gate_policy_id"]
+                    if review_candidate_id is not None
+                    else inputs["change_policy_id"]
+                )
+                if candidate_id is not None:
                     if self.candidate_workspaces is None:
                         raise RunOrchestrationError(
-                            "candidate-backed review has no workspace provider"
+                            "candidate-backed run has no workspace provider"
                         )
                     prepared = self.candidate_workspaces.prepare(
-                        run_id, inputs["gate_policy_id"]
+                        run_id, candidate_policy_id
                     )
                 else:
                     if context.repository_path is None:

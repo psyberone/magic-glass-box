@@ -38,6 +38,8 @@ class LiveGatewayProofContractTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertIsNone(response["result"]["handoff"])
         self.assertIsNone(response["result"]["recovery_checkpoint"])
+        self.assertIsNone(response["result"]["review_assignment"])
+        self.assertIsNone(response["result"]["changes_requested"])
         self.assertIsNone(response["result"]["work_memory"])
         self.assertEqual(control.database.describe_calls, 1)
 

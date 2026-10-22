@@ -67,6 +67,23 @@ separation rule. Review evidence is accepted only from a successful attempt of
 such a bound run. A generic run that merely reports the same source revision is
 not review authority.
 
+Review profiles are required to use `workspace_mode: read_only`. That check is
+performed when review runs and replacements are created and again when review
+evidence is accepted; it is not merely a reviewer prompt convention.
+
+A rejecting reviewer records actionable feedback as a `review` work-log entry
+before its attempt exits, with `candidate_revision` set to the exact reviewed
+head. After failed evidence is recorded, `gate changes-create` requires that
+current failed evidence and the note authored by its exact reviewer attempt.
+It creates an ordinary developer run whose workspace starts at the rejected
+candidate, and exposes the selected review entry explicitly through
+`run.describe`. Retry or reassignment preserves this binding. The developer's
+result becomes a new child candidate; the rejected candidate, policy, and
+failed evidence remain immutable, and the child requires a fresh policy and
+independent review. Cache recovery follows the durable changes-requested
+ancestry so a corrected candidate can still be reconstructed when its parent
+is an MGB-generated commit rather than a commit present in the source checkout.
+
 ### Candidate and combined-tree validation
 
 Candidate-only checks are insufficient when two individually valid changes
@@ -109,6 +126,31 @@ magic-glass-box gate review-record gpl_<id> --reviewer-attempt att_<id> \
   --outcome passed --recorded-by operator \
   --expected-policy-revision <sha256>
 ```
+
+When review fails, return the exact candidate and durable changes-requested
+entry to a developer profile:
+
+```console
+magic-glass-box gate review-record gpl_<id> --reviewer-attempt att_<id> \
+  --outcome failed --recorded-by operator \
+  --expected-policy-revision <sha256>
+magic-glass-box gate changes-create gpl_<id> \
+  --review-evidence gev_<id> --review-entry wle_<id> --profile Producer \
+  --requested-by operator --expected-policy-revision <sha256>
+magic-glass-box run execute run_<id>
+magic-glass-box candidate create att_<id> --created-by operator
+# create a fresh policy and independent review for the new cnd_<id>
+```
+
+The repository also contains
+`scripts/check_live_imitation_krab_beta.py`, an explicitly opted-in real-account
+proof of this choreography. Its connector invocation limit applies to the
+whole sidecar process across every seat, while the provider grant supplies the
+durable monetary ceiling. If the connector disappears after a producer has
+created a candidate, `--resume-review-run run_<failed-review>` starts an audited
+review retry against the retained exact candidate instead of rerunning the
+producer. The proof prints push and pull-request commands as handoff material
+but never executes them.
 
 Run a pinned local check and inspect current state:
 

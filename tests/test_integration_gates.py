@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,7 @@ from unittest import mock
 from magic_glass_box.candidates import CandidateManifest, GitCandidateStore
 from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import (
+    GATE_CHANGE_SCHEMA,
     GATE_SCHEMA,
     SCHEMA,
     SCHEMA_VERSION,
@@ -25,7 +27,9 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     NetworkMode,
     ProjectContext,
+    ValidationError,
     WorkItemEnvelope,
+    WorkLogEntry,
     WorkspaceMode,
 )
 from magic_glass_box.executor import DockerImage, SandboxPlan, SandboxResult
@@ -316,6 +320,22 @@ class GateEvidenceManifestTests(unittest.TestCase):
                     requested_by="boxu_" + "b" * 32,
                 ),
             )
+        with self.assertRaisesRegex(GateError, "identity"):
+            ReviewEvidence(
+                GATE_EVIDENCE_SCHEMA_VERSION,
+                inputs,
+                GateOutcome.PASSED,
+                ReviewSeparation.DIFFERENT_PROFILE_AND_IDENTITY,
+                producer,
+                RunProvenance(
+                    run_id="run_" + "b" * 32,
+                    attempt_id="att_" + "b" * 32,
+                    profile_id="agp_" + "b" * 32,
+                    profile_version_id="apv_" + "b" * 32,
+                    identity_id=producer.identity_id,
+                    requested_by="boxu_" + "b" * 32,
+                ),
+            )
         with self.assertRaisesRegex(GateError, "exit code"):
             ValidationEvidence(
                 GATE_EVIDENCE_SCHEMA_VERSION,
@@ -408,7 +428,11 @@ class GateLedgerTests(unittest.TestCase):
         self.producer_profile = self.database.create_agent_profile(
             name="Producer",
             spec=AgentProfileSpec.from_mapping(
-                {"image": "worker:local", "command": ["worker", "run"]}
+                {
+                    "image": "worker:local",
+                    "command": ["worker", "run"],
+                    "network_mode": "none",
+                }
             ),
             krab_identity_id=self.producer_identity["id"],
             created_by=self.user["id"],
@@ -420,6 +444,7 @@ class GateLedgerTests(unittest.TestCase):
                     "image": "reviewer:local",
                     "command": ["reviewer", "run"],
                     "network_mode": "none",
+                    "workspace_mode": "read_only",
                 }
             ),
             krab_identity_id=self.reviewer_identity["id"],
@@ -454,6 +479,7 @@ class GateLedgerTests(unittest.TestCase):
         source_revision: str,
         changed: bool,
         digit: str,
+        while_running: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
         preparing = self.database.begin_run_attempt(
             run["id"],
@@ -483,6 +509,8 @@ class GateLedgerTests(unittest.TestCase):
             (workspace / "file.txt").write_text("after\n", encoding="utf-8")
         captured = result_store.capture(attempt["id"], workspace)
         self.database.record_attempt_result(attempt["id"], captured.manifest)
+        if while_running is not None:
+            while_running(attempt)
         return self.database.complete_run_attempt(
             attempt["id"],
             owner_id="gate-test",
@@ -490,6 +518,66 @@ class GateLedgerTests(unittest.TestCase):
             exit_code=0,
             image_id="sha256:" + digit * 64,
         )
+
+    def rejected_review(
+        self,
+        policy: dict[str, object],
+        *,
+        candidate_revision: str | None = None,
+        summary: str = "Changes requested",
+        details: list[str] | None = None,
+        digit: str = "5",
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        review_run = self.control.create_review_run(
+            policy["id"],
+            profile_name="Reviewer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        review_entry: dict[str, object] = {}
+
+        def record_changes(_attempt: dict[str, object]) -> None:
+            review_entry.update(
+                self.control.append_work_log(
+                    review_run["id"],
+                    WorkLogEntry.from_mapping(
+                        {
+                            "schema_version": 1,
+                            "kind": "review",
+                            "summary": summary,
+                            "details": (
+                                [
+                                    "Preserve the acknowledgement before closing "
+                                    "the item."
+                                ]
+                                if details is None
+                                else details
+                            ),
+                            "artifacts": [],
+                            "related_interaction_ids": [],
+                            "candidate_revision": candidate_revision
+                            or self.candidate["head_revision"],
+                        }
+                    ),
+                    idempotency_key="review-changes-requested",
+                )
+            )
+
+        review_attempt = self._succeed_attempt(
+            review_run,
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit=digit,
+            while_running=record_changes,
+        )
+        evidence = self.control.record_review_evidence(
+            policy["id"],
+            reviewer_attempt_id=review_attempt["id"],
+            outcome="failed",
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        return evidence, review_entry
 
     def policy_spec(self) -> GatePolicySpec:
         return GatePolicySpec.from_mapping(
@@ -516,6 +604,21 @@ class GateLedgerTests(unittest.TestCase):
     def create_policy(self) -> dict[str, object]:
         return self.database.create_gate_policy(
             self.policy_manifest(), created_by=self.user["id"]
+        )
+
+    def create_same_identity_reviewer_profile(self) -> dict[str, object]:
+        return self.database.create_agent_profile(
+            name="SameIdentityReviewer",
+            spec=AgentProfileSpec.from_mapping(
+                {
+                    "image": "same-identity-reviewer:local",
+                    "command": ["reviewer", "run"],
+                    "network_mode": "none",
+                    "workspace_mode": "read_only",
+                }
+            ),
+            krab_identity_id=self.producer_identity["id"],
+            created_by=self.user["id"],
         )
 
     def provenance(
@@ -866,6 +969,57 @@ class GateLedgerTests(unittest.TestCase):
 
         self.assertEqual(self.database.status()["counts"]["runs"], 1)
 
+    def test_review_run_requires_a_read_only_reviewer_profile(self) -> None:
+        policy = self.create_policy()
+        self.database.create_agent_profile(
+            name="MutableReviewer",
+            spec=AgentProfileSpec.from_mapping(
+                {
+                    "image": "mutable-reviewer:local",
+                    "command": ["reviewer", "run"],
+                    "network_mode": "none",
+                }
+            ),
+            krab_identity_id=self.reviewer_identity["id"],
+            created_by=self.user["id"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "read-only"):
+            self.control.create_review_run(
+                policy["id"],
+                profile_name="MutableReviewer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+        self.assertEqual(self.database.status()["counts"]["runs"], 1)
+
+    def test_run_creation_rejects_an_oversized_work_item_identifier(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "work_item_id"):
+            self.database.create_run(
+                project_key="project",
+                profile_name="Producer",
+                work_item_id="w" * 65,
+                requested_by=self.user["id"],
+                source_revision=self.base,
+            )
+
+    def test_review_run_rejects_a_distinct_profile_with_the_producer_identity(
+        self,
+    ) -> None:
+        policy = self.create_policy()
+        self.create_same_identity_reviewer_profile()
+
+        with self.assertRaisesRegex(ConflictError, "identity"):
+            self.control.create_review_run(
+                policy["id"],
+                profile_name="SameIdentityReviewer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+        self.assertEqual(self.database.status()["counts"]["runs"], 1)
+
     def test_active_review_keeps_its_gate_visible_when_terminal_history_is_zero(
         self,
     ) -> None:
@@ -917,6 +1071,15 @@ class GateLedgerTests(unittest.TestCase):
                 expected_run_version=finished["version"],
             )
 
+        self.create_same_identity_reviewer_profile()
+        with self.assertRaisesRegex(ConflictError, "identity"):
+            self.database.reassign_run(
+                run["id"],
+                profile_name="SameIdentityReviewer",
+                requested_by=self.user["id"],
+                expected_run_version=finished["version"],
+            )
+
         replacement = self.database.retry_run(
             run["id"],
             requested_by=self.user["id"],
@@ -925,6 +1088,224 @@ class GateLedgerTests(unittest.TestCase):
         execution = self.database.get_run_execution(replacement["id"])
         self.assertEqual(execution["gate_policy_id"], policy["id"])
         self.assertEqual(execution["review_candidate_id"], self.candidate["id"])
+
+    def test_failed_review_hands_exact_candidate_and_feedback_back_to_developer(
+        self,
+    ) -> None:
+        policy = self.create_policy()
+        evidence, review_entry = self.rejected_review(policy)
+
+        changes_run = self.control.create_changes_run(
+            policy["id"],
+            review_evidence_id=evidence["id"],
+            review_entry_id=review_entry["id"],
+            profile_name="Producer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        execution = self.database.get_run_execution(changes_run["id"])
+
+        self.assertEqual(changes_run["change_policy_id"], policy["id"])
+        self.assertEqual(changes_run["change_candidate_id"], self.candidate["id"])
+        self.assertEqual(
+            changes_run["source_revision"], self.candidate["head_revision"]
+        )
+        self.assertEqual(
+            execution["changes_requested"]["review_entry"]["id"],
+            review_entry["id"],
+        )
+        self.assertEqual(
+            execution["changes_requested"]["review_entry"]["details"],
+            ["Preserve the acknowledgement before closing the item."],
+        )
+
+        observed: list[str] = []
+
+        class Executor:
+            def execute(inner_self, request: object, *, before_start=None):
+                observed.append(
+                    (request.workspace / "file.txt").read_text(encoding="utf-8")
+                )
+                (request.workspace / "file.txt").write_text(
+                    "corrected\n", encoding="utf-8"
+                )
+                plan = SandboxPlan(
+                    request.run_id,
+                    "magic-glass-box-changes",
+                    "sha256:" + "6" * 64,
+                    (),
+                )
+                assert before_start is not None
+                before_start(plan, "6" * 64)
+                return SandboxResult(
+                    "6" * 64,
+                    plan.container_name,
+                    plan.image_id,
+                    0,
+                )
+
+            @staticmethod
+            def cleanup_run(_run_id: str) -> int:
+                return 0
+
+            @staticmethod
+            def stop_run(_run_id: str) -> int:
+                return 1
+
+        workspaces = WorkspaceManager(
+            self.root / "changes-workspaces", GitSnapshotter(binary=self.git_binary)
+        )
+        candidate_workspaces = CandidateReviewWorkspaces(
+            self.database,
+            workspaces,
+            self.results,
+            self.candidate_store,
+        )
+        coordinator = RunCoordinator(
+            self.database,
+            Executor(),
+            workspaces,
+            None,
+            self.results,
+            candidate_workspaces=candidate_workspaces,
+            heartbeat_interval=30,
+        )
+
+        finished = coordinator.execute(changes_run["id"])
+        shutil.rmtree(self.root / "candidates")
+        corrected = self.control.create_candidate(
+            finished["attempts"][0]["id"],
+            created_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidate_store,
+        )
+
+        self.assertEqual(observed, ["after\n"])
+        self.assertEqual(corrected["base_revision"], self.candidate["head_revision"])
+        self.assertNotEqual(corrected["head_revision"], self.candidate["head_revision"])
+        corrected_policy = self.database.create_gate_policy(
+            GatePolicyManifest.bind(
+                corrected,
+                default_branch="main",
+                policy=self.policy_spec(),
+            ),
+            created_by=self.user["id"],
+        )
+        shutil.rmtree(self.root / "candidates")
+        recovered = candidate_workspaces.prepare(
+            "run_" + "8" * 32, corrected_policy["id"]
+        )
+        self.assertEqual(
+            (recovered.path / "file.txt").read_text(encoding="utf-8"),
+            "corrected\n",
+        )
+        workspaces.cleanup("run_" + "8" * 32)
+        self.assertEqual(
+            self.database.get_gate_policy(policy["id"])["candidate_id"],
+            self.candidate["id"],
+        )
+        self.assertFalse(self.control.gate_readiness(policy["id"])["ready"])
+
+        replacement = self.database.retry_run(
+            finished["id"],
+            requested_by=self.user["id"],
+            expected_run_version=finished["version"],
+        )
+        self.assertEqual(
+            replacement["events"][0]["metadata"]["review_evidence_id"],
+            evidence["id"],
+        )
+        self.assertEqual(
+            replacement["events"][0]["metadata"]["review_entry_id"],
+            review_entry["id"],
+        )
+        replacement_execution = self.database.get_run_execution(replacement["id"])
+        self.assertEqual(
+            replacement_execution["change_candidate_id"], self.candidate["id"]
+        )
+        self.assertEqual(
+            replacement_execution["changes_requested"]["review_entry"]["id"],
+            review_entry["id"],
+        )
+
+    def test_changes_run_requires_the_current_failed_review(self) -> None:
+        policy = self.create_policy()
+        failed, review_entry = self.rejected_review(policy)
+
+        passed = self.control.record_review_evidence(
+            policy["id"],
+            reviewer_attempt_id=failed["reviewer_attempt_id"],
+            outcome="passed",
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "current"):
+            self.control.create_changes_run(
+                policy["id"],
+                review_evidence_id=failed["id"],
+                review_entry_id=review_entry["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+        with self.assertRaisesRegex(ConflictError, "failed"):
+            self.control.create_changes_run(
+                policy["id"],
+                review_evidence_id=passed["id"],
+                review_entry_id=review_entry["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+    def test_changes_run_requires_an_actionable_changes_requested_note(self) -> None:
+        policy = self.create_policy()
+        failed, approved_entry = self.rejected_review(
+            policy,
+            summary="APPROVED — exact candidate is ready",
+            details=["No changes are required."],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "changes-requested note"):
+            self.control.create_changes_run(
+                policy["id"],
+                review_evidence_id=failed["id"],
+                review_entry_id=approved_entry["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+        policy = self.create_policy()
+        failed, empty_entry = self.rejected_review(policy, details=[], digit="7")
+        with self.assertRaisesRegex(ConflictError, "actionable"):
+            self.control.create_changes_run(
+                policy["id"],
+                review_evidence_id=failed["id"],
+                review_entry_id=empty_entry["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+    def test_changes_run_requires_feedback_pinned_to_the_rejected_candidate(
+        self,
+    ) -> None:
+        policy = self.create_policy()
+        failed, review_entry = self.rejected_review(
+            policy, candidate_revision=self.candidate["base_revision"]
+        )
+
+        with self.assertRaisesRegex(ConflictError, "exact candidate"):
+            self.control.create_changes_run(
+                policy["id"],
+                review_evidence_id=failed["id"],
+                review_entry_id=review_entry["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
 
     def test_review_evidence_rejects_an_unbound_same_head_run(self) -> None:
         policy = self.create_policy()
@@ -965,6 +1346,17 @@ class GateLedgerTests(unittest.TestCase):
             profile_name="Reviewer",
             requested_by_handle="operator",
             expected_policy_revision=policy["policy_revision"],
+        )
+        review_execution = self.database.get_run_execution(run["id"])
+        self.assertEqual(
+            review_execution["review_assignment"],
+            {
+                "candidate_id": self.candidate["id"],
+                "head_revision": self.candidate["head_revision"],
+                "policy_id": policy["id"],
+                "policy_revision": policy["policy_revision"],
+                "review_separation": "different_profile_and_identity",
+            },
         )
         shutil.rmtree(self.root / "candidates")
         observed: list[str] = []
@@ -1218,6 +1610,44 @@ class GateLedgerTests(unittest.TestCase):
 
 
 class GateMigrationTests(unittest.TestCase):
+    def test_schema_twenty_five_adds_immutable_change_run_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "control-plane.db"
+            historical_schema = SCHEMA[: SCHEMA.index(GATE_CHANGE_SCHEMA)]
+            with closing(sqlite3.connect(path)) as connection:
+                connection.executescript(historical_schema)
+                connection.execute("PRAGMA user_version = 25")
+                connection.commit()
+            os.chmod(path, 0o600)
+
+            database = Database(path)
+            first = database.initialize()
+            second = database.initialize()
+
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(second, first)
+            self.assertEqual(first["counts"]["integration_gate_change_runs"], 0)
+            with closing(database.connect()) as connection:
+                table = connection.execute(
+                    "SELECT sql FROM sqlite_schema WHERE type = 'table' "
+                    "AND name = 'integration_gate_change_runs'"
+                ).fetchone()
+                triggers = {
+                    row["name"]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'trigger' "
+                        "AND tbl_name = 'integration_gate_change_runs'"
+                    )
+                }
+            self.assertIsNotNone(table)
+            self.assertEqual(
+                triggers,
+                {
+                    "integration_gate_change_run_immutable_delete",
+                    "integration_gate_change_run_immutable_update",
+                },
+            )
+
     def test_schema_twelve_migrates_existing_gate_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "control-plane.db"
@@ -1236,6 +1666,7 @@ class GateMigrationTests(unittest.TestCase):
             self.assertEqual(second, first)
             self.assertEqual(first["counts"]["integration_gate_policies"], 0)
             self.assertEqual(first["counts"]["integration_gate_review_runs"], 0)
+            self.assertEqual(first["counts"]["integration_gate_change_runs"], 0)
             self.assertEqual(first["counts"]["integration_gate_evidence"], 0)
             with closing(database.connect()) as connection:
                 tables = {
@@ -1250,6 +1681,7 @@ class GateMigrationTests(unittest.TestCase):
             {
                 "integration_gate_policies",
                 "integration_gate_review_runs",
+                "integration_gate_change_runs",
                 "integration_gate_evidence",
             },
         )
@@ -1269,6 +1701,7 @@ class GateMigrationTests(unittest.TestCase):
         self.assertEqual(
             names,
             {
+                "integration_gate_change_evidence",
                 "integration_gate_evidence_candidate_created",
                 "integration_gate_evidence_policy_gate_sequence",
                 "integration_gate_evidence_policy_sequence",

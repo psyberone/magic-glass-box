@@ -719,6 +719,23 @@ def build_parser() -> argparse.ArgumentParser:
     gate_review.add_argument("--outcome", required=True, choices=("passed", "failed"))
     gate_review.add_argument("--recorded-by", required=True)
     gate_review.add_argument("--expected-policy-revision", required=True)
+    gate_changes_create = gate_commands.add_parser(
+        "changes-create",
+        help="return a failed candidate and review note to a developer run",
+    )
+    gate_changes_create.add_argument("policy_id")
+    gate_changes_create.add_argument("--review-evidence", required=True)
+    gate_changes_create.add_argument("--review-entry", required=True)
+    gate_changes_create.add_argument("--profile", required=True)
+    gate_changes_create.add_argument("--requested-by", required=True)
+    gate_changes_create.add_argument("--expected-policy-revision", required=True)
+    gate_changes_create.add_argument("--krab-session")
+    gate_changes_create.add_argument("--krab-claim")
+    gate_changes_create.add_argument(
+        "--supervision-policy",
+        type=Path,
+        help="opt in with a versioned autonomous-supervision policy",
+    )
     gate_validate = gate_commands.add_parser(
         "validate", help="run one pinned local validation gate"
     )
@@ -1349,6 +1366,22 @@ def _dispatch(
                 outcome=args.outcome,
                 recorded_by_handle=args.recorded_by,
                 expected_policy_revision=args.expected_policy_revision,
+            )
+        if args.gate_command == "changes-create":
+            return control.create_changes_run(
+                args.policy_id,
+                review_evidence_id=args.review_evidence,
+                review_entry_id=args.review_entry,
+                profile_name=args.profile,
+                requested_by_handle=args.requested_by,
+                expected_policy_revision=args.expected_policy_revision,
+                krab_session_id=args.krab_session,
+                krab_claim_id=args.krab_claim,
+                supervision_policy=(
+                    SupervisionPolicy.from_mapping(_json_file(args.supervision_policy))
+                    if args.supervision_policy is not None
+                    else None
+                ),
             )
         if (
             args.gate_command == "validate"

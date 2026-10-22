@@ -6,10 +6,12 @@ from typing import Any
 
 from ..candidates import CandidateError, CandidateManifest
 from ..domain import (
+    AgentProfileSpec,
     AttemptState,
     ProjectContext,
     RunState,
     ValidationError,
+    WorkspaceMode,
     require_string,
 )
 from ..gates import (
@@ -488,7 +490,9 @@ class GateStorage:
             "ra.source_revision AS attempt_source_revision, "
             "r.state AS run_state, r.source_revision AS run_source_revision, "
             "r.project_id, r.context_version_id, r.work_thread_id, "
-            "r.requested_by, apv.profile_id, apv.krab_identity_id "
+            "r.requested_by, apv.profile_id, apv.krab_identity_id, "
+            "apv.spec_json AS profile_spec_json, "
+            "apv.content_sha256 AS profile_content_sha256 "
             "FROM run_attempts ra JOIN runs r ON r.id = ra.run_id "
             "JOIN agent_profile_versions apv ON apv.id = ra.profile_version_id "
             "WHERE ra.id = ?",
@@ -581,6 +585,26 @@ class GateStorage:
                     ):
                         raise ConflictError(
                             "review evidence requires a successful reviewer attempt"
+                        )
+                    try:
+                        reviewer_spec = AgentProfileSpec.from_mapping(
+                            json.loads(reviewer_row["profile_spec_json"])
+                        )
+                    except (
+                        json.JSONDecodeError,
+                        TypeError,
+                        ValidationError,
+                    ) as exc:
+                        raise StorageError(
+                            "stored reviewer profile is invalid"
+                        ) from exc
+                    if reviewer_spec.digest != reviewer_row["profile_content_sha256"]:
+                        raise StorageError(
+                            "stored reviewer profile digest does not match"
+                        )
+                    if reviewer_spec.workspace_mode is not WorkspaceMode.READ_ONLY:
+                        raise ConflictError(
+                            "review evidence requires a read-only reviewer workspace"
                         )
                     if (
                         reviewer_row["project_id"] != policy.project_id

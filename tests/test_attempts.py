@@ -1395,8 +1395,20 @@ class AttemptMigrationTests(unittest.TestCase):
                 krab_identity_id=identity["id"],
                 created_by=user["id"],
             )
-            with mock.patch.object(
-                database, "_list_provider_recoveries", return_value=[]
+
+            def legacy_run(run_id: str) -> dict[str, object]:
+                with closing(database.connect()) as connection:
+                    row = connection.execute(
+                        "SELECT id, version FROM runs WHERE id = ?", (run_id,)
+                    ).fetchone()
+                self.assertIsNotNone(row)
+                return dict(row)
+
+            with (
+                mock.patch.object(database, "get_run", side_effect=legacy_run),
+                mock.patch.object(
+                    database, "_list_provider_recoveries", return_value=[]
+                ),
             ):
                 run = database.create_run(
                     project_key="migration-project",

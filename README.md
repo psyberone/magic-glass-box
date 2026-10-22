@@ -325,6 +325,23 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
 PYTHONPATH=src python3.11 -m magic_glass_box gate readiness gpl_<id>
 ```
 
+A rejecting reviewer first appends a candidate-pinned `review` work-log entry.
+The operator can then return that exact candidate and note to a developer run:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  gate review-record gpl_<id> --reviewer-attempt att_<id> --outcome failed \
+  --recorded-by operator --expected-policy-revision <sha256>
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  gate changes-create gpl_<id> --review-evidence gev_<id> \
+  --review-entry wle_<id> --profile Producer --requested-by operator \
+  --expected-policy-revision <sha256>
+```
+
+The correction run starts from the rejected head. Its result creates a new
+candidate that must receive a fresh policy and independent review; no old gate
+evidence is carried forward.
+
 Review runs receive the exact private candidate tree, not a same-named revision
 from the operator checkout. Local validation uses an immutable image, read-only
 workspace, no network, gateway, or credential, and retains only bounded hashed
@@ -481,6 +498,25 @@ PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build
 It makes no remote provider request and needs no provider credential. See
 [docs/runtime-adapters.md](docs/runtime-adapters.md) for the exact proof
 boundary.
+
+The explicitly opted-in Imitation Krab beta runs real producer and read-only
+reviewer seats through the credential-isolated ChatGPT connector. It enforces a
+$5 provider budget, can return a rejected exact head and review note to the
+developer seat, runs a fresh review and full-suite gate on the child, and emits
+only suggested Git/PR commands:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_imitation_krab_beta.py \
+  --profile-dir /absolute/private/openai-profile \
+  --repository /absolute/imitation-krab \
+  --state-dir /absolute/private/short-beta-state \
+  --source-revision <exact-commit> --model <account-visible-model> --build \
+  --i-understand-this-uses-live-quota
+```
+
+The connector turn limit is process-wide across all seats. If that sidecar
+exits after candidate creation, rerun against the existing state with
+`--resume-review-run run_<failed-review>`; the producer is not repeated.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the exact scoring rules and workflow.
 
