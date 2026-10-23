@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "review_separation": "different_profile_and_identity",
+  "maintainer_approval": true,
+  "validations": [
+    {
+      "name": "unit",
+      "image_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "command": ["python", "-m", "unittest", "discover", "-s", "tests"]
+    }
+  ],
+  "max_correction_rounds": 3,
+  "landing_mode": "manual"
+}

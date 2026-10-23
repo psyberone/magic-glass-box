@@ -218,6 +218,16 @@ review and local validation, and then stops honestly at pending maintainer
 approval. It neither approves on the maintainer's behalf nor emits landing
 authority.
 
+The maintainer subsequently approved the exact child candidate, and GitHub PR
+2 squash-landed a commit with the same tree. That operator handoff did not
+first enqueue the candidate or issue an MGB landing plan. Accordingly, the beta
+state retains no landing receipt and makes no landing-enforcement claim. It
+also retains an active work thread because no coordinator run authored the
+required final `outcome`; MGB refused to seal it. These are deliberate honest
+records of the remaining manual choreography, not data to repair after the
+fact. Milestone 12's bounded implementation workflow must close both gaps from
+prospective authority and evidence.
+
 Run a pinned local check and inspect current state:
 
 ```console

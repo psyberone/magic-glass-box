@@ -37,6 +37,7 @@ from magic_glass_box.gateway import GatewayError
 from magic_glass_box.inference import InferenceConnectorError
 from magic_glass_box.krab import ActivityPage
 from magic_glass_box.worker_transport import WorkerTransportError
+from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 
 class FakeDatabase:
@@ -123,6 +124,32 @@ class FakeControlPlane:
 
     def revise_agent_profile(self, **kwargs: object) -> dict[str, object]:
         return self._called("profile.revise", **kwargs)
+
+    def create_workflow_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.config-create", **kwargs)
+
+    def revise_workflow_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.config-revise", **kwargs)
+
+    def get_workflow_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.config-show", **kwargs)
+
+    def list_workflow_configurations(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.config-list", **kwargs)
+
+    def start_workflow_execution(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.start", **kwargs)
+
+    def get_workflow_execution(self, execution_id: str) -> dict[str, object]:
+        return self._called("workflow.show", execution_id=execution_id)
+
+    def list_workflow_executions(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.list", **kwargs)
+
+    def cancel_workflow_execution(
+        self, execution_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("workflow.cancel", execution_id=execution_id, **kwargs)
 
     def revoke_provider_grant(self, name: str, **kwargs: object) -> dict[str, object]:
         return self._called("provider.revoke", name=name, **kwargs)
@@ -428,6 +455,7 @@ class CLITests(unittest.TestCase):
                     ("krab", "manage and query Krab connections"),
                     ("project", "manage project context"),
                     ("profile", "manage agent profiles"),
+                    ("workflow", "manage bounded workflow prescriptions"),
                     (
                         "inference-connector",
                         "manage credential-isolated inference connectors",
@@ -493,6 +521,29 @@ class CLITests(unittest.TestCase):
                 (
                     ("add", "create a versioned agent profile"),
                     ("revise", "append an immutable profile revision"),
+                ),
+            ),
+            ("workflow",): (
+                "workflow_command",
+                True,
+                (
+                    (
+                        "config-create",
+                        "create a versioned workflow configuration",
+                    ),
+                    (
+                        "config-revise",
+                        "append an immutable configuration revision",
+                    ),
+                    (
+                        "config-show",
+                        "show one workflow configuration revision",
+                    ),
+                    ("config-list", "list latest workflow configurations"),
+                    ("start", "start one exact pinned workflow execution"),
+                    ("show", "show one workflow execution and event stream"),
+                    ("list", "list bounded workflow executions"),
+                    ("cancel", "cancel one active workflow execution"),
                 ),
             ),
             ("provider",): (
@@ -804,6 +855,38 @@ class CLITests(unittest.TestCase):
                     "--spec",
                     "--created-by",
                 ),
+                ("workflow", "config-create"): (
+                    "--project",
+                    "--producer",
+                    "--reviewer",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("workflow", "config-revise"): (
+                    "--project",
+                    "--producer",
+                    "--reviewer",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("workflow", "config-show"): ("--project",),
+                ("workflow", "start"): (
+                    "--project",
+                    "--work-item",
+                    "--source-revision",
+                    "--expected-configuration-version",
+                    "--expected-context-version",
+                    "--expected-work-item-version",
+                    "--expected-thread-generation",
+                    "--expected-thread-version",
+                    "--idempotency-key",
+                    "--requested-by",
+                ),
+                ("workflow", "cancel"): (
+                    "--expected-version",
+                    "--cancelled-by",
+                    "--reason",
+                ),
                 ("inference-connector", "register"): (
                     "--spec",
                     "--created-by",
@@ -971,6 +1054,11 @@ class CLITests(unittest.TestCase):
                     "CRITICAL",
                 ),
                 (("gate", "review-record"), "outcome"): ("passed", "failed"),
+                (("workflow", "list"), "state"): (
+                    "active",
+                    "cancelled",
+                    "completed",
+                ),
                 (("integration", "provider-issue"), "merge_method"): (
                     "merge",
                     "rebase",
@@ -1763,6 +1851,7 @@ class CLITests(unittest.TestCase):
                     "manage provider-neutral service sidecars and operations"
                 ),
                 "capability": ("bind project capabilities to explicit controllers"),
+                "workflow": "manage bounded workflow prescriptions",
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "interaction": "resolve durable agent interactions",
@@ -1792,6 +1881,16 @@ class CLITests(unittest.TestCase):
             "profile": {
                 "add": "create a versioned agent profile",
                 "revise": "append an immutable profile revision",
+            },
+            "workflow": {
+                "config-create": "create a versioned workflow configuration",
+                "config-revise": "append an immutable configuration revision",
+                "config-show": "show one workflow configuration revision",
+                "config-list": "list latest workflow configurations",
+                "start": "start one exact pinned workflow execution",
+                "show": "show one workflow execution and event stream",
+                "list": "list bounded workflow executions",
+                "cancel": "cancel one active workflow execution",
             },
             "provider": {
                 "connector-add": "add a connector-bound provider grant",
@@ -1909,6 +2008,205 @@ class CLITests(unittest.TestCase):
         self.assertIs(db_action.type, Path)
         self.assertIsInstance(db_action.default, Path)
         self.assertEqual(db_action.help, "control-plane database path")
+
+    def test_workflow_commands_parse_documents_and_dispatch_exact_authority(
+        self,
+    ) -> None:
+        policy_path = Path(self.temporary.name) / "workflow.json"
+        policy = {
+            "schema_version": 1,
+            "review_separation": "different_profile_and_identity",
+            "maintainer_approval": True,
+            "validations": [],
+            "max_correction_rounds": 3,
+            "landing_mode": "manual",
+        }
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        expected_spec = WorkflowConfigurationSpec.from_mapping(policy)
+        fake = FakeControlPlane()
+        cases = (
+            (
+                [
+                    "workflow",
+                    "config-create",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--producer",
+                    "Producer",
+                    "--reviewer",
+                    "Reviewer",
+                    "--spec",
+                    str(policy_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "workflow.config-create",
+                    {
+                        "project_key": "box-project",
+                        "name": "default",
+                        "spec": expected_spec,
+                        "producer_profile_name": "Producer",
+                        "reviewer_profile_name": "Reviewer",
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "config-revise",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--producer",
+                    "Producer",
+                    "--reviewer",
+                    "Reviewer",
+                    "--spec",
+                    str(policy_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "workflow.config-revise",
+                    {
+                        "project_key": "box-project",
+                        "name": "default",
+                        "spec": expected_spec,
+                        "producer_profile_name": "Producer",
+                        "reviewer_profile_name": "Reviewer",
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "config-show",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--version",
+                    "2",
+                ],
+                (
+                    "workflow.config-show",
+                    {
+                        "project_key": "box-project",
+                        "name": "default",
+                        "version": 2,
+                    },
+                ),
+            ),
+            (
+                ["workflow", "config-list", "--project", "box-project"],
+                ("workflow.config-list", {"project_key": "box-project"}),
+            ),
+            (
+                [
+                    "workflow",
+                    "start",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--work-item",
+                    "wki_" + "1" * 32,
+                    "--source-revision",
+                    "a" * 40,
+                    "--expected-configuration-version",
+                    "2",
+                    "--expected-context-version",
+                    "ctx_" + "2" * 32,
+                    "--expected-work-item-version",
+                    "wiv_" + "3" * 32,
+                    "--expected-thread-generation",
+                    "1",
+                    "--expected-thread-version",
+                    "4",
+                    "--idempotency-key",
+                    "workflow-start-1",
+                    "--requested-by",
+                    "operator",
+                ],
+                (
+                    "workflow.start",
+                    {
+                        "project_key": "box-project",
+                        "configuration_name": "default",
+                        "work_item_id": "wki_" + "1" * 32,
+                        "source_revision": "a" * 40,
+                        "expected_configuration_version": 2,
+                        "expected_context_version_id": "ctx_" + "2" * 32,
+                        "expected_work_item_version_id": "wiv_" + "3" * 32,
+                        "expected_thread_generation": 1,
+                        "expected_thread_version": 4,
+                        "idempotency_key": "workflow-start-1",
+                        "requested_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                ["workflow", "show", "wfx_" + "4" * 32],
+                (
+                    "workflow.show",
+                    {"execution_id": "wfx_" + "4" * 32},
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "list",
+                    "--project",
+                    "box-project",
+                    "--state",
+                    "cancelled",
+                    "--limit",
+                    "25",
+                ],
+                (
+                    "workflow.list",
+                    {
+                        "project_key": "box-project",
+                        "state": "cancelled",
+                        "limit": 25,
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "cancel",
+                    "wfx_" + "4" * 32,
+                    "--expected-version",
+                    "1",
+                    "--cancelled-by",
+                    "operator",
+                    "--reason",
+                    "stop now",
+                ],
+                (
+                    "workflow.cancel",
+                    {
+                        "execution_id": "wfx_" + "4" * 32,
+                        "expected_version": 1,
+                        "cancelled_by_handle": "operator",
+                        "reason": "stop now",
+                    },
+                ),
+            ),
+        )
+        for arguments, expected_call in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch("magic_glass_box.cli.ControlPlane", return_value=fake),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(fake.calls[-1], expected_call)
 
     def test_execution_cancellation_and_reconciliation_use_the_coordinator(
         self,

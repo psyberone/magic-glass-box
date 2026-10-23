@@ -159,6 +159,13 @@ class WorkItemStorage:
                 ).fetchone()
                 if active_run is not None:
                     raise ConflictError("work item has active runs")
+                active_workflow = connection.execute(
+                    "SELECT id FROM workflow_executions "
+                    "WHERE work_thread_id = ? AND state = 'active' LIMIT 1",
+                    (thread["id"],),
+                ).fetchone()
+                if active_workflow is not None:
+                    raise ConflictError("work item has an active workflow")
                 unfinished = connection.execute(
                     "SELECT id FROM work_assignments WHERE work_thread_id = ? "
                     "AND state IN ('open', 'claimed') LIMIT 1",

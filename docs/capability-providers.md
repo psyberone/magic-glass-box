@@ -1,7 +1,6 @@
 # Capability providers and project routing
 
-**Status: architectural direction; this does not expand the Milestone 10 or
-Milestone 11 MVP exit proofs.**
+**Status: implemented foundation with post-M11 expansion roadmap.**
 
 Schema v24 implements the first narrow routing seam: core-owned capability
 modes, explicit single-controller project bindings, audited unbinding, and an
@@ -173,12 +172,13 @@ binding; and ambiguous or expired reads become retryable while effects retain
 the reconciliation path. Provider naming, v1 repository-shaped payloads, Unix
 transport, and operator-only extension registration remain unchanged.
 
-Milestone 11 is now implementing the GitHub reference provider and
-integration-queue binding. The local implementation covers exact candidate-ref
+Milestone 11 implemented the GitHub reference provider and integration-queue
+binding. The implementation covers exact candidate-ref
 publication, bounded normalized work/change reads, deterministic change
 creation, named checks and approvals, truthful landing assurance, lost-response
-reconciliation, and credential containment; its live repository exit proof
-remains pending. It does not add
+reconciliation, and credential containment. Its live repository exit proof
+published, opened, landed, and reconciled an exact disposable candidate without
+duplicating the merge. It does not add
 Jira, GitLab, remote runners, dynamic plugin loading, a provider marketplace,
 or a universal resource schema.
 
@@ -189,3 +189,23 @@ pressure-test a versioned resource-binding model rather than pretending every
 external resource is a repository. Existing v1 contracts should be preserved
 or advanced explicitly; provider-specific fields must not leak into the agent
 surface to avoid a version change.
+
+## Post-M11 sequence
+
+Provider breadth waits while M12 turns the proven producer/reviewer/maintainer
+sequence into a durable bounded workflow. This is sequencing, not a change in
+the capability architecture: workflow templates consume semantic operations
+and never name GitHub, Jira, SSH, or a model provider.
+
+The next provider pressure tests are intentionally heterogeneous:
+
+1. a work-system provider, likely Jira, paired with GitHub candidates and
+   landing in one project;
+2. a controlled execution provider for an exact candidate and pinned remote
+   test recipe, with no agent-selected SSH target or command; and
+3. a second forge provider, likely GitLab, driven through the same conformance
+   contract rather than copied GitHub mechanics.
+
+Bitbucket, raw Git, additional issue systems, interaction carriers, local and
+hosted agents, and additional inference providers remain candidates selected by
+demonstrated need. See [roadmap.md](roadmap.md) for the milestone boundaries.

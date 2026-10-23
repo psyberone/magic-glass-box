@@ -62,11 +62,13 @@ from .storage.schema import (
     WORK_ITEM_SCHEMA,
     WORK_MEMORY_SCHEMA,
     WORK_THREAD_LIFECYCLE_SCHEMA,
+    WORKFLOW_TEMPLATE_SCHEMA,
 )
 from .storage.service_sidecars import ServiceSidecarStorage
 from .storage.supervision import SupervisionStorage
 from .storage.work import WorkStorage
 from .storage.work_items import WorkItemStorage
+from .storage.workflows import WorkflowStorage
 
 __all__ = [
     "ATTEMPT_SCHEMA",
@@ -115,11 +117,13 @@ __all__ = [
     "WORK_ITEM_SCHEMA",
     "WORK_MEMORY_SCHEMA",
     "WORK_THREAD_LIFECYCLE_SCHEMA",
+    "WORKFLOW_TEMPLATE_SCHEMA",
     "default_db_path",
 ]
 
 
 class Database(
+    WorkflowStorage,
     SupervisionStorage,
     ServiceSidecarStorage,
     QueryStorage,

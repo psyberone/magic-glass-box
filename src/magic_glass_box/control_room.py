@@ -151,6 +151,7 @@ class ControlRoom:
         work_items = self._work_items(connection)
         assignments = self._assignments(connection, generated_at)
         runs, terminal_total = self._runs(connection, history_limit)
+        workflows = self._workflows(connection, history_limit)
         run_ids = [run["id"] for run in runs]
         attempts = self._attempts(connection, run_ids, generated_at)
         interactions = self._interactions(connection, run_ids)
@@ -240,6 +241,7 @@ class ControlRoom:
                 "work_items": work_items,
                 "assignments": assignments,
                 "runs": runs,
+                "workflows": workflows,
                 "attempts": attempts,
                 "interactions": interactions,
                 "retained_results": retained_results,
@@ -719,6 +721,49 @@ class ControlRoom:
                 }
             )
         return runs, terminal_total
+
+    @staticmethod
+    def _workflows(
+        connection: sqlite3.Connection, history_limit: int
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            "WITH terminal AS (SELECT id FROM workflow_executions "
+            "WHERE state IN ('cancelled','completed') "
+            "ORDER BY updated_at DESC, id LIMIT ?), visible AS ("
+            "SELECT id, 0 AS group_order FROM workflow_executions "
+            "WHERE state = 'active' UNION ALL "
+            "SELECT id, 1 AS group_order FROM terminal"
+            ") SELECT e.id, p.krab_project_key AS project_key, "
+            "t.template_key, t.version AS template_version, "
+            "t.content_sha256 AS template_revision, c.name AS configuration_name, "
+            "cv.version AS configuration_version, "
+            "cv.id AS configuration_version_id, e.work_item_id, "
+            "e.work_item_version_id, e.work_thread_id, "
+            "e.work_thread_generation, e.context_version_id, e.source_revision, "
+            "e.state, e.stage, e.version, producer.name AS producer_profile_name, "
+            "producer_v.version AS producer_profile_version, "
+            "reviewer.name AS reviewer_profile_name, "
+            "reviewer_v.version AS reviewer_profile_version, "
+            "requester.handle AS requested_by, e.created_at, e.updated_at, "
+            "e.finished_at FROM visible "
+            "JOIN workflow_executions e ON e.id = visible.id "
+            "JOIN projects p ON p.id = e.project_id "
+            "JOIN workflow_template_definitions t "
+            "ON t.id = e.template_definition_id "
+            "JOIN workflow_configuration_versions cv "
+            "ON cv.id = e.configuration_version_id "
+            "JOIN workflow_configurations c ON c.id = cv.configuration_id "
+            "JOIN agent_profile_versions producer_v "
+            "ON producer_v.id = cv.producer_profile_version_id "
+            "JOIN agent_profiles producer ON producer.id = producer_v.profile_id "
+            "JOIN agent_profile_versions reviewer_v "
+            "ON reviewer_v.id = cv.reviewer_profile_version_id "
+            "JOIN agent_profiles reviewer ON reviewer.id = reviewer_v.profile_id "
+            "JOIN users requester ON requester.id = e.requested_by "
+            "ORDER BY visible.group_order, e.updated_at DESC, e.id",
+            (history_limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     @classmethod
     def _supervisor_actions(
@@ -1437,6 +1482,9 @@ class ControlRoom:
             "SELECT state, COUNT(*) AS count "
             "FROM work_item_landing_dependencies GROUP BY state"
         )
+        workflow_states = states(
+            "SELECT state, COUNT(*) AS count FROM workflow_executions GROUP BY state"
+        )
         run_total = sum(run_states.values())
         attempt_total = sum(attempt_states.values())
         return {
@@ -1463,6 +1511,13 @@ class ControlRoom:
                 "terminal": run_total
                 - sum(run_states.get(state, 0) for state in ACTIVE_RUN_STATES),
                 **{state: run_states.get(state, 0) for state in sorted(run_states)},
+            },
+            "workflows": {
+                "total": sum(workflow_states.values()),
+                **{
+                    state: workflow_states.get(state, 0)
+                    for state in ("active", "cancelled", "completed")
+                },
             },
             "attempts": {
                 "total": attempt_total,

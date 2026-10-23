@@ -1474,6 +1474,11 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE workflow_execution_events;
+                DROP TABLE workflow_executions;
+                DROP TABLE workflow_configuration_versions;
+                DROP TABLE workflow_configurations;
+                DROP TABLE workflow_template_definitions;
                 DROP TABLE integration_gate_maintainer_change_runs;
                 DROP TABLE integration_maintainer_reviews;
                 DROP TABLE integration_gate_change_runs;

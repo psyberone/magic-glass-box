@@ -497,6 +497,26 @@ class DatabaseCore:
                     "supervisor_escalations",
                     "SELECT COUNT(*) FROM supervisor_escalations",
                 ),
+                (
+                    "workflow_template_definitions",
+                    "SELECT COUNT(*) FROM workflow_template_definitions",
+                ),
+                (
+                    "workflow_configurations",
+                    "SELECT COUNT(*) FROM workflow_configurations",
+                ),
+                (
+                    "workflow_configuration_versions",
+                    "SELECT COUNT(*) FROM workflow_configuration_versions",
+                ),
+                (
+                    "workflow_executions",
+                    "SELECT COUNT(*) FROM workflow_executions",
+                ),
+                (
+                    "workflow_execution_events",
+                    "SELECT COUNT(*) FROM workflow_execution_events",
+                ),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]

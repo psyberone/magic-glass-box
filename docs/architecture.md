@@ -211,6 +211,12 @@ project-activity projection.
   readiness, while the complete history remains append-only. A
   `changes_requested` disposition can feed the same correction choreography
   without fabricating agent-review provenance.
+- Schema v28 adds the bounded workflow prescription ledger. The built-in
+  definition, saved configuration revision, and execution are distinct: an
+  execution pins exact producer/reviewer profile revisions, context and work
+  item versions, work-thread generation and version, source object ID, and
+  configuration revision. M12A records this authority but does not yet create
+  runs; the director arrives in M12B.
 - Schema v14 adds hard work-item landing dependencies, one serialized lane per
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks
@@ -309,7 +315,9 @@ recovery advances it to schema v20. Immutable attempt recovery selections and
 application receipts advance it to schema v21. Append-only landing-nonce
 generations and honest reported provider overruns advance it to schema v22.
 Provider-neutral service-sidecar registrations, durable operations, and
-dispatch/reconciliation attempts advance it to schema v23.
+dispatch/reconciliation attempts advance it to schema v23. Explicit capability
+bindings, provider landing, exact gate-change provenance, maintainer review,
+and bounded workflow prescriptions advance it through schemas v24-v28.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -481,4 +489,7 @@ lost-response live GitHub exit proof are complete. See
 [capability-providers.md](capability-providers.md),
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 [runtime-adapters.md](runtime-adapters.md), [supervision.md](supervision.md),
-and [work-memory.md](work-memory.md).
+[work-memory.md](work-memory.md), and
+[workflow-templates.md](workflow-templates.md). The M12A immutable
+prescription ledger is implemented; M12B and M12C add the director and
+landing/closeout choreography without introducing a general workflow engine.

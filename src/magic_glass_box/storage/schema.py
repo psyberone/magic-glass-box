@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -3656,6 +3656,222 @@ BEGIN
 END;
 """
 
+WORKFLOW_TEMPLATE_SCHEMA = """
+CREATE TABLE workflow_template_definitions (
+    id TEXT PRIMARY KEY,
+    template_key TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    definition_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    built_in INTEGER NOT NULL CHECK (built_in = 1),
+    created_at TEXT NOT NULL,
+    UNIQUE (template_key, version)
+) STRICT;
+
+INSERT INTO workflow_template_definitions (
+    id, template_key, version, schema_version, definition_json,
+    content_sha256, built_in, created_at
+) VALUES (
+    'wtd_b165a0973686c2e87ed8b4150e919e88',
+    'implementation-v1',
+    1,
+    1,
+    '{"correction_loop":true,"key":"implementation-v1","roles":[{"name":"producer","workspace_mode":"copy_on_write"},{"name":"reviewer","workspace_mode":"read_only"}],"schema_version":1,"stages":["build","review","maintainer","landing","completion"],"version":1}',
+    'b165a0973686c2e87ed8b4150e919e88f826b8558fe560eafcb256a87b5d75ff',
+    1,
+    '2026-10-23T00:00:00.000000+00:00'
+);
+
+CREATE TABLE workflow_configurations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, name),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_configuration_versions (
+    id TEXT PRIMARY KEY,
+    configuration_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    template_definition_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    spec_json TEXT NOT NULL,
+    producer_profile_version_id TEXT NOT NULL,
+    reviewer_profile_version_id TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (configuration_id, version),
+    UNIQUE (configuration_id, content_sha256),
+    FOREIGN KEY (configuration_id)
+        REFERENCES workflow_configurations(id) ON DELETE RESTRICT,
+    FOREIGN KEY (template_definition_id)
+        REFERENCES workflow_template_definitions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (producer_profile_version_id)
+        REFERENCES agent_profile_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_profile_version_id)
+        REFERENCES agent_profile_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_configuration_project
+    ON workflow_configurations(project_id, name);
+CREATE INDEX workflow_configuration_version_created
+    ON workflow_configuration_versions(configuration_id, version DESC);
+
+CREATE TABLE workflow_executions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    template_definition_id TEXT NOT NULL,
+    configuration_version_id TEXT NOT NULL,
+    context_version_id TEXT NOT NULL,
+    work_item_id TEXT NOT NULL,
+    work_item_version_id TEXT NOT NULL,
+    work_thread_id TEXT NOT NULL,
+    work_thread_generation INTEGER NOT NULL CHECK (work_thread_generation >= 1),
+    source_revision TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'cancelled', 'completed')),
+    stage TEXT NOT NULL CHECK (
+        stage IN ('build', 'review', 'maintainer', 'landing', 'completion')
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    request_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    cancel_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (requested_by, idempotency_key),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (template_definition_id)
+        REFERENCES workflow_template_definitions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (configuration_version_id)
+        REFERENCES workflow_configuration_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (context_version_id)
+        REFERENCES project_context_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_version_id)
+        REFERENCES work_item_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND finished_at IS NULL AND cancel_reason IS NULL)
+        OR (state = 'cancelled' AND finished_at IS NOT NULL
+            AND cancel_reason IS NOT NULL)
+        OR (state = 'completed' AND finished_at IS NOT NULL
+            AND cancel_reason IS NULL)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX workflow_execution_one_active_thread
+    ON workflow_executions(work_thread_id) WHERE state = 'active';
+CREATE INDEX workflow_execution_project_created
+    ON workflow_executions(project_id, created_at DESC, id DESC);
+CREATE INDEX workflow_execution_state_created
+    ON workflow_executions(state, created_at, id);
+
+CREATE TABLE workflow_execution_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('workflow.started', 'workflow.cancelled')
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL CHECK (
+        to_state IN ('active', 'cancelled', 'completed')
+    ),
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, sequence),
+    FOREIGN KEY (execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_execution_event_stream
+    ON workflow_execution_events(execution_id, sequence);
+
+CREATE TRIGGER workflow_template_definition_immutable_update
+BEFORE UPDATE ON workflow_template_definitions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow template definitions are immutable');
+END;
+CREATE TRIGGER workflow_template_definition_immutable_delete
+BEFORE DELETE ON workflow_template_definitions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow template definitions cannot be deleted');
+END;
+CREATE TRIGGER workflow_configuration_immutable_update
+BEFORE UPDATE ON workflow_configurations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configurations are immutable');
+END;
+CREATE TRIGGER workflow_configuration_immutable_delete
+BEFORE DELETE ON workflow_configurations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configurations cannot be deleted');
+END;
+CREATE TRIGGER workflow_configuration_version_immutable_update
+BEFORE UPDATE ON workflow_configuration_versions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configuration versions are immutable');
+END;
+CREATE TRIGGER workflow_configuration_version_immutable_delete
+BEFORE DELETE ON workflow_configuration_versions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configuration versions cannot be deleted');
+END;
+CREATE TRIGGER workflow_execution_identity_immutable
+BEFORE UPDATE OF
+    id, project_id, template_definition_id, configuration_version_id,
+    context_version_id, work_item_id, work_item_version_id, work_thread_id,
+    work_thread_generation, source_revision, request_json, content_sha256,
+    idempotency_key, requested_by, created_at
+ON workflow_executions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution identity is immutable');
+END;
+CREATE TRIGGER workflow_execution_transition
+BEFORE UPDATE ON workflow_executions
+WHEN
+    OLD.state != 'active'
+    OR NEW.version != OLD.version + 1
+    OR NEW.state NOT IN ('active', 'cancelled', 'completed')
+    OR (NEW.state = 'active'
+        AND (NEW.finished_at IS NOT NULL OR NEW.cancel_reason IS NOT NULL))
+    OR (NEW.state = 'cancelled'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NULL))
+    OR (NEW.state = 'completed'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NOT NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution transition is invalid');
+END;
+CREATE TRIGGER workflow_execution_immutable_delete
+BEFORE DELETE ON workflow_executions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow executions cannot be deleted');
+END;
+CREATE TRIGGER workflow_execution_event_immutable_update
+BEFORE UPDATE ON workflow_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution events are immutable');
+END;
+CREATE TRIGGER workflow_execution_event_immutable_delete
+BEFORE DELETE ON workflow_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution events cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -3686,6 +3902,7 @@ SCHEMA = (
     + PROVIDER_LANDING_SCHEMA
     + GATE_CHANGE_SCHEMA
     + MAINTAINER_REVIEW_SCHEMA
+    + WORKFLOW_TEMPLATE_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -3714,4 +3931,5 @@ MIGRATIONS = {
     24: PROVIDER_LANDING_SCHEMA,
     25: GATE_CHANGE_SCHEMA,
     26: MAINTAINER_REVIEW_SCHEMA,
+    27: WORKFLOW_TEMPLATE_SCHEMA,
 }

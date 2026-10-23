@@ -51,6 +51,7 @@ from magic_glass_box.service_sidecar import (
     ServiceOperationSpec,
     ServiceSidecarSpec,
 )
+from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 
 class PublishedSchemaContractTests(unittest.TestCase):
@@ -62,6 +63,7 @@ class PublishedSchemaContractTests(unittest.TestCase):
         ("work-memory-checkpoint", WorkMemoryCheckpoint.from_mapping),
         ("work-assignment", WorkAssignmentSpec.from_mapping),
         ("supervision-policy", SupervisionPolicy.from_mapping),
+        ("workflow-configuration", WorkflowConfigurationSpec.from_mapping),
     )
 
     def load(

@@ -92,6 +92,10 @@ This repository currently contains the first executable vertical slice:
   coordinator to recover parallel Claude/Codex-style work;
 - operator-controlled work completion that seals audit history and an explicit
   reopen into a blank next-generation memory thread;
+- schema-v28 bounded workflow prescriptions with one immutable built-in
+  `implementation-v1` definition, versioned producer/reviewer configurations,
+  and restart-safe executions pinned to exact project, work-item, work-thread,
+  profile, source, and policy revisions;
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues,
   where upstream bodies and host-private failure details are reduced to fixed
@@ -262,6 +266,29 @@ work, expired ownership, and configured attention thresholds advance from
 durable state without an external cron. See
 [docs/supervision.md](docs/supervision.md) for policy, privacy, retry, and
 leader-safety semantics.
+
+The first bounded-workflow slice can save an exact role/policy configuration
+and start its durable prescription ledger:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow config-create default --project box-project \
+  --producer Producer --reviewer Reviewer \
+  --spec examples/workflow-configuration.json --created-by operator
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow start default --project box-project --work-item wki_<id> \
+  --source-revision <full-object-id> \
+  --expected-configuration-version 1 \
+  --expected-context-version ctx_<id> \
+  --expected-work-item-version wiv_<id> \
+  --expected-thread-generation 1 --expected-thread-version 1 \
+  --idempotency-key <stable-key> --requested-by operator
+```
+
+At the M12A boundary, `workflow start` pins and audits the prescription but
+does not yet create a producer run. M12B adds the durable build/review/
+correction director. See
+[docs/workflow-templates.md](docs/workflow-templates.md).
 
 `control-room serve` prints a per-process private URL and binds only to
 `127.0.0.1` by default. The browser can refresh live Krab role/claim metadata

@@ -102,6 +102,16 @@ portable interchange schema. Gate-policy v1 remains backward compatible: the
 optional `maintainer_approval` member may only be present as `true`, so omitted
 legacy policies retain their original canonical bytes and revision digests.
 
+Control-plane schema v28 adds the immutable workflow-template definition,
+saved-configuration versions, and exact workflow-execution pins used by M12A.
+`schemas/workflow-configuration-v1.schema.json` publishes the operator-authored
+configuration surface: review separation, optional maintainer gate, immutable
+validation image IDs and commands, correction-round ceiling, and explicit
+manual or provider landing mode. Producer and reviewer profile bindings remain
+relational control-plane authority and are supplied separately; the runtime
+requires their workspace modes and selected separation rule to agree with the
+configuration.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

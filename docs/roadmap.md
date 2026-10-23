@@ -989,7 +989,26 @@ The continuation consumed $0.292140, bringing total live-beta accounting to
 $0.815377 of the durable $5 ceiling. Credentials remained connector-only, both
 workers had direct network denied, and the Imitation Krab checkout stayed clean
 at its newer `50fcd1e` head. The report is retained in the private beta state as
-`maintainer-round-report.json`; product approval remains intentionally open.
+`maintainer-round-report.json`; it is the honest preapproval checkpoint and was
+not rewritten after the maintainer acted.
+
+On 2026-10-23 the maintainer separately approved the exact candidate through
+maintainer review `mrv_96825270dac45883decd5d0e2a3be406`. Readiness became
+three of three gates passed. The operator then pushed exact head `6f0e67a`,
+opened `psyberone/imitation-krab` PR 2, and the maintainer squash-merged it as
+`7d70b045f0976985b493786ab138cebc81d65cc9`. The landed commit's tree
+`f4b27729de354d16cfb7666e33bc024b3938aee3` exactly equals the approved
+candidate tree. Imitation Krab subsequently released 0.6.4 on top. The target
+checkout remained unmodified throughout the handoff.
+
+That final step also exposed the next honest gap. The beta intentionally never
+enqueued this candidate or issued a manual/provider landing plan, so MGB's
+integration ledger correctly contains no landing receipt. It must not invent
+one after the fact. `work-item complete` also correctly refused to seal the
+thread: its latest entry is the independent review, not a coordinator-authored
+final `outcome`. The code landed, but the operator still performed the
+cross-stage choreography and closeout. Milestone 12 exists to make that proven
+sequence durable and supervisor-driven.
 
 The post-change local checkpoint passes 1,018 tests and Ruff format/lint with
 86% aggregate statement-plus-branch coverage. A focused schema-v27 mutation
@@ -1025,6 +1044,144 @@ explicit project binding, and sidecar deployment separately. M11 remains one
 GitHub provider. If a project binds no provider to an operation, that operation
 is disabled; later Jira, GitLab, runner, or other providers are added only when
 their real use cases justify a versioned capability contract.
+
+## Milestone 12: bounded implementation workflow
+
+**Status: in progress; M12A complete, M12B next**
+
+M11 proved every important step of one real change, but the operator still
+selected and invoked those steps. M12 packages that exact practice as one
+fixed, versioned `implementation-v1` prescription. It is not an arbitrary
+workflow engine. See [workflow-templates.md](workflow-templates.md).
+
+### M12A: immutable prescription ledger
+
+**Status: complete (2026-10-23)**
+
+- Store immutable built-in definition revisions, saved configuration versions,
+  and workflow executions as three separate records.
+- Bind producer and reviewer roles to exact active profile versions. A saved
+  configuration may reduce limits but may not grant authority absent from the
+  selected profiles or project.
+- Pin each execution to its exact project context, work-item version, active
+  work-thread generation, source revision, definition revision, and
+  configuration revision.
+- Expose a bounded redacted projection and audited cancel operation. Definition
+  or configuration edits affect only future executions.
+
+**Exit proof:** after a process restart, MGB reconstructs the exact definition,
+configuration, roles, input revisions, and current stage. Stale work-thread,
+inactive pinned-role, context, work-item, and configuration inputs—and malformed
+source object IDs—fail before any run is created, and a repeated start is
+idempotent. An active workflow also prevents its work thread from being sealed
+underneath it; audited cancellation releases the thread.
+
+Schema v28 implements that proof with the immutable built-in
+`implementation-v1` definition, separately versioned saved configurations, an
+optimistic execution/event ledger, CLI and service surfaces, and a redacted
+control-room projection. Starts bind the exact work-thread generation as well
+as its optimistic version, which closes the otherwise ambiguous
+generation-two/version-one reopen case. M12A deliberately records authority
+only; it creates no producer run and claims no orchestration yet.
+
+The final checkpoint passes 1,037 tests and Ruff format/lint with 87% aggregate
+statement-plus-branch coverage. The workflow policy model is at 100% and its
+storage layer is at 92%. An all-line Mutmut wave over the storage boundary
+killed 853 of 1,014 mutants (84.12%), with no timeouts, unchecked mutants,
+crashes, or suspicious outcomes. Independent digest oracles bind every field
+of both immutable authority envelopes rather than merely accepting a
+self-consistent stored hash. A separate focused check killed 10 of the 11
+mutations on the new work-thread lifecycle guard; the survivor changes only
+diagnostic wording. Mutmut 3.6 does not generate mutations inside the decorated
+workflow dataclasses; their parser and serialization branches are covered
+exhaustively instead.
+
+### M12B: build/review/correction director
+
+- Drive ordinary producer, candidate, gate, reviewer, validation, and
+  correction primitives through durable supervisor actions.
+- Make transition decisions from authoritative object state, never agent prose.
+  A producer handoff cannot satisfy a review gate, and approval applies only to
+  the reviewed exact head.
+- Deliver changes-requested evidence to the configured producer, create one
+  child candidate, and require fresh review and validation. Retries after a
+  dead supervisor cannot duplicate a reviewer or correction run.
+- Enforce a bounded correction-round ceiling. Crossing it opens a durable
+  coordinator/maintainer interaction instead of silently scheduling another
+  round.
+
+**Exit proof:** a deterministic workflow requests changes once, survives an
+orchestrator restart at each transition boundary, resumes the exact child, and
+stops at maintainer disposition with exactly one durable action per stage.
+
+### M12C: landing and closeout director
+
+- Enqueue only the ready exact candidate and preserve M7 dependency, serialized
+  lane, refold, and gate recheck rules.
+- Select the configured provider route or explicitly issue a manual landing
+  plan. Absence of a provider means disabled or manual according to pinned
+  configuration; there is no credential or provider fallback.
+- Require a matching provider or nonce-bound manual receipt before producing
+  the final bounded outcome and sealing the work thread.
+- Keep externally performed, non-authorized changes distinguishable from MGB
+  landing receipts; observations never inherit an enforcement claim.
+
+**Exit proof:** a second live repository change goes from imported work item to
+merged exact candidate and completed work thread, including one rejection
+round, maintainer approval, restart recovery, and credential containment. No
+human must remember which durable command advances the next mechanical stage.
+
+## Milestone 13: discovery and review prescriptions
+
+**Status: candidate milestone; schedule after the M12 live proof**
+
+- Add a bounded Discovery prescription that produces a structured ruling and
+  work-ready brief without changing source.
+- Distinguish gate review, which can produce exact-candidate evidence, from
+  advisory multi-reviewer configurations such as The Furies, which cannot.
+- Carry MUST items only from the immutable work brief, retain reviewer PROBE
+  findings as follow-up proposals, and keep budgets fixed rather than allowing
+  a review to expand indefinitely.
+- Consider delta re-review only behind an explicit path allowlist and a
+  mechanical diff classification; it remains off by default.
+
+## Milestone 14: heterogeneous work provider
+
+**Status: candidate milestone; first pressure test of non-repository resources**
+
+- Advance resource bindings without pretending every external resource is a
+  repository.
+- Implement one bounded work-system provider—Jira is the leading real use
+  case—for normalized list/get/import and explicitly selected status effects.
+- Prove a mixed project whose work comes from Jira while candidates, checks,
+  and landing remain on GitHub. Agents see only semantic capabilities and MGB
+  correlation IDs.
+
+## Milestone 15: controlled remote execution provider
+
+**Status: candidate milestone**
+
+- Define submit, inspect, cancel, reconcile, and evidence-collection semantics
+  for an exact candidate and operator-defined test recipe.
+- Implement the first controlled runner against an operator-owned remote host
+  such as the existing Azure VM. The agent never receives SSH, hostname,
+  arbitrary command, or reusable credential authority.
+- Retain bounded result identity, exit status, timing, recipe/image identity,
+  and output digest; collect artifacts through the same hostile-output boundary
+  used for local workers.
+
+## Milestone 16+: provider breadth by demonstrated need
+
+**Status: candidates, not commitments**
+
+- A second forge provider, likely GitLab, must pass the capability conformance
+  suite and expose only the operations it truthfully supports.
+- Bitbucket, raw Git actuators, additional work systems, interaction carriers,
+  hosted agents, local agents, and inference providers remain independent
+  additions selected by real use cases.
+- Provider breadth does not weaken the rule that no binding means no
+  capability. MGB never guesses a controller or exposes a provider-native
+  escape hatch to an agent.
 
 ## Optional provider-auth track: Anthropic Console OAuth connector
 

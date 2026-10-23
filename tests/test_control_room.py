@@ -37,6 +37,7 @@ from magic_glass_box.krab import (
 )
 from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import ControlPlane
+from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 
 class FakeResolver:
@@ -338,6 +339,7 @@ class ControlRoomTests(unittest.TestCase):
                 "work_items",
                 "assignments",
                 "runs",
+                "workflows",
                 "attempts",
                 "interactions",
                 "retained_results",
@@ -374,6 +376,7 @@ class ControlRoomTests(unittest.TestCase):
                 "provider_recoveries",
                 "work_items",
                 "runs",
+                "workflows",
                 "attempts",
                 "interactions",
                 "assignments",
@@ -1811,8 +1814,117 @@ class ControlRoomTests(unittest.TestCase):
             "run_authorities",
             "supervisor_actions",
             "escalations",
+            "workflows",
         ):
             self.assertEqual(snapshot[collection], [])
+
+    def test_snapshot_projects_workflow_authority_without_private_configuration(
+        self,
+    ) -> None:
+        reviewer_identity = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "8" * 32, "reviewer", 1),
+            "file:/private/reviewer-secret",
+        )
+        self.database.create_agent_profile(
+            name="Read-only Reviewer",
+            spec=AgentProfileSpec.create(
+                image="reviewer@sha256:abc",
+                command=["review", "secret-argument"],
+                workspace_mode="read_only",
+                network_mode="none",
+            ),
+            krab_identity_id=reviewer_identity["id"],
+            created_by=self.user["id"],
+        )
+        configuration = self.database.create_workflow_configuration(
+            project_key="box-project",
+            name="default",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [],
+                    "max_correction_rounds": 3,
+                    "landing_mode": "manual",
+                }
+            ),
+            producer_profile_name="Codex Worker",
+            reviewer_profile_name="Read-only Reviewer",
+            created_by=self.user["id"],
+        )
+        execution = self.database.start_workflow_execution(
+            project_key="box-project",
+            configuration_name="default",
+            work_item_id=self.item["id"],
+            source_revision="a" * 40,
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=self.item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            idempotency_key="control-room-workflow",
+            requested_by=self.user["id"],
+        )
+
+        snapshot = ControlRoom(self.database).snapshot()
+
+        self.assertEqual(
+            snapshot["summary"]["workflows"],
+            {
+                "total": 1,
+                "active": 1,
+                "cancelled": 0,
+                "completed": 0,
+            },
+        )
+        self.assertEqual(len(snapshot["workflows"]), 1)
+        projected = snapshot["workflows"][0]
+        self.assertEqual(
+            set(projected),
+            {
+                "id",
+                "project_key",
+                "template_key",
+                "template_version",
+                "template_revision",
+                "configuration_name",
+                "configuration_version",
+                "configuration_version_id",
+                "work_item_id",
+                "work_item_version_id",
+                "work_thread_id",
+                "work_thread_generation",
+                "context_version_id",
+                "source_revision",
+                "state",
+                "stage",
+                "version",
+                "producer_profile_name",
+                "producer_profile_version",
+                "reviewer_profile_name",
+                "reviewer_profile_version",
+                "requested_by",
+                "created_at",
+                "updated_at",
+                "finished_at",
+            },
+        )
+        self.assertEqual(projected["id"], execution["id"])
+        self.assertEqual(
+            projected["configuration_version_id"],
+            configuration["workflow_configuration_version_id"],
+        )
+        encoded = json.dumps(projected, sort_keys=True)
+        for private in (
+            "reviewer-secret",
+            "credential-super-secret",
+            "secret-argument",
+            "validations",
+            "max_correction_rounds",
+        ):
+            self.assertNotIn(private, encoded)
 
     def test_snapshot_surfaces_candidate_identity_without_manifest_content(
         self,

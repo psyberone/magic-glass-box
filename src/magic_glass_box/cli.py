@@ -60,6 +60,7 @@ from .service_sidecar import (
 )
 from .supervision import Supervisor, SupervisorError
 from .worker_transport import WorkerTransportError
+from .workflows import WorkflowConfigurationSpec
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
 
@@ -331,6 +332,75 @@ def build_parser() -> argparse.ArgumentParser:
         profile_action.add_argument("--krab-user", required=True)
         profile_action.add_argument("--spec", required=True, type=Path)
         profile_action.add_argument("--created-by", required=True)
+
+    workflow = commands.add_parser(
+        "workflow", help="manage bounded workflow prescriptions"
+    )
+    workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
+    for verb in ("config-create", "config-revise"):
+        configuration = workflow_commands.add_parser(
+            verb,
+            help=(
+                "create a versioned workflow configuration"
+                if verb == "config-create"
+                else "append an immutable configuration revision"
+            ),
+        )
+        configuration.add_argument("name")
+        configuration.add_argument("--project", required=True)
+        configuration.add_argument("--producer", required=True)
+        configuration.add_argument("--reviewer", required=True)
+        configuration.add_argument("--spec", required=True, type=Path)
+        configuration.add_argument("--created-by", required=True)
+    workflow_config_show = workflow_commands.add_parser(
+        "config-show", help="show one workflow configuration revision"
+    )
+    workflow_config_show.add_argument("name")
+    workflow_config_show.add_argument("--project", required=True)
+    workflow_config_show.add_argument("--version", type=int)
+    workflow_config_list = workflow_commands.add_parser(
+        "config-list", help="list latest workflow configurations"
+    )
+    workflow_config_list.add_argument("--project")
+    workflow_start = workflow_commands.add_parser(
+        "start", help="start one exact pinned workflow execution"
+    )
+    workflow_start.add_argument("configuration_name")
+    workflow_start.add_argument("--project", required=True)
+    workflow_start.add_argument("--work-item", required=True)
+    workflow_start.add_argument("--source-revision", required=True)
+    workflow_start.add_argument(
+        "--expected-configuration-version", required=True, type=int
+    )
+    workflow_start.add_argument(
+        "--expected-context-version", required=True, dest="expected_context_version_id"
+    )
+    workflow_start.add_argument(
+        "--expected-work-item-version",
+        required=True,
+        dest="expected_work_item_version_id",
+    )
+    workflow_start.add_argument("--expected-thread-generation", required=True, type=int)
+    workflow_start.add_argument("--expected-thread-version", required=True, type=int)
+    workflow_start.add_argument("--idempotency-key", required=True)
+    workflow_start.add_argument("--requested-by", required=True)
+    workflow_show = workflow_commands.add_parser(
+        "show", help="show one workflow execution and event stream"
+    )
+    workflow_show.add_argument("execution_id")
+    workflow_list = workflow_commands.add_parser(
+        "list", help="list bounded workflow executions"
+    )
+    workflow_list.add_argument("--project")
+    workflow_list.add_argument("--state", choices=("active", "cancelled", "completed"))
+    workflow_list.add_argument("--limit", type=_candidate_limit, default=100)
+    workflow_cancel = workflow_commands.add_parser(
+        "cancel", help="cancel one active workflow execution"
+    )
+    workflow_cancel.add_argument("execution_id")
+    workflow_cancel.add_argument("--expected-version", required=True, type=int)
+    workflow_cancel.add_argument("--cancelled-by", required=True)
+    workflow_cancel.add_argument("--reason", required=True)
 
     inference_connector = commands.add_parser(
         "inference-connector",
@@ -1122,6 +1192,56 @@ def _dispatch(
             return control.create_agent_profile(**kwargs)
         if args.profile_command == "revise":
             return control.revise_agent_profile(**kwargs)
+    if args.command == "workflow":
+        if args.workflow_command in {"config-create", "config-revise"}:
+            kwargs = {
+                "project_key": args.project,
+                "name": args.name,
+                "spec": WorkflowConfigurationSpec.from_mapping(_json_file(args.spec)),
+                "producer_profile_name": args.producer,
+                "reviewer_profile_name": args.reviewer,
+                "created_by_handle": args.created_by,
+            }
+            if args.workflow_command == "config-create":
+                return control.create_workflow_configuration(**kwargs)
+            return control.revise_workflow_configuration(**kwargs)
+        if args.workflow_command == "config-show":
+            return control.get_workflow_configuration(
+                project_key=args.project,
+                name=args.name,
+                version=args.version,
+            )
+        if args.workflow_command == "config-list":
+            return control.list_workflow_configurations(project_key=args.project)
+        if args.workflow_command == "start":
+            return control.start_workflow_execution(
+                project_key=args.project,
+                configuration_name=args.configuration_name,
+                work_item_id=args.work_item,
+                source_revision=args.source_revision,
+                expected_configuration_version=(args.expected_configuration_version),
+                expected_context_version_id=args.expected_context_version_id,
+                expected_work_item_version_id=(args.expected_work_item_version_id),
+                expected_thread_generation=args.expected_thread_generation,
+                expected_thread_version=args.expected_thread_version,
+                idempotency_key=args.idempotency_key,
+                requested_by_handle=args.requested_by,
+            )
+        if args.workflow_command == "show":
+            return control.get_workflow_execution(args.execution_id)
+        if args.workflow_command == "list":
+            return control.list_workflow_executions(
+                project_key=args.project,
+                state=args.state,
+                limit=args.limit,
+            )
+        if args.workflow_command == "cancel":
+            return control.cancel_workflow_execution(
+                args.execution_id,
+                expected_version=args.expected_version,
+                cancelled_by_handle=args.cancelled_by,
+                reason=args.reason,
+            )
     if args.command == "inference-connector":
         if args.inference_connector_command == "register":
             return control.register_inference_connector(

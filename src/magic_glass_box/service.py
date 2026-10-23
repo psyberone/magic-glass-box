@@ -97,6 +97,7 @@ from .service_sidecar import (
     ServiceSidecarUnavailableError,
     UnixServiceSidecarClient,
 )
+from .workflows import WorkflowConfigurationSpec
 
 if TYPE_CHECKING:
     from .executor import DockerExecutor
@@ -1859,6 +1860,118 @@ class ControlPlane:
             spec=spec,
             krab_identity_id=identity["id"],
             created_by=creator["id"],
+        )
+
+    def create_workflow_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: WorkflowConfigurationSpec,
+        producer_profile_name: str,
+        reviewer_profile_name: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.create_workflow_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            producer_profile_name=producer_profile_name,
+            reviewer_profile_name=reviewer_profile_name,
+            created_by=creator["id"],
+        )
+
+    def revise_workflow_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: WorkflowConfigurationSpec,
+        producer_profile_name: str,
+        reviewer_profile_name: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.revise_workflow_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            producer_profile_name=producer_profile_name,
+            reviewer_profile_name=reviewer_profile_name,
+            created_by=creator["id"],
+        )
+
+    def get_workflow_configuration(
+        self, *, project_key: str, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        return self.database.get_workflow_configuration(
+            project_key, name, version=version
+        )
+
+    def list_workflow_configurations(
+        self, *, project_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.database.list_workflow_configurations(project_key=project_key)
+
+    def start_workflow_execution(
+        self,
+        *,
+        project_key: str,
+        configuration_name: str,
+        work_item_id: str,
+        source_revision: str,
+        expected_configuration_version: int,
+        expected_context_version_id: str,
+        expected_work_item_version_id: str,
+        expected_thread_generation: int,
+        expected_thread_version: int,
+        idempotency_key: str,
+        requested_by_handle: str,
+    ) -> dict[str, Any]:
+        requester = self.database.get_user(requested_by_handle)
+        return self.database.start_workflow_execution(
+            project_key=project_key,
+            configuration_name=configuration_name,
+            work_item_id=work_item_id,
+            source_revision=source_revision,
+            expected_configuration_version=expected_configuration_version,
+            expected_context_version_id=expected_context_version_id,
+            expected_work_item_version_id=expected_work_item_version_id,
+            expected_thread_generation=expected_thread_generation,
+            expected_thread_version=expected_thread_version,
+            idempotency_key=idempotency_key,
+            requested_by=requester["id"],
+        )
+
+    def get_workflow_execution(self, execution_id: str) -> dict[str, Any]:
+        return self.database.get_workflow_execution(execution_id)
+
+    def list_workflow_executions(
+        self,
+        *,
+        project_key: str | None = None,
+        state: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.database.list_workflow_executions(
+            project_key=project_key, state=state, limit=limit
+        )
+
+    def cancel_workflow_execution(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        cancelled_by_handle: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(cancelled_by_handle)
+        return self.database.cancel_workflow_execution(
+            execution_id,
+            expected_version=expected_version,
+            cancelled_by=operator["id"],
+            reason=reason,
         )
 
     def import_work_item(
