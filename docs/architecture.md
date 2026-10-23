@@ -202,9 +202,15 @@ project-activity projection.
   derives readiness without retaining review transcripts or command output.
 - Schema v26 adds immutable changes-requested run bindings. A correction run
   requires the current failed independent-review evidence plus an exact-head
-  review work-log entry from that reviewer attempt, receives the rejected
+  review work-log entry from that reviewer attempt, receives the prior
   candidate snapshot, and can produce a new child candidate without mutating
-  the rejected gate tuple.
+  the changes-requested gate tuple.
+- Schema v27 adds a separate immutable maintainer-disposition stream and
+  correction-run binding. A policy may require product approval independently
+  of agent review and validation; the latest exact-candidate disposition drives
+  readiness, while the complete history remains append-only. A
+  `changes_requested` disposition can feed the same correction choreography
+  without fabricating agent-review provenance.
 - Schema v14 adds hard work-item landing dependencies, one serialized lane per
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks

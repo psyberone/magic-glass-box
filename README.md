@@ -76,8 +76,9 @@ This repository currently contains the first executable vertical slice:
 - immutable exact-input gate policies that bind repository/ref/base/head/tree
   identity, candidate-backed independent-review runs with an explicit profile
   and/or identity separation policy, networkless read-only local validation,
-  append-only bounded evidence, and derived readiness without transcripts or
-  command output;
+  an optional operator-recorded maintainer product disposition, append-only
+  bounded evidence, and derived readiness without agent transcripts or command
+  output;
 - hard work-item landing dependencies, immutable deterministic refolds, one
   leased integration lane per ref, exact argv-only manual Git plans, and
   reissuable nonce-bound receipts that either confirm the unchanged base or
@@ -325,8 +326,9 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
 PYTHONPATH=src python3.11 -m magic_glass_box gate readiness gpl_<id>
 ```
 
-A rejecting reviewer first appends a candidate-pinned `review` work-log entry.
-The operator can then return that exact candidate and note to a developer run:
+A reviewer requesting changes first appends a candidate-pinned `review`
+work-log entry. The operator can then return that exact candidate and note to a
+developer run:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
@@ -338,9 +340,34 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --expected-policy-revision <sha256>
 ```
 
-The correction run starts from the rejected head. Its result creates a new
-candidate that must receive a fresh policy and independent review; no old gate
-evidence is carried forward.
+The correction run starts from the changes-requested head. Its result creates a
+new candidate that must receive a fresh policy and independent review; no old
+gate evidence is carried forward.
+
+When product approval is required in addition to agent review and validation,
+set `"maintainer_approval": true` in the gate-policy request. Record the bounded
+disposition separately from agent evidence:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  gate maintainer-record gpl_<id> --review maintainer-review.json \
+  --recorded-by operator --expected-policy-revision <sha256>
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  gate maintainer-list gpl_<id>
+```
+
+An `approved` disposition passes that exact candidate's maintainer gate. A
+`changes_requested` disposition does not reject or discard the candidate; it
+keeps landing authority closed and can be supplied directly to
+`gate changes-create --maintainer-review mrv_<id>`. The resulting child starts
+with fresh gates. A later disposition supersedes the earlier one for readiness
+while the append-only history remains intact.
+
+Project context should carry the durable product charter—identity, boundaries,
+design preferences, and test discipline. The work item carries the particular
+brief, and the gate records evidence and product disposition for one exact
+candidate. Passing MGB's technical gates is therefore process evidence, not an
+implicit claim that the change belongs in the product.
 
 Review runs receive the exact private candidate tree, not a same-named revision
 from the operator checkout. Local validation uses an immutable image, read-only
@@ -501,9 +528,9 @@ boundary.
 
 The explicitly opted-in Imitation Krab beta runs real producer and read-only
 reviewer seats through the credential-isolated ChatGPT connector. It enforces a
-$5 provider budget, can return a rejected exact head and review note to the
-developer seat, runs a fresh review and full-suite gate on the child, and emits
-only suggested Git/PR commands:
+$5 provider budget, can return a changes-requested exact head and review note
+to the developer seat, runs a fresh review and full-suite gate on the child,
+and emits only suggested Git/PR commands:
 
 ```console
 PYTHONPATH=src python3.11 scripts/check_live_imitation_krab_beta.py \

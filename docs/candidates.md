@@ -153,9 +153,9 @@ Candidate operations perform no push, remote fetch, pull-request creation,
 remote CI query, approval query, or merge. Exact-input review and local gates
 are implemented by Milestone 7B; Milestone 7C adds separate immutable folds,
 ordering, and nonce-bound manual landing without mutating the origin candidate.
-When an independent review rejects a candidate, a changes-requested run starts
-from that exact retained head. Its successful result materializes as a new
-child candidate instead of rewriting the rejected candidate. The immutable
+When an independent review requests changes, a correction run starts from that
+exact retained head. Its successful result materializes as a new child
+candidate instead of rewriting the prior candidate. The immutable
 changes-requested binding also provides the ancestry needed to reconstruct the
 parent and child after loss of the private candidate cache.
 See [integration-gates.md](integration-gates.md).

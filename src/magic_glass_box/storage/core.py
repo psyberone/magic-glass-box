@@ -434,6 +434,14 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM integration_gate_change_runs",
                 ),
                 (
+                    "integration_maintainer_reviews",
+                    "SELECT COUNT(*) FROM integration_maintainer_reviews",
+                ),
+                (
+                    "integration_gate_maintainer_change_runs",
+                    "SELECT COUNT(*) FROM integration_gate_maintainer_change_runs",
+                ),
+                (
                     "integration_gate_evidence",
                     "SELECT COUNT(*) FROM integration_gate_evidence",
                 ),

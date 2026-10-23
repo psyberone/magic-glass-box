@@ -1,0 +1,8 @@
+{
+  "decision": "changes_requested",
+  "details": [
+    "Publish the machine-readable output schema before landing."
+  ],
+  "schema_version": 1,
+  "summary": "Changes requested, not rejected"
+}

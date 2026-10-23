@@ -17,6 +17,7 @@ from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import (
     GATE_CHANGE_SCHEMA,
     GATE_SCHEMA,
+    MAINTAINER_REVIEW_SCHEMA,
     SCHEMA,
     SCHEMA_VERSION,
     ConflictError,
@@ -41,10 +42,14 @@ from magic_glass_box.gates import (
     GateOutcome,
     GatePolicyManifest,
     GatePolicySpec,
+    MaintainerDecision,
+    MaintainerReview,
+    MaintainerReviewRequest,
     ReviewEvidence,
     ReviewSeparation,
     RunProvenance,
     ValidationEvidence,
+    resolve_gate_policy_request,
 )
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import (
@@ -159,6 +164,48 @@ class GatePolicySpecTests(unittest.TestCase):
                 self.assertRaisesRegex(GateError, message),
             ):
                 GatePolicySpec.from_mapping(value)
+
+    def test_maintainer_approval_is_an_explicit_optional_gate(self) -> None:
+        legacy = GatePolicySpec.from_mapping(
+            {
+                "schema_version": 1,
+                "review_separation": "different_profile",
+                "validations": [],
+            }
+        )
+        self.assertFalse(legacy.maintainer_approval)
+        self.assertNotIn("maintainer_approval", legacy.to_dict())
+
+        policy = GatePolicySpec.from_mapping(
+            {
+                "schema_version": 1,
+                "review_separation": None,
+                "maintainer_approval": True,
+                "validations": [],
+            }
+        )
+
+        self.assertEqual(policy.required_gates, ("maintainer-approval",))
+        self.assertTrue(policy.to_dict()["maintainer_approval"])
+        self.assertEqual(GatePolicySpec.from_mapping(policy.to_dict()), policy)
+        resolved = resolve_gate_policy_request(
+            {
+                "schema_version": 1,
+                "review_separation": None,
+                "maintainer_approval": True,
+                "validations": [],
+            },
+            image_resolver=lambda _reference: object(),
+        )
+        self.assertTrue(resolved.maintainer_approval)
+        for value in (False, None, 1, "yes"):
+            document = policy.to_dict()
+            document["maintainer_approval"] = value
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(GateError, "maintainer"),
+            ):
+                GatePolicySpec.from_mapping(document)
 
 
 class GatePolicyManifestTests(unittest.TestCase):
@@ -288,6 +335,127 @@ class GateEvidenceManifestTests(unittest.TestCase):
         self.assertEqual(evidence.gate_name, "validation:unit")
         self.assertNotIn("output", evidence.to_dict())
         self.assertEqual(len(evidence.digest), 64)
+
+    def test_maintainer_review_round_trip_keeps_product_authority_distinct(
+        self,
+    ) -> None:
+        manifest = self.policy_manifest()
+        request = MaintainerReviewRequest.from_mapping(
+            {
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Changes requested before landing",
+                "details": [
+                    "Publish the machine-readable output schema.",
+                    "Describe the command as a liveness probe.",
+                ],
+            }
+        )
+        review = MaintainerReview.bind(
+            "gpl_" + "9" * 32,
+            manifest,
+            request,
+        )
+
+        self.assertEqual(MaintainerReview.from_mapping(review.to_dict()), review)
+        self.assertEqual(review.decision, MaintainerDecision.CHANGES_REQUESTED)
+        self.assertEqual(review.gate_name, "maintainer-approval")
+        self.assertEqual(review.gate_state, "failed")
+        self.assertEqual(len(review.digest), 64)
+
+        with self.assertRaisesRegex(GateError, "actionable"):
+            MaintainerReviewRequest.from_mapping(
+                {
+                    "schema_version": 1,
+                    "decision": "changes_requested",
+                    "summary": "Changes requested",
+                    "details": [],
+                }
+            )
+
+    def test_maintainer_review_rejects_malformed_or_unbounded_input(self) -> None:
+        valid = {
+            "schema_version": 1,
+            "decision": "approved",
+            "summary": "Product fit approved",
+            "details": [],
+        }
+        bad_documents = (
+            None,
+            {**valid, "unknown": True},
+            {key: value for key, value in valid.items() if key != "summary"},
+            {**valid, "schema_version": True},
+            {**valid, "decision": "rejected"},
+            {**valid, "summary": ""},
+            {**valid, "summary": "é" * 2049},
+            {**valid, "details": "not-a-list"},
+            {**valid, "details": ["detail"] * 33},
+            {**valid, "details": [""]},
+            {**valid, "details": ["é" * 2049]},
+        )
+        for document in bad_documents:
+            with self.subTest(document=document), self.assertRaises(GateError):
+                MaintainerReviewRequest.from_mapping(document)
+
+        maximum_details = [f"detail-{index}" for index in range(32)]
+        bounded = MaintainerReviewRequest.from_mapping(
+            {**valid, "details": maximum_details}
+        )
+        self.assertEqual(list(bounded.details), maximum_details)
+
+        for request in (
+            lambda: MaintainerReviewRequest(  # type: ignore[arg-type]
+                1, "approved", "Approved", ()
+            ),
+            lambda: MaintainerReviewRequest(
+                True,
+                MaintainerDecision.APPROVED,
+                "Approved",
+                (),
+            ),
+            lambda: MaintainerReviewRequest(  # type: ignore[arg-type]
+                1,
+                MaintainerDecision.APPROVED,
+                "Approved",
+                [],
+            ),
+        ):
+            with self.subTest(request=request), self.assertRaises(GateError):
+                request()
+
+    def test_maintainer_review_rejects_malformed_bound_record(self) -> None:
+        manifest = self.policy_manifest()
+        request = MaintainerReviewRequest.from_mapping(
+            {
+                "schema_version": 1,
+                "decision": "approved",
+                "summary": "Product fit approved",
+                "details": [],
+            }
+        )
+        review = MaintainerReview.bind("gpl_" + "9" * 32, manifest, request)
+        self.assertEqual(review.gate_state, "passed")
+
+        for document in (
+            None,
+            {**review.to_dict(), "unknown": True},
+            {key: value for key, value in review.to_dict().items() if key != "inputs"},
+            {**review.to_dict(), "kind": "agent_review"},
+        ):
+            with self.subTest(document=document), self.assertRaises(GateError):
+                MaintainerReview.from_mapping(document)
+        with self.assertRaisesRegex(GateError, "request"):
+            MaintainerReview.bind(  # type: ignore[arg-type]
+                "gpl_" + "9" * 32, manifest, object()
+            )
+        with self.assertRaisesRegex(GateError, "inputs"):
+            MaintainerReview(  # type: ignore[arg-type]
+                schema_version=1,
+                inputs=object(),
+                decision=MaintainerDecision.APPROVED,
+                summary="Approved",
+                details=(),
+            )
 
     def test_rejects_self_review_separation_mismatch_and_exit_outcome_mismatch(
         self,
@@ -601,9 +769,28 @@ class GateLedgerTests(unittest.TestCase):
             policy=self.policy_spec(),
         )
 
+    def maintainer_policy_manifest(self) -> GatePolicyManifest:
+        return GatePolicyManifest.bind(
+            self.candidate,
+            default_branch="main",
+            policy=GatePolicySpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": None,
+                    "maintainer_approval": True,
+                    "validations": [],
+                }
+            ),
+        )
+
     def create_policy(self) -> dict[str, object]:
         return self.database.create_gate_policy(
             self.policy_manifest(), created_by=self.user["id"]
+        )
+
+    def create_maintainer_policy(self) -> dict[str, object]:
+        return self.database.create_gate_policy(
+            self.maintainer_policy_manifest(), created_by=self.user["id"]
         )
 
     def create_same_identity_reviewer_profile(self) -> dict[str, object]:
@@ -956,6 +1143,443 @@ class GateLedgerTests(unittest.TestCase):
                 expected_policy_revision="f" * 64,
             )
 
+    def test_maintainer_changes_requested_is_durable_and_returns_to_developer(
+        self,
+    ) -> None:
+        policy = self.create_maintainer_policy()
+        review = self.control.record_maintainer_review(
+            policy["id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Changes requested, not rejected",
+                "details": [
+                    "Publish a JSON schema for the machine output.",
+                    "Assert the timeout and bounded response read in tests.",
+                ],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        self.assertEqual(review["decision"], "changes_requested")
+        self.assertRegex(review["id"], r"^mrv_[0-9a-f]{32}$")
+        self.assertEqual(review["recorded_by"], self.user["id"])
+        self.assertEqual(review["summary"], "Changes requested, not rejected")
+        self.assertEqual(
+            review["details"],
+            [
+                "Publish a JSON schema for the machine output.",
+                "Assert the timeout and bounded response read in tests.",
+            ],
+        )
+        self.assertEqual(review["review"]["summary"], review["summary"])
+        self.assertEqual(review["review"]["details"], review["details"])
+        readiness = self.control.gate_readiness(policy["id"])
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["gates"][0]["state"], "failed")
+        self.assertEqual(readiness["gates"][0]["kind"], "maintainer_review")
+
+        changes_run = self.control.create_changes_run(
+            policy["id"],
+            maintainer_review_id=review["id"],
+            profile_name="Producer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        execution = self.database.get_run_execution(changes_run["id"])
+
+        self.assertEqual(
+            changes_run["source_revision"], self.candidate["head_revision"]
+        )
+        created_metadata = changes_run["events"][0]["metadata"]
+        self.assertEqual(created_metadata["gate_policy_id"], policy["id"])
+        self.assertEqual(created_metadata["candidate_id"], self.candidate["id"])
+        self.assertTrue(created_metadata["changes_requested"])
+        self.assertEqual(created_metadata["feedback_source"], "maintainer_review")
+        self.assertEqual(created_metadata["maintainer_review_id"], review["id"])
+        self.assertEqual(
+            execution["changes_requested"],
+            {
+                "policy_id": policy["id"],
+                "candidate_id": self.candidate["id"],
+                "source": "maintainer_review",
+                "maintainer_review": review,
+            },
+        )
+
+        observed: list[str] = []
+
+        class Executor:
+            def execute(inner_self, request: object, *, before_start=None):
+                observed.append(
+                    (request.workspace / "file.txt").read_text(encoding="utf-8")
+                )
+                (request.workspace / "file.txt").write_text(
+                    "maintainer-corrected\n", encoding="utf-8"
+                )
+                plan = SandboxPlan(
+                    request.run_id,
+                    "magic-glass-box-maintainer-changes",
+                    "sha256:" + "a" * 64,
+                    (),
+                )
+                assert before_start is not None
+                before_start(plan, "a" * 64)
+                return SandboxResult(
+                    "a" * 64,
+                    plan.container_name,
+                    plan.image_id,
+                    0,
+                )
+
+            @staticmethod
+            def cleanup_run(_run_id: str) -> int:
+                return 0
+
+            @staticmethod
+            def stop_run(_run_id: str) -> int:
+                return 1
+
+        workspaces = WorkspaceManager(
+            self.root / "maintainer-workspaces",
+            GitSnapshotter(binary=self.git_binary),
+        )
+        coordinator = RunCoordinator(
+            self.database,
+            Executor(),
+            workspaces,
+            None,
+            self.results,
+            candidate_workspaces=CandidateReviewWorkspaces(
+                self.database,
+                workspaces,
+                self.results,
+                self.candidate_store,
+            ),
+            heartbeat_interval=30,
+        )
+        finished = coordinator.execute(changes_run["id"])
+        self.assertEqual(observed, ["after\n"])
+        replacement = self.database.retry_run(
+            finished["id"],
+            requested_by=self.user["id"],
+            expected_run_version=finished["version"],
+        )
+        replacement_metadata = replacement["events"][0]["metadata"]
+        self.assertEqual(replacement_metadata["gate_policy_id"], policy["id"])
+        self.assertEqual(replacement_metadata["candidate_id"], self.candidate["id"])
+        self.assertTrue(replacement_metadata["changes_requested"])
+        self.assertEqual(replacement_metadata["feedback_source"], "maintainer_review")
+        self.assertEqual(replacement_metadata["maintainer_review_id"], review["id"])
+        self.assertEqual(
+            self.database.get_run_execution(replacement["id"])["changes_requested"][
+                "maintainer_review"
+            ]["id"],
+            review["id"],
+        )
+
+    def test_maintainer_approval_supersedes_changes_requested_for_readiness(
+        self,
+    ) -> None:
+        policy = self.create_maintainer_policy()
+        requested = self.control.record_maintainer_review(
+            policy["id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Four corrections remain",
+                "details": ["Publish the JSON schema."],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        requested_retry = self.control.record_maintainer_review(
+            policy["id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Four corrections remain",
+                "details": ["Publish the JSON schema."],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        self.assertEqual(requested_retry, requested)
+        queued = self.control.enqueue_integration(
+            policy["id"], created_by_handle="operator"
+        )
+        with self.assertRaisesRegex(ConflictError, "gates are not ready"):
+            self.database.claim_integration_item(
+                queued["id"],
+                owner_id="maintainer-gate-test",
+                expected_version=queued["version"],
+                lease_seconds=30,
+            )
+        approved = self.control.record_maintainer_review(
+            policy["id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "approved",
+                "summary": "Product fit approved",
+                "details": [],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        readiness = self.control.gate_readiness(policy["id"])
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(readiness["gates"][0]["evidence_id"], approved["id"])
+        claimed = self.database.claim_integration_item(
+            queued["id"],
+            owner_id="maintainer-gate-test",
+            expected_version=queued["version"],
+            lease_seconds=30,
+        )
+        self.assertEqual(claimed["current_policy_id"], policy["id"])
+        self.assertEqual(
+            [item["id"] for item in self.control.list_maintainer_reviews(policy["id"])],
+            [approved["id"], requested["id"]],
+        )
+        with self.assertRaisesRegex(ConflictError, "current"):
+            self.control.create_changes_run(
+                policy["id"],
+                maintainer_review_id=requested["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+        repeated = self.control.record_maintainer_review(
+            policy["id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Four corrections remain",
+                "details": ["Publish the JSON schema."],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        self.assertNotEqual(repeated["id"], requested["id"])
+        self.assertEqual(repeated["sequence"], 3)
+        self.assertFalse(self.control.gate_readiness(policy["id"])["ready"])
+        correction = self.control.create_changes_run(
+            policy["id"],
+            maintainer_review_id=repeated["id"],
+            profile_name="Producer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        self.assertEqual(
+            self.database.get_run_execution(correction["id"])["changes_requested"][
+                "maintainer_review"
+            ]["id"],
+            repeated["id"],
+        )
+        with self.assertRaisesRegex(ConflictError, "changes requested"):
+            self.control.create_changes_run(
+                policy["id"],
+                maintainer_review_id=approved["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+    def test_maintainer_review_requires_policy_authority_and_exact_revision(
+        self,
+    ) -> None:
+        ordinary = self.create_policy()
+        request = {
+            "schema_version": 1,
+            "decision": "approved",
+            "summary": "Approved",
+            "details": [],
+        }
+        with self.assertRaisesRegex(ConflictError, "not required"):
+            self.control.record_maintainer_review(
+                ordinary["id"],
+                review_request=request,
+                recorded_by_handle="operator",
+                expected_policy_revision=ordinary["policy_revision"],
+            )
+
+        policy = self.create_maintainer_policy()
+        with self.assertRaisesRegex(ConflictError, "revision"):
+            self.control.record_maintainer_review(
+                policy["id"],
+                review_request=request,
+                recorded_by_handle="operator",
+                expected_policy_revision="f" * 64,
+            )
+
+    def test_changes_run_binding_requires_one_complete_feedback_source(self) -> None:
+        policy = self.create_maintainer_policy()
+        base = {
+            "project_key": "project",
+            "profile_name": "Producer",
+            "work_item_id": self.work_item["id"],
+            "requested_by": self.user["id"],
+        }
+        cases = (
+            (
+                "exactly one feedback source",
+                {"change_policy_id": policy["id"]},
+            ),
+            (
+                "binding is incomplete",
+                {"change_maintainer_review_id": "mrv_" + "1" * 32},
+            ),
+            (
+                "binding is incomplete",
+                {
+                    "change_policy_id": policy["id"],
+                    "change_review_evidence_id": "gev_" + "2" * 32,
+                },
+            ),
+            (
+                "exactly one feedback source",
+                {
+                    "change_policy_id": policy["id"],
+                    "change_review_evidence_id": "gev_" + "2" * 32,
+                    "change_review_entry_id": "wle_" + "3" * 32,
+                    "change_maintainer_review_id": "mrv_" + "1" * 32,
+                },
+            ),
+            (
+                "both a review and changes-requested run",
+                {
+                    "gate_policy_id": policy["id"],
+                    "change_policy_id": policy["id"],
+                    "change_maintainer_review_id": "mrv_" + "1" * 32,
+                },
+            ),
+        )
+        for message, bindings in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValidationError, message),
+            ):
+                self.database.create_run(**base, **bindings)
+
+    def test_maintainer_review_storage_rejects_wrong_authority_and_tuple(
+        self,
+    ) -> None:
+        policy = self.create_maintainer_policy()
+        request = MaintainerReviewRequest.from_mapping(
+            {
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "One correction remains",
+                "details": ["Publish the schema."],
+            }
+        )
+        review = MaintainerReview.bind(
+            policy["id"], self.maintainer_policy_manifest(), request
+        )
+        wrong_inputs = replace(
+            review,
+            inputs=replace(
+                review.inputs,
+                head_revision=self.candidate["base_revision"],
+            ),
+        )
+        with self.assertRaisesRegex(ConflictError, "exact policy inputs"):
+            self.database.record_maintainer_review(
+                wrong_inputs, recorded_by=self.user["id"]
+            )
+
+        with self.assertRaisesRegex(ValidationError, "recorded_by"):
+            self.database.record_maintainer_review(review, recorded_by="x" * 65)
+
+        stored = self.database.record_maintainer_review(
+            review, recorded_by=self.user["id"]
+        )
+        for limit in (1, 1000):
+            with self.subTest(valid_limit=limit):
+                self.assertEqual(
+                    self.control.list_maintainer_reviews(policy["id"], limit=limit)[0][
+                        "id"
+                    ],
+                    stored["id"],
+                )
+
+        inactive = self.database.create_user("inactive", "Inactive")
+        with closing(self.database.connect()) as connection:
+            connection.execute(
+                "UPDATE users SET active = 0 WHERE id = ?", (inactive["id"],)
+            )
+            connection.commit()
+        with self.assertRaisesRegex(ConflictError, "inactive"):
+            self.database.record_maintainer_review(review, recorded_by=inactive["id"])
+
+        for limit in (True, 0, 1001):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                self.control.list_maintainer_reviews(policy["id"], limit=limit)
+        with self.assertRaises(NotFoundError):
+            self.control.list_maintainer_reviews("gpl_" + "f" * 32)
+
+    def test_maintainer_changes_run_rejects_missing_or_other_policy_review(
+        self,
+    ) -> None:
+        policy = self.create_maintainer_policy()
+        with self.assertRaisesRegex(NotFoundError, "maintainer review"):
+            self.control.create_changes_run(
+                policy["id"],
+                maintainer_review_id="mrv_" + "f" * 32,
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+        other_run = self.database.create_run(
+            project_key="project",
+            profile_name="Producer",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+            source_revision=self.base,
+        )
+        other_attempt = self._succeed_attempt(
+            other_run,
+            source_revision=self.base,
+            changed=True,
+            digit="8",
+        )
+        other_candidate = self.control.create_candidate(
+            other_attempt["id"],
+            created_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidate_store,
+        )
+        other_manifest = GatePolicyManifest.bind(
+            other_candidate,
+            default_branch="main",
+            policy=self.maintainer_policy_manifest().policy,
+        )
+        other_policy = self.database.create_gate_policy(
+            other_manifest, created_by=self.user["id"]
+        )
+        other_review = self.control.record_maintainer_review(
+            other_policy["id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "One correction remains",
+                "details": ["Publish the schema."],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=other_policy["policy_revision"],
+        )
+        with self.assertRaisesRegex(ConflictError, "policy candidate"):
+            self.control.create_changes_run(
+                policy["id"],
+                maintainer_review_id=other_review["id"],
+                profile_name="Producer",
+                requested_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
     def test_review_run_rejects_the_producer_profile_at_creation(self) -> None:
         policy = self.create_policy()
 
@@ -1118,6 +1742,10 @@ class GateLedgerTests(unittest.TestCase):
             execution["changes_requested"]["review_entry"]["details"],
             ["Preserve the acknowledgement before closing the item."],
         )
+        created_metadata = changes_run["events"][0]["metadata"]
+        self.assertEqual(created_metadata["feedback_source"], "independent_review")
+        self.assertEqual(created_metadata["review_evidence_id"], evidence["id"])
+        self.assertEqual(created_metadata["review_entry_id"], review_entry["id"])
 
         observed: list[str] = []
 
@@ -1211,14 +1839,10 @@ class GateLedgerTests(unittest.TestCase):
             requested_by=self.user["id"],
             expected_run_version=finished["version"],
         )
-        self.assertEqual(
-            replacement["events"][0]["metadata"]["review_evidence_id"],
-            evidence["id"],
-        )
-        self.assertEqual(
-            replacement["events"][0]["metadata"]["review_entry_id"],
-            review_entry["id"],
-        )
+        replacement_metadata = replacement["events"][0]["metadata"]
+        self.assertEqual(replacement_metadata["feedback_source"], "independent_review")
+        self.assertEqual(replacement_metadata["review_evidence_id"], evidence["id"])
+        self.assertEqual(replacement_metadata["review_entry_id"], review_entry["id"])
         replacement_execution = self.database.get_run_execution(replacement["id"])
         self.assertEqual(
             replacement_execution["change_candidate_id"], self.candidate["id"]
@@ -1610,6 +2234,60 @@ class GateLedgerTests(unittest.TestCase):
 
 
 class GateMigrationTests(unittest.TestCase):
+    def test_schema_twenty_six_adds_immutable_maintainer_review_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "control-plane.db"
+            historical_schema = SCHEMA[: SCHEMA.index(MAINTAINER_REVIEW_SCHEMA)]
+            with closing(sqlite3.connect(path)) as connection:
+                connection.executescript(historical_schema)
+                connection.execute("PRAGMA user_version = 26")
+                connection.commit()
+            os.chmod(path, 0o600)
+
+            database = Database(path)
+            first = database.initialize()
+            second = database.initialize()
+
+            self.assertEqual(first["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(second, first)
+            self.assertEqual(first["counts"]["integration_maintainer_reviews"], 0)
+            self.assertEqual(
+                first["counts"]["integration_gate_maintainer_change_runs"], 0
+            )
+            with closing(database.connect()) as connection:
+                tables = {
+                    row["name"]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'table' "
+                        "AND name IN ('integration_maintainer_reviews', "
+                        "'integration_gate_maintainer_change_runs')"
+                    )
+                }
+                triggers = {
+                    row["name"]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_schema WHERE type = 'trigger' "
+                        "AND tbl_name IN ('integration_maintainer_reviews', "
+                        "'integration_gate_maintainer_change_runs')"
+                    )
+                }
+            self.assertEqual(
+                tables,
+                {
+                    "integration_maintainer_reviews",
+                    "integration_gate_maintainer_change_runs",
+                },
+            )
+            self.assertEqual(
+                triggers,
+                {
+                    "integration_maintainer_review_immutable_update",
+                    "integration_maintainer_review_immutable_delete",
+                    "integration_gate_maintainer_change_run_immutable_update",
+                    "integration_gate_maintainer_change_run_immutable_delete",
+                },
+            )
+
     def test_schema_twenty_five_adds_immutable_change_run_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "control-plane.db"
@@ -1673,7 +2351,8 @@ class GateMigrationTests(unittest.TestCase):
                     row["name"]
                     for row in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type = 'table' "
-                        "AND name LIKE 'integration_gate_%'"
+                        "AND (name LIKE 'integration_gate_%' "
+                        "OR name = 'integration_maintainer_reviews')"
                     )
                 }
         self.assertEqual(
@@ -1683,6 +2362,8 @@ class GateMigrationTests(unittest.TestCase):
                 "integration_gate_review_runs",
                 "integration_gate_change_runs",
                 "integration_gate_evidence",
+                "integration_gate_maintainer_change_runs",
+                "integration_maintainer_reviews",
             },
         )
 
@@ -1695,19 +2376,24 @@ class GateMigrationTests(unittest.TestCase):
                     row["name"]
                     for row in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type = 'index' "
-                        "AND tbl_name LIKE 'integration_gate_%' AND sql IS NOT NULL"
+                        "AND (tbl_name LIKE 'integration_gate_%' OR "
+                        "tbl_name = 'integration_maintainer_reviews') "
+                        "AND sql IS NOT NULL"
                     )
                 }
         self.assertEqual(
             names,
             {
                 "integration_gate_change_evidence",
+                "integration_gate_maintainer_change_review",
                 "integration_gate_evidence_candidate_created",
                 "integration_gate_evidence_policy_gate_sequence",
                 "integration_gate_evidence_policy_sequence",
                 "integration_gate_policy_candidate_created",
                 "integration_gate_policy_project_created",
                 "integration_gate_policy_thread_created",
+                "integration_maintainer_review_candidate_created",
+                "integration_maintainer_review_policy_sequence",
             },
         )
 

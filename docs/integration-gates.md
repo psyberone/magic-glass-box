@@ -52,6 +52,23 @@ and starts with no evidence; evidence is never carried forward by inference.
 Readiness is derived from the newest evidence for every required gate, even
 when the append-only stream is longer than an operator listing page.
 
+### Three distinct inputs
+
+MGB does not ask one prompt or one green check to stand in for product
+judgment. A well-described project supplies three separate inputs:
+
+1. The versioned project context is the durable charter: what the product is,
+   what it is not, its design preferences, and its engineering discipline.
+2. The immutable work-item version is the particular brief: what this change
+   must accomplish and its constraints.
+3. The exact-candidate gate policy is the acceptance process: independent
+   review, validation, and—when selected—maintainer disposition.
+
+Every run remains pinned to the context version it started with. Revising a
+charter changes future runs; it does not silently rewrite historical candidate
+authority. If product feedback applies to an already-produced candidate, the
+maintainer-review record below carries that bounded exact-candidate judgment.
+
 ### Independent review
 
 Review must come from a separate run and satisfy an explicit separation policy.
@@ -71,18 +88,41 @@ Review profiles are required to use `workspace_mode: read_only`. That check is
 performed when review runs and replacements are created and again when review
 evidence is accepted; it is not merely a reviewer prompt convention.
 
-A rejecting reviewer records actionable feedback as a `review` work-log entry
-before its attempt exits, with `candidate_revision` set to the exact reviewed
-head. After failed evidence is recorded, `gate changes-create` requires that
-current failed evidence and the note authored by its exact reviewer attempt.
-It creates an ordinary developer run whose workspace starts at the rejected
-candidate, and exposes the selected review entry explicitly through
+A reviewer requesting changes records actionable feedback as a `review`
+work-log entry before its attempt exits, with `candidate_revision` set to the
+exact reviewed head. After failed evidence is recorded, `gate changes-create`
+requires that current failed evidence and the note authored by its exact
+reviewer attempt. It creates an ordinary developer run whose workspace starts
+at the changes-requested candidate, and exposes the selected review entry
+explicitly through
 `run.describe`. Retry or reassignment preserves this binding. The developer's
-result becomes a new child candidate; the rejected candidate, policy, and
-failed evidence remain immutable, and the child requires a fresh policy and
+result becomes a new child candidate; the prior candidate, policy, and failed
+evidence remain immutable, and the child requires a fresh policy and
 independent review. Cache recovery follows the durable changes-requested
 ancestry so a corrected candidate can still be reconstructed when its parent
 is an MGB-generated commit rather than a commit present in the source checkout.
+
+### Maintainer product disposition
+
+Schema v27 adds an optional `maintainer-approval` gate. It is deliberately not
+agent-review evidence. An operator records a bounded `approved` or
+`changes_requested` disposition against one policy's full exact-input tuple.
+Summary and actionable details are retained; no agent transcript or provider
+payload is involved. Dispositions are immutable and append-only, while only the
+latest one determines readiness.
+
+`changes_requested` means the candidate remains viable but is not authorized
+to land. `gate changes-create` can bind a developer run directly to that exact
+maintainer record, and `run.describe` exposes its source and bounded feedback.
+Retry and reassignment preserve the binding. The resulting child candidate
+requires an entirely fresh policy, review, validation, and maintainer
+disposition.
+
+The current authority model is intentionally single-operator: any active local
+MGB user with access to the private control-plane state may record the
+disposition. It does not yet model repository-specific maintainer roles or a
+multi-person approval quorum. The redacted control room exposes gate state and
+record identity, not review text.
 
 ### Candidate and combined-tree validation
 
@@ -142,6 +182,25 @@ magic-glass-box candidate create att_<id> --created-by operator
 # create a fresh policy and independent review for the new cnd_<id>
 ```
 
+When the policy includes `"maintainer_approval": true`, record product judgment
+through its separate published request contract:
+
+```console
+magic-glass-box gate maintainer-record gpl_<id> \
+  --review examples/maintainer-review-request.json --recorded-by operator \
+  --expected-policy-revision <sha256>
+magic-glass-box gate maintainer-list gpl_<id>
+magic-glass-box gate changes-create gpl_<id> \
+  --maintainer-review mrv_<id> --profile Producer \
+  --requested-by operator --expected-policy-revision <sha256>
+```
+
+Agent-review feedback and maintainer feedback are mutually exclusive sources
+for one correction run; MGB never manufactures one kind of provenance from the
+other. An item may be queued for visibility while gates are pending, but claim,
+manual-plan, and provider-landing authority all recheck readiness and remain
+closed until the latest maintainer disposition is `approved`.
+
 The repository also contains
 `scripts/check_live_imitation_krab_beta.py`, an explicitly opted-in real-account
 proof of this choreography. Its connector invocation limit applies to the
@@ -151,6 +210,13 @@ created a candidate, `--resume-review-run run_<failed-review>` starts an audited
 review retry against the retained exact candidate instead of rerunning the
 producer. The proof prints push and pull-request commands as handoff material
 but never executes them.
+
+`scripts/check_live_imitation_krab_maintainer_round.py` continues an existing
+beta candidate from a bounded external `changes_requested` document. It
+replays the feedback through the developer seat, performs a fresh independent
+review and local validation, and then stops honestly at pending maintainer
+approval. It neither approves on the maintainer's behalf nor emits landing
+authority.
 
 Run a pinned local check and inspect current state:
 

@@ -44,6 +44,7 @@ class RunStorage:
         change_policy_id: str | None = None,
         change_review_evidence_id: str | None = None,
         change_review_entry_id: str | None = None,
+        change_maintainer_review_id: str | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
@@ -56,13 +57,20 @@ class RunStorage:
             gate_policy_id = require_string(
                 gate_policy_id, field="gate_policy_id", max_bytes=64
             )
-        change_values = (
-            change_policy_id,
-            change_review_evidence_id,
-            change_review_entry_id,
+        agent_feedback = (
+            change_review_evidence_id is not None or change_review_entry_id is not None
         )
-        if any(value is not None for value in change_values):
-            if not all(value is not None for value in change_values):
+        maintainer_feedback = change_maintainer_review_id is not None
+        if change_policy_id is not None or agent_feedback or maintainer_feedback:
+            if change_policy_id is None:
+                raise ValidationError("change-request binding is incomplete")
+            if agent_feedback == maintainer_feedback:
+                raise ValidationError(
+                    "change request must select exactly one feedback source"
+                )
+            if agent_feedback and (
+                change_review_evidence_id is None or change_review_entry_id is None
+            ):
                 raise ValidationError("change-request binding is incomplete")
             if gate_policy_id is not None:
                 raise ValidationError(
@@ -71,16 +79,23 @@ class RunStorage:
             change_policy_id = require_string(
                 change_policy_id, field="change_policy_id", max_bytes=64
             )
-            change_review_evidence_id = require_string(
-                change_review_evidence_id,
-                field="change_review_evidence_id",
-                max_bytes=64,
-            )
-            change_review_entry_id = require_string(
-                change_review_entry_id,
-                field="change_review_entry_id",
-                max_bytes=64,
-            )
+            if agent_feedback:
+                change_review_evidence_id = require_string(
+                    change_review_evidence_id,
+                    field="change_review_evidence_id",
+                    max_bytes=64,
+                )
+                change_review_entry_id = require_string(
+                    change_review_entry_id,
+                    field="change_review_entry_id",
+                    max_bytes=64,
+                )
+            else:
+                change_maintainer_review_id = require_string(
+                    change_maintainer_review_id,
+                    field="change_maintainer_review_id",
+                    max_bytes=64,
+                )
         if krab_session_id is not None:
             krab_session_id = validate_krab_id(krab_session_id, "ses")
         if krab_claim_id is not None:
@@ -104,6 +119,7 @@ class RunStorage:
                     raise NotFoundError(f"active project not found: {project_key}")
                 gate_policy = None
                 change_target = None
+                maintainer_change_target = None
                 bound_policy_id = gate_policy_id or change_policy_id
                 if bound_policy_id is not None:
                     gate_policy = connection.execute(
@@ -127,7 +143,10 @@ class RunStorage:
                         raise NotFoundError(f"gate policy not found: {bound_policy_id}")
                     if gate_policy["project_id"] != project["id"]:
                         raise ConflictError("gate policy belongs to another project")
-                    if gate_policy["review_separation"] is None:
+                    if (
+                        gate_policy_id is not None
+                        and gate_policy["review_separation"] is None
+                    ):
                         raise ConflictError(
                             "gate policy does not require independent review"
                         )
@@ -138,7 +157,7 @@ class RunStorage:
                         raise ConflictError("run source revision must match exact head")
                     source_revision = gate_policy["head_revision"]
                     context = {"id": gate_policy["context_version_id"]}
-                    if change_policy_id is not None:
+                    if change_review_evidence_id is not None:
                         evidence = connection.execute(
                             "SELECT id, policy_id, candidate_id, kind, gate_name, "
                             "outcome, reviewer_run_id, reviewer_attempt_id "
@@ -231,6 +250,41 @@ class RunStorage:
                                 "candidate"
                             )
                         change_target = evidence
+                    elif change_maintainer_review_id is not None:
+                        maintainer_review = connection.execute(
+                            "SELECT id, policy_id, candidate_id, decision "
+                            "FROM integration_maintainer_reviews WHERE id = ?",
+                            (change_maintainer_review_id,),
+                        ).fetchone()
+                        if maintainer_review is None:
+                            raise NotFoundError(
+                                "maintainer review not found: "
+                                + change_maintainer_review_id
+                            )
+                        if (
+                            maintainer_review["policy_id"] != gate_policy["id"]
+                            or maintainer_review["candidate_id"]
+                            != gate_policy["candidate_id"]
+                        ):
+                            raise ConflictError(
+                                "maintainer review does not match the policy candidate"
+                            )
+                        if maintainer_review["decision"] != "changes_requested":
+                            raise ConflictError(
+                                "changes requested require a maintainer review "
+                                "with that decision"
+                            )
+                        latest = connection.execute(
+                            "SELECT id FROM integration_maintainer_reviews "
+                            "WHERE policy_id = ? ORDER BY sequence DESC LIMIT 1",
+                            (gate_policy["id"],),
+                        ).fetchone()
+                        if latest is None or latest["id"] != maintainer_review["id"]:
+                            raise ConflictError(
+                                "changes requested require the current maintainer "
+                                "review"
+                            )
+                        maintainer_change_target = maintainer_review
                 else:
                     context = connection.execute(
                         "SELECT id FROM project_context_versions "
@@ -351,12 +405,7 @@ class RunStorage:
                     ),
                 )
                 if gate_policy is not None:
-                    binding_table = (
-                        "integration_gate_review_runs"
-                        if gate_policy_id is not None
-                        else "integration_gate_change_runs"
-                    )
-                    if binding_table == "integration_gate_review_runs":
+                    if gate_policy_id is not None:
                         connection.execute(
                             "INSERT INTO integration_gate_review_runs "
                             "(run_id, policy_id, candidate_id, created_at) "
@@ -368,7 +417,7 @@ class RunStorage:
                                 now,
                             ),
                         )
-                    else:
+                    elif change_target is not None:
                         assert change_target is not None
                         connection.execute(
                             "INSERT INTO integration_gate_change_runs "
@@ -384,6 +433,21 @@ class RunStorage:
                                 now,
                             ),
                         )
+                    else:
+                        assert maintainer_change_target is not None
+                        connection.execute(
+                            "INSERT INTO integration_gate_maintainer_change_runs "
+                            "(run_id, policy_id, candidate_id, "
+                            "maintainer_review_id, created_at) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (
+                                run_id,
+                                gate_policy["id"],
+                                gate_policy["candidate_id"],
+                                maintainer_change_target["id"],
+                                now,
+                            ),
+                        )
                 event_metadata: dict[str, Any] = {}
                 if supervision_policy != SupervisionPolicy.disabled():
                     event_metadata["supervision_policy_sha256"] = (
@@ -394,8 +458,15 @@ class RunStorage:
                     event_metadata["candidate_id"] = gate_policy["candidate_id"]
                 if change_target is not None:
                     event_metadata["changes_requested"] = True
+                    event_metadata["feedback_source"] = "independent_review"
                     event_metadata["review_evidence_id"] = change_target["id"]
                     event_metadata["review_entry_id"] = change_review_entry_id
+                if maintainer_change_target is not None:
+                    event_metadata["changes_requested"] = True
+                    event_metadata["feedback_source"] = "maintainer_review"
+                    event_metadata["maintainer_review_id"] = maintainer_change_target[
+                        "id"
+                    ]
                 connection.execute(
                     "INSERT INTO run_events "
                     "(run_id, sequence, kind, from_state, to_state, metadata_json, "
@@ -553,7 +624,21 @@ class RunStorage:
                     "WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
-                if review_target is not None and change_target is not None:
+                maintainer_change_target = connection.execute(
+                    "SELECT policy_id, candidate_id, maintainer_review_id "
+                    "FROM integration_gate_maintainer_change_runs "
+                    "WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                binding_count = sum(
+                    target is not None
+                    for target in (
+                        review_target,
+                        change_target,
+                        maintainer_change_target,
+                    )
+                )
+                if binding_count > 1:
                     raise StorageError(
                         "run has conflicting review and changes-requested bindings"
                     )
@@ -740,6 +825,19 @@ class RunStorage:
                             now,
                         ),
                     )
+                if maintainer_change_target is not None:
+                    connection.execute(
+                        "INSERT INTO integration_gate_maintainer_change_runs "
+                        "(run_id, policy_id, candidate_id, maintainer_review_id, "
+                        "created_at) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            replacement_run_id,
+                            maintainer_change_target["policy_id"],
+                            maintainer_change_target["candidate_id"],
+                            maintainer_change_target["maintainer_review_id"],
+                            now,
+                        ),
+                    )
                 try:
                     source_policy = SupervisionPolicy.from_mapping(
                         json.loads(source["supervision_policy_json"])
@@ -761,6 +859,19 @@ class RunStorage:
                         "review_evidence_id"
                     ]
                     created_event["review_entry_id"] = change_target["review_entry_id"]
+                    created_event["feedback_source"] = "independent_review"
+                if maintainer_change_target is not None:
+                    created_event["gate_policy_id"] = maintainer_change_target[
+                        "policy_id"
+                    ]
+                    created_event["candidate_id"] = maintainer_change_target[
+                        "candidate_id"
+                    ]
+                    created_event["changes_requested"] = True
+                    created_event["feedback_source"] = "maintainer_review"
+                    created_event["maintainer_review_id"] = maintainer_change_target[
+                        "maintainer_review_id"
+                    ]
                 if source_policy != SupervisionPolicy.disabled():
                     created_event["supervision_policy_sha256"] = source_policy.digest
                 created_metadata = canonical_json(created_event)

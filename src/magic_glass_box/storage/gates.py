@@ -18,6 +18,7 @@ from ..gates import (
     GateError,
     GateEvidence,
     GatePolicyManifest,
+    MaintainerReview,
     ReviewEvidence,
     RunProvenance,
     ValidationEvidence,
@@ -168,6 +169,81 @@ class GateStorage:
             "recorded_by": row["recorded_by"],
             "created_at": row["created_at"],
         }
+
+    @staticmethod
+    def _maintainer_review_columns(alias: str | None = None) -> str:
+        prefix = "" if alias is None else f"{alias}."
+        return ", ".join(
+            prefix + column
+            for column in (
+                "id",
+                "policy_id",
+                "sequence",
+                "schema_version",
+                "review_json",
+                "content_sha256",
+                "decision",
+                "candidate_id",
+                "repository_identity",
+                "integration_ref",
+                "expected_base_revision",
+                "head_revision",
+                "tree_revision",
+                "object_format",
+                "policy_revision",
+                "recorded_by",
+                "created_at",
+            )
+        )
+
+    @classmethod
+    def _maintainer_review_record(cls, row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            review = MaintainerReview.from_mapping(json.loads(row["review_json"]))
+        except (GateError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageError("stored maintainer review is invalid") from exc
+        inputs = review.inputs
+        expected = {
+            "policy_id": inputs.policy_id,
+            "schema_version": review.schema_version,
+            "content_sha256": review.digest,
+            "decision": review.decision.value,
+            "candidate_id": inputs.candidate_id,
+            "repository_identity": inputs.repository_identity,
+            "integration_ref": inputs.integration_ref,
+            "expected_base_revision": inputs.expected_base_revision,
+            "head_revision": inputs.head_revision,
+            "tree_revision": inputs.tree_revision,
+            "object_format": inputs.object_format,
+            "policy_revision": inputs.policy_revision,
+        }
+        if any(row[field] != value for field, value in expected.items()):
+            raise StorageError(
+                "stored maintainer review columns do not match its manifest"
+            )
+        return {
+            "id": row["id"],
+            **expected,
+            "sequence": row["sequence"],
+            "summary": review.summary,
+            "details": list(review.details),
+            "review": review.to_dict(),
+            "recorded_by": row["recorded_by"],
+            "created_at": row["created_at"],
+        }
+
+    @classmethod
+    def _maintainer_review_row(
+        cls, connection: sqlite3.Connection, review_id: str
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            f"SELECT {cls._maintainer_review_columns()} "  # noqa: S608
+            "FROM integration_maintainer_reviews WHERE id = ?",
+            (review_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"maintainer review not found: {review_id}")
+        return row
 
     def create_gate_policy(
         self, manifest: GatePolicyManifest, *, created_by: str
@@ -711,6 +787,115 @@ class GateStorage:
             raise StorageError("gate evidence was not recorded")
         return self._evidence_record(row)
 
+    def record_maintainer_review(
+        self, review: MaintainerReview, *, recorded_by: str
+    ) -> dict[str, Any]:
+        if not isinstance(review, MaintainerReview):
+            raise GateError("maintainer review is invalid")
+        recorded_by = require_string(recorded_by, field="recorded_by", max_bytes=64)
+        review_id = self.new_id("mrv")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                policy_row = connection.execute(
+                    f"SELECT {self._policy_columns()} "  # noqa: S608
+                    "FROM integration_gate_policies WHERE id = ?",
+                    (review.inputs.policy_id,),
+                ).fetchone()
+                if policy_row is None:
+                    raise NotFoundError(
+                        f"gate policy not found: {review.inputs.policy_id}"
+                    )
+                policy_record = self._policy_record(policy_row)
+                policy = GatePolicyManifest.from_mapping(policy_record["manifest"])
+                try:
+                    review.inputs.assert_matches(policy)
+                except GateError as exc:
+                    raise ConflictError(
+                        "maintainer review does not match the exact policy inputs"
+                    ) from exc
+                if not policy.policy.maintainer_approval:
+                    raise ConflictError(
+                        "maintainer approval is not required by the policy"
+                    )
+                self._active_user(
+                    connection, recorded_by, role="maintainer review recorder"
+                )
+                latest = connection.execute(
+                    f"SELECT {self._maintainer_review_columns()} "  # noqa: S608
+                    "FROM integration_maintainer_reviews "
+                    "WHERE policy_id = ? ORDER BY sequence DESC LIMIT 1",
+                    (review.inputs.policy_id,),
+                ).fetchone()
+                if latest is not None and latest["content_sha256"] == review.digest:
+                    connection.commit()
+                    return self._maintainer_review_record(latest)
+                sequence = 1 if latest is None else latest["sequence"] + 1
+                inputs = review.inputs
+                connection.execute(
+                    "INSERT INTO integration_maintainer_reviews "
+                    "(id, policy_id, sequence, schema_version, review_json, "
+                    "content_sha256, decision, candidate_id, repository_identity, "
+                    "integration_ref, expected_base_revision, head_revision, "
+                    "tree_revision, object_format, policy_revision, recorded_by, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "?, ?, ?, ?)",
+                    (
+                        review_id,
+                        inputs.policy_id,
+                        sequence,
+                        review.schema_version,
+                        review.canonical,
+                        review.digest,
+                        review.decision.value,
+                        inputs.candidate_id,
+                        inputs.repository_identity,
+                        inputs.integration_ref,
+                        inputs.expected_base_revision,
+                        inputs.head_revision,
+                        inputs.tree_revision,
+                        inputs.object_format,
+                        inputs.policy_revision,
+                        recorded_by,
+                        now,
+                    ),
+                )
+                row = self._maintainer_review_row(connection, review_id)
+                connection.commit()
+            except (ConflictError, GateError, NotFoundError, StorageError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("maintainer review could not be recorded") from exc
+        return self._maintainer_review_record(row)
+
+    def list_maintainer_reviews(
+        self, policy_id: str, *, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError("limit must be between 1 and 1000")
+        with self._read_snapshot() as connection:
+            known = connection.execute(
+                "SELECT 1 FROM integration_gate_policies WHERE id = ?",
+                (policy_id,),
+            ).fetchone()
+            if known is None:
+                raise NotFoundError(f"gate policy not found: {policy_id}")
+            rows = connection.execute(
+                f"SELECT {self._maintainer_review_columns()} "  # noqa: S608
+                "FROM integration_maintainer_reviews WHERE policy_id = ? "
+                "ORDER BY sequence DESC LIMIT ?",
+                (policy_id, limit),
+            ).fetchall()
+        return [self._maintainer_review_record(row) for row in rows]
+
     def get_gate_review_provenance(
         self, policy_id: str, reviewer_attempt_id: str
     ) -> dict[str, Any]:
@@ -795,6 +980,24 @@ class GateStorage:
             record["gate_name"]: record
             for record in (self._evidence_record(row) for row in evidence_rows)
         }
+        if manifest.policy.maintainer_approval:
+            maintainer_row = connection.execute(
+                f"SELECT {self._maintainer_review_columns()} "  # noqa: S608
+                "FROM integration_maintainer_reviews WHERE policy_id = ? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (policy_id,),
+            ).fetchone()
+            if maintainer_row is not None:
+                review = self._maintainer_review_record(maintainer_row)
+                latest["maintainer-approval"] = {
+                    "id": review["id"],
+                    "gate_name": "maintainer-approval",
+                    "outcome": (
+                        "passed" if review["decision"] == "approved" else "failed"
+                    ),
+                    "sequence": review["sequence"],
+                    "created_at": review["created_at"],
+                }
         gates: list[dict[str, Any]] = []
         for name in manifest.policy.required_gates:
             record = latest.get(name)
@@ -805,7 +1008,11 @@ class GateStorage:
                     "kind": (
                         "independent_review"
                         if name == "independent-review"
-                        else "local_validation"
+                        else (
+                            "maintainer_review"
+                            if name == "maintainer-approval"
+                            else "local_validation"
+                        )
                     ),
                     "state": state,
                     "evidence_id": None if record is None else record["id"],

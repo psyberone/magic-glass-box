@@ -930,27 +930,28 @@ ordinary durable runs: a producer and an independent reviewer with a different
 profile and Krab identity. This remains an interim choreography rather than the
 future workflow-template system.
 
-Schema v26 closes the one missing return path. A rejecting reviewer must append
+Schema v26 closes the one missing return path. A reviewer requesting changes
+must append
 an actionable `review` work-log entry pinned to the exact candidate before the
 attempt exits. `gate changes-create` accepts only the current failed
 independent-review evidence and that exact reviewer-authored entry, then gives
-a developer profile a fresh workspace rooted at the rejected candidate.
+a developer profile a fresh workspace rooted at the prior candidate.
 Retries and reassignments keep the binding. A successful correction produces a
-new child candidate with fresh gates; the rejected candidate, policy, and
+new child candidate with fresh gates; the prior candidate, policy, and
 evidence are never rewritten. Reviewer profiles are structurally read-only,
 and durable ancestry reconstructs corrected candidates after private-cache
 loss.
 
-The live proof must exercise both branches: reject once and return the requested
-changes to the developer seat, then accept a freshly gated corrected candidate.
+The live proof must exercise both branches: request changes once and return the
+feedback to the developer seat, then accept a freshly gated corrected candidate.
 It must also retain the producer/reviewer negative preflight documented in the
 internal beta contract.
 
 The 2026-10-21 live proof did exactly that against Imitation Krab commit
 `83eaec7`. The producer created a three-file health-command candidate. A
-read-only reviewer rejected its test fixture because it attempted to create
+read-only reviewer requested a test-fixture correction because it attempted to create
 temporary state inside the read-only source checkout. The developer correction
-run began at that exact rejected head and changed only the test fixture. A new
+run began at that exact changes-requested head and changed only the test fixture. A new
 reviewer approved the child, and the independent-review plus full-suite gates
 became ready after all 102 tests passed. The negative preflight rejected both
 the producer profile and a distinct profile sharing the producer identity.
@@ -966,9 +967,44 @@ harness now defaults the connector lifetime cap to 64 turns while the durable
 $5 budget remains the resource authority, and supports an explicit failed-
 review resume path.
 
-The completed local checkpoint passes 1,002 tests and Ruff format/lint with 86%
-aggregate statement-plus-branch coverage. A focused mutation wave over the
-correction-run binding, replacement propagation, candidate creation and
+The first external product review then exposed a different missing boundary:
+MGB had proved technical rigor but could not separately retain a maintainer's
+judgment that a change belongs in Krab. Schema v27 adds an optional
+exact-candidate maintainer gate, append-only `approved`/`changes_requested`
+dispositions, and a provenance-preserving return path to the developer seat.
+It also makes the project charter, work brief, and review gate explicit as
+three different inputs. Passing technical gates no longer implies product
+approval. The continuation proof must apply the four health-command
+corrections, pass a fresh independent review and full suite, and stop at pending
+maintainer approval rather than approving itself.
+
+The 2026-10-22 continuation proof completed that choreography. The maintainer's
+four-item disposition was bound to candidate `cnd_3b5a05d7530b5fe1306dcd314f25ca74`;
+the producer returned a five-file child candidate
+`cnd_5b49595ec00849e1193d36cbc913445d` at `6f0e67a`. A fresh read-only reviewer
+approved the exact child after its 105-test suite passed, and MGB's separate
+networkless full-suite validation passed. Readiness stopped at two passed gates
+and one pending maintainer gate, so no landing authority or command was issued.
+The continuation consumed $0.292140, bringing total live-beta accounting to
+$0.815377 of the durable $5 ceiling. Credentials remained connector-only, both
+workers had direct network denied, and the Imitation Krab checkout stayed clean
+at its newer `50fcd1e` head. The report is retained in the private beta state as
+`maintainer-round-report.json`; product approval remains intentionally open.
+
+The post-change local checkpoint passes 1,018 tests and Ruff format/lint with
+86% aggregate statement-plus-branch coverage. A focused schema-v27 mutation
+wave covered 5,780 mutants in every changed production function. It carried
+forward 4,759 kills from the same production source, reran all 1,021 prior
+survivors or unclassified mutants, and killed 562 of them. Survivor-driven
+boundary and provenance assertions then killed 48 more, for a conservative
+5,369/5,780 result (92.89%). The remaining survivors change diagnostic prose,
+redundant internal fields, or pre-existing broad-function behavior outside the
+new maintainer authority path. There were no timeouts, uncovered mutants,
+suspicious outcomes, interruptions, or crashes in the focused waves.
+
+The preceding schema-v26 checkpoint passed 1,002 tests and Ruff format/lint
+with 86% aggregate statement-plus-branch coverage. A focused mutation wave
+over the correction-run binding, replacement propagation, candidate creation and
 recovery call site, review workspace, gate evidence, and execution projection
 killed 82 of 98 mutants (83.67%). Survivor-driven tests added a genuinely cold
 parent-cache recovery, the 64-byte work-item boundary, and exact review-evidence

@@ -647,7 +647,10 @@ class ControlRoom:
             "gcr.policy_id AS change_policy_id, "
             "gcr.candidate_id AS change_candidate_id, "
             "gcr.review_evidence_id AS change_review_evidence_id, "
-            "gcr.review_entry_id AS change_review_entry_id "
+            "gcr.review_entry_id AS change_review_entry_id, "
+            "gmcr.policy_id AS maintainer_change_policy_id, "
+            "gmcr.candidate_id AS maintainer_change_candidate_id, "
+            "gmcr.maintainer_review_id AS change_maintainer_review_id "
             "FROM visible JOIN runs r ON r.id = visible.id "
             "JOIN projects p ON p.id = r.project_id "
             "JOIN project_context_versions c ON c.id = r.context_version_id "
@@ -658,6 +661,8 @@ class ControlRoom:
             "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
             "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
             "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
+            "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
+            "ON gmcr.run_id = r.id "
             "ORDER BY visible.group_order, r.updated_at DESC, r.id",
             (history_limit,),
         ).fetchall()
@@ -695,6 +700,11 @@ class ControlRoom:
                     "change_candidate_id": row["change_candidate_id"],
                     "change_review_evidence_id": row["change_review_evidence_id"],
                     "change_review_entry_id": row["change_review_entry_id"],
+                    "maintainer_change_policy_id": row["maintainer_change_policy_id"],
+                    "maintainer_change_candidate_id": row[
+                        "maintainer_change_candidate_id"
+                    ],
+                    "change_maintainer_review_id": row["change_maintainer_review_id"],
                     "untrusted_work_item_title": title,
                     "source_revision": row["source_revision"],
                     "predecessor_run_id": row["predecessor_run_id"],
@@ -885,9 +895,14 @@ class ControlRoom:
             f"{placeholders})) OR EXISTS ("
             "SELECT 1 FROM integration_gate_change_runs gcr "
             "WHERE gcr.policy_id = gp.id AND gcr.run_id IN ("
+            f"{placeholders})) OR EXISTS ("
+            "SELECT 1 FROM integration_gate_maintainer_change_runs gmcr "
+            "WHERE gmcr.policy_id = gp.id AND gmcr.run_id IN ("
             f"{placeholders})) ORDER BY gp.created_at DESC, gp.id"
         )
-        rows = connection.execute(query, (*run_ids, *run_ids, *run_ids)).fetchall()
+        rows = connection.execute(
+            query, (*run_ids, *run_ids, *run_ids, *run_ids)
+        ).fetchall()
         if not rows:
             return []
         manifests: dict[str, GatePolicyManifest] = {}
@@ -915,6 +930,20 @@ class ControlRoom:
         ).fetchall()
         latest: dict[str, dict[str, sqlite3.Row]] = defaultdict(dict)
         for evidence in evidence_rows:
+            latest[evidence["policy_id"]][evidence["gate_name"]] = evidence
+        maintainer_rows = connection.execute(
+            "SELECT r.policy_id, r.id, 'maintainer-approval' AS gate_name, "
+            "CASE r.decision WHEN 'approved' THEN 'passed' ELSE 'failed' END "
+            "AS outcome, r.sequence, r.created_at "
+            "FROM integration_maintainer_reviews r JOIN ("
+            "SELECT policy_id, MAX(sequence) AS sequence "
+            "FROM integration_maintainer_reviews WHERE policy_id IN ("
+            + placeholders
+            + ") GROUP BY policy_id) latest "
+            "ON latest.policy_id = r.policy_id AND latest.sequence = r.sequence",
+            policy_ids,
+        ).fetchall()
+        for evidence in maintainer_rows:
             latest[evidence["policy_id"]][evidence["gate_name"]] = evidence
 
         policies: list[dict[str, Any]] = []
@@ -1496,6 +1525,12 @@ class ControlRoom:
             ).fetchone()[0],
             "integration_gate_change_runs": connection.execute(
                 "SELECT COUNT(*) FROM integration_gate_change_runs"
+            ).fetchone()[0],
+            "integration_maintainer_reviews": connection.execute(
+                "SELECT COUNT(*) FROM integration_maintainer_reviews"
+            ).fetchone()[0],
+            "integration_gate_maintainer_change_runs": connection.execute(
+                "SELECT COUNT(*) FROM integration_gate_maintainer_change_runs"
             ).fetchone()[0],
             "integration_gate_evidence": connection.execute(
                 "SELECT COUNT(*) FROM integration_gate_evidence"

@@ -49,7 +49,8 @@ contains:
 - attempts, owners, leases, cancellation signals, interactions, retained
   result summaries, run-bound provider authorities, pinned supervision
   policies, candidate-backed review bindings, redacted exact-input gate
-  readiness, hard landing dependencies, serialized integration queue state,
+  readiness (including maintainer-gate state without its text), hard landing
+  dependencies, serialized integration queue state,
   folded policy identity, pending manual-plan or provider-landing IDs, pinned
   provider service-operation state, durable supervisor actions, and threshold
   escalation records; and
@@ -85,6 +86,7 @@ The projection intentionally excludes:
 - work-log and checkpoint text;
 - interaction titles, questions, answers, and message history;
 - handoff summaries and agent transcripts;
+- maintainer-disposition summaries and actionable details;
 - retained result manifests, file paths, and file content;
 - agent command arguments;
 - landing-plan argv, private candidate-repository paths, remotes, and raw

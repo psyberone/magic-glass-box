@@ -54,6 +54,8 @@ from .gates import (
     ExactGateInputs,
     GateOutcome,
     GatePolicyManifest,
+    MaintainerReview,
+    MaintainerReviewRequest,
     ReviewEvidence,
     ValidationEvidence,
     resolve_gate_policy_request,
@@ -784,6 +786,29 @@ class ControlPlane:
         )
         return self.database.record_gate_evidence(evidence, recorded_by=recorder["id"])
 
+    def record_maintainer_review(
+        self,
+        policy_id: str,
+        *,
+        review_request: object,
+        recorded_by_handle: str,
+        expected_policy_revision: str,
+    ) -> dict[str, Any]:
+        """Record one authorized product disposition for an exact candidate."""
+
+        recorder = self.database.get_user(recorded_by_handle)
+        if recorder["active"] != 1:
+            raise ConflictError("maintainer review recorder is inactive")
+        policy_record = self.database.get_gate_policy(policy_id)
+        if policy_record["policy_revision"] != expected_policy_revision:
+            raise ConflictError("gate policy revision changed")
+        manifest = GatePolicyManifest.from_mapping(policy_record["manifest"])
+        request = MaintainerReviewRequest.from_mapping(review_request)
+        review = MaintainerReview.bind(policy_id, manifest, request)
+        return self.database.record_maintainer_review(
+            review, recorded_by=recorder["id"]
+        )
+
     def create_review_run(
         self,
         policy_id: str,
@@ -821,8 +846,9 @@ class ControlPlane:
         self,
         policy_id: str,
         *,
-        review_evidence_id: str,
-        review_entry_id: str,
+        review_evidence_id: str | None = None,
+        review_entry_id: str | None = None,
+        maintainer_review_id: str | None = None,
         profile_name: str,
         requested_by_handle: str,
         expected_policy_revision: str,
@@ -830,7 +856,7 @@ class ControlPlane:
         krab_claim_id: str | None = None,
         supervision_policy: SupervisionPolicy | None = None,
     ) -> dict[str, Any]:
-        """Return a rejected candidate and its review note to a developer run."""
+        """Return a changes-requested candidate and exact feedback to a developer."""
 
         requester = self.database.get_user(requested_by_handle)
         if requester["active"] != 1:
@@ -838,7 +864,7 @@ class ControlPlane:
         target = self.database.get_gate_review_target(policy_id)
         if target["policy_revision"] != expected_policy_revision:
             raise ConflictError("gate policy revision changed")
-        if target["review_separation"] is None:
+        if review_evidence_id is not None and target["review_separation"] is None:
             raise ConflictError("gate policy does not require independent review")
         return self.database.create_run(
             project_key=target["project_key"],
@@ -852,6 +878,7 @@ class ControlPlane:
             change_policy_id=policy_id,
             change_review_evidence_id=review_evidence_id,
             change_review_entry_id=review_entry_id,
+            change_maintainer_review_id=maintainer_review_id,
         )
 
     def gate_readiness(self, policy_id: str) -> dict[str, Any]:
@@ -861,6 +888,11 @@ class ControlPlane:
         self, policy_id: str, *, limit: int = 500
     ) -> list[dict[str, Any]]:
         return self.database.list_gate_evidence(policy_id, limit=limit)
+
+    def list_maintainer_reviews(
+        self, policy_id: str, *, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        return self.database.list_maintainer_reviews(policy_id, limit=limit)
 
     def run_local_validation(
         self,

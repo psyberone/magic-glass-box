@@ -719,13 +719,33 @@ def build_parser() -> argparse.ArgumentParser:
     gate_review.add_argument("--outcome", required=True, choices=("passed", "failed"))
     gate_review.add_argument("--recorded-by", required=True)
     gate_review.add_argument("--expected-policy-revision", required=True)
+    gate_maintainer = gate_commands.add_parser(
+        "maintainer-record",
+        help="record an authorized product disposition for an exact candidate",
+    )
+    gate_maintainer.add_argument("policy_id")
+    gate_maintainer.add_argument("--review", required=True, type=Path)
+    gate_maintainer.add_argument("--recorded-by", required=True)
+    gate_maintainer.add_argument("--expected-policy-revision", required=True)
+    gate_maintainer_list = gate_commands.add_parser(
+        "maintainer-list", help="list append-only maintainer dispositions"
+    )
+    gate_maintainer_list.add_argument("policy_id")
+    gate_maintainer_list.add_argument(
+        "--limit",
+        type=_evidence_limit,
+        default=500,
+        help="maximum maintainer reviews to return (1-1000; default: 500)",
+    )
     gate_changes_create = gate_commands.add_parser(
         "changes-create",
-        help="return a failed candidate and review note to a developer run",
+        help="return a changes-requested candidate and feedback to a developer run",
     )
     gate_changes_create.add_argument("policy_id")
-    gate_changes_create.add_argument("--review-evidence", required=True)
-    gate_changes_create.add_argument("--review-entry", required=True)
+    gate_feedback = gate_changes_create.add_mutually_exclusive_group(required=True)
+    gate_feedback.add_argument("--review-evidence")
+    gate_feedback.add_argument("--maintainer-review")
+    gate_changes_create.add_argument("--review-entry")
     gate_changes_create.add_argument("--profile", required=True)
     gate_changes_create.add_argument("--requested-by", required=True)
     gate_changes_create.add_argument("--expected-policy-revision", required=True)
@@ -1367,11 +1387,21 @@ def _dispatch(
                 recorded_by_handle=args.recorded_by,
                 expected_policy_revision=args.expected_policy_revision,
             )
+        if args.gate_command == "maintainer-record":
+            return control.record_maintainer_review(
+                args.policy_id,
+                review_request=_json_file(args.review),
+                recorded_by_handle=args.recorded_by,
+                expected_policy_revision=args.expected_policy_revision,
+            )
+        if args.gate_command == "maintainer-list":
+            return control.list_maintainer_reviews(args.policy_id, limit=args.limit)
         if args.gate_command == "changes-create":
             return control.create_changes_run(
                 args.policy_id,
                 review_evidence_id=args.review_evidence,
                 review_entry_id=args.review_entry,
+                maintainer_review_id=args.maintainer_review,
                 profile_name=args.profile,
                 requested_by_handle=args.requested_by,
                 expected_policy_revision=args.expected_policy_revision,

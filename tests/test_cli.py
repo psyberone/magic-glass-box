@@ -187,6 +187,16 @@ class FakeControlPlane:
     ) -> dict[str, object]:
         return self._called("gate.review-record", policy_id=policy_id, **kwargs)
 
+    def record_maintainer_review(
+        self, policy_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("gate.maintainer-record", policy_id=policy_id, **kwargs)
+
+    def list_maintainer_reviews(
+        self, policy_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("gate.maintainer-list", policy_id=policy_id, **kwargs)
+
     def create_changes_run(self, policy_id: str, **kwargs: object) -> dict[str, object]:
         return self._called("gate.changes-create", policy_id=policy_id, **kwargs)
 
@@ -634,8 +644,18 @@ class CLITests(unittest.TestCase):
                     ),
                     ("review-record", "record independent-review evidence"),
                     (
+                        "maintainer-record",
+                        "record an authorized product disposition for an exact "
+                        "candidate",
+                    ),
+                    (
+                        "maintainer-list",
+                        "list append-only maintainer dispositions",
+                    ),
+                    (
                         "changes-create",
-                        "return a failed candidate and review note to a developer run",
+                        "return a changes-requested candidate and feedback to a "
+                        "developer run",
                     ),
                     ("validate", "run one pinned local validation gate"),
                     ("evidence-list", "list append-only gate evidence"),
@@ -874,9 +894,12 @@ class CLITests(unittest.TestCase):
                     "--recorded-by",
                     "--expected-policy-revision",
                 ),
+                ("gate", "maintainer-record"): (
+                    "--review",
+                    "--recorded-by",
+                    "--expected-policy-revision",
+                ),
                 ("gate", "changes-create"): (
-                    "--review-evidence",
-                    "--review-entry",
                     "--profile",
                     "--requested-by",
                     "--expected-policy-revision",
@@ -1834,8 +1857,13 @@ class CLITests(unittest.TestCase):
                 "policy-list": "list recent immutable gate policies",
                 "review-create": "create a candidate-backed independent review run",
                 "review-record": "record independent-review evidence",
+                "maintainer-record": (
+                    "record an authorized product disposition for an exact candidate"
+                ),
+                "maintainer-list": "list append-only maintainer dispositions",
                 "changes-create": (
-                    "return a failed candidate and review note to a developer run"
+                    "return a changes-requested candidate and feedback to a "
+                    "developer run"
                 ),
                 "validate": "run one pinned local validation gate",
                 "evidence-list": "list append-only gate evidence",
@@ -2419,6 +2447,13 @@ class CLITests(unittest.TestCase):
                 ),
             ),
             (
+                ["gate", "maintainer-list", policy_id, "--limit", "23"],
+                (
+                    "gate.maintainer-list",
+                    {"policy_id": policy_id, "limit": 23},
+                ),
+            ),
+            (
                 ["gate", "readiness", policy_id],
                 ("gate.readiness", {"policy_id": policy_id}),
             ),
@@ -2538,6 +2573,90 @@ class CLITests(unittest.TestCase):
             ),
         )
 
+        maintainer_review = {
+            "schema_version": 1,
+            "decision": "changes_requested",
+            "summary": "Changes requested, not rejected",
+            "details": ["Publish the JSON output schema."],
+        }
+        maintainer_path = Path(self.temporary.name) / "maintainer-review.json"
+        maintainer_path.write_text(json.dumps(maintainer_review), encoding="utf-8")
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "maintainer-record",
+                    policy_id,
+                    "--review",
+                    str(maintainer_path),
+                    "--recorded-by",
+                    "operator",
+                    "--expected-policy-revision",
+                    "a" * 64,
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "gate.maintainer-record",
+                {
+                    "policy_id": policy_id,
+                    "review_request": maintainer_review,
+                    "recorded_by_handle": "operator",
+                    "expected_policy_revision": "a" * 64,
+                },
+            ),
+        )
+
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "gate",
+                    "changes-create",
+                    policy_id,
+                    "--maintainer-review",
+                    "mrv_" + "c" * 32,
+                    "--profile",
+                    "Producer",
+                    "--requested-by",
+                    "operator",
+                    "--expected-policy-revision",
+                    "a" * 64,
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "gate.changes-create",
+                {
+                    "policy_id": policy_id,
+                    "review_evidence_id": None,
+                    "review_entry_id": None,
+                    "maintainer_review_id": "mrv_" + "c" * 32,
+                    "profile_name": "Producer",
+                    "requested_by_handle": "operator",
+                    "expected_policy_revision": "a" * 64,
+                    "krab_session_id": None,
+                    "krab_claim_id": None,
+                    "supervision_policy": None,
+                },
+            ),
+        )
+
         stdout = io.StringIO()
         with (
             mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
@@ -2608,6 +2727,7 @@ class CLITests(unittest.TestCase):
                     "policy_id": policy_id,
                     "review_evidence_id": "gev_" + "a" * 32,
                     "review_entry_id": "wle_" + "b" * 32,
+                    "maintainer_review_id": None,
                     "profile_name": "Producer",
                     "requested_by_handle": "operator",
                     "expected_policy_revision": "a" * 64,

@@ -85,11 +85,22 @@ allows a landing receipt to originate from exactly one manual plan or provider
 landing.
 
 Control-plane schema v26 adds an internal immutable binding for
-changes-requested runs. The binding joins one run to the rejected policy and
+changes-requested runs. The binding joins one run to the prior policy and
 candidate, the current failed independent-review evidence, and the exact
 candidate-pinned `review` work-log entry authored by that reviewer attempt. It
 is a relational control-plane invariant rather than a portable interchange
 document, so it adds no public JSON Schema.
+
+Control-plane schema v27 adds the independent maintainer-disposition lane. The
+portable input is published as
+`schemas/maintainer-review-request-v1.schema.json`: one bounded `approved` or
+`changes_requested` decision with summary and details. Storage binds that input
+to the policy's complete exact-candidate tuple and records it append-only.
+Schema v27 also adds an internal immutable binding from a correction run to the
+current `changes_requested` maintainer review. That relational binding has no
+portable interchange schema. Gate-policy v1 remains backward compatible: the
+optional `maintainer_approval` member may only be present as `true`, so omitted
+legacy policies retain their original canonical bytes and revision digests.
 
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and

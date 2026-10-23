@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -1381,6 +1381,91 @@ CREATE TRIGGER integration_gate_change_run_immutable_delete
 BEFORE DELETE ON integration_gate_change_runs
 BEGIN
     SELECT RAISE(ABORT, 'integration gate change runs cannot be deleted');
+END;
+"""
+
+MAINTAINER_REVIEW_SCHEMA = """
+CREATE TABLE integration_maintainer_reviews (
+    id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    review_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('approved', 'changes_requested')),
+    candidate_id TEXT NOT NULL,
+    repository_identity TEXT NOT NULL,
+    integration_ref TEXT NOT NULL,
+    expected_base_revision TEXT NOT NULL,
+    head_revision TEXT NOT NULL,
+    tree_revision TEXT NOT NULL,
+    object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+    policy_revision TEXT NOT NULL,
+    recorded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (policy_id, sequence),
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (recorded_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (object_format = 'sha1'
+            AND length(expected_base_revision) = 40
+            AND length(head_revision) = 40
+            AND length(tree_revision) = 40)
+        OR
+        (object_format = 'sha256'
+            AND length(expected_base_revision) = 64
+            AND length(head_revision) = 64
+            AND length(tree_revision) = 64)
+    )
+) STRICT;
+
+CREATE INDEX integration_maintainer_review_policy_sequence
+    ON integration_maintainer_reviews(policy_id, sequence DESC);
+CREATE INDEX integration_maintainer_review_candidate_created
+    ON integration_maintainer_reviews(candidate_id, created_at DESC, id DESC);
+
+CREATE TABLE integration_gate_maintainer_change_runs (
+    run_id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    maintainer_review_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (maintainer_review_id)
+        REFERENCES integration_maintainer_reviews(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX integration_gate_maintainer_change_review
+    ON integration_gate_maintainer_change_runs(
+        maintainer_review_id, created_at DESC
+    );
+
+CREATE TRIGGER integration_maintainer_review_immutable_update
+BEFORE UPDATE ON integration_maintainer_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'maintainer reviews are immutable');
+END;
+CREATE TRIGGER integration_maintainer_review_immutable_delete
+BEFORE DELETE ON integration_maintainer_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'maintainer reviews cannot be deleted');
+END;
+CREATE TRIGGER integration_gate_maintainer_change_run_immutable_update
+BEFORE UPDATE ON integration_gate_maintainer_change_runs
+BEGIN
+    SELECT RAISE(ABORT, 'maintainer change-run bindings are immutable');
+END;
+CREATE TRIGGER integration_gate_maintainer_change_run_immutable_delete
+BEFORE DELETE ON integration_gate_maintainer_change_runs
+BEGIN
+    SELECT RAISE(ABORT, 'maintainer change-run bindings cannot be deleted');
 END;
 """
 
@@ -3600,6 +3685,7 @@ SCHEMA = (
     + CAPABILITY_BINDING_SCHEMA
     + PROVIDER_LANDING_SCHEMA
     + GATE_CHANGE_SCHEMA
+    + MAINTAINER_REVIEW_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -3627,4 +3713,5 @@ MIGRATIONS = {
     23: CAPABILITY_BINDING_SCHEMA,
     24: PROVIDER_LANDING_SCHEMA,
     25: GATE_CHANGE_SCHEMA,
+    26: MAINTAINER_REVIEW_SCHEMA,
 }

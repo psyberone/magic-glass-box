@@ -10,6 +10,9 @@ from .domain import canonical_json, content_sha256, require_string
 
 GATE_POLICY_SCHEMA_VERSION = 1
 GATE_EVIDENCE_SCHEMA_VERSION = 1
+MAINTAINER_REVIEW_SCHEMA_VERSION = 1
+MAX_MAINTAINER_REVIEW_DETAILS = 32
+MAX_MAINTAINER_REVIEW_TEXT_BYTES = 4096
 MAX_VALIDATION_GATES = 32
 MAX_VALIDATION_ARGUMENTS = 64
 # Keep the durable gate contract no wider than AgentProfileSpec, which is the
@@ -54,6 +57,11 @@ class ReviewSeparation(StrEnum):
 class GateOutcome(StrEnum):
     PASSED = "passed"
     FAILED = "failed"
+
+
+class MaintainerDecision(StrEnum):
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
 
 
 def normalize_integration_ref(value: object) -> str:
@@ -166,6 +174,7 @@ class GatePolicySpec:
     schema_version: int
     review_separation: ReviewSeparation | None
     validations: tuple[ValidationGate, ...]
+    maintainer_approval: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -179,6 +188,8 @@ class GatePolicySpec:
             self.review_separation, ReviewSeparation
         ):
             raise GateError("gate policy review separation is invalid")
+        if not isinstance(self.maintainer_approval, bool):
+            raise GateError("gate policy maintainer approval must be a boolean")
         if not isinstance(self.validations, tuple) or len(self.validations) > (
             MAX_VALIDATION_GATES
         ):
@@ -188,7 +199,11 @@ class GatePolicySpec:
         names = [gate.name for gate in self.validations]
         if len(set(names)) != len(names):
             raise GateError("gate policy validation names must be unique")
-        if self.review_separation is None and not self.validations:
+        if (
+            self.review_separation is None
+            and not self.maintainer_approval
+            and not self.validations
+        ):
             raise GateError("gate policy must require at least one gate")
         if tuple(sorted(self.validations, key=lambda gate: gate.name)) != (
             self.validations
@@ -199,9 +214,10 @@ class GatePolicySpec:
     def from_mapping(cls, value: object) -> GatePolicySpec:
         if not isinstance(value, dict):
             raise GateError("gate policy must be an object")
-        fields = {"schema_version", "review_separation", "validations"}
+        required_fields = {"schema_version", "review_separation", "validations"}
+        fields = required_fields | {"maintainer_approval"}
         unknown = set(value) - fields
-        missing = fields - set(value)
+        missing = required_fields - set(value)
         if unknown:
             raise GateError(
                 "gate policy contains unknown fields: " + ", ".join(sorted(unknown))
@@ -210,6 +226,8 @@ class GatePolicySpec:
             raise GateError(
                 "gate policy is missing fields: " + ", ".join(sorted(missing))
             )
+        if "maintainer_approval" in value and value["maintainer_approval"] is not True:
+            raise GateError("gate policy maintainer approval must be true when present")
         raw_review = value["review_separation"]
         try:
             review = (
@@ -232,6 +250,7 @@ class GatePolicySpec:
             schema_version=value["schema_version"],  # type: ignore[arg-type]
             review_separation=review,
             validations=validations,
+            maintainer_approval=value.get("maintainer_approval", False),  # type: ignore[arg-type]
         )
 
     @classmethod
@@ -240,6 +259,7 @@ class GatePolicySpec:
         *,
         review_separation: ReviewSeparation | str | None,
         validations: Sequence[ValidationGate] = (),
+        maintainer_approval: bool = False,
     ) -> GatePolicySpec:
         try:
             review = (
@@ -253,16 +273,20 @@ class GatePolicySpec:
             schema_version=GATE_POLICY_SCHEMA_VERSION,
             review_separation=review,
             validations=tuple(sorted(validations, key=lambda gate: gate.name)),
+            maintainer_approval=maintainer_approval,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "review_separation": (
                 None if self.review_separation is None else self.review_separation.value
             ),
             "schema_version": self.schema_version,
             "validations": [gate.to_dict() for gate in self.validations],
         }
+        if self.maintainer_approval:
+            result["maintainer_approval"] = True
+        return result
 
     @property
     def canonical(self) -> str:
@@ -277,6 +301,8 @@ class GatePolicySpec:
         required: list[str] = []
         if self.review_separation is not None:
             required.append("independent-review")
+        if self.maintainer_approval:
+            required.append("maintainer-approval")
         required.extend(f"validation:{gate.name}" for gate in self.validations)
         return tuple(required)
 
@@ -625,6 +651,199 @@ class ExactGateInputs:
             raise GateError("gate evidence does not match the exact policy inputs")
 
 
+def _maintainer_details(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > MAX_MAINTAINER_REVIEW_DETAILS:
+        raise GateError(
+            "maintainer review details must be a list of at most "
+            f"{MAX_MAINTAINER_REVIEW_DETAILS} entries"
+        )
+    return tuple(
+        _bounded_text(
+            item,
+            field=f"maintainer review detail {index}",
+            max_bytes=MAX_MAINTAINER_REVIEW_TEXT_BYTES,
+        )
+        for index, item in enumerate(value)
+    )
+
+
+@dataclass(frozen=True)
+class MaintainerReviewRequest:
+    schema_version: int
+    decision: MaintainerDecision
+    summary: str
+    details: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, bool)
+            or self.schema_version != MAINTAINER_REVIEW_SCHEMA_VERSION
+        ):
+            raise GateError(
+                "maintainer review schema_version must be "
+                f"{MAINTAINER_REVIEW_SCHEMA_VERSION}"
+            )
+        if not isinstance(self.decision, MaintainerDecision):
+            raise GateError("maintainer review decision is invalid")
+        _bounded_text(
+            self.summary,
+            field="maintainer review summary",
+            max_bytes=MAX_MAINTAINER_REVIEW_TEXT_BYTES,
+        )
+        if (
+            not isinstance(self.details, tuple)
+            or len(self.details) > MAX_MAINTAINER_REVIEW_DETAILS
+        ):
+            raise GateError("maintainer review details are invalid")
+        for index, detail in enumerate(self.details):
+            _bounded_text(
+                detail,
+                field=f"maintainer review detail {index}",
+                max_bytes=MAX_MAINTAINER_REVIEW_TEXT_BYTES,
+            )
+        if self.decision is MaintainerDecision.CHANGES_REQUESTED and not self.details:
+            raise GateError("changes requested require actionable maintainer details")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> MaintainerReviewRequest:
+        if not isinstance(value, dict):
+            raise GateError("maintainer review request must be an object")
+        fields = {"schema_version", "decision", "summary", "details"}
+        unknown = set(value) - fields
+        missing = fields - set(value)
+        if unknown or missing:
+            detail = unknown if unknown else missing
+            label = "unknown" if unknown else "missing"
+            raise GateError(
+                f"maintainer review request contains {label} fields: "
+                + ", ".join(sorted(detail))
+            )
+        try:
+            decision = MaintainerDecision(value["decision"])
+        except (TypeError, ValueError) as exc:
+            raise GateError("maintainer review decision is invalid") from exc
+        return cls(
+            schema_version=value["schema_version"],  # type: ignore[arg-type]
+            decision=decision,
+            summary=_bounded_text(
+                value["summary"],
+                field="maintainer review summary",
+                max_bytes=MAX_MAINTAINER_REVIEW_TEXT_BYTES,
+            ),
+            details=_maintainer_details(value["details"]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision.value,
+            "details": list(self.details),
+            "schema_version": self.schema_version,
+            "summary": self.summary,
+        }
+
+
+@dataclass(frozen=True)
+class MaintainerReview:
+    schema_version: int
+    inputs: ExactGateInputs
+    decision: MaintainerDecision
+    summary: str
+    details: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        request = MaintainerReviewRequest(
+            schema_version=self.schema_version,
+            decision=self.decision,
+            summary=self.summary,
+            details=self.details,
+        )
+        if not isinstance(self.inputs, ExactGateInputs):
+            raise GateError("maintainer review inputs are invalid")
+        if request.decision is not self.decision:
+            raise GateError("maintainer review decision is invalid")
+
+    @classmethod
+    def bind(
+        cls,
+        policy_id: str,
+        manifest: GatePolicyManifest,
+        request: MaintainerReviewRequest,
+    ) -> MaintainerReview:
+        if not isinstance(request, MaintainerReviewRequest):
+            raise GateError("maintainer review request is invalid")
+        return cls(
+            schema_version=request.schema_version,
+            inputs=ExactGateInputs.from_policy(policy_id, manifest),
+            decision=request.decision,
+            summary=request.summary,
+            details=request.details,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> MaintainerReview:
+        if not isinstance(value, dict):
+            raise GateError("maintainer review must be an object")
+        fields = {
+            "schema_version",
+            "kind",
+            "inputs",
+            "decision",
+            "summary",
+            "details",
+        }
+        unknown = set(value) - fields
+        missing = fields - set(value)
+        if unknown or missing:
+            detail = unknown if unknown else missing
+            label = "unknown" if unknown else "missing"
+            raise GateError(
+                f"maintainer review contains {label} fields: "
+                + ", ".join(sorted(detail))
+            )
+        if value["kind"] != "maintainer_review":
+            raise GateError("maintainer review kind is invalid")
+        request = MaintainerReviewRequest.from_mapping(
+            {field: value[field] for field in MaintainerReviewRequest.__annotations__}
+        )
+        return cls(
+            schema_version=request.schema_version,
+            inputs=ExactGateInputs.from_mapping(value["inputs"]),
+            decision=request.decision,
+            summary=request.summary,
+            details=request.details,
+        )
+
+    @property
+    def gate_name(self) -> str:
+        return "maintainer-approval"
+
+    @property
+    def gate_state(self) -> str:
+        return (
+            GateOutcome.PASSED.value
+            if self.decision is MaintainerDecision.APPROVED
+            else GateOutcome.FAILED.value
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": self.decision.value,
+            "details": list(self.details),
+            "inputs": self.inputs.to_dict(),
+            "kind": "maintainer_review",
+            "schema_version": self.schema_version,
+            "summary": self.summary,
+        }
+
+    @property
+    def canonical(self) -> str:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return content_sha256(self.canonical)
+
+
 @dataclass(frozen=True)
 class RunProvenance:
     run_id: str
@@ -945,9 +1164,10 @@ def resolve_gate_policy_request(
 ) -> GatePolicySpec:
     if not isinstance(value, dict):
         raise GateError("gate policy request must be an object")
-    fields = {"schema_version", "review_separation", "validations"}
+    required_fields = {"schema_version", "review_separation", "validations"}
+    fields = required_fields | {"maintainer_approval"}
     unknown = set(value) - fields
-    missing = fields - set(value)
+    missing = required_fields - set(value)
     if unknown:
         raise GateError(
             "gate policy request contains unknown fields: " + ", ".join(sorted(unknown))
@@ -1000,10 +1220,11 @@ def resolve_gate_policy_request(
                 command=_command(raw["command"]),
             )
         )
-    return GatePolicySpec.from_mapping(
-        {
-            "schema_version": schema_version,
-            "review_separation": value["review_separation"],
-            "validations": [validation.to_dict() for validation in validations],
-        }
-    )
+    resolved = {
+        "schema_version": schema_version,
+        "review_separation": value["review_separation"],
+        "validations": [validation.to_dict() for validation in validations],
+    }
+    if "maintainer_approval" in value:
+        resolved["maintainer_approval"] = value["maintainer_approval"]
+    return GatePolicySpec.from_mapping(resolved)

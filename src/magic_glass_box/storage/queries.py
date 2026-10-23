@@ -50,7 +50,10 @@ class QueryStorage:
                 "gcr.policy_id AS change_policy_id, "
                 "gcr.candidate_id AS change_candidate_id, "
                 "gcr.review_evidence_id AS change_review_evidence_id, "
-                "gcr.review_entry_id AS change_review_entry_id "
+                "gcr.review_entry_id AS change_review_entry_id, "
+                "gmcr.policy_id AS maintainer_change_policy_id, "
+                "gmcr.candidate_id AS maintainer_change_candidate_id, "
+                "gmcr.maintainer_review_id AS change_maintainer_review_id "
                 "FROM runs r JOIN projects p ON p.id = r.project_id "
                 "JOIN project_context_versions c ON c.id = r.context_version_id "
                 "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
@@ -62,6 +65,8 @@ class QueryStorage:
                 "LEFT JOIN integration_gate_policies review_policy "
                 "ON review_policy.id = grr.policy_id "
                 "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
+                "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
+                "ON gmcr.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
@@ -166,18 +171,35 @@ class QueryStorage:
             }
         )
         change_entry_id = result["change_review_entry_id"]
-        result["changes_requested"] = (
-            None
-            if change_entry_id is None
-            else {
+        maintainer_review_id = result["change_maintainer_review_id"]
+        if change_entry_id is not None and maintainer_review_id is not None:
+            raise StorageError(
+                "run has conflicting independent and maintainer feedback bindings"
+            )
+        if maintainer_review_id is not None:
+            result["change_policy_id"] = result["maintainer_change_policy_id"]
+            result["change_candidate_id"] = result["maintainer_change_candidate_id"]
+        if change_entry_id is not None:
+            result["changes_requested"] = {
                 "policy_id": result["change_policy_id"],
                 "candidate_id": result["change_candidate_id"],
+                "source": "independent_review",
                 "review_evidence_id": result["change_review_evidence_id"],
                 "review_entry": self._work_log_record(
                     self._work_log_row(connection, change_entry_id)
                 ),
             }
-        )
+        elif maintainer_review_id is not None:
+            result["changes_requested"] = {
+                "policy_id": result["maintainer_change_policy_id"],
+                "candidate_id": result["maintainer_change_candidate_id"],
+                "source": "maintainer_review",
+                "maintainer_review": self._maintainer_review_record(
+                    self._maintainer_review_row(connection, maintainer_review_id)
+                ),
+            }
+        else:
+            result["changes_requested"] = None
         return result
 
     def get_run_transport(self, run_id: str) -> dict[str, Any]:
@@ -224,6 +246,9 @@ class QueryStorage:
                 "gcr.candidate_id AS change_candidate_id, "
                 "gcr.review_evidence_id AS change_review_evidence_id, "
                 "gcr.review_entry_id AS change_review_entry_id, "
+                "gmcr.policy_id AS maintainer_change_policy_id, "
+                "gmcr.candidate_id AS maintainer_change_candidate_id, "
+                "gmcr.maintainer_review_id AS change_maintainer_review_id, "
                 "c.id AS context_version_id, c.version AS context_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
                 "av.version AS profile_version, u.handle AS requested_by, "
@@ -240,6 +265,8 @@ class QueryStorage:
                 "LEFT JOIN work_items wi ON wi.id = wiv.work_item_id "
                 "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
                 "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
+                "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
+                "ON gmcr.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()

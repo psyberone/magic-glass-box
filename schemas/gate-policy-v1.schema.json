@@ -82,6 +82,7 @@
       "additionalProperties": false,
       "required": ["review_separation", "schema_version", "validations"],
       "properties": {
+        "maintainer_approval": { "const": true },
         "review_separation": {
           "type": ["string", "null"],
           "enum": [
@@ -106,6 +107,10 @@
         {
           "properties": { "validations": { "minItems": 1 } },
           "required": ["validations"]
+        },
+        {
+          "properties": { "maintainer_approval": { "const": true } },
+          "required": ["maintainer_approval"]
         }
       ]
     },

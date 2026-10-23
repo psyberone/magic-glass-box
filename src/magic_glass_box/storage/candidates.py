@@ -116,13 +116,16 @@ class CandidateStorage:
             "ra.run_id AS producer_run_id, ra.state AS attempt_state, "
             "ra.exit_code, r.project_id, r.context_version_id, "
             "r.work_thread_id, pc.context_json, "
-            "gcr.candidate_id AS change_candidate_id, "
-            "gcr.policy_id AS change_policy_id "
+            "COALESCE(gcr.candidate_id, gmcr.candidate_id) "
+            "AS change_candidate_id, "
+            "COALESCE(gcr.policy_id, gmcr.policy_id) AS change_policy_id "
             "FROM attempt_results ar "
             "JOIN run_attempts ra ON ra.id = ar.attempt_id "
             "JOIN runs r ON r.id = ra.run_id "
             "JOIN project_context_versions pc ON pc.id = r.context_version_id "
             "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
+            "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
+            "ON gmcr.run_id = r.id "
         )
 
     def get_candidate_source(self, attempt_id: str) -> dict[str, Any]:

@@ -26,20 +26,25 @@ coordination through work.* operations.
 
 If `review_assignment` is non-null, act only as the independent reviewer. Do
 not modify the workspace. Inspect the exact candidate, run appropriate tests,
-then use `work.append` to leave one `review` entry whose summary begins
+and explicitly assess whether it solves the requested problem with the smallest
+project-native primitive without importing orchestration concerns or weakening
+an existing boundary. Then use `work.append` to leave one `review` entry whose
+summary begins
 `APPROVED` or `CHANGES REQUESTED`, whose details are actionable, and whose
 `candidate_revision` equals `review_assignment.head_revision`. The
 `work.append` payload has exactly `assignment_id` (null), `idempotency_key`, and
 `entry`; the entry has `schema_version` 1, `kind`, `summary`, `details`,
 `artifacts`, `related_interaction_ids`, and `candidate_revision`. Exit cleanly
-after recording either verdict; review rejection is not a process failure.
+after recording either verdict; requesting changes is not a process failure.
 
 If `changes_requested` is non-null, implement the requested corrections in its
-exact `review_entry` as well as the original work item. Otherwise implement the
-work item normally. If human input is required, open a structured interaction,
-submit a bounded handoff when asked, and exit. Do not commit, push, open a pull
-request, or disclose credentials. Finish by leaving the requested file changes
-in /workspace and exit cleanly.
+exact feedback (`review_entry` for independent review or `maintainer_review`
+for product review) as well as the original work item. The candidate remains a
+viable changes-requested candidate; it has not been rejected. Otherwise
+implement the work item normally. If human input is required, open a structured
+interaction, submit a bounded handoff when asked, and exit. Do not commit, push,
+open a pull request, or disclose credentials. Finish by leaving the requested
+file changes in /workspace and exit cleanly.
 """.strip()
 
 WORKER_TRANSPORT_EXECUTABLE = "magic-glass-box-worker"

@@ -89,7 +89,10 @@ class RuntimeAdapterContractTests(unittest.TestCase):
         self.assertIn("review_assignment", codex.command[-1])
         self.assertIn("changes_requested", codex.command[-1])
         self.assertIn("not modify the workspace", codex.command[-1])
+        self.assertIn("smallest\nproject-native primitive", codex.command[-1])
         self.assertIn("implement the requested corrections", codex.command[-1])
+        self.assertIn("maintainer_review", codex.command[-1])
+        self.assertIn("has not been rejected", codex.command[-1])
         self.assertNotIn("openai-main", codex.environment)
         self.assertIn(
             ("MAGIC_GLASS_BOX_PROVIDER_TOKEN", "local-gateway-not-a-secret"),

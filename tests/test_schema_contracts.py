@@ -24,6 +24,7 @@ from magic_glass_box.executor import DockerImage
 from magic_glass_box.gates import (
     GateError,
     GatePolicyManifest,
+    MaintainerReviewRequest,
     parse_gate_evidence,
     resolve_gate_policy_request,
 )
@@ -322,6 +323,31 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 evidence_validator.validate(evidence)
                 self.assertEqual(parse_gate_evidence(evidence).to_dict(), evidence)
+
+        maintainer_schema = json.loads(
+            (
+                self.repository / "schemas/maintainer-review-request-v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        Draft202012Validator.check_schema(maintainer_schema)
+        maintainer_validator = Draft202012Validator(maintainer_schema)
+        maintainer_request = json.loads(
+            (self.repository / "examples/maintainer-review-request.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        maintainer_validator.validate(maintainer_request)
+        self.assertEqual(
+            MaintainerReviewRequest.from_mapping(maintainer_request).to_dict(),
+            maintainer_request,
+        )
+
+        empty_feedback = copy.deepcopy(maintainer_request)
+        empty_feedback["details"] = []
+        with self.assertRaises(SchemaValidationError):
+            maintainer_validator.validate(empty_feedback)
+        with self.assertRaises(GateError):
+            MaintainerReviewRequest.from_mapping(empty_feedback)
 
     def test_gate_schemas_and_runtime_reject_mutable_or_inconsistent_inputs(
         self,

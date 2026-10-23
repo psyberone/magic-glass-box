@@ -36,6 +36,7 @@ from magic_glass_box.krab import (
     WorkClaimPage,
 )
 from magic_glass_box.results import ResultManifest
+from magic_glass_box.service import ControlPlane
 
 
 class FakeResolver:
@@ -381,6 +382,8 @@ class ControlRoomTests(unittest.TestCase):
                 "integration_gate_policies",
                 "integration_gate_review_runs",
                 "integration_gate_change_runs",
+                "integration_maintainer_reviews",
+                "integration_gate_maintainer_change_runs",
                 "integration_gate_evidence",
                 "integration_queue",
                 "landing_dependencies",
@@ -631,6 +634,9 @@ class ControlRoomTests(unittest.TestCase):
                 "change_candidate_id",
                 "change_review_evidence_id",
                 "change_review_entry_id",
+                "maintainer_change_policy_id",
+                "maintainer_change_candidate_id",
+                "change_maintainer_review_id",
                 "untrusted_work_item_title",
                 "source_revision",
                 "predecessor_run_id",
@@ -1906,16 +1912,29 @@ class ControlRoomTests(unittest.TestCase):
                 candidate,
                 default_branch="main",
                 policy=GatePolicySpec.create(
-                    review_separation="different_profile_and_identity"
+                    review_separation="different_profile_and_identity",
+                    maintainer_approval=True,
                 ),
             ),
             created_by=self.user["id"],
+        )
+        maintainer = ControlPlane(self.database).record_maintainer_review(
+            policy["id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "PRIVATE PRODUCT JUDGMENT",
+                "details": ["PRIVATE ACTIONABLE DETAIL"],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
         )
 
         snapshot = ControlRoom(self.database).snapshot()
 
         self.assertEqual(snapshot["summary"]["integration_gate_policies"], 1)
         self.assertEqual(snapshot["summary"]["integration_gate_evidence"], 0)
+        self.assertEqual(snapshot["summary"]["integration_maintainer_reviews"], 1)
         self.assertEqual(
             snapshot["gate_policies"],
             [
@@ -1934,25 +1953,27 @@ class ControlRoomTests(unittest.TestCase):
                     "policy_revision": policy["policy_revision"],
                     "content_sha256": policy["content_sha256"],
                     "review_separation": "different_profile_and_identity",
-                    "required_count": 1,
+                    "required_count": 2,
                     "passed_count": 0,
-                    "failed_count": 0,
+                    "failed_count": 1,
                     "pending_count": 1,
                     "ready": False,
-                    "latest_evidence_at": None,
+                    "latest_evidence_at": maintainer["created_at"],
                     "created_by_handle": "operator",
                     "created_at": policy["created_at"],
                 }
             ],
         )
         pending = [
-            entry for entry in snapshot["attention"] if entry["kind"] == "gate.pending"
+            entry for entry in snapshot["attention"] if entry["kind"] == "gate.failed"
         ]
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["subject_id"], policy["id"])
         encoded = json.dumps(snapshot["gate_policies"], sort_keys=True)
         self.assertNotIn("manifest", encoded)
         self.assertNotIn("command", encoded)
+        self.assertNotIn("PRIVATE PRODUCT JUDGMENT", encoded)
+        self.assertNotIn("PRIVATE ACTIONABLE DETAIL", encoded)
 
     def test_snapshot_surfaces_durable_supervisor_work_without_private_content(
         self,
