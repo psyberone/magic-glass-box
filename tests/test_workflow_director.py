@@ -437,26 +437,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertEqual(current["stage"], "landing")
         return current, gate
 
-    def issue_provider_workflow_landing(
-        self, *, configuration_name: str, external_id: str
-    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-        execution = self.start_execution(
-            configuration_name=configuration_name,
-            external_id=external_id,
-            spec={
-                "schema_version": 1,
-                "review_separation": "different_profile_and_identity",
-                "maintainer_approval": False,
-                "validations": [],
-                "max_correction_rounds": 2,
-                "landing_mode": "provider",
-            },
-        )
-        landing, gate = self.drive_approved_to_landing(execution)
-        self.assertTrue(
-            self.director().advance(landing["id"], expected_version=landing["version"])
-        )
-        enqueued = self.database.get_workflow_execution(execution["id"])
+    def register_provider_landing_sidecar(self) -> None:
         sidecar = ServiceSidecarSpec.from_mapping(
             {
                 "schema_version": 1,
@@ -497,6 +478,28 @@ class WorkflowDirectorTests(unittest.TestCase):
             mapping_name="primary",
             bound_by=self.user["id"],
         )
+
+    def issue_provider_workflow_landing(
+        self, *, configuration_name: str, external_id: str
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        execution = self.start_execution(
+            configuration_name=configuration_name,
+            external_id=external_id,
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "provider",
+            },
+        )
+        landing, gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.register_provider_landing_sidecar()
         target = self.control.configure_workflow_provider_landing(
             enqueued["id"],
             expected_version=enqueued["version"],
@@ -1683,7 +1686,215 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertTrue(
             self.director().advance(ready["id"], expected_version=ready["version"])
         )
+        enqueued = self.database.get_workflow_execution(ready["id"])
+        queue = self.database.get_integration_queue_item(
+            enqueued["landing"]["queue_item_id"]
+        )
+        self.assertEqual(queue["state"], "refold_required")
+        self.assertEqual(queue["current_revision"], self.base)
+
+        # A genuine external advance is not a correction chain. It must remain
+        # on the ordinary refold path instead of inheriting the workflow's gates.
+        drifted = "f" * 40
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE integration_refs SET current_revision = ? WHERE id = ?",
+                (drifted, queue["integration_ref_id"]),
+            )
+        self.assertIsNone(
+            self.database.accept_workflow_landing_chain(
+                enqueued["id"],
+                expected_queue_version=queue["version"],
+                accepted_by=self.user["id"],
+            )
+        )
+        self.assertEqual(
+            self.database.get_integration_queue_item(queue["id"])["state"],
+            "refold_required",
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE integration_refs SET current_revision = ? WHERE id = ?",
+                (self.base, queue["integration_ref_id"]),
+            )
+
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        accepted = self.database.get_workflow_execution(enqueued["id"])
+        accepted_queue = self.database.get_integration_queue_item(queue["id"])
+        self.assertEqual(accepted_queue["state"], "queued")
+        self.assertEqual(
+            accepted_queue["events"][-1]["kind"],
+            "queue.workflow_chain_accepted",
+        )
+        self.assertEqual(
+            accepted_queue["events"][0]["metadata"],
+            {"policy_id": gate_two["policy_id"]},
+        )
+        chain = self.database.get_workflow_landing_chain(enqueued["id"])
+        self.assertEqual(chain["root_revision"], self.base)
+        self.assertEqual(chain["head_revision"], policy_two["head_revision"])
+        self.assertEqual(
+            set(chain["chain"]),
+            {
+                "schema_version",
+                "execution_id",
+                "queue_item_id",
+                "correction_round",
+                "candidate_id",
+                "policy_id",
+                "project_id",
+                "context_version_id",
+                "work_thread_id",
+                "integration_ref",
+                "root_revision",
+                "head_revision",
+                "object_format",
+                "rounds",
+            },
+        )
+        for round_record in chain["chain"]["rounds"]:
+            self.assertEqual(
+                set(round_record),
+                {
+                    "correction_round",
+                    "candidate_id",
+                    "policy_id",
+                    "policy_revision",
+                    "base_revision",
+                    "head_revision",
+                    "tree_revision",
+                },
+            )
+        self.assertEqual(
+            [item["policy_id"] for item in chain["chain"]["rounds"]],
+            [gate_one["policy_id"], gate_two["policy_id"]],
+        )
+
+        issued = self.control.issue_workflow_manual_landing(
+            accepted["id"],
+            expected_version=accepted["version"],
+            remote="origin",
+            issued_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        self.assertEqual(issued["plan"]["expected_base_revision"], self.base)
+        self.assertEqual(issued["plan"]["head_revision"], policy_two["head_revision"])
         self.assertEqual(self.database.status()["counts"]["workflow_run_bindings"], 4)
+
+    def test_provider_landing_uses_one_approved_correction_chain(self) -> None:
+        execution = self.start_execution(
+            configuration_name="provider-correction-chain",
+            external_id="workflow-director-provider-correction-chain",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "provider",
+            },
+        )
+        review_one, gate_one, reviewer_one = self.drive_build_to_review(
+            execution, before="base\n", after="first\n"
+        )
+        first_policy = self.database.get_gate_policy(gate_one["policy_id"])
+        self.finish_run(
+            reviewer_one,
+            source_revision=first_policy["head_revision"],
+            before="first\n",
+            after="first\n",
+            review_outcome="changes_requested",
+        )
+        self.assertTrue(
+            self.director().advance(
+                review_one["id"], expected_version=review_one["version"]
+            )
+        )
+        correction = self.database.get_workflow_execution(execution["id"])
+
+        review_two, gate_two, reviewer_two = self.drive_build_to_review(
+            correction, before="first\n", after="second\n"
+        )
+        final_policy = self.database.get_gate_policy(gate_two["policy_id"])
+        self.finish_run(
+            reviewer_two,
+            source_revision=final_policy["head_revision"],
+            before="second\n",
+            after="second\n",
+            review_outcome="approved",
+        )
+        self.assertTrue(
+            self.director().advance(
+                review_two["id"], expected_version=review_two["version"]
+            )
+        )
+        ready = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual((ready["stage"], ready["correction_round"]), ("landing", 1))
+
+        self.assertTrue(
+            self.director().advance(ready["id"], expected_version=ready["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(enqueued["landing"]["queue_state"], "refold_required")
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        accepted = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(accepted["landing"]["queue_state"], "queued")
+        chain = self.database.get_workflow_landing_chain(execution["id"])
+        replayed = self.database.accept_workflow_landing_chain(
+            execution["id"],
+            expected_queue_version=accepted["landing"]["queue_version"],
+            accepted_by=self.user["id"],
+        )
+        self.assertEqual(replayed, chain)
+
+        self.register_provider_landing_sidecar()
+        self.control.configure_workflow_provider_landing(
+            accepted["id"],
+            expected_version=accepted["version"],
+            resource_id="42",
+            merge_method="squash",
+            configured_by_handle="operator",
+        )
+        self.assertFalse(
+            self.director().advance(
+                accepted["id"], expected_version=accepted["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(claimed["landing"]["queue_state"], "claimed")
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        issued_execution = self.database.get_workflow_execution(execution["id"])
+        issued = self.control.get_provider_landing(
+            issued_execution["landing"]["provider_landing_id"]
+        )
+        self.assertEqual(
+            issued["operation"]["spec"]["target"]["expected_revision"], self.base
+        )
+        self.assertEqual(
+            issued["operation"]["spec"]["target"]["desired_revision"],
+            final_policy["head_revision"],
+        )
+        self.assertEqual(
+            issued["provider_landing"]["request"]["expected_base_revision"],
+            self.base,
+        )
+        self.assertEqual(
+            issued["provider_landing"]["evidence_snapshot"][
+                "workflow_landing_chain_sha256"
+            ],
+            chain["content_sha256"],
+        )
 
     def test_cancelled_execution_is_a_noop_at_its_current_version(self) -> None:
         cancelled = self.control.cancel_workflow_execution(

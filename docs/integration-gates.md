@@ -414,6 +414,17 @@ paths pass the execution ID and optimistic version into landing issuance, so a
 stale, completed, wrong-mode, wrong-queue, or wrong-target workflow cannot
 borrow otherwise valid integration authority. There is no mode fallback.
 
+One narrow workflow-specific case is not an integration refold. A correction
+candidate starts from the prior changes-requested candidate, so the final
+reviewed head may be a contiguous stack over the execution's pinned source.
+When the integration ref still equals that source, MGB verifies every round's
+candidate, policy, producer, exact changes-requested provenance, scope, and
+fresh final readiness, then records an immutable chain digest and may authorize
+the final head from that root. This preserves all reviewed correction commits;
+replaying only the last result as a refold would discard earlier rounds. If the
+integration ref has moved anywhere else, chain authority does not apply and the
+ordinary conservative refold rule remains mandatory.
+
 A provider failure releases the existing queue according to the ordinary
 provider ledger and opens a ruling naming that exact provider landing. One
 explicit `continue` authorizes one retry. Manual `not_landed` receipts remain

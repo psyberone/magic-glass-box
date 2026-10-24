@@ -62,6 +62,19 @@ class IntegrationStorage:
         return value
 
     @staticmethod
+    def _object_revision(value: object, *, object_format: str, field: str) -> str:
+        length = 40 if object_format == "sha1" else 64
+        if (
+            not isinstance(value, str)
+            or len(value) != length
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValidationError(
+                f"{field} must be a lowercase {object_format} object ID"
+            )
+        return value
+
+    @staticmethod
     def _dependency_record(
         connection: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, Any]:
@@ -394,7 +407,13 @@ class IntegrationStorage:
             ),
         )
 
-    def enqueue_integration(self, policy_id: str, *, created_by: str) -> dict[str, Any]:
+    def enqueue_integration(
+        self,
+        policy_id: str,
+        *,
+        created_by: str,
+        initial_revision: str | None = None,
+    ) -> dict[str, Any]:
         policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
         created_by = require_string(created_by, field="created_by", max_bytes=64)
         queue_item_id = self.new_id("iqm")
@@ -413,6 +432,12 @@ class IntegrationStorage:
                     raise NotFoundError(f"gate policy not found: {policy_id}")
                 policy_record = self._policy_record(policy_row)
                 policy = GatePolicyManifest.from_mapping(policy_record["manifest"])
+                if initial_revision is not None:
+                    initial_revision = self._object_revision(
+                        initial_revision,
+                        object_format=policy.object_format,
+                        field="initial_revision",
+                    )
                 candidate = connection.execute(
                     "SELECT ic.id, ic.project_id, ic.work_thread_id, "
                     "wt.work_item_id FROM integration_candidates ic "
@@ -441,13 +466,13 @@ class IntegrationStorage:
                             policy.repository_identity,
                             policy.integration_ref,
                             policy.object_format,
-                            policy.expected_base_revision,
+                            initial_revision or policy.expected_base_revision,
                             created_by,
                             now,
                             now,
                         ),
                     )
-                    current_revision = policy.expected_base_revision
+                    current_revision = initial_revision or policy.expected_base_revision
                 else:
                     integration_ref_id = ref["id"]
                     current_revision = ref["current_revision"]
@@ -563,6 +588,400 @@ class IntegrationStorage:
                 result.append(self._queue_record(connection, row))
             return result
 
+    @staticmethod
+    def _workflow_landing_chain_row(
+        connection: sqlite3.Connection,
+        *,
+        execution_id: str | None = None,
+        queue_item_id: str | None = None,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT c.execution_id, c.queue_item_id, c.schema_version, "
+            "c.correction_round, c.candidate_id, c.policy_id, c.root_revision, "
+            "c.head_revision, c.object_format, c.chain_json, c.content_sha256, "
+            "u.handle AS accepted_by, c.created_at "
+            "FROM workflow_landing_chains c "
+            "JOIN users u ON u.id = c.accepted_by "
+            "WHERE (? IS NOT NULL AND c.execution_id = ?) "
+            "OR (? IS NOT NULL AND c.queue_item_id = ?) LIMIT 1",
+            (execution_id, execution_id, queue_item_id, queue_item_id),
+        ).fetchone()
+
+    @staticmethod
+    def _workflow_landing_chain_record(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            chain = json.loads(row["chain_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise StorageError("stored workflow landing chain is invalid") from exc
+        if not isinstance(chain, dict):
+            raise StorageError("stored workflow landing chain is invalid")
+        record = dict(row)
+        record.pop("chain_json")
+        record["chain"] = chain
+        return record
+
+    def get_workflow_landing_chain(self, execution_id: str) -> dict[str, Any] | None:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        with self._read_snapshot() as connection:
+            row = self._workflow_landing_chain_row(
+                connection, execution_id=execution_id
+            )
+            return None if row is None else self._workflow_landing_chain_record(row)
+
+    def accept_workflow_landing_chain(
+        self,
+        execution_id: str,
+        *,
+        expected_queue_version: int,
+        accepted_by: str,
+    ) -> dict[str, Any] | None:
+        """Authorize one contiguous correction stack when the target has not moved."""
+
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        expected_queue_version = self._expected_version(expected_queue_version)
+        accepted_by = require_string(accepted_by, field="accepted_by", max_bytes=64)
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, accepted_by, role="workflow chain acceptor"
+                )
+                source = connection.execute(
+                    "SELECT e.state AS execution_state, e.stage, "
+                    "e.correction_round, e.project_id, e.context_version_id, "
+                    "e.work_thread_id, e.source_revision, "
+                    "b.correction_round AS binding_round, "
+                    "b.candidate_id AS binding_candidate_id, "
+                    "b.policy_id AS binding_policy_id, b.queue_item_id, "
+                    "q.project_id AS queue_project_id, "
+                    "q.work_thread_id AS queue_work_thread_id, "
+                    "q.candidate_id AS queue_candidate_id, "
+                    "q.current_policy_id AS queue_policy_id, "
+                    "q.current_fold_id, q.state AS queue_state, "
+                    "q.version AS queue_version, q.event_sequence, "
+                    "r.integration_ref, r.object_format, r.current_revision "
+                    "FROM workflow_executions e "
+                    "JOIN workflow_landing_bindings b ON b.execution_id = e.id "
+                    "JOIN integration_queue_items q ON q.id = b.queue_item_id "
+                    "JOIN integration_refs r ON r.id = q.integration_ref_id "
+                    "WHERE e.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError("workflow landing chain source not found")
+                if source["queue_version"] != expected_queue_version:
+                    raise ConcurrentUpdateError("integration queue version changed")
+                if (
+                    source["execution_state"] != "active"
+                    or source["stage"] != "landing"
+                ):
+                    raise ConflictError("workflow is not awaiting landing")
+                correction_round = source["correction_round"]
+                if correction_round < 1:
+                    connection.commit()
+                    return None
+                exact_binding = {
+                    "binding_round": correction_round,
+                    "queue_project_id": source["project_id"],
+                    "queue_work_thread_id": source["work_thread_id"],
+                    "queue_candidate_id": source["binding_candidate_id"],
+                    "queue_policy_id": source["binding_policy_id"],
+                }
+                if any(
+                    source[field] != value for field, value in exact_binding.items()
+                ):
+                    raise ConflictError(
+                        "workflow landing chain does not match its landing authority"
+                    )
+                existing_row = self._workflow_landing_chain_row(
+                    connection, execution_id=execution_id
+                )
+                if existing_row is not None:
+                    existing = self._workflow_landing_chain_record(existing_row)
+                    if (
+                        existing["queue_item_id"] != source["queue_item_id"]
+                        or existing["candidate_id"] != source["binding_candidate_id"]
+                        or existing["policy_id"] != source["binding_policy_id"]
+                        or existing["root_revision"] != source["source_revision"]
+                    ):
+                        raise ConflictError(
+                            "workflow already names another landing chain"
+                        )
+                    if source["current_revision"] != existing["root_revision"]:
+                        connection.commit()
+                        return None
+                    if source["queue_state"] != "refold_required":
+                        if source["queue_state"] == "cancelled":
+                            raise ConflictError("workflow landing queue is cancelled")
+                        connection.commit()
+                        return existing
+                elif source["queue_state"] != "refold_required":
+                    raise ConflictError(
+                        "workflow landing queue does not require chain acceptance"
+                    )
+                if source["current_revision"] != source["source_revision"]:
+                    connection.commit()
+                    return None
+                if source["current_fold_id"] is not None:
+                    raise ConflictError(
+                        "a refolded candidate cannot use workflow chain authority"
+                    )
+
+                bindings = connection.execute(
+                    "SELECT g.correction_round, g.candidate_id, g.policy_id, "
+                    "producer.run_id AS producer_run_id "
+                    "FROM workflow_gate_bindings g "
+                    "JOIN workflow_run_bindings producer "
+                    "ON producer.execution_id = g.execution_id "
+                    "AND producer.correction_round = g.correction_round "
+                    "AND producer.role = 'producer' "
+                    "WHERE g.execution_id = ? ORDER BY g.correction_round",
+                    (execution_id,),
+                ).fetchall()
+                if [item["correction_round"] for item in bindings] != list(
+                    range(correction_round + 1)
+                ):
+                    raise ConflictError(
+                        "workflow landing chain has incomplete correction rounds"
+                    )
+
+                rounds: list[dict[str, Any]] = []
+                previous_head = source["source_revision"]
+                previous_candidate_id = None
+                previous_policy_id = None
+                integration_ref = None
+                object_format = None
+                for binding in bindings:
+                    candidate_row = connection.execute(
+                        f"SELECT {self._candidate_columns()} "  # noqa: S608
+                        "FROM integration_candidates WHERE id = ?",
+                        (binding["candidate_id"],),
+                    ).fetchone()
+                    policy_row = connection.execute(
+                        f"SELECT {self._policy_columns()} "  # noqa: S608
+                        "FROM integration_gate_policies WHERE id = ?",
+                        (binding["policy_id"],),
+                    ).fetchone()
+                    if candidate_row is None or policy_row is None:
+                        raise StorageError(
+                            "workflow landing chain candidate or policy is unavailable"
+                        )
+                    candidate = self._candidate_record(candidate_row)
+                    policy = self._policy_record(policy_row)
+                    expected_scope = {
+                        "project_id": source["project_id"],
+                        "context_version_id": source["context_version_id"],
+                        "work_thread_id": source["work_thread_id"],
+                    }
+                    if (
+                        any(
+                            candidate[field] != value
+                            for field, value in expected_scope.items()
+                        )
+                        or binding["producer_run_id"] != candidate["producer_run_id"]
+                    ):
+                        raise ConflictError(
+                            "workflow landing chain crosses an authority scope"
+                        )
+                    expected_policy = {
+                        "candidate_id": candidate["id"],
+                        **expected_scope,
+                        "expected_base_revision": candidate["base_revision"],
+                        "head_revision": candidate["head_revision"],
+                        "tree_revision": candidate["tree_revision"],
+                        "object_format": candidate["object_format"],
+                    }
+                    if any(
+                        policy[field] != value
+                        for field, value in expected_policy.items()
+                    ):
+                        raise ConflictError(
+                            "workflow landing chain policy does not match its candidate"
+                        )
+                    if candidate["base_revision"] != previous_head:
+                        raise ConflictError(
+                            "workflow landing correction candidates are not contiguous"
+                        )
+                    if integration_ref is None:
+                        integration_ref = policy["integration_ref"]
+                        object_format = policy["object_format"]
+                    elif (
+                        policy["integration_ref"] != integration_ref
+                        or policy["object_format"] != object_format
+                    ):
+                        raise ConflictError(
+                            "workflow landing chain target changed between rounds"
+                        )
+                    if binding["correction_round"] > 0:
+                        changes = connection.execute(
+                            "SELECT policy_id, candidate_id "
+                            "FROM integration_gate_change_runs WHERE run_id = ? "
+                            "UNION ALL SELECT policy_id, candidate_id "
+                            "FROM integration_gate_maintainer_change_runs "
+                            "WHERE run_id = ?",
+                            (binding["producer_run_id"], binding["producer_run_id"]),
+                        ).fetchall()
+                        if (
+                            len(changes) != 1
+                            or changes[0]["candidate_id"] != previous_candidate_id
+                            or changes[0]["policy_id"] != previous_policy_id
+                        ):
+                            raise ConflictError(
+                                "workflow correction lacks exact changes-requested "
+                                "authority"
+                            )
+                    rounds.append(
+                        {
+                            "correction_round": binding["correction_round"],
+                            "candidate_id": candidate["id"],
+                            "policy_id": policy["id"],
+                            "policy_revision": policy["policy_revision"],
+                            "base_revision": candidate["base_revision"],
+                            "head_revision": candidate["head_revision"],
+                            "tree_revision": candidate["tree_revision"],
+                        }
+                    )
+                    previous_head = candidate["head_revision"]
+                    previous_candidate_id = candidate["id"]
+                    previous_policy_id = policy["id"]
+
+                final = rounds[-1]
+                if (
+                    final["candidate_id"] != source["binding_candidate_id"]
+                    or final["policy_id"] != source["binding_policy_id"]
+                    or integration_ref != source["integration_ref"]
+                    or object_format != source["object_format"]
+                    or not self._gate_readiness(
+                        connection, source["binding_policy_id"]
+                    )["ready"]
+                ):
+                    raise ConflictError(
+                        "workflow landing chain final gate is not ready"
+                    )
+                chain = {
+                    "schema_version": 1,
+                    "execution_id": execution_id,
+                    "queue_item_id": source["queue_item_id"],
+                    "correction_round": correction_round,
+                    "candidate_id": final["candidate_id"],
+                    "policy_id": final["policy_id"],
+                    "project_id": source["project_id"],
+                    "context_version_id": source["context_version_id"],
+                    "work_thread_id": source["work_thread_id"],
+                    "integration_ref": integration_ref,
+                    "root_revision": source["source_revision"],
+                    "head_revision": final["head_revision"],
+                    "object_format": object_format,
+                    "rounds": rounds,
+                }
+                chain_json = canonical_json(chain)
+                digest = content_sha256(chain_json)
+                if existing_row is None:
+                    connection.execute(
+                        "INSERT INTO workflow_landing_chains "
+                        "(execution_id, queue_item_id, schema_version, "
+                        "correction_round, candidate_id, policy_id, root_revision, "
+                        "head_revision, object_format, chain_json, content_sha256, "
+                        "accepted_by, created_at) "
+                        "VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            execution_id,
+                            source["queue_item_id"],
+                            correction_round,
+                            final["candidate_id"],
+                            final["policy_id"],
+                            source["source_revision"],
+                            final["head_revision"],
+                            object_format,
+                            chain_json,
+                            digest,
+                            accepted_by,
+                            now,
+                        ),
+                    )
+                version = source["queue_version"] + 1
+                sequence = source["event_sequence"] + 1
+                changed = connection.execute(
+                    "UPDATE integration_queue_items SET state = 'queued', "
+                    "version = ?, event_sequence = ?, updated_at = ? "
+                    "WHERE id = ? AND version = ? AND state = 'refold_required'",
+                    (
+                        version,
+                        sequence,
+                        now,
+                        source["queue_item_id"],
+                        source["queue_version"],
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "integration queue changed concurrently"
+                    )
+                self._queue_event(
+                    connection,
+                    queue_item_id=source["queue_item_id"],
+                    sequence=sequence,
+                    kind="queue.workflow_chain_accepted",
+                    from_state="refold_required",
+                    to_state="queued",
+                    actor=accepted_by,
+                    metadata={
+                        "correction_round": correction_round,
+                        "root_revision": source["source_revision"],
+                        "head_revision": final["head_revision"],
+                        "chain_sha256": digest,
+                    },
+                    created_at=now,
+                )
+                stored = self._workflow_landing_chain_row(
+                    connection, execution_id=execution_id
+                )
+                assert stored is not None
+                result = self._workflow_landing_chain_record(stored)
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow landing chain could not be accepted"
+                ) from exc
+        return result
+
+    def _workflow_chain_authority(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        policy: GatePolicyManifest,
+    ) -> dict[str, Any] | None:
+        chain_row = self._workflow_landing_chain_row(
+            connection, queue_item_id=row["id"]
+        )
+        if chain_row is None:
+            return None
+        chain = self._workflow_landing_chain_record(chain_row)
+        expected = {
+            "queue_item_id": row["id"],
+            "candidate_id": row["candidate_id"],
+            "policy_id": row["current_policy_id"],
+            "root_revision": row["current_revision"],
+            "head_revision": policy.head_revision,
+            "object_format": row["object_format"],
+        }
+        if row["current_fold_id"] is not None or any(
+            chain[field] != value for field, value in expected.items()
+        ):
+            raise ConflictError("workflow landing chain does not match the current ref")
+        return chain
+
     def _assert_queue_authority_ready(
         self, connection: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, Any]:
@@ -584,11 +1003,15 @@ class IntegrationStorage:
             "project_id": row["project_id"],
             "work_thread_id": row["work_thread_id"],
             "integration_ref": row["integration_ref"],
-            "expected_base_revision": row["current_revision"],
             "object_format": row["object_format"],
         }
         if any(getattr(policy, key) != value for key, value in expected.items()):
             raise ConflictError("integration policy does not match the current ref")
+        chain = None
+        if policy.expected_base_revision != row["current_revision"]:
+            chain = self._workflow_chain_authority(connection, row, policy)
+            if chain is None:
+                raise ConflictError("integration policy does not match the current ref")
         blocked = connection.execute(
             "SELECT 1 FROM work_item_landing_dependencies d "
             "WHERE d.dependent_work_item_id = ? AND d.state = 'active' "
@@ -603,6 +1026,12 @@ class IntegrationStorage:
         readiness = self._gate_readiness(connection, row["current_policy_id"])
         if not readiness["ready"]:
             raise ConflictError("integration item gates are not ready")
+        if chain is not None:
+            readiness = {
+                **readiness,
+                "landing_base_revision": row["current_revision"],
+                "workflow_landing_chain_sha256": chain["content_sha256"],
+            }
         return readiness
 
     def _expire_ref_claims(
@@ -1289,7 +1718,7 @@ class IntegrationStorage:
                     fold_id=queue["current_fold_id"],
                     repository_identity=queue["project_id"],
                     integration_ref=queue["integration_ref"],
-                    expected_base_revision=policy.expected_base_revision,
+                    expected_base_revision=queue["current_revision"],
                     head_revision=policy.head_revision,
                     tree_revision=policy.tree_revision,
                     object_format=policy.object_format,
@@ -1674,7 +2103,7 @@ class IntegrationStorage:
                             "repository": mapping.repository,
                             "resource_id": resource_id,
                             "object_format": policy.object_format,
-                            "expected_revision": policy.expected_base_revision,
+                            "expected_revision": queue["current_revision"],
                             "desired_revision": policy.head_revision,
                         },
                         "parameters": dict(parameters),
@@ -1706,7 +2135,7 @@ class IntegrationStorage:
                     fold_id=queue["current_fold_id"],
                     repository_identity=queue["project_id"],
                     integration_ref=queue["integration_ref"],
-                    expected_base_revision=policy.expected_base_revision,
+                    expected_base_revision=queue["current_revision"],
                     head_revision=policy.head_revision,
                     tree_revision=policy.tree_revision,
                     object_format=policy.object_format,

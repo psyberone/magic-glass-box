@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from magic_glass_box.candidates import CandidateManifest, GitCandidateStore
-from magic_glass_box.db import Database
+from magic_glass_box.db import Database, NotFoundError
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -848,11 +848,16 @@ def _register_github_authority(
     *,
     spec: ServiceSidecarSpec,
 ) -> dict[str, dict[str, Any]]:
-    control.register_service_sidecar(
-        name=GITHUB_SIDECAR_NAME,
-        spec=spec,
-        created_by_handle="operator",
-    )
+    try:
+        sidecar = control.database.get_service_sidecar(GITHUB_SIDECAR_NAME)
+    except NotFoundError:
+        sidecar = control.register_service_sidecar(
+            name=GITHUB_SIDECAR_NAME,
+            spec=spec,
+            created_by_handle="operator",
+        )
+    if sidecar["state"] != "active" or sidecar["content_sha256"] != spec.digest:
+        raise RuntimeError("existing GitHub sidecar authority does not match")
     bindings: dict[str, dict[str, Any]] = {}
     for capability in ("refs.publish", "change.open", "landing.invoke"):
         bindings[capability] = control.bind_project_capability(
@@ -880,7 +885,7 @@ def _settle_effect(
             owner_id=owner_id,
             expected_version=operation["version"],
         )
-    elif operation["state"] in {"queued", "retryable"}:
+    elif operation["state"] in {"pending", "retryable", "throttled"}:
         settled = control.execute_service_operation(
             operation["id"],
             owner_id=owner_id,

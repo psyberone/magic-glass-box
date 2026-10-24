@@ -225,6 +225,11 @@ project-activity projection.
   dependency, refold, gate, and lease authority; a matching manual or provider
   receipt is required before one transaction records a control-plane outcome,
   seals the work thread, and completes the workflow.
+- Schema v31 adds immutable authority for one contiguous workflow correction
+  chain. It permits the final reviewed stacked head to land directly from the
+  execution's pinned source only while that source is still the observed
+  integration ref; real external drift continues through the ordinary refold
+  and fresh-gate path.
 - Schema v14 adds hard work-item landing dependencies, one serialized lane per
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks
@@ -326,7 +331,8 @@ Provider-neutral service-sidecar registrations, durable operations, and
 dispatch/reconciliation attempts advance it to schema v23. Explicit capability
 bindings, provider landing, exact gate-change provenance, maintainer review,
 bounded workflow prescriptions, their build/review/correction director, and
-their landing/closeout director advance it through schemas v24-v30.
+their landing/closeout director and correction-chain authority advance it
+through schemas v24-v31.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted

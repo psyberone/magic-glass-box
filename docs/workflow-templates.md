@@ -140,7 +140,7 @@ integration ledger remains truthful.
 
 ### M12C: landing and closeout director
 
-**Implemented in schema v30.**
+**Implemented in schemas v30-v31.**
 
 - Enqueue only the exact ready candidate and preserve dependency/refold rules.
 - Use either the configured provider binding or an explicitly issued manual
@@ -155,6 +155,15 @@ candidate, and gate policy. Binding and the `workflow.landing_enqueued` event
 commit together. Dependencies, serialized ownership, gate readiness, and
 refold requirements remain properties of the existing integration queue; the
 workflow does not reimplement or weaken them.
+
+Correction rounds form a different shape from independent sibling work: each
+child candidate is based on the exact changes-requested head before it. Schema
+v31 records that complete contiguous, independently gated chain. The final
+reviewed head may use the workflow's pinned source as its landing compare base
+only while the observed integration ref still equals that source. Any unrelated
+movement remains a real refold, with a new candidate and fresh gates. This keeps
+the reviewed correction stack intact without turning chain acceptance into a
+general bypass of the integration queue.
 
 Manual mode deliberately stops for `workflow manual-plan`, then waits for the
 ordinary nonce-bound receipt. A `not_landed` receipt releases the lane and the

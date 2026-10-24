@@ -466,10 +466,32 @@ class ControlPlane:
         )
 
     def enqueue_integration(
-        self, policy_id: str, *, created_by_handle: str
+        self,
+        policy_id: str,
+        *,
+        created_by_handle: str,
+        initial_revision: str | None = None,
     ) -> dict[str, Any]:
         creator = self.database.get_user(created_by_handle)
-        return self.database.enqueue_integration(policy_id, created_by=creator["id"])
+        return self.database.enqueue_integration(
+            policy_id,
+            created_by=creator["id"],
+            initial_revision=initial_revision,
+        )
+
+    def accept_workflow_landing_chain(
+        self,
+        execution_id: str,
+        *,
+        expected_queue_version: int,
+        accepted_by_handle: str,
+    ) -> dict[str, Any] | None:
+        acceptor = self.database.get_user(accepted_by_handle)
+        return self.database.accept_workflow_landing_chain(
+            execution_id,
+            expected_queue_version=expected_queue_version,
+            accepted_by=acceptor["id"],
+        )
 
     def refold_integration_item(
         self,

@@ -134,6 +134,16 @@ names its actor and workflow execution, and the database transaction that
 creates it also records completion, seals the thread, and completes the
 execution. No new worker-authored portable document is introduced.
 
+Control-plane schema v31 adds an immutable workflow landing-chain record for a
+bounded correction stack. It binds every workflow round's candidate and gate
+policy from the execution's pinned source through the final reviewed head, and
+records the exact chain digest before the integration queue can return from
+`refold_required` to `queued`. This is relational control-plane authority, not
+a new portable input. It is accepted only when all rounds are contiguous,
+changes-requested provenance is exact, every round stays in one project/thread/
+ref/object-format scope, the final gate remains ready, and the current
+integration ref still equals the workflow source.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

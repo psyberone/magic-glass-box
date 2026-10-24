@@ -1168,7 +1168,7 @@ merged exact candidate and completed work thread, including one rejection
 round, maintainer approval, restart recovery, and credential containment. No
 human must remember which durable command advances the next mechanical stage.
 
-Schema v30 implements the local choreography by binding the ready workflow
+Schemas v30-v31 implement the local choreography by binding the ready workflow
 round to one integration-queue item and committing that binding with its
 `workflow.landing_enqueued` event. Manual mode requires an explicitly issued
 workflow plan and nonce-bound receipt. Provider mode requires an explicitly
@@ -1177,6 +1177,15 @@ pinned resource and merge method plus the project's active
 Dependencies, serialized ownership, refolds, and gate rechecks remain the
 existing integration queue's authority rather than being duplicated in the
 director.
+
+The first live correction exposed a necessary distinction: its final candidate
+was a reviewed stack over the prior changes-requested head, while the provider's
+integration ref still correctly remained at the workflow source. Schema v31
+adds a bounded immutable chain authority for exactly that case. It verifies all
+rounds, their policies, producer bindings, changes-requested provenance, shared
+scope, contiguity, and final readiness before requeueing the exact final head.
+Actual external ref movement still refuses chain acceptance and requires the
+ordinary refold path.
 
 Provider failures open a ruling bound to the exact failed landing, and one
 explicit `continue` authorizes exactly one retry. Mismatched or cancelled
@@ -1204,6 +1213,17 @@ independent work-log digest verification, and the exact final outcome contract.
 Those tests killed all 13 selected behavior-changing former survivors, for a
 conservative effective result of at least 2,283/2,588 (88.21%). Neither wave
 produced timeouts, uncovered mutants, suspicious outcomes, or crashes.
+
+The live-proof correction-stack follow-up passes 1,092 tests with 86%
+aggregate statement-plus-branch coverage and clean Ruff format/lint. A fresh
+final-code wave over queue seeding, chain acceptance, authority rechecks, and
+the director's landing transition killed 115 of 145 selected mutants. Exact
+survivor tests killed eight more: two in Mutmut's targeted rerun and six in
+direct trampoline reruns where Mutmut's coverage mapper omitted the asserting
+test. Counting all five no-test mappings against the denominator, the
+conservative effective result is 123/145 (84.83%). The remaining reviewed
+survivors are diagnostic changes, relationally equivalent guards, or trusted-
+state inconsistency branches outside the accepted workflow path.
 
 ## Milestone 13: discovery and review prescriptions
 

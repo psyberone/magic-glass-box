@@ -8,6 +8,7 @@ from pathlib import Path
 from magic_glass_box.db import (
     SCHEMA,
     WORKFLOW_DIRECTOR_SCHEMA,
+    WORKFLOW_LANDING_CHAIN_SCHEMA,
     WORKFLOW_TEMPLATE_SCHEMA,
     ConcurrentUpdateError,
     ConflictError,
@@ -1064,11 +1065,34 @@ class WorkflowStorageTests(unittest.TestCase):
         status = migrated.initialize()
         repeated = migrated.initialize()
 
-        self.assertEqual(status["schema_version"], 30)
-        self.assertEqual(repeated["schema_version"], 30)
+        self.assertEqual(status["schema_version"], 31)
+        self.assertEqual(repeated["schema_version"], 31)
         definitions = migrated.list_workflow_template_definitions()
         self.assertEqual(len(definitions), 1)
         self.assertEqual(definitions[0]["key"], "implementation-v1")
+
+    def test_schema_thirty_one_adds_correction_chain_authority_once(self) -> None:
+        path = Path(self.temporary.name) / "schema-30.db"
+        with sqlite3.connect(path) as connection:
+            connection.executescript(
+                SCHEMA[: SCHEMA.index(WORKFLOW_LANDING_CHAIN_SCHEMA)]
+            )
+            connection.execute("PRAGMA user_version = 30")
+        path.chmod(0o600)
+
+        migrated = Database(path)
+        first = migrated.initialize()
+        repeated = migrated.initialize()
+
+        self.assertEqual(first["schema_version"], 31)
+        self.assertEqual(repeated, first)
+        self.assertEqual(first["counts"]["workflow_landing_chains"], 0)
+        with migrated.connect() as connection:
+            event_schema = connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' "
+                "AND name = 'integration_queue_events'"
+            ).fetchone()["sql"]
+        self.assertIn("queue.workflow_chain_accepted", event_schema)
 
     def test_schema_thirty_preserves_schema_twenty_eight_workflow_state(
         self,
@@ -1193,7 +1217,7 @@ class WorkflowStorageTests(unittest.TestCase):
         execution = migrated.get_workflow_execution(execution_id)
         action = migrated.get_supervisor_action("act_" + "7" * 32)
 
-        self.assertEqual(status["schema_version"], 30)
+        self.assertEqual(status["schema_version"], 31)
         self.assertEqual(execution["correction_round"], 0)
         self.assertEqual(execution["events"][0]["kind"], "workflow.started")
         self.assertEqual(action["run_id"], run_id)
@@ -1203,6 +1227,7 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertEqual(status["counts"]["integration_review_verdicts"], 0)
         self.assertEqual(status["counts"]["workflow_rulings"], 0)
         self.assertEqual(status["counts"]["workflow_landing_bindings"], 0)
+        self.assertEqual(status["counts"]["workflow_landing_chains"], 0)
         self.assertEqual(status["counts"]["workflow_provider_targets"], 0)
         self.assertEqual(status["counts"]["workflow_completions"], 0)
 
@@ -1261,6 +1286,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 PRAGMA foreign_keys = OFF;
                 DROP TABLE workflow_completions;
                 DROP TABLE workflow_provider_targets;
+                DROP TABLE workflow_landing_chains;
                 DROP TABLE workflow_landing_bindings;
 
                 DROP TRIGGER work_log_entry_immutable_update;
@@ -1401,7 +1427,7 @@ class WorkflowStorageTests(unittest.TestCase):
         migrated_ruling = migrated.get_workflow_ruling(ruling["id"])
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 30)
+        self.assertEqual(first["schema_version"], 31)
         self.assertEqual(memory["entries"][0]["id"], entry["id"])
         self.assertEqual(
             memory["entries"][0]["author"],

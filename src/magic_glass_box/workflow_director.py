@@ -315,7 +315,9 @@ class WorkflowDirector:
             if not readiness["ready"]:
                 raise RuntimeError("workflow landing gate is not ready")
             queue = self.control.enqueue_integration(
-                gate["policy_id"], created_by_handle=execution["requested_by"]
+                gate["policy_id"],
+                created_by_handle=execution["requested_by"],
+                initial_revision=execution["source_revision"],
             )
             self.database.bind_workflow_landing(
                 execution["id"],
@@ -357,6 +359,19 @@ class WorkflowDirector:
             return self._ruling(
                 execution, "landing_cancelled", policy_id=landing["policy_id"]
             )
+        if (
+            landing["queue_state"] == "refold_required"
+            and execution["correction_round"] > 0
+        ):
+            self.control.accept_workflow_landing_chain(
+                execution["id"],
+                expected_queue_version=landing["queue_version"],
+                accepted_by_handle=execution["requested_by"],
+            )
+            # Chain acceptance advances queue authority, not the workflow
+            # execution version. Keep this version-bound supervisor action
+            # deferred so it can observe the new queue state on its next pass.
+            return False
 
         if landing["queue_state"] != "landed":
             if mode == "provider":

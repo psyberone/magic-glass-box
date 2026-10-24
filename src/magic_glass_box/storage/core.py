@@ -535,6 +535,10 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM workflow_landing_bindings",
                 ),
                 (
+                    "workflow_landing_chains",
+                    "SELECT COUNT(*) FROM workflow_landing_chains",
+                ),
+                (
                     "workflow_provider_targets",
                     "SELECT COUNT(*) FROM workflow_provider_targets",
                 ),

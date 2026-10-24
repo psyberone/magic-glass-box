@@ -30,6 +30,7 @@ from magic_glass_box.db import (
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
+    ValidationError,
     WorkItemEnvelope,
     canonical_json,
 )
@@ -554,7 +555,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 30)
+        self.assertEqual(SCHEMA_VERSION, 31)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -1466,6 +1467,7 @@ class IntegrationLedgerTests(unittest.TestCase):
         with closing(self.database.connect()) as connection, connection:
             connection.execute("DROP TABLE workflow_completions")
             connection.execute("DROP TABLE workflow_provider_targets")
+            connection.execute("DROP TABLE workflow_landing_chains")
             connection.execute("DROP TABLE workflow_landing_bindings")
             connection.execute("DROP TABLE workflow_rulings")
             connection.execute("DROP TABLE integration_review_verdicts")
@@ -1575,6 +1577,7 @@ class IntegrationLedgerTests(unittest.TestCase):
                 END;
                 DROP TABLE workflow_completions;
                 DROP TABLE workflow_provider_targets;
+                DROP TABLE workflow_landing_chains;
                 DROP TABLE workflow_landing_bindings;
                 DROP TABLE integration_provider_landings;
                 DROP TABLE workflow_rulings;
@@ -1821,6 +1824,31 @@ class IntegrationLedgerTests(unittest.TestCase):
                 candidate_repository=self.root / "repository.git",
                 remote="origin",
                 issued_by=self.user["id"],
+            )
+
+    def test_initial_revision_requires_the_policy_object_format(self) -> None:
+        policy = self._policy(self.candidate_a)
+
+        for invalid in (42, "a" * 39, "g" * 40, "A" * 40, "X" * 40):
+            with (
+                self.subTest(initial_revision=invalid),
+                self.assertRaises(ValidationError),
+            ):
+                self.database.enqueue_integration(
+                    policy["id"],
+                    created_by=self.user["id"],
+                    initial_revision=invalid,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(
+            self.database._object_revision(
+                "b" * 64, object_format="sha256", field="initial_revision"
+            ),
+            "b" * 64,
+        )
+        with self.assertRaises(ValidationError):
+            self.database._object_revision(
+                "b" * 65, object_format="sha256", field="initial_revision"
             )
 
     def test_enqueue_is_idempotent_only_for_the_exact_policy(self) -> None:

@@ -25,8 +25,11 @@ from scripts.check_live_imitation_krab_workflow import (
     _load_maintainer_review,
     _prepare_control_plane,
     _project_context,
+    _register_github_authority,
     _require_approved_landing_authority,
     _RunScopedConnector,
+    _service_sidecar_spec,
+    _settle_effect,
     _work_item,
     _workflow_spec,
     _write_workflow_connector_config,
@@ -456,6 +459,80 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             "/state/candidates/repository.git",
         )
         self.assertEqual(PROJECT_KEY, "imitation-krab-workflow")
+
+    def test_pending_github_effect_is_invoked_once(self) -> None:
+        calls: list[tuple[str, str, int]] = []
+
+        class Control:
+            @staticmethod
+            def execute_service_operation(
+                operation_id: str, *, owner_id: str, expected_version: int
+            ) -> dict[str, object]:
+                calls.append((operation_id, owner_id, expected_version))
+                return {
+                    "id": operation_id,
+                    "state": "succeeded",
+                    "version": expected_version + 2,
+                }
+
+            @staticmethod
+            def reconcile_service_operation(*args: object, **kwargs: object) -> None:
+                raise AssertionError((args, kwargs))
+
+        settled = _settle_effect(
+            Control(),  # type: ignore[arg-type]
+            {"id": "sop_publish", "state": "pending", "version": 1},
+            owner_id="workflow-publish-wfx_test",
+        )
+
+        self.assertEqual(settled["state"], "succeeded")
+        self.assertEqual(
+            calls,
+            [("sop_publish", "workflow-publish-wfx_test", 1)],
+        )
+
+    def test_github_authority_registration_resumes_the_exact_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = Database(root / "control-plane.db")
+            control = ControlPlane(database)
+            _prepare_control_plane(
+                control,
+                repository=root / "source",
+                source_revision="d" * 40,
+                image="runtime-proof:local",
+                image_id="sha256:" + "a" * 64,
+                connector_socket=root / "connector.sock",
+                deployment_sha256="b" * 64,
+                scope_sha256="c" * 64,
+                model="gpt-test",
+            )
+            spec = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="f" * 64,
+            )
+
+            first = _register_github_authority(control, spec=spec)
+            resumed = _register_github_authority(control, spec=spec)
+
+            self.assertEqual(resumed, first)
+            self.assertEqual(len(database.list_service_sidecars()), 1)
+            self.assertEqual(
+                len(database.list_project_capability_bindings(project_key=PROJECT_KEY)),
+                3,
+            )
+            changed_spec = _service_sidecar_spec(
+                socket_path=root / "different.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="f" * 64,
+            )
+            with self.assertRaisesRegex(RuntimeError, "authority does not match"):
+                _register_github_authority(control, spec=changed_spec)
 
 
 if __name__ == "__main__":

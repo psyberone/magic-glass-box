@@ -1476,6 +1476,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 PRAGMA foreign_keys = OFF;
                 DROP TABLE workflow_completions;
                 DROP TABLE workflow_provider_targets;
+                DROP TABLE workflow_landing_chains;
                 DROP TABLE workflow_landing_bindings;
                 DROP TABLE workflow_rulings;
                 DROP TABLE integration_review_verdicts;

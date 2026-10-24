@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -4504,6 +4504,106 @@ BEGIN
 END;
 """
 
+WORKFLOW_LANDING_CHAIN_SCHEMA = """
+DROP TRIGGER integration_queue_event_immutable_update;
+DROP TRIGGER integration_queue_event_immutable_delete;
+DROP INDEX integration_queue_event_stream;
+
+CREATE TABLE integration_queue_events_v31 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_item_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'queue.created', 'queue.claimed', 'queue.claim_expired',
+            'queue.claim_released', 'queue.plan_issued',
+            'queue.provider_landing_issued', 'queue.provider_landing_failed',
+            'queue.not_landed', 'queue.refolded',
+            'queue.refold_required', 'queue.workflow_chain_accepted',
+            'queue.landed', 'queue.cancelled'
+        )
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (queue_item_id, sequence),
+    FOREIGN KEY (queue_item_id)
+        REFERENCES integration_queue_items(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO integration_queue_events_v31 (
+    id, queue_item_id, sequence, kind, from_state, to_state, actor,
+    metadata_json, created_at
+)
+SELECT
+    id, queue_item_id, sequence, kind, from_state, to_state, actor,
+    metadata_json, created_at
+FROM integration_queue_events;
+
+DROP TABLE integration_queue_events;
+ALTER TABLE integration_queue_events_v31 RENAME TO integration_queue_events;
+
+CREATE INDEX integration_queue_event_stream
+    ON integration_queue_events(queue_item_id, sequence);
+CREATE TRIGGER integration_queue_event_immutable_update
+BEFORE UPDATE ON integration_queue_events
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue events are immutable');
+END;
+CREATE TRIGGER integration_queue_event_immutable_delete
+BEFORE DELETE ON integration_queue_events
+BEGIN
+    SELECT RAISE(ABORT, 'integration queue events cannot be deleted');
+END;
+
+CREATE TABLE workflow_landing_chains (
+    execution_id TEXT PRIMARY KEY,
+    queue_item_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 1 AND 8),
+    candidate_id TEXT NOT NULL UNIQUE,
+    policy_id TEXT NOT NULL UNIQUE,
+    root_revision TEXT NOT NULL,
+    head_revision TEXT NOT NULL,
+    object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+    chain_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    accepted_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (queue_item_id)
+        REFERENCES integration_queue_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (accepted_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (object_format = 'sha1'
+            AND length(root_revision) = 40
+            AND length(head_revision) = 40)
+        OR
+        (object_format = 'sha256'
+            AND length(root_revision) = 64
+            AND length(head_revision) = 64)
+    )
+) STRICT;
+
+CREATE TRIGGER workflow_landing_chain_immutable_update
+BEFORE UPDATE ON workflow_landing_chains
+BEGIN
+    SELECT RAISE(ABORT, 'workflow landing chains are immutable');
+END;
+CREATE TRIGGER workflow_landing_chain_immutable_delete
+BEFORE DELETE ON workflow_landing_chains
+BEGIN
+    SELECT RAISE(ABORT, 'workflow landing chains cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -4537,6 +4637,7 @@ SCHEMA = (
     + WORKFLOW_TEMPLATE_SCHEMA
     + WORKFLOW_DIRECTOR_SCHEMA
     + WORKFLOW_LANDING_SCHEMA
+    + WORKFLOW_LANDING_CHAIN_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -4568,4 +4669,5 @@ MIGRATIONS = {
     27: WORKFLOW_TEMPLATE_SCHEMA,
     28: WORKFLOW_DIRECTOR_SCHEMA,
     29: WORKFLOW_LANDING_SCHEMA,
+    30: WORKFLOW_LANDING_CHAIN_SCHEMA,
 }

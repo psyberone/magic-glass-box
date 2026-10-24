@@ -92,7 +92,7 @@ This repository currently contains the first executable vertical slice:
   coordinator to recover parallel Claude/Codex-style work;
 - operator-controlled work completion that seals audit history and an explicit
   reopen into a blank next-generation memory thread;
-- schema-v30 bounded workflow prescriptions with one immutable built-in
+- schema-v31 bounded workflow prescriptions with one immutable built-in
   `implementation-v1` definition, versioned producer/reviewer configurations,
   restart-safe executions pinned to exact project, work-item, work-thread,
   profile, source, and policy revisions, and a durable supervisor-driven
@@ -294,6 +294,13 @@ At landing it uses only the mode pinned in the workflow configuration: manual
 mode requires an explicitly issued plan and nonce-bound receipt; provider mode
 requires an explicit target and the project's `landing.invoke@1` binding. It
 never falls back between the two:
+
+A reviewed correction may be a contiguous commit stack rather than a sibling
+candidate based directly on the original integration ref. MGB records and
+rechecks that complete workflow-owned chain before landing the final reviewed
+head. This exception applies only while the actual integration ref still equals
+the workflow's pinned source; unrelated ref movement still requires an ordinary
+refold and fresh gates.
 
 ```console
 # Manual mode: inspect the workflow version, then issue its exact plan.
