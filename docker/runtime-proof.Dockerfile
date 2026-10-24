@@ -6,7 +6,8 @@ ARG CODEX_VERSION=0.161.0
 ARG CLAUDE_CODE_VERSION=2.1.296
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates python3 python3-venv \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates python3 python3-coverage python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install --global --omit=dev \

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from magic_glass_box.db import Database
@@ -22,6 +24,7 @@ from scripts.check_live_imitation_krab_workflow import (
     _prepare_control_plane,
     _project_context,
     _require_approved_landing_authority,
+    _RunScopedConnector,
     _work_item,
     _workflow_spec,
     _write_workflow_connector_config,
@@ -86,7 +89,17 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
         self.assertEqual(len(spec.validations), 1)
         self.assertEqual(spec.validations[0].name, VALIDATION_NAME)
         self.assertEqual(spec.validations[0].image_id, image_id)
-        self.assertIn("unittest", " ".join(spec.validations[0].command))
+        validation = " ".join(spec.validations[0].command)
+        self.assertIn("coverage run", validation)
+        self.assertIn("unittest", validation)
+        self.assertIn("coverage report", validation)
+
+    def test_runtime_proof_image_contains_the_configured_coverage_tool(self) -> None:
+        dockerfile = (
+            Path(__file__).resolve().parents[1] / "docker" / "runtime-proof.Dockerfile"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("python3-coverage", dockerfile)
 
     def test_control_plane_setup_pins_the_exact_workflow_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -104,6 +117,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
                 deployment_sha256="b" * 64,
                 scope_sha256="c" * 64,
                 model="gpt-test",
+                budget_ceiling_microusd=3_200_000,
             )
 
             self.assertEqual(execution["stage"], "build")
@@ -116,7 +130,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             self.assertEqual(grant["policy"]["request_bytes"], WORKFLOW_REQUEST_BYTES)
             self.assertEqual(
                 grant["policy"]["budget"]["project_microusd"],
-                WORKFLOW_BUDGET_CEILING_MICROUSD,
+                3_200_000,
             )
             self.assertNotEqual(
                 profiles["producer"]["krab_identity_id"],
@@ -193,6 +207,10 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
         self.assertIsNone(arguments.maintainer_review)
         self.assertIsNone(arguments.gh_config_dir)
         self.assertEqual(arguments.max_invocations, 64)
+        self.assertEqual(
+            arguments.budget_ceiling_microusd,
+            WORKFLOW_BUDGET_CEILING_MICROUSD,
+        )
         acknowledged = parse_args(
             [
                 "--profile-dir",
@@ -207,6 +225,127 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             ]
         )
         self.assertTrue(acknowledged.approved_landing_acknowledged)
+
+    def test_live_budget_override_is_positive_and_capped_at_five_dollars(
+        self,
+    ) -> None:
+        prefix = [
+            "--profile-dir",
+            "/private/profile",
+            "--repository",
+            "/source/krab",
+            "--state-dir",
+            "/state/workflow",
+            "--model",
+            "gpt-test",
+            "--budget-ceiling-microusd",
+        ]
+
+        self.assertEqual(
+            parse_args([*prefix, "3200000"]).budget_ceiling_microusd,
+            3_200_000,
+        )
+        for invalid in ("0", "5000001", "not-an-integer"):
+            with (
+                self.subTest(invalid=invalid),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parse_args([*prefix, invalid])
+
+    def test_connector_allowance_rotates_once_per_active_workflow_run(self) -> None:
+        runs = {
+            (0, "producer"): {"id": "run_producer", "state": "queued"},
+            (0, "reviewer"): {"id": "run_reviewer", "state": "queued"},
+        }
+
+        class Database:
+            @staticmethod
+            def find_workflow_run(
+                _execution_id: str, correction_round: int, role: str
+            ) -> dict[str, str] | None:
+                return runs.get((correction_round, role))
+
+        started: list[str] = []
+        stopped: list[str] = []
+
+        def start(run_id: str) -> str:
+            started.append(run_id)
+            return "process:" + run_id
+
+        def stop(process: str) -> tuple[str, str]:
+            stopped.append(process)
+            return ("stdout:" + process, "stderr:" + process)
+
+        scope = _RunScopedConnector(
+            Database(),  # type: ignore[arg-type]
+            start=start,  # type: ignore[arg-type]
+            stop=stop,  # type: ignore[arg-type]
+        )
+        build = {
+            "id": "wfx_test",
+            "state": "active",
+            "stage": "build",
+            "correction_round": 0,
+        }
+        review = {**build, "stage": "review"}
+
+        scope.before_tick(build)
+        scope.before_tick(build)
+        scope.before_tick(review)
+        scope.before_tick({**review, "stage": "maintainer"})
+        stdout, stderr = scope.close()
+
+        self.assertEqual(started, ["run_producer", "run_reviewer"])
+        self.assertEqual(
+            stopped,
+            ["process:run_producer", "process:run_reviewer"],
+        )
+        self.assertIn("stdout:process:run_producer", stdout)
+        self.assertIn("stdout:process:run_reviewer", stdout)
+        self.assertIn("stderr:process:run_producer", stderr)
+        self.assertIn("stderr:process:run_reviewer", stderr)
+
+    def test_drive_prepares_the_run_connector_before_supervisor_tick(self) -> None:
+        execution = {
+            "id": "wfx_test",
+            "state": "active",
+            "stage": "build",
+            "correction_round": 0,
+            "version": 1,
+            "rulings": [],
+        }
+        order: list[str] = []
+
+        class Database:
+            @staticmethod
+            def get_workflow_execution(_execution_id: str):
+                return execution
+
+        class Supervisor:
+            @staticmethod
+            def tick() -> dict[str, int]:
+                order.append("tick")
+                execution["stage"] = "maintainer"
+                return {"actions_started": 1}
+
+            @staticmethod
+            def drain(*, timeout: float) -> bool:
+                self.assertEqual(timeout, 30)
+                order.append("drain")
+                return True
+
+        result = _drive_until(
+            Supervisor(),  # type: ignore[arg-type]
+            Database(),  # type: ignore[arg-type]
+            "wfx_test",
+            predicate=lambda item: item["stage"] == "maintainer",
+            timeout=30,
+            before_tick=lambda _item: order.append("connector"),
+        )
+
+        self.assertEqual(result["stage"], "maintainer")
+        self.assertEqual(order, ["connector", "tick", "drain"])
 
     def test_maintainer_review_is_bounded_exact_and_allows_both_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -147,6 +147,7 @@ MAX_WORKFLOW_SECONDS = 7200.0
 WORKFLOW_REQUEST_BYTES = 1024 * 1024
 WORKFLOW_BUDGET_CEILING_MICROUSD = 4_500_000
 WORKFLOW_INVOCATION_MICROUSD = 2_500_000
+MAX_LIVE_BUDGET_MICROUSD = 5_000_000
 ACKNOWLEDGEMENT_FLAG = (
     "--i-understand-an-approved-review-publishes-opens-and-merges-a-pr"
 )
@@ -154,6 +155,60 @@ ACKNOWLEDGEMENT_FLAG = (
 
 class WorkflowRulingRequired(RuntimeError):
     """The durable workflow intentionally stopped for an operator ruling."""
+
+
+class _RunScopedConnector:
+    """Give each durable worker run one fresh bounded connector process."""
+
+    _ACTIVE_RUN_STATES = frozenset({"queued", "preparing", "running"})
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        start: Callable[[str], subprocess.Popen[str]],
+        stop: Callable[[subprocess.Popen[str]], tuple[str, str]],
+    ) -> None:
+        self.database = database
+        self.start = start
+        self.stop = stop
+        self.bound_run_id: str | None = None
+        self.process: subprocess.Popen[str] | None = None
+        self.stdout: list[str] = []
+        self.stderr: list[str] = []
+
+    def _active_run_id(self, execution: Mapping[str, Any]) -> str | None:
+        if execution["state"] != "active":
+            return None
+        role = {"build": "producer", "review": "reviewer"}.get(str(execution["stage"]))
+        if role is None:
+            return None
+        run = self.database.find_workflow_run(
+            str(execution["id"]), int(execution["correction_round"]), role
+        )
+        if run is None or run["state"] not in self._ACTIVE_RUN_STATES:
+            return None
+        return str(run["id"])
+
+    def _stop_current(self) -> None:
+        if self.process is None:
+            return
+        stdout, stderr = self.stop(self.process)
+        self.stdout.append(stdout)
+        self.stderr.append(stderr)
+        self.process = None
+
+    def before_tick(self, execution: Mapping[str, Any]) -> None:
+        run_id = self._active_run_id(execution)
+        if run_id is None or run_id == self.bound_run_id:
+            return
+        self._stop_current()
+        self.process = self.start(run_id)
+        self.bound_run_id = run_id
+
+    def close(self) -> tuple[str, str]:
+        self._stop_current()
+        return "\n".join(self.stdout), "\n".join(self.stderr)
 
 
 def _positive_integer(value: str) -> int:
@@ -178,6 +233,18 @@ def _positive_seconds(value: str) -> float:
     return parsed
 
 
+def _budget_microusd(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if not 1 <= parsed <= MAX_LIVE_BUDGET_MICROUSD:
+        raise argparse.ArgumentTypeError(
+            f"must be between 1 and {MAX_LIVE_BUDGET_MICROUSD} microusd"
+        )
+    return parsed
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse both quota and approved-landing acknowledgements explicitly."""
 
@@ -192,7 +259,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--build-timeout", type=_positive_seconds, default=900.0)
     parser.add_argument("--run-timeout", type=_positive_seconds, default=900.0)
     parser.add_argument("--workflow-timeout", type=_positive_seconds, default=5400.0)
-    parser.add_argument("--max-invocations", type=_positive_integer, default=64)
+    parser.add_argument(
+        "--max-invocations",
+        type=_positive_integer,
+        default=64,
+        help="maximum connector calls per durable worker run",
+    )
+    parser.add_argument(
+        "--budget-ceiling-microusd",
+        type=_budget_microusd,
+        default=WORKFLOW_BUDGET_CEILING_MICROUSD,
+    )
     parser.add_argument("--maintainer-review", type=Path)
     parser.add_argument("--gh-config-dir", type=Path)
     parser.add_argument("--github-repository", default="psyberone/imitation-krab")
@@ -434,7 +511,8 @@ def _workflow_spec(image_id: str) -> WorkflowConfigurationSpec:
                         "/bin/sh",
                         "-c",
                         "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m "
-                        "unittest discover -s tests -v",
+                        "coverage run -m unittest discover -s tests -v && "
+                        "python3 -m coverage report",
                     ],
                 }
             ],
@@ -462,7 +540,11 @@ def _workflow_connector_spec(
 
 
 def _workflow_grant_spec(
-    *, deployment_sha256: str, scope_sha256: str, model: str
+    *,
+    deployment_sha256: str,
+    scope_sha256: str,
+    model: str,
+    budget_ceiling_microusd: int = WORKFLOW_BUDGET_CEILING_MICROUSD,
 ) -> InferenceGrantSpec:
     value = _grant_spec(
         deployment_sha256=deployment_sha256,
@@ -473,9 +555,9 @@ def _workflow_grant_spec(
     value["budget"].update(
         {
             "invocation_microusd": WORKFLOW_INVOCATION_MICROUSD,
-            "run_microusd": WORKFLOW_BUDGET_CEILING_MICROUSD,
-            "project_microusd": WORKFLOW_BUDGET_CEILING_MICROUSD,
-            "grant_microusd": WORKFLOW_BUDGET_CEILING_MICROUSD,
+            "run_microusd": budget_ceiling_microusd,
+            "project_microusd": budget_ceiling_microusd,
+            "grant_microusd": budget_ceiling_microusd,
         }
     )
     return InferenceGrantSpec.from_mapping(value)
@@ -561,6 +643,7 @@ def _prepare_control_plane(
     deployment_sha256: str,
     scope_sha256: str,
     model: str,
+    budget_ceiling_microusd: int = WORKFLOW_BUDGET_CEILING_MICROUSD,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
     database = control.database
     database.initialize()
@@ -608,6 +691,7 @@ def _prepare_control_plane(
             deployment_sha256=deployment_sha256,
             scope_sha256=scope_sha256,
             model=model,
+            budget_ceiling_microusd=budget_ceiling_microusd,
         ),
         expires_at=None,
         created_by_handle="operator",
@@ -688,6 +772,7 @@ def _drive_until(
     *,
     predicate: Callable[[Mapping[str, Any]], bool],
     timeout: float,
+    before_tick: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_signature: tuple[object, ...] | None = None
@@ -709,6 +794,8 @@ def _drive_until(
             execution["correction_round"],
             execution["version"],
         )
+        if before_tick is not None:
+            before_tick(execution)
         result = supervisor.tick()
         if signature == last_signature and not any(result.values()):
             time.sleep(0.1)
@@ -745,9 +832,9 @@ def _clear_stale_socket(path: Path) -> None:
     except FileNotFoundError:
         return
     except OSError as exc:
-        raise RuntimeError("GitHub provider socket is unavailable") from exc
+        raise RuntimeError("provider socket is unavailable") from exc
     if not stat.S_ISSOCK(info.st_mode):
-        raise RuntimeError("GitHub provider socket path is not a socket")
+        raise RuntimeError("provider socket path is not a socket")
     path.unlink()
 
 
@@ -1112,6 +1199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             deployment_sha256=deployment_sha256,
             scope_sha256=session.credential_scope_sha256,
             model=args.model,
+            budget_ceiling_microusd=args.budget_ceiling_microusd,
         )
     else:
         execution, connector, profiles = _existing_execution(database)
@@ -1142,6 +1230,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         or stored_connector_spec.canonical not in acceptable_connector_specs
     ):
         raise RuntimeError("existing connector does not match this workflow proof")
+    stored_grant = database.get_provider_grant(GRANT_NAME)
+    if (
+        stored_grant["policy"]["budget"]["project_microusd"]
+        != args.budget_ceiling_microusd
+    ):
+        raise RuntimeError(
+            "existing provider budget does not match this workflow proof"
+        )
     connector_config = connector_root / "config.json"
     _write_workflow_connector_config(
         connector_config,
@@ -1212,7 +1308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action_timeout=args.run_timeout + 300,
     )
 
-    connector_process: subprocess.Popen[str] | None = None
+    connector_scope: _RunScopedConnector | None = None
     connector_stdout = ""
     connector_stderr = ""
     github_process: subprocess.Popen[bytes] | None = None
@@ -1342,12 +1438,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout=args.workflow_timeout,
             )
         elif execution["state"] == "active" and not pending_maintainer:
-            connector_process = _start_connector(
-                project_root=project_root,
-                profile_dir=profile_dir,
-                config_path=connector_config,
-                socket_path=connector_socket,
-                max_invocations=args.max_invocations,
+
+            def start_run_connector(_run_id: str) -> subprocess.Popen[str]:
+                _clear_stale_socket(connector_socket)
+                return _start_connector(
+                    project_root=project_root,
+                    profile_dir=profile_dir,
+                    config_path=connector_config,
+                    socket_path=connector_socket,
+                    max_invocations=args.max_invocations,
+                )
+
+            connector_scope = _RunScopedConnector(
+                database,
+                start=start_run_connector,
+                stop=_stop_connector,
             )
             execution = _drive_until(
                 supervisor,
@@ -1355,6 +1460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 execution["id"],
                 predicate=lambda item: _pending_maintainer(database, item),
                 timeout=args.workflow_timeout,
+                before_tick=connector_scope.before_tick,
             )
         else:
             execution = database.get_workflow_execution(execution["id"])
@@ -1376,10 +1482,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     except RuntimeError:
                         if proof_error is None:
                             raise
-                if connector_process is not None:
-                    connector_stdout, connector_stderr = _stop_connector(
-                        connector_process
-                    )
+                if connector_scope is not None:
+                    connector_stdout, connector_stderr = connector_scope.close()
 
     final_secrets = tuple(
         dict.fromkeys(
