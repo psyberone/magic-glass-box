@@ -329,8 +329,9 @@ otherwise independent candidates is optional future optimization.
 Workers may produce results and review evidence, then exit. Waiting for review,
 validation, an integration lease, or a remote provider may outlive any worker.
 Landing therefore advances through durable control-plane actions rather than a
-worker-held capability. M7C exposes these actions through the CLI; automatic
-queue driving is a later supervisor integration.
+worker-held capability. M7C exposes the primitives through the CLI; M12C's
+fixed `implementation-v1` director now drives them through version-bound
+supervisor actions.
 
 The landing lease serializes the expected integration ref. Before issuing an
 actuator plan, the supervisor rechecks dependencies, gate evidence, expected
@@ -404,6 +405,21 @@ landed only when its own remote identity appears in its provider-confirmed
 closed-reference set. The queue advances to the provider's actual observed base
 revision, not blindly to the candidate head. See
 [github-provider.md](github-provider.md).
+
+For an `implementation-v1` workflow, the integration queue is additionally
+bound to the exact workflow execution, correction round, candidate, and ready
+gate. Manual mode requires `workflow manual-plan`; provider mode requires
+`workflow provider-target` plus an active `landing.invoke@1` binding. These
+paths pass the execution ID and optimistic version into landing issuance, so a
+stale, completed, wrong-mode, wrong-queue, or wrong-target workflow cannot
+borrow otherwise valid integration authority. There is no mode fallback.
+
+A provider failure releases the existing queue according to the ordinary
+provider ledger and opens a ruling naming that exact provider landing. One
+explicit `continue` authorizes one retry. Manual `not_landed` receipts remain
+operator-attested facts and require an explicit fresh plan. Once either path
+records a matching `landed` receipt, workflow closeout rechecks the current
+gate and commits its outcome, thread seal, and workflow completion atomically.
 
 ## Receipts
 

@@ -11,8 +11,8 @@ or transcript.
 
 Work memory deliberately separates:
 
-- **work-log entries**, which are append-only evidence from workers and
-  coordinators;
+- **work-log entries**, which are append-only evidence from workers and the
+  trusted control plane;
 - **checkpoints**, which are compact coordinator-authored views through one
   exact log sequence; and
 - **assignments**, which delegate a bounded objective to one exact agent
@@ -31,6 +31,9 @@ A log entry has a typed kind, short summary, bounded details, artifact
 references, related interaction IDs, and an optional candidate revision. The
 orchestrator supplies its author run, attempt, profile revision, runtime
 adapter, sequence, and timestamp. A worker cannot forge that provenance.
+The sole non-worker form is the final `outcome` written by the M12 workflow
+closeout transaction; it carries the acting local user and workflow execution
+instead of invented run/attempt provenance.
 Schema v2 is reserved for `review` entries and adds a required
 `review_outcome` of `approved` or `changes_requested`. It requires the exact
 candidate revision, and a changes-requested verdict requires at least one
@@ -82,11 +85,15 @@ action outside the worker gateway and succeeds only when:
 - every assignment is completed or cancelled; and
 - the latest log entry is a typed `outcome`.
 
-The operator supplies the exact observed thread version. A stale completion
-fails, and a successful completion appends an immutable lifecycle event naming
-the operator and final outcome entry. The thread is then sealed: old runs can
-still read its evidence, but no worker can append, checkpoint, assign, claim,
-or complete more work against it.
+The operator supplies the exact observed thread version for ordinary manual
+completion. A stale completion fails, and a successful completion appends an
+immutable lifecycle event naming the operator and final outcome entry. The
+fixed implementation workflow may instead perform the same checks and create
+its bounded final outcome atomically after a matching landed receipt. It also
+records the exact workflow, queue, candidate, policy, receipt, and observed
+revision before completing the execution. The thread is then sealed: old runs
+can still read its evidence, but no worker can append, checkpoint, assign,
+claim, or complete more work against it.
 
 Nothing is deleted. If work resumes, an operator explicitly reopens the work
 item using the completed thread's exact version. Magic Glass Box creates a new

@@ -1481,6 +1481,21 @@ class WorkMemoryDatabaseTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(statement, values)
 
+    def test_work_log_digest_mismatch_is_rejected_independently_of_kind(self) -> None:
+        coordinator, _ = self.running_run("Coordinator")
+        entry = self.database.append_work_log(
+            coordinator["id"], log_entry(), idempotency_key="entry:digest-corrupt"
+        )
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER work_log_entry_immutable_update")
+            connection.execute(
+                "UPDATE work_log_entries SET content_sha256 = ? WHERE id = ?",
+                ("f" * 64, entry["id"]),
+            )
+
+        with self.assertRaisesRegex(StorageError, "digest does not match"):
+            self.database.get_work_memory_for_run(coordinator["id"])
+
 
 class WorkMemoryMigrationTests(unittest.TestCase):
     def test_schema_five_backfills_threads_and_existing_runs(self) -> None:

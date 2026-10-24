@@ -8,6 +8,7 @@ from pathlib import Path
 from magic_glass_box.db import (
     SCHEMA,
     WORKFLOW_DIRECTOR_SCHEMA,
+    WORKFLOW_TEMPLATE_SCHEMA,
     ConcurrentUpdateError,
     ConflictError,
     Database,
@@ -594,8 +595,12 @@ class WorkflowStorageTests(unittest.TestCase):
                 "spec",
                 "events",
                 "rulings",
+                "landing",
+                "completion",
             },
         )
+        self.assertIsNone(execution["landing"])
+        self.assertIsNone(execution["completion"])
         expected_request = {
             "schema_version": 1,
             "project_key": "workflow-project",
@@ -1048,40 +1053,24 @@ class WorkflowStorageTests(unittest.TestCase):
             ):
                 connection.execute(statement, parameters)
 
-    def test_schema_twenty_nine_migrates_schema_twenty_seven_once(self) -> None:
+    def test_schema_thirty_migrates_schema_twenty_seven_once(self) -> None:
         path = Path(self.temporary.name) / "schema-27.db"
-        historical = Database(path)
-        historical.initialize()
-        connection = historical.connect()
-        try:
-            for statement in (
-                "DROP TABLE workflow_rulings",
-                "DROP TABLE integration_review_verdicts",
-                "DROP TABLE workflow_gate_bindings",
-                "DROP TABLE workflow_run_bindings",
-                "DROP TABLE workflow_execution_events",
-                "DROP TABLE workflow_executions",
-                "DROP TABLE workflow_configuration_versions",
-                "DROP TABLE workflow_configurations",
-                "DROP TABLE workflow_template_definitions",
-            ):
-                connection.execute(statement)
+        with sqlite3.connect(path) as connection:
+            connection.executescript(SCHEMA[: SCHEMA.index(WORKFLOW_TEMPLATE_SCHEMA)])
             connection.execute("PRAGMA user_version = 27")
-            connection.commit()
-        finally:
-            connection.close()
+        path.chmod(0o600)
 
         migrated = Database(path)
         status = migrated.initialize()
         repeated = migrated.initialize()
 
-        self.assertEqual(status["schema_version"], 29)
-        self.assertEqual(repeated["schema_version"], 29)
+        self.assertEqual(status["schema_version"], 30)
+        self.assertEqual(repeated["schema_version"], 30)
         definitions = migrated.list_workflow_template_definitions()
         self.assertEqual(len(definitions), 1)
         self.assertEqual(definitions[0]["key"], "implementation-v1")
 
-    def test_schema_twenty_nine_preserves_schema_twenty_eight_workflow_state(
+    def test_schema_thirty_preserves_schema_twenty_eight_workflow_state(
         self,
     ) -> None:
         path = Path(self.temporary.name) / "schema-28.db"
@@ -1204,7 +1193,7 @@ class WorkflowStorageTests(unittest.TestCase):
         execution = migrated.get_workflow_execution(execution_id)
         action = migrated.get_supervisor_action("act_" + "7" * 32)
 
-        self.assertEqual(status["schema_version"], 29)
+        self.assertEqual(status["schema_version"], 30)
         self.assertEqual(execution["correction_round"], 0)
         self.assertEqual(execution["events"][0]["kind"], "workflow.started")
         self.assertEqual(action["run_id"], run_id)
@@ -1213,6 +1202,221 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertEqual(status["counts"]["workflow_gate_bindings"], 0)
         self.assertEqual(status["counts"]["integration_review_verdicts"], 0)
         self.assertEqual(status["counts"]["workflow_rulings"], 0)
+        self.assertEqual(status["counts"]["workflow_landing_bindings"], 0)
+        self.assertEqual(status["counts"]["workflow_provider_targets"], 0)
+        self.assertEqual(status["counts"]["workflow_completions"], 0)
+
+    def test_schema_thirty_preserves_schema_twenty_nine_logs_and_rulings(
+        self,
+    ) -> None:
+        self.create_configuration()
+        execution = self.start()
+        ruling = self.database.open_workflow_ruling(
+            execution["id"],
+            expected_version=execution["version"],
+            kind="correction_limit",
+        )
+        run = self.database.create_run(
+            project_key="workflow-project",
+            profile_name="Producer",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+            source_revision="a" * 40,
+        )
+        preparing = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="command",
+            owner_id="schema-29-author",
+            expected_run_version=run["version"],
+        )
+        attempt = self.database.start_run_attempt(
+            preparing["id"],
+            owner_id="schema-29-author",
+            expected_attempt_version=preparing["version"],
+            expected_run_version=preparing["run_version"],
+            source_revision="a" * 40,
+            container_id="4" * 64,
+            container_name="schema-29-author",
+            image_id="sha256:" + "5" * 64,
+        )
+        entry = self.database.append_work_log(
+            run["id"],
+            WorkLogEntry.from_mapping(
+                {
+                    "schema_version": 1,
+                    "kind": "progress",
+                    "summary": "Legacy workflow work remains attributable.",
+                    "details": [],
+                    "artifacts": [],
+                    "related_interaction_ids": [],
+                    "candidate_revision": None,
+                }
+            ),
+            idempotency_key="schema-29-progress",
+        )
+
+        with sqlite3.connect(self.database.path) as connection:
+            connection.executescript(
+                """
+                PRAGMA foreign_keys = OFF;
+                DROP TABLE workflow_completions;
+                DROP TABLE workflow_provider_targets;
+                DROP TABLE workflow_landing_bindings;
+
+                DROP TRIGGER work_log_entry_immutable_update;
+                DROP TRIGGER work_log_entry_immutable_delete;
+                DROP INDEX work_log_thread_sequence;
+                CREATE TABLE work_log_entries_v29 (
+                    id TEXT PRIMARY KEY,
+                    work_thread_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                    kind TEXT NOT NULL CHECK (
+                        kind IN (
+                            'plan', 'progress', 'finding', 'decision', 'blocker',
+                            'verification', 'review', 'assignment_result', 'outcome'
+                        )
+                    ),
+                    content_json TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    author_run_id TEXT NOT NULL,
+                    author_attempt_id TEXT NOT NULL,
+                    assignment_id TEXT,
+                    idempotency_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (work_thread_id, sequence),
+                    UNIQUE (work_thread_id, author_run_id, idempotency_key),
+                    FOREIGN KEY (work_thread_id)
+                        REFERENCES work_threads(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (author_run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (author_attempt_id)
+                        REFERENCES run_attempts(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (assignment_id)
+                        REFERENCES work_assignments(id) ON DELETE RESTRICT
+                ) STRICT;
+                INSERT INTO work_log_entries_v29 (
+                    id, work_thread_id, sequence, kind, content_json,
+                    content_sha256, author_run_id, author_attempt_id,
+                    assignment_id, idempotency_key, created_at
+                )
+                SELECT
+                    id, work_thread_id, sequence, kind, content_json,
+                    content_sha256, author_run_id, author_attempt_id,
+                    assignment_id, idempotency_key, created_at
+                FROM work_log_entries;
+                DROP TABLE work_log_entries;
+                ALTER TABLE work_log_entries_v29 RENAME TO work_log_entries;
+                CREATE INDEX work_log_thread_sequence
+                    ON work_log_entries(work_thread_id, sequence);
+                CREATE TRIGGER work_log_entry_immutable_update
+                BEFORE UPDATE ON work_log_entries
+                BEGIN
+                    SELECT RAISE(ABORT, 'work-log entries are immutable');
+                END;
+                CREATE TRIGGER work_log_entry_immutable_delete
+                BEFORE DELETE ON work_log_entries
+                BEGIN
+                    SELECT RAISE(ABORT, 'work-log entries are immutable');
+                END;
+
+                DROP TRIGGER workflow_ruling_identity_immutable;
+                DROP TRIGGER workflow_ruling_immutable_delete;
+                DROP INDEX workflow_ruling_one_open;
+                CREATE TABLE workflow_rulings_v29 (
+                    id TEXT PRIMARY KEY,
+                    execution_id TEXT NOT NULL,
+                    execution_version INTEGER NOT NULL CHECK (execution_version >= 1),
+                    correction_round INTEGER NOT NULL CHECK (
+                        correction_round BETWEEN 0 AND 8
+                    ),
+                    kind TEXT NOT NULL CHECK (
+                        kind IN (
+                            'correction_limit', 'producer_failed',
+                            'reviewer_failed', 'review_verdict_missing',
+                            'validation_failed'
+                        )
+                    ),
+                    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+                    version INTEGER NOT NULL CHECK (version >= 1),
+                    policy_id TEXT,
+                    run_id TEXT,
+                    gate_name TEXT,
+                    resolved_by TEXT,
+                    decision TEXT CHECK (
+                        decision IS NULL OR decision IN ('continue', 'cancel')
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    UNIQUE (execution_id, execution_version, kind),
+                    FOREIGN KEY (execution_id)
+                        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (policy_id)
+                        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE RESTRICT,
+                    CHECK (
+                        (state = 'open' AND resolved_by IS NULL
+                            AND decision IS NULL AND resolved_at IS NULL)
+                        OR
+                        (state = 'resolved' AND resolved_by IS NOT NULL
+                            AND decision IS NOT NULL AND resolved_at IS NOT NULL)
+                    )
+                ) STRICT;
+                INSERT INTO workflow_rulings_v29 (
+                    id, execution_id, execution_version, correction_round,
+                    kind, state, version, policy_id, run_id, gate_name,
+                    resolved_by, decision, created_at, updated_at, resolved_at
+                )
+                SELECT
+                    id, execution_id, execution_version, correction_round,
+                    kind, state, version, policy_id, run_id, gate_name,
+                    resolved_by, decision, created_at, updated_at, resolved_at
+                FROM workflow_rulings;
+                DROP TABLE workflow_rulings;
+                ALTER TABLE workflow_rulings_v29 RENAME TO workflow_rulings;
+                CREATE UNIQUE INDEX workflow_ruling_one_open
+                    ON workflow_rulings(execution_id) WHERE state = 'open';
+                CREATE TRIGGER workflow_ruling_identity_immutable
+                BEFORE UPDATE OF
+                    id, execution_id, execution_version, correction_round, kind,
+                    policy_id, run_id, gate_name, created_at
+                ON workflow_rulings
+                BEGIN
+                    SELECT RAISE(ABORT, 'workflow ruling identity is immutable');
+                END;
+                CREATE TRIGGER workflow_ruling_immutable_delete
+                BEFORE DELETE ON workflow_rulings
+                BEGIN
+                    SELECT RAISE(ABORT, 'workflow rulings cannot be deleted');
+                END;
+                PRAGMA user_version = 29;
+                PRAGMA foreign_keys = ON;
+                """
+            )
+
+        migrated = Database(self.database.path)
+        first = migrated.initialize()
+        second = migrated.initialize()
+        memory = migrated.get_work_memory_for_run(run["id"])
+        migrated_ruling = migrated.get_workflow_ruling(ruling["id"])
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema_version"], 30)
+        self.assertEqual(memory["entries"][0]["id"], entry["id"])
+        self.assertEqual(
+            memory["entries"][0]["author"],
+            {
+                "run_id": run["id"],
+                "attempt_id": attempt["id"],
+                "profile_name": "Producer",
+                "profile_version_id": self.producer["profile_version_id"],
+                "profile_version": 1,
+                "runtime_adapter": "command",
+            },
+        )
+        self.assertEqual(migrated_ruling["kind"], "correction_limit")
+        self.assertIsNone(migrated_ruling["provider_landing_id"])
+        self.assertIsNone(migrated_ruling["landing_plan_id"])
 
 
 if __name__ == "__main__":

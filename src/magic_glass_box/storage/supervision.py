@@ -155,7 +155,8 @@ class SupervisionStorage:
                 workflows = connection.execute(
                     "SELECT e.id, e.version FROM workflow_executions e "
                     "WHERE e.state = 'active' "
-                    "AND e.stage IN ('build', 'review', 'maintainer') "
+                    "AND e.stage IN ("
+                    "'build', 'review', 'maintainer', 'landing', 'completion') "
                     "AND NOT EXISTS (SELECT 1 FROM workflow_rulings wr "
                     "WHERE wr.execution_id = e.id AND wr.state = 'open') "
                     "ORDER BY e.created_at, e.id"

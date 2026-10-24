@@ -123,6 +123,17 @@ storage additionally prove that the author is the policy-bound reviewer
 attempt for that exact head; portable schema validation alone cannot grant
 review authority.
 
+Control-plane schema v30 adds immutable workflow-to-landing bindings, explicit
+provider targets, and workflow completion records. Landing plans and provider
+operations continue to use their existing published contracts; workflow
+authority is relational and is rechecked against the exact active execution,
+version, configured mode, queue item, provider resource, and merge method at
+issuance and closeout. Schema v30 also permits one `outcome` work-log entry
+authored by the trusted control plane rather than a worker attempt. That entry
+names its actor and workflow execution, and the database transaction that
+creates it also records completion, seals the thread, and completes the
+execution. No new worker-authored portable document is introduced.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

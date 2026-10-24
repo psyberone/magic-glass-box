@@ -92,11 +92,12 @@ This repository currently contains the first executable vertical slice:
   coordinator to recover parallel Claude/Codex-style work;
 - operator-controlled work completion that seals audit history and an explicit
   reopen into a blank next-generation memory thread;
-- schema-v29 bounded workflow prescriptions with one immutable built-in
+- schema-v30 bounded workflow prescriptions with one immutable built-in
   `implementation-v1` definition, versioned producer/reviewer configurations,
   restart-safe executions pinned to exact project, work-item, work-thread,
   profile, source, and policy revisions, and a durable supervisor-driven
-  build/review/validation/correction loop with typed exact-head verdicts;
+  build/review/validation/correction loop with typed exact-head verdicts,
+  explicit manual/provider landing authority, and atomic durable closeout;
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues,
   where upstream bodies and host-private failure details are reduced to fixed
@@ -111,7 +112,7 @@ This repository currently contains the first executable vertical slice:
   reconcile interrupted ones, inspect or apply retained results, materialize,
   reconstruct, list, or verify trusted candidates, and manage exact-input gate
   policy, review, validation, evidence, readiness, dependency, refold, queue,
-  landing-plan, and receipt state.
+  landing-plan, receipt, and bounded-workflow state.
 
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
@@ -268,8 +269,8 @@ durable state without an external cron. See
 [docs/supervision.md](docs/supervision.md) for policy, privacy, retry, and
 leader-safety semantics.
 
-The first bounded-workflow slice can save an exact role/policy configuration
-and start its durable prescription ledger:
+The bounded implementation workflow saves an exact role/policy configuration
+and starts its durable prescription ledger:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
@@ -286,11 +287,32 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --idempotency-key <stable-key> --requested-by operator
 ```
 
-With the supervisor running, `workflow start` now drives the pinned producer,
-candidate, independent reviewer, validation, and bounded correction stages.
-It stops at maintainer disposition when configured and at the `landing` stage
-for M12C to take over. A failed stage or exhausted correction budget opens a
-durable ruling instead of guessing:
+With the supervisor running, `workflow start` drives the pinned producer,
+candidate, independent reviewer, validation, bounded correction, landing, and
+closeout stages. It waits honestly for maintainer disposition when configured.
+At landing it uses only the mode pinned in the workflow configuration: manual
+mode requires an explicitly issued plan and nonce-bound receipt; provider mode
+requires an explicit target and the project's `landing.invoke@1` binding. It
+never falls back between the two:
+
+```console
+# Manual mode: inspect the workflow version, then issue its exact plan.
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow manual-plan wfx_<id> --expected-version <version> \
+  --remote origin --issued-by operator
+
+# Provider mode: bind the exact provider resource and merge method once.
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow provider-target wfx_<id> --expected-version <version> \
+  --resource-id <pull-number> --merge-method squash \
+  --configured-by operator
+```
+
+The control-room attention queue names a missing target, capability, manual
+plan or receipt, required refold, and manual retry. A failed provider attempt
+opens a ruling bound to that exact attempt instead of silently replaying an
+effect. Other failed stages and an exhausted correction budget likewise open
+a durable ruling instead of guessing:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
@@ -300,8 +322,11 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --decision continue --resolved-by operator
 ```
 
-Only a correction-limit ruling may continue into another bounded round; any
-ruling may be explicitly cancelled. See
+Only a correction-limit ruling or an exact failed-provider-landing ruling may
+continue. The latter authorizes one retry of that failed attempt; any ruling
+may be explicitly cancelled. After a matching landed receipt, schema v30
+atomically writes a bounded control-plane outcome, seals the work thread, and
+completes the workflow. See
 [docs/workflow-templates.md](docs/workflow-templates.md).
 
 `control-room serve` prints a per-process private URL and binds only to

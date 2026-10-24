@@ -72,20 +72,29 @@ class WorkStorage:
             raise StorageError("stored work-log entry is invalid") from exc
         if entry.digest != row["content_sha256"] or entry.kind.value != row["kind"]:
             raise StorageError("stored work-log entry digest does not match")
-        return {
-            "id": row["id"],
-            "thread_id": row["work_thread_id"],
-            "sequence": row["sequence"],
-            "content_sha256": row["content_sha256"],
-            "assignment_id": row["assignment_id"],
-            "author": {
+        author = (
+            {
+                "type": "control_plane",
+                "actor": row["actor_handle"],
+                "workflow_execution_id": row["workflow_execution_id"],
+            }
+            if row["workflow_execution_id"] is not None
+            else {
                 "run_id": row["author_run_id"],
                 "attempt_id": row["author_attempt_id"],
                 "profile_name": row["profile_name"],
                 "profile_version_id": row["profile_version_id"],
                 "profile_version": row["profile_version"],
                 "runtime_adapter": row["runtime_adapter"],
-            },
+            }
+        )
+        return {
+            "id": row["id"],
+            "thread_id": row["work_thread_id"],
+            "sequence": row["sequence"],
+            "content_sha256": row["content_sha256"],
+            "assignment_id": row["assignment_id"],
+            "author": author,
             "created_at": row["created_at"],
             **entry.to_dict(),
         }
@@ -95,12 +104,15 @@ class WorkStorage:
         row = connection.execute(
             "SELECT e.id, e.work_thread_id, e.sequence, e.kind, e.content_json, "
             "e.content_sha256, e.author_run_id, e.author_attempt_id, "
-            "e.assignment_id, e.created_at, ap.name AS profile_name, "
+            "e.assignment_id, e.actor_id, e.workflow_execution_id, "
+            "e.created_at, ap.name AS profile_name, "
             "av.id AS profile_version_id, av.version AS profile_version, "
-            "ra.runtime_adapter FROM work_log_entries e "
-            "JOIN run_attempts ra ON ra.id = e.author_attempt_id "
-            "JOIN agent_profile_versions av ON av.id = ra.profile_version_id "
-            "JOIN agent_profiles ap ON ap.id = av.profile_id WHERE e.id = ?",
+            "ra.runtime_adapter, actor.handle AS actor_handle "
+            "FROM work_log_entries e "
+            "LEFT JOIN run_attempts ra ON ra.id = e.author_attempt_id "
+            "LEFT JOIN agent_profile_versions av ON av.id = ra.profile_version_id "
+            "LEFT JOIN agent_profiles ap ON ap.id = av.profile_id "
+            "LEFT JOIN users actor ON actor.id = e.actor_id WHERE e.id = ?",
             (entry_id,),
         ).fetchone()
         if row is None:

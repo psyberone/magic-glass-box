@@ -63,6 +63,7 @@ from .storage.schema import (
     WORK_MEMORY_SCHEMA,
     WORK_THREAD_LIFECYCLE_SCHEMA,
     WORKFLOW_DIRECTOR_SCHEMA,
+    WORKFLOW_LANDING_SCHEMA,
     WORKFLOW_TEMPLATE_SCHEMA,
 )
 from .storage.service_sidecars import ServiceSidecarStorage
@@ -119,6 +120,7 @@ __all__ = [
     "WORK_MEMORY_SCHEMA",
     "WORK_THREAD_LIFECYCLE_SCHEMA",
     "WORKFLOW_DIRECTOR_SCHEMA",
+    "WORKFLOW_LANDING_SCHEMA",
     "WORKFLOW_TEMPLATE_SCHEMA",
     "default_db_path",
 ]

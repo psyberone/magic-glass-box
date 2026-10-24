@@ -415,6 +415,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--decision", required=True, choices=("continue", "cancel")
     )
     workflow_ruling_resolve.add_argument("--resolved-by", required=True)
+    workflow_provider_target = workflow_commands.add_parser(
+        "provider-target", help="bind one provider resource to an exact workflow"
+    )
+    workflow_provider_target.add_argument("execution_id")
+    workflow_provider_target.add_argument("--expected-version", required=True, type=int)
+    workflow_provider_target.add_argument("--resource-id", required=True)
+    workflow_provider_target.add_argument(
+        "--merge-method", required=True, choices=("merge", "rebase", "squash")
+    )
+    workflow_provider_target.add_argument("--configured-by", required=True)
+    workflow_manual_plan = workflow_commands.add_parser(
+        "manual-plan", help="issue the workflow's exact manual landing plan"
+    )
+    workflow_manual_plan.add_argument("execution_id")
+    workflow_manual_plan.add_argument("--expected-version", required=True, type=int)
+    workflow_manual_plan.add_argument("--remote", default="origin")
+    workflow_manual_plan.add_argument("--issued-by", required=True)
+    workflow_manual_plan.add_argument(
+        "--operation-timeout",
+        dest="candidate_timeout",
+        type=_positive_seconds,
+        default=DEFAULT_GIT_TIMEOUT_SECONDS,
+    )
 
     inference_connector = commands.add_parser(
         "inference-connector",
@@ -1278,6 +1301,27 @@ def _dispatch(
                 decision=args.decision,
                 resolved_by_handle=args.resolved_by,
             )
+        if args.workflow_command == "provider-target":
+            return control.configure_workflow_provider_landing(
+                args.execution_id,
+                expected_version=args.expected_version,
+                resource_id=args.resource_id,
+                merge_method=args.merge_method,
+                configured_by_handle=args.configured_by,
+            )
+        if (
+            args.workflow_command == "manual-plan"
+            and result_store is not None
+            and candidate_store is not None
+        ):
+            return control.issue_workflow_manual_landing(
+                args.execution_id,
+                expected_version=args.expected_version,
+                remote=args.remote,
+                issued_by_handle=args.issued_by,
+                result_store=result_store,
+                candidate_store=candidate_store,
+            )
     if args.command == "inference-connector":
         if args.inference_connector_command == "register":
             return control.register_inference_connector(
@@ -1766,10 +1810,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             gate_engine = DockerCLI(run_timeout=args.run_timeout)
             gate_executor = DockerExecutor(gate_engine)
-        elif args.command == "integration" and args.integration_command in {
-            "refold",
-            "plan",
-        }:
+        elif (
+            args.command == "integration"
+            and args.integration_command in {"refold", "plan"}
+        ) or (args.command == "workflow" and args.workflow_command == "manual-plan"):
             result_store = _build_result_store(control)
             candidate_store = _build_candidate_store(
                 control, timeout=args.candidate_timeout

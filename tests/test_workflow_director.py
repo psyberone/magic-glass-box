@@ -7,19 +7,27 @@ import unittest
 from pathlib import Path
 
 from magic_glass_box.candidates import GitCandidateStore
+from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
     ValidationError,
+    WorkAssignmentSpec,
     WorkItemEnvelope,
     WorkLogEntry,
     canonical_json,
 )
 from magic_glass_box.executor import SandboxResult
+from magic_glass_box.integration import LandingReceiptRequest
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
+from magic_glass_box.service_sidecar import (
+    ServiceOperationRequest,
+    ServiceOperationResponse,
+    ServiceSidecarSpec,
+)
 from magic_glass_box.storage.errors import ConcurrentUpdateError, ConflictError
 from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION, WorkflowDirector
@@ -388,6 +396,1136 @@ class WorkflowDirectorTests(unittest.TestCase):
             )
         )
         return advanced, gate, reviewer
+
+    def drive_approved_to_landing(
+        self, execution: dict[str, object]
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        review, gate, reviewer = self.drive_build_to_review(
+            execution, before="base\n", after="approved\n"
+        )
+        policy = self.database.get_gate_policy(gate["policy_id"])
+        self.finish_run(
+            reviewer,
+            source_revision=policy["head_revision"],
+            before="approved\n",
+            after="approved\n",
+            review_outcome="approved",
+        )
+        self.assertTrue(
+            self.director().advance(review["id"], expected_version=review["version"])
+        )
+        current = self.database.get_workflow_execution(execution["id"])
+        if current["stage"] == "maintainer":
+            disposition = self.control.record_maintainer_review(
+                gate["policy_id"],
+                review_request={
+                    "schema_version": 1,
+                    "decision": "approved",
+                    "summary": "The exact candidate fits the project.",
+                    "details": [],
+                },
+                recorded_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+            self.assertEqual(disposition["decision"], "approved")
+            self.assertTrue(
+                self.director().advance(
+                    current["id"], expected_version=current["version"]
+                )
+            )
+            current = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(current["stage"], "landing")
+        return current, gate
+
+    def issue_provider_workflow_landing(
+        self, *, configuration_name: str, external_id: str
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        execution = self.start_execution(
+            configuration_name=configuration_name,
+            external_id=external_id,
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "provider",
+            },
+        )
+        landing, gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        sidecar = ServiceSidecarSpec.from_mapping(
+            {
+                "schema_version": 1,
+                "connector_protocol_version": 1,
+                "deployment_sha256": "1" * 64,
+                "transport": {
+                    "kind": "unix",
+                    "socket_path": str(self.root / "github.sock"),
+                },
+                "capabilities": [
+                    {"name": "landing.invoke", "version": 1, "mode": "effect"}
+                ],
+                "mappings": [
+                    {
+                        "name": "primary",
+                        "service": "github",
+                        "host": "github.com",
+                        "repository": "acme/widgets",
+                        "account": "mgb-bot",
+                        "credential_scope_sha256": "2" * 64,
+                    }
+                ],
+                "request_bytes": 128 * 1024,
+                "response_bytes": 512 * 1024,
+                "timeout_ms": 30000,
+                "max_concurrency": 2,
+                "max_requests_per_minute": 60,
+            }
+        )
+        self.database.register_service_sidecar(
+            name="github-main", spec=sidecar, created_by=self.user["id"]
+        )
+        self.database.bind_project_capability(
+            project_key="workflow-project",
+            capability_name="landing.invoke",
+            capability_version=1,
+            sidecar_name="github-main",
+            mapping_name="primary",
+            bound_by=self.user["id"],
+        )
+        target = self.control.configure_workflow_provider_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            resource_id="42",
+            merge_method="squash",
+            configured_by_handle="operator",
+        )
+        self.assertEqual(
+            target,
+            {
+                "execution_id": enqueued["id"],
+                "queue_item_id": enqueued["landing"]["queue_item_id"],
+                "resource_id": "42",
+                "merge_method": "squash",
+                "created_by": "operator",
+                "created_at": target["created_at"],
+            },
+        )
+        repeated = self.control.configure_workflow_provider_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            resource_id="42",
+            merge_method="squash",
+            configured_by_handle="operator",
+        )
+        self.assertEqual(repeated, target)
+        with self.assertRaises(ConcurrentUpdateError):
+            self.control.configure_workflow_provider_landing(
+                enqueued["id"],
+                expected_version=enqueued["version"] + 1,
+                resource_id="42",
+                merge_method="squash",
+                configured_by_handle="operator",
+            )
+        with self.assertRaisesRegex(ConflictError, "another provider target"):
+            self.control.configure_workflow_provider_landing(
+                enqueued["id"],
+                expected_version=enqueued["version"],
+                resource_id="43",
+                merge_method="squash",
+                configured_by_handle="operator",
+            )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(claimed["landing"]["queue_state"], "claimed")
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        issued_execution = self.database.get_workflow_execution(claimed["id"])
+        self.assertEqual(issued_execution["landing"]["queue_state"], "awaiting_receipt")
+        self.assertEqual(
+            issued_execution["landing"]["provider_target"],
+            {
+                "resource_id": target["resource_id"],
+                "merge_method": target["merge_method"],
+                "created_by": target["created_by"],
+                "created_at": target["created_at"],
+            },
+        )
+        issued = self.control.get_provider_landing(
+            issued_execution["landing"]["provider_landing_id"]
+        )
+        return issued_execution, gate, issued
+
+    def complete_provider_operation(
+        self,
+        issued: dict[str, object],
+        *,
+        outcome: str,
+        observed_revision: str | None = None,
+    ) -> None:
+        operation = issued["operation"]
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="replacement-provider",
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        response = ServiceOperationResponse.from_mapping(
+            {
+                **request.correlation_dict(),
+                "outcome": outcome,
+                "provider_status": 200 if outcome == "succeeded" else 403,
+                "request_bytes": 64,
+                "response_bytes": 128,
+                "error_code": None if outcome == "succeeded" else "github-denied",
+                "retry_after_seconds": None,
+                "receipt": (
+                    {
+                        "remote_identity": "github:github.com/acme/widgets/pull/42",
+                        "observed_revision": observed_revision,
+                        "evidence_sha256": "3" * 64,
+                        "closed_references": ["github:github.com/acme/widgets/pull/42"],
+                    }
+                    if outcome == "succeeded"
+                    else None
+                ),
+            }
+        )
+        self.database.complete_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id="replacement-provider",
+            expected_operation_version=dispatch["operation"]["version"],
+            response=response,
+        )
+
+    def test_manual_landing_receipt_closes_the_exact_workflow_atomically(self) -> None:
+        landing, gate = self.drive_approved_to_landing(self.execution)
+
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(landing["id"])
+        self.assertEqual(enqueued["stage"], "landing")
+        self.assertEqual(enqueued["landing"]["mode"], "manual")
+        self.assertEqual(enqueued["landing"]["candidate_id"], gate["candidate_id"])
+        self.assertEqual(enqueued["landing"]["policy_id"], gate["policy_id"])
+        self.assertEqual(enqueued["landing"]["queue_state"], "queued")
+        self.assert_transition_event(
+            enqueued["events"][-1],
+            kind="workflow.landing_enqueued",
+            from_stage="landing",
+            to_stage="landing",
+            from_round=0,
+            to_round=0,
+            metadata={
+                "candidate_id": gate["candidate_id"],
+                "policy_id": gate["policy_id"],
+                "queue_item_id": enqueued["landing"]["queue_item_id"],
+            },
+        )
+
+        issued = self.control.issue_workflow_manual_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            remote="origin",
+            issued_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        self.assertIn("nonce", issued)
+        self.assertEqual(issued["queue_item_id"], enqueued["landing"]["queue_item_id"])
+        self.assertEqual(issued["state"], "pending")
+
+        recorded = self.control.record_landing_receipt(
+            LandingReceiptRequest.from_mapping(
+                {
+                    "schema_version": 1,
+                    "plan_id": issued["id"],
+                    "request_sha256": issued["content_sha256"],
+                    "nonce": issued["nonce"],
+                    "outcome": "landed",
+                    "observed_revision": issued["plan"]["head_revision"],
+                }
+            ).to_dict(),
+            recorded_by_handle="operator",
+        )
+        self.assertEqual(recorded["queue_item"]["state"], "landed")
+
+        self.assertTrue(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        completion = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(completion["stage"], "completion")
+        self.assertEqual(completion["landing"]["receipt_id"], recorded["receipt"]["id"])
+        self.assertEqual(completion["landing"]["receipt_kind"], "manual")
+        self.assert_transition_event(
+            completion["events"][-1],
+            kind="workflow.landing_recorded",
+            from_stage="landing",
+            to_stage="completion",
+            from_round=0,
+            to_round=0,
+            metadata={
+                "candidate_id": gate["candidate_id"],
+                "policy_id": gate["policy_id"],
+                "queue_item_id": enqueued["landing"]["queue_item_id"],
+                "receipt_id": recorded["receipt"]["id"],
+            },
+        )
+
+        replacement = self.director()
+        self.assertTrue(
+            replacement.advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        finished = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(
+            (finished["state"], finished["stage"]), ("completed", "completion")
+        )
+        self.assertEqual(
+            finished["completion"],
+            {
+                "execution_id": finished["id"],
+                "queue_item_id": enqueued["landing"]["queue_item_id"],
+                "receipt_id": recorded["receipt"]["id"],
+                "outcome_entry_id": finished["events"][-1]["metadata"][
+                    "outcome_entry_id"
+                ],
+                "candidate_id": gate["candidate_id"],
+                "policy_id": gate["policy_id"],
+                "observed_revision": issued["plan"]["head_revision"],
+                "completed_by": "operator",
+                "created_at": finished["finished_at"],
+            },
+        )
+        self.assertEqual(
+            finished["completion"]["receipt_id"], recorded["receipt"]["id"]
+        )
+        self.assertEqual(finished["completion"]["candidate_id"], gate["candidate_id"])
+        self.assertEqual(
+            finished["completion"]["outcome_entry_id"],
+            finished["events"][-1]["metadata"]["outcome_entry_id"],
+        )
+        self.assert_transition_event(
+            finished["events"][-1],
+            kind="workflow.completed",
+            from_stage="completion",
+            to_stage="completion",
+            from_round=0,
+            to_round=0,
+            metadata={
+                "candidate_id": gate["candidate_id"],
+                "policy_id": gate["policy_id"],
+                "queue_item_id": enqueued["landing"]["queue_item_id"],
+                "receipt_id": recorded["receipt"]["id"],
+                "outcome_entry_id": finished["completion"]["outcome_entry_id"],
+            },
+        )
+        shown_item = self.database.get_work_item(self.work_item["id"])
+        self.assertEqual(shown_item["state"], "completed")
+        self.assertEqual(
+            shown_item["work_thread"]["events"][-1],
+            {
+                "sequence": 2,
+                "kind": "work_thread.completed",
+                "from_state": "active",
+                "to_state": "completed",
+                "actor": "operator",
+                "metadata": {
+                    "outcome_entry_id": finished["completion"]["outcome_entry_id"],
+                    "landing_receipt_id": recorded["receipt"]["id"],
+                    "workflow_execution_id": finished["id"],
+                },
+                "created_at": finished["completion"]["created_at"],
+            },
+        )
+        producer = self.database.find_workflow_run(finished["id"], 0, "producer")
+        memory = self.database.get_work_memory_for_run(producer["id"])
+        outcome = memory["entries"][-1]
+        self.assertEqual(
+            set(outcome),
+            {
+                "id",
+                "thread_id",
+                "sequence",
+                "content_sha256",
+                "assignment_id",
+                "author",
+                "created_at",
+                "schema_version",
+                "kind",
+                "summary",
+                "details",
+                "artifacts",
+                "related_interaction_ids",
+                "candidate_revision",
+            },
+        )
+        self.assertEqual(outcome["kind"], "outcome")
+        self.assertEqual(outcome["candidate_revision"], issued["plan"]["head_revision"])
+        self.assertEqual(
+            outcome["author"],
+            {
+                "type": "control_plane",
+                "actor": "operator",
+                "workflow_execution_id": finished["id"],
+            },
+        )
+
+    def test_landing_binding_and_transition_are_one_restart_safe_transaction(
+        self,
+    ) -> None:
+        landing, _gate = self.drive_approved_to_landing(self.execution)
+        with self.database.connect() as connection:
+            connection.execute(
+                "CREATE TRIGGER test_reject_landing_event "
+                "BEFORE INSERT ON workflow_execution_events "
+                "WHEN NEW.kind = 'workflow.landing_enqueued' BEGIN "
+                "SELECT RAISE(ABORT, 'simulated event failure'); END"
+            )
+        with self.assertRaises(ConflictError):
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        unchanged = self.database.get_workflow_execution(landing["id"])
+        self.assertEqual(unchanged["version"], landing["version"])
+        self.assertIsNone(unchanged["landing"])
+        queued = self.control.list_integration_queue(project_key="workflow-project")
+        self.assertEqual(len(queued), 1)
+
+        with self.database.connect() as connection:
+            connection.execute("DROP TRIGGER test_reject_landing_event")
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        recovered = self.database.get_workflow_execution(landing["id"])
+        self.assertEqual(recovered["landing"]["queue_item_id"], queued[0]["id"])
+        self.assertEqual(recovered["events"][-1]["kind"], "workflow.landing_enqueued")
+        self.assertEqual(len(self.database.list_integration_queue()), 1)
+        repeated = self.database.bind_workflow_landing(
+            landing["id"],
+            expected_version=landing["version"],
+            correction_round=landing["correction_round"],
+            candidate_id=recovered["landing"]["candidate_id"],
+            policy_id=recovered["landing"]["initial_policy_id"],
+            queue_item_id=recovered["landing"]["queue_item_id"],
+        )
+        self.assertEqual(
+            repeated,
+            {
+                "execution_id": landing["id"],
+                "correction_round": landing["correction_round"],
+                "candidate_id": recovered["landing"]["candidate_id"],
+                "policy_id": recovered["landing"]["initial_policy_id"],
+                "queue_item_id": queued[0]["id"],
+                "created_at": recovered["landing"]["created_at"],
+            },
+        )
+        with self.assertRaises(ConcurrentUpdateError):
+            self.database.bind_workflow_landing(
+                landing["id"],
+                expected_version=recovered["version"],
+                correction_round=landing["correction_round"],
+                candidate_id=recovered["landing"]["candidate_id"],
+                policy_id=recovered["landing"]["initial_policy_id"],
+                queue_item_id=recovered["landing"]["queue_item_id"],
+            )
+
+    def test_landing_binding_refuses_cancelled_queue_and_execution(self) -> None:
+        landing, gate = self.drive_approved_to_landing(self.execution)
+        queue = self.control.enqueue_integration(
+            gate["policy_id"], created_by_handle="operator"
+        )
+        cancelled_queue = self.control.cancel_integration_item(
+            queue["id"],
+            expected_version=queue["version"],
+            cancelled_by_handle="operator",
+        )
+        with self.assertRaisesRegex(ConflictError, "queue is cancelled"):
+            self.database.bind_workflow_landing(
+                landing["id"],
+                expected_version=landing["version"],
+                correction_round=landing["correction_round"],
+                candidate_id=gate["candidate_id"],
+                policy_id=gate["policy_id"],
+                queue_item_id=cancelled_queue["id"],
+            )
+        self.assertIsNone(
+            self.database.get_workflow_execution(landing["id"])["landing"]
+        )
+
+        other = self.start_execution(
+            configuration_name="cancelled-before-binding",
+            external_id="workflow-director-cancelled-before-binding",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "manual",
+            },
+        )
+        other_landing, other_gate = self.drive_approved_to_landing(other)
+        other_queue = self.control.enqueue_integration(
+            other_gate["policy_id"], created_by_handle="operator"
+        )
+        cancelled_execution = self.control.cancel_workflow_execution(
+            other_landing["id"],
+            expected_version=other_landing["version"],
+            cancelled_by_handle="operator",
+            reason="Exercise the inactive-execution fence.",
+        )
+        with self.assertRaisesRegex(ConflictError, "not ready for landing"):
+            self.database.bind_workflow_landing(
+                cancelled_execution["id"],
+                expected_version=cancelled_execution["version"],
+                correction_round=cancelled_execution["correction_round"],
+                candidate_id=other_gate["candidate_id"],
+                policy_id=other_gate["policy_id"],
+                queue_item_id=other_queue["id"],
+            )
+        self.assertIsNone(
+            self.database.get_workflow_execution(cancelled_execution["id"])["landing"]
+        )
+
+    def test_control_room_names_manual_landing_actions_without_nonce_content(
+        self,
+    ) -> None:
+        landing, _gate = self.drive_approved_to_landing(self.execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(landing["id"])
+        snapshot = ControlRoom(self.database).snapshot()
+        projected = next(
+            item for item in snapshot["workflows"] if item["id"] == landing["id"]
+        )
+        self.assertEqual(projected["landing_mode"], "manual")
+        self.assertEqual(
+            projected["landing_queue_item_id"], enqueued["landing"]["queue_item_id"]
+        )
+        self.assertEqual(projected["landing_queue_state"], "queued")
+        self.assertIsNone(projected["landing_plan_id"])
+        self.assertIn(
+            "workflow.manual_plan_required",
+            {
+                item["kind"]
+                for item in snapshot["attention"]
+                if item.get("workflow_execution_id") == landing["id"]
+            },
+        )
+
+        issued = self.control.issue_workflow_manual_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            remote="origin",
+            issued_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        self.assertIn("nonce", issued)
+        awaiting = ControlRoom(self.database).snapshot()
+        projected = next(
+            item for item in awaiting["workflows"] if item["id"] == landing["id"]
+        )
+        self.assertEqual(projected["landing_plan_id"], issued["id"])
+        self.assertEqual(projected["landing_plan_state"], "pending")
+        encoded = canonical_json(awaiting)
+        self.assertNotIn(issued["nonce"], encoded)
+        self.assertIn(
+            "workflow.manual_receipt_pending",
+            {
+                item["kind"]
+                for item in awaiting["attention"]
+                if item.get("workflow_execution_id") == landing["id"]
+            },
+        )
+        self.control.record_landing_receipt(
+            LandingReceiptRequest.from_mapping(
+                {
+                    "schema_version": 1,
+                    "plan_id": issued["id"],
+                    "request_sha256": issued["content_sha256"],
+                    "nonce": issued["nonce"],
+                    "outcome": "not_landed",
+                    "observed_revision": issued["plan"]["expected_base_revision"],
+                }
+            ).to_dict(),
+            recorded_by_handle="operator",
+        )
+        retry = ControlRoom(self.database).snapshot()
+        projected = next(
+            item for item in retry["workflows"] if item["id"] == landing["id"]
+        )
+        self.assertEqual(projected["landing_queue_state"], "queued")
+        self.assertEqual(projected["landing_plan_state"], "not_landed")
+        self.assertIn(
+            "workflow.manual_retry_required",
+            {
+                item["kind"]
+                for item in retry["attention"]
+                if item.get("workflow_execution_id") == landing["id"]
+            },
+        )
+
+    def test_completion_rolls_back_outcome_and_seal_until_work_is_quiescent(
+        self,
+    ) -> None:
+        landing, _gate = self.drive_approved_to_landing(self.execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(landing["id"])
+        issued = self.control.issue_workflow_manual_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            remote="origin",
+            issued_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        self.control.record_landing_receipt(
+            LandingReceiptRequest.from_mapping(
+                {
+                    "schema_version": 1,
+                    "plan_id": issued["id"],
+                    "request_sha256": issued["content_sha256"],
+                    "nonce": issued["nonce"],
+                    "outcome": "landed",
+                    "observed_revision": issued["plan"]["head_revision"],
+                }
+            ).to_dict(),
+            recorded_by_handle="operator",
+        )
+        self.assertTrue(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        completion = self.database.get_workflow_execution(enqueued["id"])
+        coordinator = self.database.create_run(
+            project_key="workflow-project",
+            profile_name="Producer",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+            source_revision=issued["plan"]["head_revision"],
+        )
+        with self.assertRaisesRegex(ConflictError, "active runs"):
+            self.director().advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        unchanged = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(
+            (unchanged["state"], unchanged["stage"]), ("active", "completion")
+        )
+        self.assertIsNone(unchanged["completion"])
+        memory = self.database.get_work_memory_for_run(coordinator["id"])
+        self.assertEqual(memory["state"], "active")
+        self.assertNotIn("outcome", {entry["kind"] for entry in memory["entries"]})
+
+        preparing = self.database.begin_run_attempt(
+            coordinator["id"],
+            runtime_adapter="command",
+            owner_id="closeout-assignment-author",
+            expected_run_version=coordinator["version"],
+        )
+        attempt = self.database.start_run_attempt(
+            preparing["id"],
+            owner_id="closeout-assignment-author",
+            expected_attempt_version=preparing["version"],
+            expected_run_version=preparing["run_version"],
+            source_revision=issued["plan"]["head_revision"],
+            container_id="e" * 64,
+            container_name="closeout-assignment-author",
+            image_id="sha256:" + "f" * 64,
+        )
+        memory = self.database.get_work_memory_for_run(coordinator["id"])
+        assignment = self.control.create_work_assignment(
+            coordinator["id"],
+            target_profile_name="Reviewer",
+            spec=WorkAssignmentSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "title": "Hold closeout",
+                    "objective": "Prove unfinished delegated work fences completion.",
+                    "scope_paths": ["feature.txt"],
+                    "acceptance_checks": ["Observe atomic rollback."],
+                    "base_revision": issued["plan"]["head_revision"],
+                }
+            ),
+            expected_thread_version=memory["version"],
+            idempotency_key="hold-workflow-closeout",
+        )
+        workspace = self.root / "closeout-assignment-workspace"
+        workspace.mkdir()
+        (workspace / "feature.txt").write_text("approved\n", encoding="utf-8")
+        self.results.stage(attempt["id"], workspace, issued["plan"]["head_revision"])
+        captured = self.results.capture(attempt["id"], workspace)
+        self.database.record_attempt_result(attempt["id"], captured.manifest)
+        self.database.complete_run_attempt(
+            attempt["id"],
+            owner_id="closeout-assignment-author",
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id=attempt["image_id"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "unfinished assignments"):
+            self.director().advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        unchanged = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(
+            (unchanged["state"], unchanged["stage"]), ("active", "completion")
+        )
+        self.assertIsNone(unchanged["completion"])
+        memory = self.database.get_work_memory_for_run(coordinator["id"])
+        self.assertEqual(memory["state"], "active")
+        self.assertEqual(memory["assignments"][0]["id"], assignment["id"])
+        self.assertNotIn("outcome", {entry["kind"] for entry in memory["entries"]})
+
+    def test_provider_target_is_invoked_settled_and_closed_by_replacements(
+        self,
+    ) -> None:
+        issued_execution, gate, issued = self.issue_provider_workflow_landing(
+            configuration_name="provider-landing",
+            external_id="workflow-director-provider-landing",
+        )
+        self.assertEqual(issued["operation"]["spec"]["target"]["resource_id"], "42")
+        self.assertEqual(
+            issued["operation"]["spec"]["target"]["desired_revision"],
+            self.database.get_gate_policy(gate["policy_id"])["head_revision"],
+        )
+
+        self.complete_provider_operation(
+            issued, outcome="succeeded", observed_revision="f" * 40
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                issued_execution["id"], expected_version=issued_execution["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(issued_execution["id"])
+        self.assertEqual(landed["landing"]["queue_state"], "landed")
+        self.assertEqual(landed["landing"]["receipt_kind"], "provider")
+        self.assertEqual(landed["landing"]["receipt_observed_revision"], "f" * 40)
+        self.assertTrue(
+            self.director().advance(landed["id"], expected_version=landed["version"])
+        )
+        completion = self.database.get_workflow_execution(landed["id"])
+        self.assertEqual(completion["stage"], "completion")
+        self.assertTrue(
+            self.director().advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        finished = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(finished["state"], "completed")
+        self.assertEqual(finished["completion"]["observed_revision"], "f" * 40)
+
+    def test_provider_failure_requires_explicit_ruling_for_each_retry(self) -> None:
+        execution, _gate, issued = self.issue_provider_workflow_landing(
+            configuration_name="provider-failure",
+            external_id="workflow-director-provider-failure",
+        )
+        first_landing_id = issued["provider_landing"]["id"]
+        self.complete_provider_operation(issued, outcome="denied")
+
+        self.assertFalse(
+            self.director().advance(
+                execution["id"], expected_version=execution["version"]
+            )
+        )
+        failed = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(failed["landing"]["queue_state"], "queued")
+        self.assertEqual(failed["landing"]["provider_landing_state"], "failed")
+        self.assertTrue(
+            self.director().advance(failed["id"], expected_version=failed["version"])
+        )
+        ruled = self.database.get_workflow_execution(failed["id"])
+        ruling = ruled["rulings"][-1]
+        self.assertEqual(ruling["kind"], "landing_failed")
+        self.assertEqual(ruling["provider_landing_id"], first_landing_id)
+        self.assertEqual(ruling["state"], "open")
+        self.assertEqual(ruled["landing"]["provider_landing_id"], first_landing_id)
+
+        resolved = self.control.resolve_workflow_ruling(
+            ruling["id"],
+            expected_version=ruling["version"],
+            decision="continue",
+            resolved_by_handle="operator",
+        )
+        self.assertEqual(resolved["decision"], "continue")
+        retry = self.database.get_workflow_execution(ruled["id"])
+        self.assertEqual((retry["stage"], retry["correction_round"]), ("landing", 0))
+        self.assertFalse(
+            self.director().advance(retry["id"], expected_version=retry["version"])
+        )
+        claimed = self.database.get_workflow_execution(retry["id"])
+        with self.assertRaisesRegex(ValidationError, "supplied together"):
+            self.control.issue_provider_landing(
+                claimed["landing"]["queue_item_id"],
+                owner_id=f"workflow-{claimed['id']}",
+                expected_version=claimed["landing"]["queue_version"],
+                resource_id="42",
+                merge_method="squash",
+                issued_by_handle="operator",
+                workflow_execution_id=claimed["id"],
+            )
+        with self.assertRaisesRegex(ConflictError, "workflow target"):
+            self.control.issue_provider_landing(
+                claimed["landing"]["queue_item_id"],
+                owner_id=f"workflow-{claimed['id']}",
+                expected_version=claimed["landing"]["queue_version"],
+                resource_id="43",
+                merge_method="squash",
+                issued_by_handle="operator",
+                workflow_execution_id=claimed["id"],
+                workflow_execution_version=claimed["version"],
+            )
+        with self.assertRaisesRegex(ConflictError, "workflow target"):
+            self.control.issue_provider_landing(
+                claimed["landing"]["queue_item_id"],
+                owner_id=f"workflow-{claimed['id']}",
+                expected_version=claimed["landing"]["queue_version"],
+                resource_id="42",
+                merge_method="merge",
+                issued_by_handle="operator",
+                workflow_execution_id=claimed["id"],
+                workflow_execution_version=claimed["version"],
+            )
+        with self.assertRaises(ConcurrentUpdateError):
+            self.control.issue_provider_landing(
+                claimed["landing"]["queue_item_id"],
+                owner_id=f"workflow-{claimed['id']}",
+                expected_version=claimed["landing"]["queue_version"],
+                resource_id="42",
+                merge_method="squash",
+                issued_by_handle="operator",
+                workflow_execution_id=claimed["id"],
+                workflow_execution_version=ruled["version"],
+            )
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        reissued = self.database.get_workflow_execution(retry["id"])
+        second_landing_id = reissued["landing"]["provider_landing_id"]
+        self.assertNotEqual(second_landing_id, first_landing_id)
+
+        second = self.control.get_provider_landing(second_landing_id)
+        self.complete_provider_operation(second, outcome="denied")
+        self.assertFalse(
+            self.director().advance(
+                reissued["id"], expected_version=reissued["version"]
+            )
+        )
+        failed_again = self.database.get_workflow_execution(reissued["id"])
+        self.assertTrue(
+            self.director().advance(
+                failed_again["id"], expected_version=failed_again["version"]
+            )
+        )
+        reruled = self.database.get_workflow_execution(reissued["id"])
+        self.assertEqual(len(reruled["rulings"]), 2)
+        self.assertEqual(
+            reruled["rulings"][-1]["provider_landing_id"], second_landing_id
+        )
+        self.assertEqual(reruled["rulings"][-1]["state"], "open")
+
+    def test_provider_landing_waits_without_consuming_retries_when_dependency_blocks(
+        self,
+    ) -> None:
+        execution = self.start_execution(
+            configuration_name="provider-dependency",
+            external_id="workflow-director-provider-dependency",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "provider",
+            },
+        )
+        prerequisite = self.database.import_work_item(
+            project_key="workflow-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "workflow-prerequisite",
+                    "source_updated_at": "2026-10-23T14:00:00Z",
+                    "title": "Land the prerequisite first",
+                    "brief": "This item deliberately remains unlanded.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        dependency = self.control.add_landing_dependency(
+            execution["work_item_id"],
+            prerequisite["id"],
+            created_by_handle="operator",
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            resource_id="42",
+            merge_method="squash",
+            configured_by_handle="operator",
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        waiting = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(waiting["landing"]["blocked_dependency_count"], 1)
+        self.assertEqual(waiting["landing"]["queue_state"], "queued")
+        self.assertIsNone(waiting["landing"]["owner_id"])
+        self.assertEqual(waiting["rulings"], [])
+
+        self.control.remove_landing_dependency(
+            dependency["id"],
+            expected_version=dependency["version"],
+            removed_by_handle="operator",
+        )
+        self.assertFalse(
+            self.director().advance(waiting["id"], expected_version=waiting["version"])
+        )
+        unavailable = self.database.get_workflow_execution(waiting["id"])
+        self.assertEqual(unavailable["landing"]["blocked_dependency_count"], 0)
+        self.assertFalse(unavailable["landing"]["provider_available"])
+        self.assertEqual(unavailable["landing"]["queue_state"], "queued")
+        snapshot = ControlRoom(self.database).snapshot()
+        self.assertIn(
+            "workflow.provider_capability_required",
+            {
+                item["kind"]
+                for item in snapshot["attention"]
+                if item.get("workflow_execution_id") == waiting["id"]
+            },
+        )
+
+    def test_landing_mode_never_falls_back_to_an_incompatible_authority(self) -> None:
+        provider = self.start_execution(
+            configuration_name="provider-no-fallback",
+            external_id="workflow-director-provider-no-fallback",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "provider",
+            },
+        )
+        landing, _gate = self.drive_approved_to_landing(provider)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(provider["id"])
+        with self.assertRaisesRegex(ConflictError, "provider landing"):
+            self.control.issue_workflow_manual_landing(
+                enqueued["id"],
+                expected_version=enqueued["version"],
+                remote="origin",
+                issued_by_handle="operator",
+                result_store=self.results,
+                candidate_store=self.candidates,
+            )
+        queue = self.control.claim_integration_item(
+            enqueued["landing"]["queue_item_id"],
+            owner_id="generic-operator",
+            expected_version=enqueued["landing"]["queue_version"],
+            lease_seconds=60,
+        )
+        with self.assertRaisesRegex(ValidationError, "supplied together"):
+            self.control.issue_landing_plan(
+                queue["id"],
+                owner_id="generic-operator",
+                expected_version=queue["version"],
+                remote="origin",
+                issued_by_handle="operator",
+                result_store=self.results,
+                candidate_store=self.candidates,
+                workflow_execution_id=enqueued["id"],
+            )
+        with self.assertRaisesRegex(ConflictError, "provider landing"):
+            self.control.issue_landing_plan(
+                queue["id"],
+                owner_id="generic-operator",
+                expected_version=queue["version"],
+                remote="origin",
+                issued_by_handle="operator",
+                result_store=self.results,
+                candidate_store=self.candidates,
+                workflow_execution_id=enqueued["id"],
+                workflow_execution_version=enqueued["version"],
+            )
+        issued = self.control.issue_landing_plan(
+            queue["id"],
+            owner_id="generic-operator",
+            expected_version=queue["version"],
+            remote="origin",
+            issued_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        self.assertTrue(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        ruled = self.database.get_workflow_execution(enqueued["id"])
+        ruling = ruled["rulings"][-1]
+        self.assertEqual(ruling["kind"], "landing_authority_mismatch")
+        self.assertEqual(ruling["landing_plan_id"], issued["id"])
+        self.assertIsNone(ruling["provider_landing_id"])
+        with self.assertRaisesRegex(ConflictError, "continue the workflow"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+            )
+
+        manual_landing, _gate = self.drive_approved_to_landing(self.execution)
+        self.assertTrue(
+            self.director().advance(
+                manual_landing["id"], expected_version=manual_landing["version"]
+            )
+        )
+        manual = self.database.get_workflow_execution(self.execution["id"])
+        with self.assertRaisesRegex(ConflictError, "manual landing"):
+            self.control.configure_workflow_provider_landing(
+                manual["id"],
+                expected_version=manual["version"],
+                resource_id="42",
+                merge_method="squash",
+                configured_by_handle="operator",
+            )
+        with self.assertRaises(ConcurrentUpdateError):
+            self.control.issue_workflow_manual_landing(
+                manual["id"],
+                expected_version=manual["version"] + 1,
+                remote="origin",
+                issued_by_handle="operator",
+                result_store=self.results,
+                candidate_store=self.candidates,
+            )
+
+    def test_manual_landing_issuance_rejects_cancelled_workflow_at_landing_stage(
+        self,
+    ) -> None:
+        manual_landing, _gate = self.drive_approved_to_landing(self.execution)
+        self.assertTrue(
+            self.director().advance(
+                manual_landing["id"], expected_version=manual_landing["version"]
+            )
+        )
+        manual = self.database.get_workflow_execution(self.execution["id"])
+        self.control.issue_workflow_manual_landing(
+            manual["id"],
+            expected_version=manual["version"],
+            remote="origin",
+            issued_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        cancelled_manual = self.control.cancel_workflow_execution(
+            manual["id"],
+            expected_version=manual["version"],
+            cancelled_by_handle="operator",
+            reason="Exercise the landing issuance fence.",
+        )
+        manual_queue = self.database.get_integration_queue_item(
+            cancelled_manual["landing"]["queue_item_id"]
+        )
+        with self.assertRaisesRegex(ConflictError, "workflow is not awaiting landing"):
+            self.control.issue_landing_plan(
+                manual_queue["id"],
+                owner_id=f"workflow-{cancelled_manual['id']}",
+                expected_version=manual_queue["version"],
+                remote="origin",
+                issued_by_handle="operator",
+                result_store=self.results,
+                candidate_store=self.candidates,
+                workflow_execution_id=cancelled_manual["id"],
+                workflow_execution_version=cancelled_manual["version"],
+            )
+
+        oversized_execution_id = "x" * 65
+        with self.assertRaises(ValidationError):
+            self.database.issue_landing_plan(
+                "queue",
+                owner_id="owner",
+                expected_version=1,
+                candidate_repository=self.repository,
+                remote="origin",
+                issued_by=self.user["id"],
+                workflow_execution_id=oversized_execution_id,
+                workflow_execution_version=1,
+            )
+
+    def test_provider_landing_issuance_rejects_cancelled_workflow_at_landing_stage(
+        self,
+    ) -> None:
+        provider, _provider_gate, _issued = self.issue_provider_workflow_landing(
+            configuration_name="provider-cancelled-issuance",
+            external_id="workflow-director-provider-cancelled-issuance",
+        )
+        cancelled_provider = self.control.cancel_workflow_execution(
+            provider["id"],
+            expected_version=provider["version"],
+            cancelled_by_handle="operator",
+            reason="Exercise the provider issuance fence.",
+        )
+        provider_queue = self.database.get_integration_queue_item(
+            cancelled_provider["landing"]["queue_item_id"]
+        )
+        with self.assertRaisesRegex(ConflictError, "workflow is not awaiting landing"):
+            self.control.issue_provider_landing(
+                provider_queue["id"],
+                owner_id=f"workflow-{cancelled_provider['id']}",
+                expected_version=provider_queue["version"],
+                resource_id="42",
+                merge_method="squash",
+                issued_by_handle="operator",
+                workflow_execution_id=cancelled_provider["id"],
+                workflow_execution_version=cancelled_provider["version"],
+            )
+        oversized_execution_id = "x" * 65
+        with self.assertRaises(ValidationError):
+            self.database.issue_provider_landing(
+                "queue",
+                owner_id="owner",
+                expected_version=1,
+                resource_id="42",
+                parameters={},
+                issued_by=self.user["id"],
+                workflow_execution_id=oversized_execution_id,
+                workflow_execution_version=1,
+            )
 
     def test_restart_safe_change_round_reaches_exact_maintainer_handoff(self) -> None:
         # A later profile revision must not rewrite the workflow's pinned producer.
@@ -1078,23 +2216,38 @@ class WorkflowDirectorTests(unittest.TestCase):
         maintainer_action = self.database.enqueue_supervisor_actions()[0]
         supervisor.tick(wait=True)
 
+        self.assertEqual(
+            self.database.get_supervisor_action(maintainer_action["id"])["state"],
+            "succeeded",
+        )
+        landing = self.database.get_workflow_execution(self.execution["id"])
+        self.assertEqual(landing["stage"], "landing")
+        landing_action = self.database.enqueue_supervisor_actions()[0]
+        supervisor.tick(wait=True)
+        enqueued = self.database.get_workflow_execution(self.execution["id"])
+        self.assertEqual(enqueued["landing"]["queue_state"], "queued")
+        waiting_action = self.database.enqueue_supervisor_actions()[0]
+        supervisor.tick(wait=True)
+
         actions = self.database.list_supervisor_actions()
-        self.assertEqual(len(actions), 3)
+        self.assertEqual(len(actions), 5)
         self.assertEqual(
             {(action["subject_version"], action["state"]) for action in actions},
             {
                 (1, "succeeded"),
                 (review["version"], "succeeded"),
                 (maintainer["version"], "succeeded"),
+                (landing["version"], "succeeded"),
+                (enqueued["version"], "pending"),
             },
         )
         self.assertEqual(
-            self.database.get_supervisor_action(maintainer_action["id"])["state"],
+            self.database.get_supervisor_action(landing_action["id"])["state"],
             "succeeded",
         )
         self.assertEqual(
-            self.database.get_workflow_execution(self.execution["id"])["stage"],
-            "landing",
+            self.database.get_supervisor_action(waiting_action["id"])["state"],
+            "pending",
         )
         self.assertEqual(self.database.enqueue_supervisor_actions(), [])
 

@@ -591,6 +591,8 @@ class ControlPlane:
         issued_by_handle: str,
         result_store: WorkspaceResultStore,
         candidate_store: GitCandidateStore,
+        workflow_execution_id: str | None = None,
+        workflow_execution_version: int | None = None,
     ) -> dict[str, Any]:
         """Issue argv-only authority for the exact policy revision."""
 
@@ -619,6 +621,8 @@ class ControlPlane:
             ),
             remote=remote,
             issued_by=issuer["id"],
+            workflow_execution_id=workflow_execution_id,
+            workflow_execution_version=workflow_execution_version,
         )
 
     def record_landing_receipt(
@@ -639,6 +643,8 @@ class ControlPlane:
         resource_id: str,
         merge_method: str,
         issued_by_handle: str,
+        workflow_execution_id: str | None = None,
+        workflow_execution_version: int | None = None,
     ) -> dict[str, Any]:
         issuer = self.database.get_user(issued_by_handle)
         queue = self.database.get_integration_queue_item(queue_item_id)
@@ -653,6 +659,8 @@ class ControlPlane:
                 "merge_method": merge_method,
             },
             issued_by=issuer["id"],
+            workflow_execution_id=workflow_execution_id,
+            workflow_execution_version=workflow_execution_version,
         )
 
     def get_provider_landing(self, provider_landing_id: str) -> dict[str, Any]:
@@ -1991,6 +1999,72 @@ class ControlPlane:
             expected_version=expected_version,
             decision=decision,
             resolved_by=resolver["id"],
+        )
+
+    def configure_workflow_provider_landing(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        resource_id: str,
+        merge_method: str,
+        configured_by_handle: str,
+    ) -> dict[str, Any]:
+        configurator = self.database.get_user(configured_by_handle)
+        return self.database.configure_workflow_provider_target(
+            execution_id,
+            expected_version=expected_version,
+            resource_id=resource_id,
+            merge_method=merge_method,
+            created_by=configurator["id"],
+        )
+
+    def issue_workflow_manual_landing(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        remote: str,
+        issued_by_handle: str,
+        result_store: WorkspaceResultStore,
+        candidate_store: GitCandidateStore,
+    ) -> dict[str, Any]:
+        execution = self.database.get_workflow_execution(execution_id)
+        if execution["version"] != expected_version:
+            raise ConcurrentUpdateError("workflow execution version changed")
+        if execution["state"] != "active" or execution["stage"] != "landing":
+            raise ConflictError("workflow is not awaiting landing")
+        if execution["spec"]["landing_mode"] != "manual":
+            raise ConflictError("workflow is configured for provider landing")
+        landing = execution["landing"]
+        if landing is None:
+            raise ConflictError("workflow landing has not been enqueued")
+        queue_item_id = landing["queue_item_id"]
+        queue = self.database.get_integration_queue_item(queue_item_id)
+        owner_id = f"workflow-{execution_id}"
+        if queue["state"] == "queued" or (
+            queue["state"] == "claimed"
+            and queue["owner_id"] == owner_id
+            and queue["lease_expires_at"] <= self.database.now()
+        ):
+            queue = self.claim_integration_item(
+                queue_item_id,
+                owner_id=owner_id,
+                expected_version=queue["version"],
+                lease_seconds=300,
+            )
+        elif queue["state"] != "claimed" or queue["owner_id"] != owner_id:
+            raise ConflictError("workflow landing queue is not available")
+        return self.issue_landing_plan(
+            queue_item_id,
+            owner_id=owner_id,
+            expected_version=queue["version"],
+            remote=remote,
+            issued_by_handle=issued_by_handle,
+            result_store=result_store,
+            candidate_store=candidate_store,
+            workflow_execution_id=execution_id,
+            workflow_execution_version=expected_version,
         )
 
     def import_work_item(

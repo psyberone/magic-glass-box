@@ -515,6 +515,38 @@ def _render_control_room(
         for row in snapshot.get("supervisor_actions", [])
         if isinstance(row, Mapping)
     ]
+    workflow_rows = []
+    for row in snapshot.get("workflows", []):
+        if not isinstance(row, Mapping):
+            continue
+        queue = row.get("landing_queue_item_id")
+        queue_summary = None
+        if queue is not None:
+            authority = (
+                row.get("landing_plan_id")
+                or row.get("landing_provider_landing_id")
+                or row.get("landing_provider_resource_id")
+            )
+            queue_summary = " · ".join(
+                str(value)
+                for value in (queue, row.get("landing_queue_state"), authority)
+                if value is not None
+            )
+        workflow_rows.append(
+            (
+                row.get("id"),
+                row.get("project_key"),
+                row.get("state"),
+                row.get("stage"),
+                row.get("correction_round"),
+                f"{row.get('configuration_name')}@{row.get('configuration_version')}",
+                f"{row.get('producer_profile_name')}@{row.get('producer_profile_version')}",
+                f"{row.get('reviewer_profile_name')}@{row.get('reviewer_profile_version')}",
+                row.get("landing_mode"),
+                queue_summary,
+                row.get("open_ruling_kind"),
+            )
+        )
     escalation_rows = [
         (
             row.get("id"),
@@ -846,6 +878,25 @@ def _render_control_room(
                     "Error",
                 ),
                 supervisor_action_rows,
+            ),
+        ),
+        _section(
+            "Workflows",
+            _table(
+                (
+                    "ID",
+                    "Project",
+                    "State",
+                    "Stage",
+                    "Round",
+                    "Configuration",
+                    "Producer",
+                    "Reviewer",
+                    "Landing mode",
+                    "Landing queue / authority",
+                    "Open ruling",
+                ),
+                workflow_rows,
             ),
         ),
         _section(

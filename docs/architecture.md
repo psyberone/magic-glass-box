@@ -220,6 +220,11 @@ project-activity projection.
   typed exact-head reviewer verdicts, durable workflow supervisor actions, and
   explicit rulings drive producer, candidate, independent review, validation,
   correction, and maintainer stages without treating agent prose as authority.
+- Schema v30 adds the M12C landing binding, explicit provider target, and
+  atomic completion record. The fixed director reuses the integration queue's
+  dependency, refold, gate, and lease authority; a matching manual or provider
+  receipt is required before one transaction records a control-plane outcome,
+  seals the work thread, and completes the workflow.
 - Schema v14 adds hard work-item landing dependencies, one serialized lane per
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks
@@ -320,8 +325,8 @@ generations and honest reported provider overruns advance it to schema v22.
 Provider-neutral service-sidecar registrations, durable operations, and
 dispatch/reconciliation attempts advance it to schema v23. Explicit capability
 bindings, provider landing, exact gate-change provenance, maintainer review,
-bounded workflow prescriptions, and their build/review/correction director
-advance it through schemas v24-v29.
+bounded workflow prescriptions, their build/review/correction director, and
+their landing/closeout director advance it through schemas v24-v30.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -494,6 +499,7 @@ lost-response live GitHub exit proof are complete. See
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 [runtime-adapters.md](runtime-adapters.md), [supervision.md](supervision.md),
 [work-memory.md](work-memory.md), and
-[workflow-templates.md](workflow-templates.md). The M12A immutable prescription
-ledger and M12B build/review/correction director are implemented; M12C adds the
-landing/closeout choreography without introducing a general workflow engine.
+[workflow-templates.md](workflow-templates.md). The M12 immutable prescription,
+build/review/correction, and landing/closeout slices are implemented without
+introducing a general workflow engine; the real-repository M12 exit proof is
+the remaining milestone gate.

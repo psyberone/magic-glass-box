@@ -530,6 +530,18 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM workflow_gate_bindings",
                 ),
                 ("workflow_rulings", "SELECT COUNT(*) FROM workflow_rulings"),
+                (
+                    "workflow_landing_bindings",
+                    "SELECT COUNT(*) FROM workflow_landing_bindings",
+                ),
+                (
+                    "workflow_provider_targets",
+                    "SELECT COUNT(*) FROM workflow_provider_targets",
+                ),
+                (
+                    "workflow_completions",
+                    "SELECT COUNT(*) FROM workflow_completions",
+                ),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]

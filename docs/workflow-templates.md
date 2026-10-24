@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A and M12B implemented; M12C next**
+**Status: M12A-M12C implemented; live M12 exit proof pending**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -137,6 +137,8 @@ integration ledger remains truthful.
 
 ### M12C: landing and closeout director
 
+**Implemented in schema v30.**
+
 - Enqueue only the exact ready candidate and preserve dependency/refold rules.
 - Use either the configured provider binding or an explicitly issued manual
   plan; never fall back from one to the other implicitly.
@@ -144,6 +146,34 @@ integration ledger remains truthful.
   final outcome exist.
 - Prove the entire flow on a real repository, including one changes-requested
   round, maintainer approval, exact-head landing, and restart recovery.
+
+The director binds one integration-queue item to the exact workflow round,
+candidate, and gate policy. Binding and the `workflow.landing_enqueued` event
+commit together. Dependencies, serialized ownership, gate readiness, and
+refold requirements remain properties of the existing integration queue; the
+workflow does not reimplement or weaken them.
+
+Manual mode deliberately stops for `workflow manual-plan`, then waits for the
+ordinary nonce-bound receipt. A `not_landed` receipt releases the lane and the
+control room requests an explicit new plan. Provider mode deliberately stops
+until `workflow provider-target` has pinned one resource and merge method and
+an active `landing.invoke@1` capability exists. Failed or provider-confirmed
+`not_landed` attempts open a ruling bound to that exact provider landing; a
+`continue` decision authorizes one retry and no more. Authority from the wrong
+mode or target opens a non-continuable mismatch ruling.
+
+After an exact matching `landed` receipt, the director enters `completion`.
+One SQLite transaction rechecks the current gate and receipt, rejects active
+runs or unfinished assignments, appends a bounded `outcome` with explicit
+control-plane/workflow provenance, records the workflow completion, seals the
+work thread, and marks the execution completed. A crash can therefore expose
+the whole closeout or none of it.
+
+The implementation and local quality gates are separate from the milestone's
+live exit proof. M12 remains open until the real-repository exercise has also
+demonstrated one changes-requested round, maintainer approval, restart
+recovery, credential containment, provider-observed exact landing, and sealed
+closeout without an operator remembering a hidden transition.
 
 Each slice gets its own RED-first happy and sad path suite, branch-aware
 coverage gate, focused mutation gate, and honest checkpoint. M12C's live proof

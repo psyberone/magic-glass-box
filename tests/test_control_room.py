@@ -1917,6 +1917,22 @@ class ControlRoomTests(unittest.TestCase):
                 "open_ruling_kind",
                 "open_ruling_version",
                 "open_ruling_created_at",
+                "landing_mode",
+                "landing_candidate_id",
+                "landing_policy_id",
+                "landing_queue_item_id",
+                "landing_queue_state",
+                "landing_queue_version",
+                "landing_queue_updated_at",
+                "landing_provider_resource_id",
+                "landing_merge_method",
+                "landing_provider_available",
+                "landing_plan_id",
+                "landing_plan_state",
+                "landing_provider_landing_id",
+                "landing_provider_landing_state",
+                "landing_receipt_id",
+                "completion_outcome_entry_id",
                 "created_at",
                 "updated_at",
                 "finished_at",
@@ -1929,6 +1945,25 @@ class ControlRoomTests(unittest.TestCase):
             (action["id"], "pending"),
         )
         self.assertIsNone(projected["open_ruling_id"])
+        self.assertEqual(projected["landing_mode"], "manual")
+        for field in (
+            "landing_candidate_id",
+            "landing_policy_id",
+            "landing_queue_item_id",
+            "landing_queue_state",
+            "landing_queue_version",
+            "landing_queue_updated_at",
+            "landing_provider_resource_id",
+            "landing_merge_method",
+            "landing_provider_available",
+            "landing_plan_id",
+            "landing_plan_state",
+            "landing_provider_landing_id",
+            "landing_provider_landing_state",
+            "landing_receipt_id",
+            "completion_outcome_entry_id",
+        ):
+            self.assertIsNone(projected[field])
         self.assertEqual(
             snapshot["supervisor_actions"][0]["workflow_execution_id"],
             execution["id"],

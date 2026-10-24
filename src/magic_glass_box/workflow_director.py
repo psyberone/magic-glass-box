@@ -57,6 +57,13 @@ class WorkflowDirector:
             return self._advance_review(execution)
         if execution["stage"] == "maintainer":
             return self._advance_maintainer(execution)
+        if execution["stage"] == "landing":
+            return self._advance_landing(execution)
+        if execution["stage"] == "completion":
+            self.database.complete_workflow_execution(
+                execution["id"], expected_version=execution["version"]
+            )
+            return True
         return True
 
     def _advance_build(self, execution: dict[str, Any]) -> bool:
@@ -255,6 +262,182 @@ class WorkflowDirector:
         )
         return True
 
+    def _advance_landing(self, execution: dict[str, Any]) -> bool:
+        gate = self._required_gate(execution)
+        landing = execution["landing"]
+        if landing is None:
+            readiness = self.database.gate_readiness(gate["policy_id"])
+            if not readiness["ready"]:
+                raise RuntimeError("workflow landing gate is not ready")
+            queue = self.control.enqueue_integration(
+                gate["policy_id"], created_by_handle=execution["requested_by"]
+            )
+            self.database.bind_workflow_landing(
+                execution["id"],
+                expected_version=execution["version"],
+                correction_round=execution["correction_round"],
+                candidate_id=gate["candidate_id"],
+                policy_id=gate["policy_id"],
+                queue_item_id=queue["id"],
+            )
+            return True
+
+        mode = execution["spec"]["landing_mode"]
+        if mode == "provider" and landing["plan_id"] is not None:
+            return self._ruling(
+                execution,
+                "landing_authority_mismatch",
+                policy_id=landing["policy_id"],
+                landing_plan_id=landing["plan_id"],
+            )
+        if (
+            mode == "provider"
+            and landing["provider_landing_id"] is not None
+            and landing["provider_target"] is None
+        ):
+            return self._ruling(
+                execution,
+                "landing_authority_mismatch",
+                policy_id=landing["policy_id"],
+                provider_landing_id=landing["provider_landing_id"],
+            )
+        if mode == "manual" and landing["provider_landing_id"] is not None:
+            return self._ruling(
+                execution,
+                "landing_authority_mismatch",
+                policy_id=landing["policy_id"],
+                provider_landing_id=landing["provider_landing_id"],
+            )
+        if landing["queue_state"] == "cancelled":
+            return self._ruling(
+                execution, "landing_cancelled", policy_id=landing["policy_id"]
+            )
+
+        if landing["queue_state"] != "landed":
+            if mode == "provider":
+                return self._advance_provider_landing(execution, landing)
+            return False
+        if landing["receipt_outcome"] != "landed":
+            raise RuntimeError("workflow landed queue has no landed receipt")
+        if landing["receipt_kind"] != mode:
+            return self._ruling(
+                execution,
+                "landing_authority_mismatch",
+                policy_id=landing["policy_id"],
+                provider_landing_id=(
+                    landing["provider_landing_id"]
+                    if landing["receipt_kind"] == "provider"
+                    else None
+                ),
+                landing_plan_id=(
+                    landing["plan_id"] if landing["receipt_kind"] == "manual" else None
+                ),
+            )
+        if mode == "provider":
+            issued = self.control.get_provider_landing(landing["provider_landing_id"])
+            operation = issued["operation"]
+            target = landing["provider_target"]
+            if (
+                operation["spec"]["target"]["resource_id"] != target["resource_id"]
+                or operation["spec"]["parameters"]["merge_method"]
+                != target["merge_method"]
+            ):
+                return self._ruling(
+                    execution,
+                    "landing_authority_mismatch",
+                    policy_id=landing["policy_id"],
+                    provider_landing_id=landing["provider_landing_id"],
+                )
+        self.database.advance_workflow_execution(
+            execution["id"],
+            expected_version=execution["version"],
+            expected_stage="landing",
+            expected_correction_round=execution["correction_round"],
+            target_stage="completion",
+            target_correction_round=execution["correction_round"],
+            event_kind="workflow.landing_recorded",
+            metadata={
+                "candidate_id": landing["candidate_id"],
+                "policy_id": landing["policy_id"],
+                "queue_item_id": landing["queue_item_id"],
+                "receipt_id": landing["receipt_id"],
+            },
+        )
+        return True
+
+    def _advance_provider_landing(
+        self, execution: dict[str, Any], landing: dict[str, Any]
+    ) -> bool:
+        target = landing["provider_target"]
+        if target is None or landing["queue_state"] == "refold_required":
+            return False
+        if landing["provider_landing_state"] in {"failed", "not_landed"} and not any(
+            ruling["kind"] == "landing_failed"
+            and ruling["state"] == "resolved"
+            and ruling["decision"] == "continue"
+            and ruling["provider_landing_id"] == landing["provider_landing_id"]
+            and ruling["execution_version"] + 1 == execution["version"]
+            for ruling in execution["rulings"]
+        ):
+            return self._ruling(
+                execution,
+                "landing_failed",
+                policy_id=landing["policy_id"],
+                provider_landing_id=landing["provider_landing_id"],
+            )
+        if landing["blocked_dependency_count"] or not landing["gates_ready"]:
+            return False
+        if not landing["provider_available"]:
+            return False
+        owner_id = f"workflow-{execution['id']}"
+        if landing["queue_state"] == "queued":
+            self.control.claim_integration_item(
+                landing["queue_item_id"],
+                owner_id=owner_id,
+                expected_version=landing["queue_version"],
+                lease_seconds=300,
+            )
+            return False
+        if landing["queue_state"] == "claimed":
+            if landing["owner_id"] != owner_id:
+                return False
+            if landing["lease_expires_at"] <= self.database.now():
+                self.control.claim_integration_item(
+                    landing["queue_item_id"],
+                    owner_id=owner_id,
+                    expected_version=landing["queue_version"],
+                    lease_seconds=300,
+                )
+                return False
+            self.control.issue_provider_landing(
+                landing["queue_item_id"],
+                owner_id=owner_id,
+                expected_version=landing["queue_version"],
+                resource_id=target["resource_id"],
+                merge_method=target["merge_method"],
+                issued_by_handle=execution["requested_by"],
+                workflow_execution_id=execution["id"],
+                workflow_execution_version=execution["version"],
+            )
+            return False
+        if landing["queue_state"] != "awaiting_receipt":
+            raise RuntimeError("workflow integration queue state is invalid")
+        if landing["provider_landing_id"] is None:
+            raise RuntimeError("provider workflow has no provider landing authority")
+        issued = self.control.get_provider_landing(landing["provider_landing_id"])
+        operation = issued["operation"]
+        if (
+            operation["spec"]["target"]["resource_id"] != target["resource_id"]
+            or operation["spec"]["parameters"]["merge_method"] != target["merge_method"]
+        ):
+            raise RuntimeError("provider landing does not match workflow target")
+        self.control.execute_provider_landing(
+            landing["provider_landing_id"],
+            owner_id=owner_id,
+            settled_by_handle=execution["requested_by"],
+        )
+        return False
+
     def _create_producer(self, execution: dict[str, Any]) -> dict[str, Any]:
         correction_round = execution["correction_round"]
         kwargs: dict[str, Any] = {}
@@ -404,6 +587,8 @@ class WorkflowDirector:
         policy_id: str | None = None,
         run_id: str | None = None,
         gate_name: str | None = None,
+        provider_landing_id: str | None = None,
+        landing_plan_id: str | None = None,
     ) -> bool:
         self.database.open_workflow_ruling(
             execution["id"],
@@ -412,6 +597,8 @@ class WorkflowDirector:
             policy_id=policy_id,
             run_id=run_id,
             gate_name=gate_name,
+            provider_landing_id=provider_landing_id,
+            landing_plan_id=landing_plan_id,
         )
         return True
 

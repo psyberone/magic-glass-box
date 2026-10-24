@@ -755,6 +755,29 @@ class ControlRoom:
             "ruling.id AS open_ruling_id, ruling.kind AS open_ruling_kind, "
             "ruling.version AS open_ruling_version, "
             "ruling.created_at AS open_ruling_created_at, "
+            "json_extract(cv.spec_json, '$.landing_mode') AS landing_mode, "
+            "landing.candidate_id AS landing_candidate_id, "
+            "queue.current_policy_id AS landing_policy_id, "
+            "landing.queue_item_id AS landing_queue_item_id, "
+            "queue.state AS landing_queue_state, "
+            "queue.version AS landing_queue_version, "
+            "queue.updated_at AS landing_queue_updated_at, "
+            "target.resource_id AS landing_provider_resource_id, "
+            "target.merge_method AS landing_merge_method, "
+            "CASE WHEN landing.execution_id IS NOT NULL "
+            "AND json_extract(cv.spec_json, '$.landing_mode') = 'provider' "
+            "THEN EXISTS(SELECT 1 FROM project_capability_bindings pcb "
+            "JOIN service_sidecars sidecar ON sidecar.id = pcb.service_sidecar_id "
+            "WHERE pcb.project_id = e.project_id "
+            "AND pcb.capability_name = 'landing.invoke' "
+            "AND pcb.capability_version = 1 AND pcb.state = 'active' "
+            "AND sidecar.state = 'active') ELSE NULL END "
+            "AS landing_provider_available, "
+            "plan.id AS landing_plan_id, plan.state AS landing_plan_state, "
+            "provider_landing.id AS landing_provider_landing_id, "
+            "provider_landing.state AS landing_provider_landing_state, "
+            "queue.landed_receipt_id AS landing_receipt_id, "
+            "completion.outcome_entry_id AS completion_outcome_entry_id, "
             "e.created_at, e.updated_at, "
             "e.finished_at FROM visible "
             "JOIN workflow_executions e ON e.id = visible.id "
@@ -778,6 +801,23 @@ class ControlRoom:
             "ORDER BY sa.created_at DESC, sa.id DESC LIMIT 1) "
             "LEFT JOIN workflow_rulings ruling ON ruling.execution_id = e.id "
             "AND ruling.state = 'open' "
+            "LEFT JOIN workflow_landing_bindings landing "
+            "ON landing.execution_id = e.id "
+            "LEFT JOIN integration_queue_items queue "
+            "ON queue.id = landing.queue_item_id "
+            "LEFT JOIN workflow_provider_targets target "
+            "ON target.execution_id = e.id "
+            "LEFT JOIN integration_landing_plans plan ON plan.id = ("
+            "SELECT lp.id FROM integration_landing_plans lp "
+            "WHERE lp.queue_item_id = landing.queue_item_id "
+            "ORDER BY lp.sequence DESC LIMIT 1) "
+            "LEFT JOIN integration_provider_landings provider_landing "
+            "ON provider_landing.id = ("
+            "SELECT pl.id FROM integration_provider_landings pl "
+            "WHERE pl.queue_item_id = landing.queue_item_id "
+            "ORDER BY pl.sequence DESC LIMIT 1) "
+            "LEFT JOIN workflow_completions completion "
+            "ON completion.execution_id = e.id "
             "ORDER BY visible.group_order, e.updated_at DESC, e.id",
             (history_limit,),
         ).fetchall()
@@ -1878,6 +1918,101 @@ class ControlRoom:
                     },
                     workflow["open_ruling_created_at"],
                 )
+            if workflow["state"] != "active" or workflow["stage"] != "landing":
+                continue
+            queue_item_id = workflow["landing_queue_item_id"]
+            queue_state = workflow["landing_queue_state"]
+            if queue_item_id is None:
+                continue
+            if queue_state == "refold_required":
+                add(
+                    {
+                        "kind": "workflow.refold_required",
+                        "severity": "action",
+                        "subject_type": "integration_queue_item",
+                        "subject_id": queue_item_id,
+                        "workflow_execution_id": workflow["id"],
+                    },
+                    workflow["landing_queue_updated_at"],
+                )
+            elif (
+                workflow["landing_mode"] == "provider"
+                and workflow["landing_provider_resource_id"] is None
+            ):
+                add(
+                    {
+                        "kind": "workflow.provider_target_required",
+                        "severity": "action",
+                        "subject_type": "workflow_execution",
+                        "subject_id": workflow["id"],
+                        "workflow_execution_id": workflow["id"],
+                        "queue_item_id": queue_item_id,
+                    },
+                    workflow["landing_queue_updated_at"],
+                )
+            elif (
+                workflow["landing_mode"] == "provider"
+                and not workflow["landing_provider_available"]
+            ):
+                add(
+                    {
+                        "kind": "workflow.provider_capability_required",
+                        "severity": "action",
+                        "subject_type": "workflow_execution",
+                        "subject_id": workflow["id"],
+                        "workflow_execution_id": workflow["id"],
+                        "queue_item_id": queue_item_id,
+                        "capability": "landing.invoke@1",
+                    },
+                    workflow["landing_queue_updated_at"],
+                )
+            elif workflow["landing_mode"] == "manual":
+                if workflow["landing_plan_id"] is None and queue_state in {
+                    "queued",
+                    "claimed",
+                }:
+                    add(
+                        {
+                            "kind": "workflow.manual_plan_required",
+                            "severity": "action",
+                            "subject_type": "workflow_execution",
+                            "subject_id": workflow["id"],
+                            "workflow_execution_id": workflow["id"],
+                            "queue_item_id": queue_item_id,
+                        },
+                        workflow["landing_queue_updated_at"],
+                    )
+                elif (
+                    workflow["landing_plan_state"] == "pending"
+                    and queue_state == "awaiting_receipt"
+                ):
+                    add(
+                        {
+                            "kind": "workflow.manual_receipt_pending",
+                            "severity": "action",
+                            "subject_type": "landing_plan",
+                            "subject_id": workflow["landing_plan_id"],
+                            "workflow_execution_id": workflow["id"],
+                            "queue_item_id": queue_item_id,
+                        },
+                        workflow["landing_queue_updated_at"],
+                    )
+                elif (
+                    workflow["landing_plan_state"] == "not_landed"
+                    and queue_state == "queued"
+                ):
+                    add(
+                        {
+                            "kind": "workflow.manual_retry_required",
+                            "severity": "action",
+                            "subject_type": "workflow_execution",
+                            "subject_id": workflow["id"],
+                            "workflow_execution_id": workflow["id"],
+                            "queue_item_id": queue_item_id,
+                            "prior_plan_id": workflow["landing_plan_id"],
+                        },
+                        workflow["landing_queue_updated_at"],
+                    )
         for escalation in escalations or []:
             if escalation["state"] == "exhausted":
                 add(

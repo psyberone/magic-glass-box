@@ -159,6 +159,18 @@ class FakeControlPlane:
     ) -> dict[str, object]:
         return self._called("workflow.ruling-resolve", ruling_id=ruling_id, **kwargs)
 
+    def configure_workflow_provider_landing(
+        self, execution_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "workflow.provider-target", execution_id=execution_id, **kwargs
+        )
+
+    def issue_workflow_manual_landing(
+        self, execution_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("workflow.manual-plan", execution_id=execution_id, **kwargs)
+
     def revoke_provider_grant(self, name: str, **kwargs: object) -> dict[str, object]:
         return self._called("provider.revoke", name=name, **kwargs)
 
@@ -554,6 +566,14 @@ class CLITests(unittest.TestCase):
                     ("cancel", "cancel one active workflow execution"),
                     ("ruling-show", "show one durable workflow ruling"),
                     ("ruling-resolve", "resolve one durable workflow ruling"),
+                    (
+                        "provider-target",
+                        "bind one provider resource to an exact workflow",
+                    ),
+                    (
+                        "manual-plan",
+                        "issue the workflow's exact manual landing plan",
+                    ),
                 ),
             ),
             ("provider",): (
@@ -902,6 +922,16 @@ class CLITests(unittest.TestCase):
                     "--decision",
                     "--resolved-by",
                 ),
+                ("workflow", "provider-target"): (
+                    "--expected-version",
+                    "--resource-id",
+                    "--merge-method",
+                    "--configured-by",
+                ),
+                ("workflow", "manual-plan"): (
+                    "--expected-version",
+                    "--issued-by",
+                ),
                 ("inference-connector", "register"): (
                     "--spec",
                     "--created-by",
@@ -1077,6 +1107,11 @@ class CLITests(unittest.TestCase):
                 (("workflow", "ruling-resolve"), "decision"): (
                     "continue",
                     "cancel",
+                ),
+                (("workflow", "provider-target"), "merge_method"): (
+                    "merge",
+                    "rebase",
+                    "squash",
                 ),
                 (("integration", "provider-issue"), "merge_method"): (
                     "merge",
@@ -1912,6 +1947,8 @@ class CLITests(unittest.TestCase):
                 "cancel": "cancel one active workflow execution",
                 "ruling-show": "show one durable workflow ruling",
                 "ruling-resolve": "resolve one durable workflow ruling",
+                "provider-target": "bind one provider resource to an exact workflow",
+                "manual-plan": "issue the workflow's exact manual landing plan",
             },
             "provider": {
                 "connector-add": "add a connector-bound provider grant",
@@ -2246,6 +2283,31 @@ class CLITests(unittest.TestCase):
                     },
                 ),
             ),
+            (
+                [
+                    "workflow",
+                    "provider-target",
+                    "wfx_" + "4" * 32,
+                    "--expected-version",
+                    "6",
+                    "--resource-id",
+                    "42",
+                    "--merge-method",
+                    "squash",
+                    "--configured-by",
+                    "operator",
+                ],
+                (
+                    "workflow.provider-target",
+                    {
+                        "execution_id": "wfx_" + "4" * 32,
+                        "expected_version": 6,
+                        "resource_id": "42",
+                        "merge_method": "squash",
+                        "configured_by_handle": "operator",
+                    },
+                ),
+            ),
         )
         for arguments, expected_call in cases:
             with self.subTest(arguments=arguments):
@@ -2257,6 +2319,57 @@ class CLITests(unittest.TestCase):
                     status = main(["--db", str(self.database), *arguments])
                 self.assertEqual(status, 0)
                 self.assertEqual(fake.calls[-1], expected_call)
+
+    def test_workflow_manual_plan_opens_both_object_stores(self) -> None:
+        control = FakeControlPlane()
+        result_store = FakeResultStore()
+        candidate_store = FakeCandidateStore()
+        execution_id = "wfx_" + "4" * 32
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.ControlPlane", return_value=control),
+            mock.patch(
+                "magic_glass_box.cli._build_result_store", return_value=result_store
+            ),
+            mock.patch(
+                "magic_glass_box.cli._build_candidate_store",
+                return_value=candidate_store,
+            ) as build_candidate_store,
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--db",
+                    str(self.database),
+                    "workflow",
+                    "manual-plan",
+                    execution_id,
+                    "--expected-version",
+                    "6",
+                    "--remote",
+                    "upstream",
+                    "--issued-by",
+                    "operator",
+                    "--operation-timeout",
+                    "12.5",
+                ]
+            )
+        self.assertEqual(status, 0)
+        build_candidate_store.assert_called_once_with(control, timeout=12.5)
+        self.assertEqual(
+            control.calls[-1],
+            (
+                "workflow.manual-plan",
+                {
+                    "execution_id": execution_id,
+                    "expected_version": 6,
+                    "remote": "upstream",
+                    "issued_by_handle": "operator",
+                    "result_store": result_store,
+                    "candidate_store": candidate_store,
+                },
+            ),
+        )
 
     def test_execution_cancellation_and_reconciliation_use_the_coordinator(
         self,

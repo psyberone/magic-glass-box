@@ -104,19 +104,29 @@ special in-memory resume signal is required.
 
 Active `implementation-v1` workflows use the same durable action ledger. One
 `workflow.advance` action is unique to the execution version that represents a
-logical build, review, or maintainer stage. The director may perform several
+logical build, review, maintainer, landing, or completion stage. The director
+may perform several
 idempotent micro-steps while that action remains pending—for example creating a
 producer, materializing its candidate, binding a policy, and creating the exact
 reviewer. Waiting for a worker or maintainer defers the claim without consuming
 its finite retry budget. A stage transition increments the execution version,
 settles the old action, and makes exactly one next-stage action discoverable.
 
-Failed producer/reviewer runs, missing typed verdicts, failed validations, and
-an exhausted correction budget open a durable workflow ruling. An open ruling
+Failed producer/reviewer runs, missing typed verdicts, failed validations,
+provider landing failures, landing-authority mismatches, cancellations, and an
+exhausted correction budget open a durable workflow ruling. An open ruling
 stops action discovery for that execution and appears in the control-room
 attention projection. `workflow ruling-show` and `workflow ruling-resolve`
-provide the explicit operator boundary; only a correction-limit ruling may be
-continued into one additional bounded round.
+provide the explicit operator boundary. A correction-limit ruling may authorize
+one additional bounded round, while an exact failed-provider-landing ruling may
+authorize one retry of that attempt. Other rulings can only cancel.
+
+Waiting at landing is not an operational failure and does not spend retry
+budget. Manual workflows wait for an explicitly issued plan and receipt;
+provider workflows wait for their explicit target and active capability;
+dependency or ref drift waits for the existing queue's dependency/refold
+actions. A landed receipt advances through a separate `completion` version so
+a replacement supervisor can finish the atomic closeout after process death.
 
 ## Provider recovery
 

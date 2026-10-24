@@ -1047,7 +1047,7 @@ their real use cases justify a versioned capability contract.
 
 ## Milestone 12: bounded implementation workflow
 
-**Status: in progress; M12A and M12B complete, M12C next**
+**Status: implementation complete; live exit proof pending**
 
 M11 proved every important step of one real change, but the operator still
 selected and invoked those steps. M12 packages that exact practice as one
@@ -1149,6 +1149,8 @@ mutations and pre-existing generic supervisor branches outside the M12B path.
 
 ### M12C: landing and closeout director
 
+**Status: local implementation complete (2026-10-23); live proof pending**
+
 - Enqueue only the ready exact candidate and preserve M7 dependency, serialized
   lane, refold, and gate recheck rules.
 - Select the configured provider route or explicitly issue a manual landing
@@ -1163,6 +1165,43 @@ mutations and pre-existing generic supervisor branches outside the M12B path.
 merged exact candidate and completed work thread, including one rejection
 round, maintainer approval, restart recovery, and credential containment. No
 human must remember which durable command advances the next mechanical stage.
+
+Schema v30 implements the local choreography by binding the ready workflow
+round to one integration-queue item and committing that binding with its
+`workflow.landing_enqueued` event. Manual mode requires an explicitly issued
+workflow plan and nonce-bound receipt. Provider mode requires an explicitly
+pinned resource and merge method plus the project's active
+`landing.invoke@1` capability; neither mode can fall back to the other.
+Dependencies, serialized ownership, refolds, and gate rechecks remain the
+existing integration queue's authority rather than being duplicated in the
+director.
+
+Provider failures open a ruling bound to the exact failed landing, and one
+explicit `continue` authorizes exactly one retry. Mismatched or cancelled
+authority cannot be continued. The control room names missing manual plans and
+receipts, manual retries, provider targets and capabilities, and required
+refolds without exposing nonces or provider payloads. After a matching landed
+receipt, one transaction writes a bounded control-plane-authored outcome,
+records exact workflow completion provenance, seals the work thread, and
+completes the execution. The transaction first rejects active runs,
+unfinished assignments, stale gates, wrong-mode receipts, and wrong provider
+targets.
+
+The implementation checkpoint does not satisfy the exit proof by itself. M12
+remains open until the prospective real-repository run demonstrates the
+changes-requested loop, maintainer approval, process replacement, provider
+credential containment, exact landing evidence, and final sealed thread.
+
+The final local checkpoint passes 1,073 tests and Ruff format/lint with 86%
+aggregate statement-plus-branch coverage. A focused Mutmut wave across the
+landing director and workflow storage killed 1,626/1,858 mutants (87.51%). A
+second, non-overlapping wave across landing issuance and the work-log receipt
+seam killed 644/730 mutants (88.22%); survivor analysis then added exact tests
+for inactive landing-stage workflows, the workflow-execution identifier bound,
+independent work-log digest verification, and the exact final outcome contract.
+Those tests killed all 13 selected behavior-changing former survivors, for a
+conservative effective result of at least 2,283/2,588 (88.21%). Neither wave
+produced timeouts, uncovered mutants, suspicious outcomes, or crashes.
 
 ## Milestone 13: discovery and review prescriptions
 

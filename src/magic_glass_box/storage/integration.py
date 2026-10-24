@@ -1197,6 +1197,8 @@ class IntegrationStorage:
         candidate_repository: Path,
         remote: str,
         issued_by: str,
+        workflow_execution_id: str | None = None,
+        workflow_execution_version: int | None = None,
     ) -> dict[str, Any]:
         queue_item_id = require_string(
             queue_item_id, field="queue_item_id", max_bytes=64
@@ -1204,6 +1206,19 @@ class IntegrationStorage:
         owner_id = require_string(owner_id, field="owner_id", max_bytes=128)
         issued_by = require_string(issued_by, field="issued_by", max_bytes=64)
         expected_version = self._expected_version(expected_version)
+        if (workflow_execution_id is None) != (workflow_execution_version is None):
+            raise ValidationError(
+                "workflow landing authority must be supplied together"
+            )
+        if workflow_execution_id is not None:
+            workflow_execution_id = require_string(
+                workflow_execution_id,
+                field="workflow_execution_id",
+                max_bytes=64,
+            )
+            workflow_execution_version = self._expected_version(
+                workflow_execution_version
+            )
         plan_id = self.new_id("lpl")
         nonce = secrets.token_hex(32)
         nonce_sha256 = hashlib.sha256(nonce.encode("ascii")).hexdigest()
@@ -1219,6 +1234,36 @@ class IntegrationStorage:
                     )
                 if queue["version"] != expected_version:
                     raise ConcurrentUpdateError("integration queue version changed")
+                if workflow_execution_id is not None:
+                    workflow = connection.execute(
+                        "SELECT e.state, e.stage, e.version, cv.spec_json "
+                        "FROM workflow_executions e "
+                        "JOIN workflow_configuration_versions cv "
+                        "ON cv.id = e.configuration_version_id "
+                        "JOIN workflow_landing_bindings b ON b.execution_id = e.id "
+                        "WHERE e.id = ? AND b.queue_item_id = ?",
+                        (workflow_execution_id, queue_item_id),
+                    ).fetchone()
+                    if workflow is None:
+                        raise ConflictError(
+                            "manual landing is not bound to this workflow"
+                        )
+                    if workflow["version"] != workflow_execution_version:
+                        raise ConcurrentUpdateError(
+                            "workflow execution version changed"
+                        )
+                    if workflow["state"] != "active" or workflow["stage"] != "landing":
+                        raise ConflictError("workflow is not awaiting landing")
+                    try:
+                        landing_mode = json.loads(workflow["spec_json"])["landing_mode"]
+                    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                        raise StorageError(
+                            "stored workflow configuration is invalid"
+                        ) from exc
+                    if landing_mode != "manual":
+                        raise ConflictError(
+                            "workflow is configured for provider landing"
+                        )
                 if queue["state"] != "claimed" or queue["owner_id"] != owner_id:
                     raise ConflictError("integration claim is not owned by caller")
                 if queue["lease_expires_at"] <= now:
@@ -1506,6 +1551,8 @@ class IntegrationStorage:
         resource_id: str,
         parameters: dict[str, Any],
         issued_by: str,
+        workflow_execution_id: str | None = None,
+        workflow_execution_version: int | None = None,
     ) -> dict[str, Any]:
         queue_item_id = require_string(
             queue_item_id, field="queue_item_id", max_bytes=64
@@ -1516,6 +1563,19 @@ class IntegrationStorage:
         )
         issued_by = require_string(issued_by, field="issued_by", max_bytes=64)
         expected_version = self._expected_version(expected_version)
+        if (workflow_execution_id is None) != (workflow_execution_version is None):
+            raise ValidationError(
+                "workflow landing authority must be supplied together"
+            )
+        if workflow_execution_id is not None:
+            workflow_execution_id = require_string(
+                workflow_execution_id,
+                field="workflow_execution_id",
+                max_bytes=64,
+            )
+            workflow_execution_version = self._expected_version(
+                workflow_execution_version
+            )
         if not isinstance(parameters, dict) or set(parameters) != {
             "assurance",
             "integration_ref",
@@ -1544,6 +1604,43 @@ class IntegrationStorage:
                     )
                 if queue["version"] != expected_version:
                     raise ConcurrentUpdateError("integration queue version changed")
+                if workflow_execution_id is not None:
+                    workflow = connection.execute(
+                        "SELECT e.state, e.stage, e.version, cv.spec_json, "
+                        "t.resource_id, t.merge_method "
+                        "FROM workflow_executions e "
+                        "JOIN workflow_configuration_versions cv "
+                        "ON cv.id = e.configuration_version_id "
+                        "JOIN workflow_landing_bindings b ON b.execution_id = e.id "
+                        "JOIN workflow_provider_targets t ON t.execution_id = e.id "
+                        "WHERE e.id = ? AND b.queue_item_id = ?",
+                        (workflow_execution_id, queue_item_id),
+                    ).fetchone()
+                    if workflow is None:
+                        raise ConflictError(
+                            "provider landing is not bound to this workflow"
+                        )
+                    if workflow["version"] != workflow_execution_version:
+                        raise ConcurrentUpdateError(
+                            "workflow execution version changed"
+                        )
+                    if workflow["state"] != "active" or workflow["stage"] != "landing":
+                        raise ConflictError("workflow is not awaiting landing")
+                    try:
+                        landing_mode = json.loads(workflow["spec_json"])["landing_mode"]
+                    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                        raise StorageError(
+                            "stored workflow configuration is invalid"
+                        ) from exc
+                    if landing_mode != "provider":
+                        raise ConflictError("workflow is configured for manual landing")
+                    if (
+                        workflow["resource_id"] != resource_id
+                        or workflow["merge_method"] != parameters["merge_method"]
+                    ):
+                        raise ConflictError(
+                            "provider landing does not match workflow target"
+                        )
                 if queue["state"] != "claimed" or queue["owner_id"] != owner_id:
                     raise ConflictError("integration claim is not owned by caller")
                 if queue["lease_expires_at"] <= now:

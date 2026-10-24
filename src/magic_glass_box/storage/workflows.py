@@ -8,6 +8,8 @@ from typing import Any
 from ..domain import (
     AgentProfileSpec,
     ValidationError,
+    WorkLogEntry,
+    WorkLogKind,
     WorkspaceMode,
     canonical_json,
     content_sha256,
@@ -24,6 +26,7 @@ from ..workflows import (
     IMPLEMENTATION_TEMPLATE_KEY,
     IMPLEMENTATION_TEMPLATE_REVISION,
     WorkflowConfigurationSpec,
+    WorkflowLandingMode,
 )
 from .errors import (
     ConcurrentUpdateError,
@@ -780,12 +783,19 @@ class WorkflowStorage:
         rulings = connection.execute(
             "SELECT wr.id, wr.execution_version, wr.correction_round, wr.kind, "
             "wr.state, wr.version, wr.policy_id, wr.run_id, wr.gate_name, "
+            "wr.provider_landing_id, wr.landing_plan_id, "
             "resolver.handle AS resolved_by, wr.decision, wr.created_at, "
             "wr.updated_at, wr.resolved_at FROM workflow_rulings wr "
             "LEFT JOIN users resolver ON resolver.id = wr.resolved_by "
             "WHERE wr.execution_id = ? ORDER BY wr.created_at, wr.id",
             (execution_id,),
         ).fetchall()
+        landing = self._workflow_landing_record(
+            connection,
+            execution_id,
+            mode=configuration["spec"]["landing_mode"],
+        )
+        completion = self._workflow_completion_record(connection, execution_id)
         return {
             **dict(row),
             "template": configuration["template"],
@@ -794,7 +804,124 @@ class WorkflowStorage:
             "spec": configuration["spec"],
             "events": parsed_events,
             "rulings": [dict(ruling) for ruling in rulings],
+            "landing": landing,
+            "completion": completion,
         }
+
+    def _workflow_landing_record(
+        self,
+        connection: sqlite3.Connection,
+        execution_id: str,
+        *,
+        mode: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT b.execution_id, b.correction_round, b.candidate_id, "
+            "b.policy_id AS initial_policy_id, b.queue_item_id, b.created_at, "
+            "q.current_policy_id AS policy_id, q.current_fold_id AS fold_id, "
+            "q.state AS queue_state, q.version AS queue_version, q.owner_id, "
+            "q.lease_expires_at, q.landed_receipt_id AS receipt_id "
+            "FROM workflow_landing_bindings b "
+            "JOIN integration_queue_items q ON q.id = b.queue_item_id "
+            "WHERE b.execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        authority = connection.execute(
+            "SELECT COUNT(d.id) AS blocked_dependency_count, q.work_item_id, "
+            "q.integration_ref_id FROM integration_queue_items q "
+            "LEFT JOIN work_item_landing_dependencies d "
+            "ON d.dependent_work_item_id = q.work_item_id AND d.state = 'active' "
+            "AND NOT EXISTS (SELECT 1 FROM integration_queue_items prerequisite "
+            "WHERE prerequisite.integration_ref_id = q.integration_ref_id "
+            "AND prerequisite.work_item_id = d.prerequisite_work_item_id "
+            "AND prerequisite.state = 'landed') WHERE q.id = ? GROUP BY q.id",
+            (row["queue_item_id"],),
+        ).fetchone()
+        if authority is None:
+            raise StorageError("workflow landing queue is unavailable")
+        gates_ready = self._gate_readiness(connection, row["policy_id"])["ready"]
+        provider_available = None
+        if mode == WorkflowLandingMode.PROVIDER.value:
+            provider_available = bool(
+                connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM workflow_executions e "
+                    "JOIN project_capability_bindings b ON b.project_id = e.project_id "
+                    "JOIN service_sidecars s ON s.id = b.service_sidecar_id "
+                    "WHERE e.id = ? AND b.capability_name = 'landing.invoke' "
+                    "AND b.capability_version = 1 AND b.state = 'active' "
+                    "AND s.state = 'active')",
+                    (execution_id,),
+                ).fetchone()[0]
+            )
+        target = connection.execute(
+            "SELECT t.resource_id, t.merge_method, u.handle AS created_by, "
+            "t.created_at FROM workflow_provider_targets t "
+            "JOIN users u ON u.id = t.created_by WHERE t.execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        plan = connection.execute(
+            "SELECT id, state, sequence, created_at, resolved_at "
+            "FROM integration_landing_plans WHERE queue_item_id = ? "
+            "ORDER BY sequence DESC LIMIT 1",
+            (row["queue_item_id"],),
+        ).fetchone()
+        provider = connection.execute(
+            "SELECT id, state, sequence, service_operation_id, created_at, "
+            "resolved_at FROM integration_provider_landings "
+            "WHERE queue_item_id = ? ORDER BY sequence DESC LIMIT 1",
+            (row["queue_item_id"],),
+        ).fetchone()
+        receipt = None
+        if row["receipt_id"] is not None:
+            receipt = connection.execute(
+                "SELECT id, plan_id, provider_landing_id, outcome, "
+                "observed_revision, assurance, created_at "
+                "FROM integration_landing_receipts WHERE id = ?",
+                (row["receipt_id"],),
+            ).fetchone()
+            if receipt is None:
+                raise StorageError("workflow landing receipt is unavailable")
+        return {
+            **dict(row),
+            "mode": mode,
+            "gates_ready": gates_ready,
+            "blocked_dependency_count": authority["blocked_dependency_count"],
+            "provider_available": provider_available,
+            "provider_target": None if target is None else dict(target),
+            "plan_id": None if plan is None else plan["id"],
+            "plan_state": None if plan is None else plan["state"],
+            "provider_landing_id": None if provider is None else provider["id"],
+            "provider_landing_state": (None if provider is None else provider["state"]),
+            "provider_operation_id": (
+                None if provider is None else provider["service_operation_id"]
+            ),
+            "receipt_kind": (
+                None
+                if receipt is None
+                else ("manual" if receipt["plan_id"] is not None else "provider")
+            ),
+            "receipt_outcome": None if receipt is None else receipt["outcome"],
+            "receipt_observed_revision": (
+                None if receipt is None else receipt["observed_revision"]
+            ),
+            "receipt_assurance": None if receipt is None else receipt["assurance"],
+        }
+
+    @staticmethod
+    def _workflow_completion_record(
+        connection: sqlite3.Connection, execution_id: str
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT c.execution_id, c.queue_item_id, c.receipt_id, "
+            "c.outcome_entry_id, c.candidate_id, c.policy_id, "
+            "c.observed_revision, u.handle AS completed_by, c.created_at "
+            "FROM workflow_completions c JOIN users u ON u.id = c.completed_by "
+            "WHERE c.execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        return None if row is None else dict(row)
 
     def find_workflow_run(
         self, execution_id: str, correction_round: int, role: str
@@ -933,6 +1060,305 @@ class WorkflowStorage:
             ).fetchone()
         return None if row is None else dict(row)
 
+    def bind_workflow_landing(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        correction_round: int,
+        candidate_id: str,
+        policy_id: str,
+        queue_item_id: str,
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        self._nonnegative_correction_round(correction_round)
+        candidate_id = require_string(candidate_id, field="candidate_id", max_bytes=64)
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        queue_item_id = require_string(
+            queue_item_id, field="queue_item_id", max_bytes=64
+        )
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT execution_id, correction_round, candidate_id, policy_id, "
+                    "queue_item_id, created_at FROM workflow_landing_bindings "
+                    "WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if existing is not None:
+                    expected = {
+                        "correction_round": correction_round,
+                        "candidate_id": candidate_id,
+                        "policy_id": policy_id,
+                        "queue_item_id": queue_item_id,
+                    }
+                    if any(
+                        existing[field] != value for field, value in expected.items()
+                    ):
+                        raise ConflictError(
+                            "workflow already names another landing authority"
+                        )
+                    current = connection.execute(
+                        "SELECT version FROM workflow_executions WHERE id = ?",
+                        (execution_id,),
+                    ).fetchone()
+                    if current is None:
+                        raise StorageError("workflow landing execution is unavailable")
+                    if current["version"] != expected_version + 1:
+                        raise ConcurrentUpdateError(
+                            "workflow execution version changed"
+                        )
+                    connection.commit()
+                    return dict(existing)
+                source = connection.execute(
+                    "SELECT e.state, e.stage, e.correction_round, e.version, "
+                    "e.requested_by, e.project_id, e.work_thread_id, "
+                    "g.candidate_id AS gate_candidate_id, "
+                    "g.policy_id AS gate_policy_id, q.project_id AS queue_project_id, "
+                    "q.work_thread_id AS queue_work_thread_id, "
+                    "q.candidate_id AS queue_candidate_id, "
+                    "q.current_policy_id AS queue_policy_id, q.state AS queue_state "
+                    "FROM workflow_executions e "
+                    "JOIN workflow_gate_bindings g ON g.execution_id = e.id "
+                    "AND g.correction_round = e.correction_round "
+                    "JOIN integration_queue_items q ON q.id = ? "
+                    "WHERE e.id = ?",
+                    (queue_item_id, execution_id),
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError("workflow landing authority not found")
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if source["state"] != "active" or source["stage"] != "landing":
+                    raise ConflictError("workflow is not ready for landing")
+                if source["correction_round"] != correction_round:
+                    raise ConflictError("workflow correction round changed")
+                expected = {
+                    "gate_candidate_id": candidate_id,
+                    "gate_policy_id": policy_id,
+                    "queue_candidate_id": candidate_id,
+                    "queue_policy_id": policy_id,
+                    "queue_project_id": source["project_id"],
+                    "queue_work_thread_id": source["work_thread_id"],
+                }
+                if any(source[field] != value for field, value in expected.items()):
+                    raise ConflictError(
+                        "workflow landing authority does not match its exact gate"
+                    )
+                if source["queue_state"] == "cancelled":
+                    raise ConflictError("workflow landing queue is cancelled")
+                if not self._gate_readiness(connection, policy_id)["ready"]:
+                    raise ConflictError("workflow landing gate is not ready")
+                connection.execute(
+                    "INSERT INTO workflow_landing_bindings "
+                    "(execution_id, correction_round, candidate_id, policy_id, "
+                    "queue_item_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        execution_id,
+                        correction_round,
+                        candidate_id,
+                        policy_id,
+                        queue_item_id,
+                        now,
+                    ),
+                )
+                changed = connection.execute(
+                    "UPDATE workflow_executions SET version = version + 1, "
+                    "updated_at = ? WHERE id = ? AND version = ? "
+                    "AND state = 'active' AND stage = 'landing'",
+                    (now, execution_id, expected_version),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "workflow execution changed concurrently"
+                    )
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+                    "FROM workflow_execution_events WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()["sequence"]
+                connection.execute(
+                    "INSERT INTO workflow_execution_events "
+                    "(execution_id, sequence, kind, from_state, to_state, actor, "
+                    "metadata_json, created_at) VALUES (?, ?, "
+                    "'workflow.landing_enqueued', 'active', 'active', ?, ?, ?)",
+                    (
+                        execution_id,
+                        sequence,
+                        source["requested_by"],
+                        canonical_json(
+                            {
+                                "from_stage": "landing",
+                                "to_stage": "landing",
+                                "from_correction_round": correction_round,
+                                "to_correction_round": correction_round,
+                                "candidate_id": candidate_id,
+                                "policy_id": policy_id,
+                                "queue_item_id": queue_item_id,
+                            }
+                        ),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("workflow landing could not be bound") from exc
+        return {
+            "execution_id": execution_id,
+            "correction_round": correction_round,
+            "candidate_id": candidate_id,
+            "policy_id": policy_id,
+            "queue_item_id": queue_item_id,
+            "created_at": now,
+        }
+
+    def configure_workflow_provider_target(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        resource_id: str,
+        merge_method: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        resource_id = require_string(resource_id, field="resource_id", max_bytes=512)
+        if not resource_id.strip():
+            raise ValidationError("resource_id must not be blank")
+        if merge_method not in {"merge", "rebase", "squash"}:
+            raise ValidationError("merge_method is invalid")
+        created_by = require_string(created_by, field="created_by", max_bytes=64)
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, created_by, role="workflow landing authorizer"
+                )
+                creator = connection.execute(
+                    "SELECT handle FROM users WHERE id = ?", (created_by,)
+                ).fetchone()
+                existing = connection.execute(
+                    "SELECT t.execution_id, t.queue_item_id, t.resource_id, "
+                    "t.merge_method, u.handle AS created_by, t.created_at "
+                    "FROM workflow_provider_targets t JOIN users u "
+                    "ON u.id = t.created_by WHERE t.execution_id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if existing is not None:
+                    current = connection.execute(
+                        "SELECT e.state, e.stage, e.version, cv.spec_json "
+                        "FROM workflow_executions e "
+                        "JOIN workflow_configuration_versions cv "
+                        "ON cv.id = e.configuration_version_id WHERE e.id = ?",
+                        (execution_id,),
+                    ).fetchone()
+                    if current is None:
+                        raise StorageError("workflow execution is unavailable")
+                    if current["version"] != expected_version:
+                        raise ConcurrentUpdateError(
+                            "workflow execution version changed"
+                        )
+                    if current["state"] != "active" or current["stage"] != "landing":
+                        raise ConflictError("workflow is not awaiting landing")
+                    try:
+                        current_spec = WorkflowConfigurationSpec.from_mapping(
+                            json.loads(current["spec_json"])
+                        )
+                    except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                        raise StorageError(
+                            "stored workflow configuration is invalid"
+                        ) from exc
+                    if current_spec.landing_mode is not WorkflowLandingMode.PROVIDER:
+                        raise ConflictError("workflow is configured for manual landing")
+                    if (
+                        existing["resource_id"] != resource_id
+                        or existing["merge_method"] != merge_method
+                    ):
+                        raise ConflictError(
+                            "workflow already names another provider target"
+                        )
+                    connection.commit()
+                    return dict(existing)
+                source = connection.execute(
+                    "SELECT e.state, e.stage, e.version, cv.spec_json, "
+                    "b.queue_item_id, q.state AS queue_state "
+                    "FROM workflow_executions e "
+                    "JOIN workflow_configuration_versions cv "
+                    "ON cv.id = e.configuration_version_id "
+                    "JOIN workflow_landing_bindings b ON b.execution_id = e.id "
+                    "JOIN integration_queue_items q ON q.id = b.queue_item_id "
+                    "WHERE e.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError("workflow landing binding not found")
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if source["state"] != "active" or source["stage"] != "landing":
+                    raise ConflictError("workflow is not awaiting landing")
+                try:
+                    spec = WorkflowConfigurationSpec.from_mapping(
+                        json.loads(source["spec_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored workflow configuration is invalid"
+                    ) from exc
+                if spec.landing_mode is not WorkflowLandingMode.PROVIDER:
+                    raise ConflictError("workflow is configured for manual landing")
+                if source["queue_state"] not in {"queued", "refold_required"}:
+                    raise ConflictError("workflow landing authority is already in use")
+                connection.execute(
+                    "INSERT INTO workflow_provider_targets "
+                    "(execution_id, queue_item_id, resource_id, merge_method, "
+                    "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        execution_id,
+                        source["queue_item_id"],
+                        resource_id,
+                        merge_method,
+                        created_by,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow provider target could not be stored"
+                ) from exc
+        return {
+            "execution_id": execution_id,
+            "queue_item_id": source["queue_item_id"],
+            "resource_id": resource_id,
+            "merge_method": merge_method,
+            "created_by": creator["handle"],
+            "created_at": now,
+        }
+
     def advance_workflow_execution(
         self,
         execution_id: str,
@@ -957,6 +1383,8 @@ class WorkflowStorage:
             "workflow.correction_started",
             "workflow.maintainer_pending",
             "workflow.landing_ready",
+            "workflow.landing_enqueued",
+            "workflow.landing_recorded",
             "workflow.ruling_resolved",
         }
         if event_kind not in allowed_events:
@@ -1042,6 +1470,284 @@ class WorkflowStorage:
                 raise ConflictError("workflow execution could not advance") from exc
         return self.get_workflow_execution(execution_id)
 
+    def complete_workflow_execution(
+        self, execution_id: str, *, expected_version: int
+    ) -> dict[str, Any]:
+        """Atomically bind a landed receipt, final outcome, and sealed thread."""
+
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        outcome_entry_id = self.new_id("wle")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                source = connection.execute(
+                    "SELECT e.state, e.stage, e.correction_round, e.version, "
+                    "e.work_thread_id, e.requested_by, cv.spec_json, "
+                    "b.queue_item_id, b.candidate_id, "
+                    "q.current_policy_id AS policy_id, q.state AS queue_state, "
+                    "q.landed_receipt_id AS receipt_id, gp.head_revision, "
+                    "r.plan_id, r.provider_landing_id, r.outcome, "
+                    "r.observed_revision, r.assurance "
+                    "FROM workflow_executions e "
+                    "JOIN workflow_configuration_versions cv "
+                    "ON cv.id = e.configuration_version_id "
+                    "JOIN workflow_landing_bindings b ON b.execution_id = e.id "
+                    "JOIN integration_queue_items q ON q.id = b.queue_item_id "
+                    "JOIN integration_gate_policies gp "
+                    "ON gp.id = q.current_policy_id "
+                    "LEFT JOIN integration_landing_receipts r "
+                    "ON r.id = q.landed_receipt_id WHERE e.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError("workflow landing completion not found")
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if source["state"] != "active" or source["stage"] != "completion":
+                    raise ConflictError("workflow is not ready for completion")
+                if (
+                    source["queue_state"] != "landed"
+                    or source["receipt_id"] is None
+                    or source["outcome"] != "landed"
+                ):
+                    raise ConflictError("workflow has no matching landed receipt")
+                try:
+                    spec = WorkflowConfigurationSpec.from_mapping(
+                        json.loads(source["spec_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored workflow configuration is invalid"
+                    ) from exc
+                if spec.landing_mode is WorkflowLandingMode.MANUAL:
+                    if (
+                        source["plan_id"] is None
+                        or source["provider_landing_id"] is not None
+                    ):
+                        raise ConflictError(
+                            "workflow receipt does not match manual landing mode"
+                        )
+                else:
+                    if (
+                        source["provider_landing_id"] is None
+                        or source["plan_id"] is not None
+                    ):
+                        raise ConflictError(
+                            "workflow receipt does not match provider landing mode"
+                        )
+                    target = connection.execute(
+                        "SELECT resource_id, merge_method "
+                        "FROM workflow_provider_targets WHERE execution_id = ?",
+                        (execution_id,),
+                    ).fetchone()
+                    operation = connection.execute(
+                        "SELECT o.spec_json FROM integration_provider_landings p "
+                        "JOIN service_operations o ON o.id = p.service_operation_id "
+                        "WHERE p.id = ? AND p.queue_item_id = ?",
+                        (source["provider_landing_id"], source["queue_item_id"]),
+                    ).fetchone()
+                    if target is None or operation is None:
+                        raise ConflictError(
+                            "workflow provider landing target is unavailable"
+                        )
+                    try:
+                        operation_spec = json.loads(operation["spec_json"])
+                        operation_resource = operation_spec["target"]["resource_id"]
+                        operation_method = operation_spec["parameters"]["merge_method"]
+                    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                        raise StorageError(
+                            "stored provider landing operation is invalid"
+                        ) from exc
+                    if (
+                        operation_resource != target["resource_id"]
+                        or operation_method != target["merge_method"]
+                    ):
+                        raise ConflictError(
+                            "workflow provider landing does not match its target"
+                        )
+                if not self._gate_readiness(connection, source["policy_id"])["ready"]:
+                    raise ConflictError("workflow landing gate is no longer ready")
+                active_run = connection.execute(
+                    "SELECT id FROM runs WHERE work_thread_id = ? AND state IN "
+                    "('queued', 'preparing', 'running', 'waiting_for_input', "
+                    "'paused') LIMIT 1",
+                    (source["work_thread_id"],),
+                ).fetchone()
+                if active_run is not None:
+                    raise ConflictError("workflow work item has active runs")
+                unfinished = connection.execute(
+                    "SELECT id FROM work_assignments WHERE work_thread_id = ? "
+                    "AND state IN ('open', 'claimed') LIMIT 1",
+                    (source["work_thread_id"],),
+                ).fetchone()
+                if unfinished is not None:
+                    raise ConflictError("workflow work item has unfinished assignments")
+                thread = connection.execute(
+                    "SELECT state, version, log_sequence FROM work_threads "
+                    "WHERE id = ?",
+                    (source["work_thread_id"],),
+                ).fetchone()
+                if thread is None:
+                    raise StorageError("workflow work thread is unavailable")
+                if thread["state"] != "active":
+                    raise ConflictError("workflow work thread is not active")
+                outcome = WorkLogEntry.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "kind": WorkLogKind.OUTCOME.value,
+                        "summary": (
+                            "The exact workflow candidate landed and its durable "
+                            "work thread was completed."
+                        ),
+                        "details": [
+                            f"candidate_id={source['candidate_id']}",
+                            f"landing_receipt_id={source['receipt_id']}",
+                            f"landing_assurance={source['assurance']}",
+                            f"observed_revision={source['observed_revision']}",
+                        ],
+                        "artifacts": [],
+                        "related_interaction_ids": [],
+                        "candidate_revision": source["head_revision"],
+                    }
+                )
+                log_sequence = thread["log_sequence"] + 1
+                idempotency_key = f"workflow-outcome-{execution_id}"
+                connection.execute(
+                    "INSERT INTO work_log_entries "
+                    "(id, work_thread_id, sequence, kind, content_json, "
+                    "content_sha256, author_run_id, author_attempt_id, actor_id, "
+                    "workflow_execution_id, assignment_id, idempotency_key, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, "
+                    "NULL, ?, ?)",
+                    (
+                        outcome_entry_id,
+                        source["work_thread_id"],
+                        log_sequence,
+                        outcome.kind.value,
+                        outcome.canonical,
+                        outcome.digest,
+                        source["requested_by"],
+                        execution_id,
+                        idempotency_key,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO workflow_completions "
+                    "(execution_id, queue_item_id, receipt_id, outcome_entry_id, "
+                    "candidate_id, policy_id, observed_revision, completed_by, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        execution_id,
+                        source["queue_item_id"],
+                        source["receipt_id"],
+                        outcome_entry_id,
+                        source["candidate_id"],
+                        source["policy_id"],
+                        source["observed_revision"],
+                        source["requested_by"],
+                        now,
+                    ),
+                )
+                changed = connection.execute(
+                    "UPDATE work_threads SET state = 'completed', "
+                    "version = version + 2, log_sequence = ?, updated_at = ?, "
+                    "completed_at = ? WHERE id = ? AND version = ? "
+                    "AND state = 'active'",
+                    (
+                        log_sequence,
+                        now,
+                        now,
+                        source["work_thread_id"],
+                        thread["version"],
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError("workflow work thread changed")
+                thread_sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+                    "FROM work_thread_events WHERE work_thread_id = ?",
+                    (source["work_thread_id"],),
+                ).fetchone()["sequence"]
+                connection.execute(
+                    "INSERT INTO work_thread_events "
+                    "(work_thread_id, sequence, kind, from_state, to_state, "
+                    "actor_id, metadata_json, created_at) VALUES (?, ?, "
+                    "'work_thread.completed', 'active', 'completed', ?, ?, ?)",
+                    (
+                        source["work_thread_id"],
+                        thread_sequence,
+                        source["requested_by"],
+                        canonical_json(
+                            {
+                                "outcome_entry_id": outcome_entry_id,
+                                "landing_receipt_id": source["receipt_id"],
+                                "workflow_execution_id": execution_id,
+                            }
+                        ),
+                        now,
+                    ),
+                )
+                changed = connection.execute(
+                    "UPDATE workflow_executions SET state = 'completed', "
+                    "version = version + 1, updated_at = ?, finished_at = ? "
+                    "WHERE id = ? AND version = ? AND state = 'active' "
+                    "AND stage = 'completion'",
+                    (now, now, execution_id, expected_version),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "workflow execution changed concurrently"
+                    )
+                event_sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+                    "FROM workflow_execution_events WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()["sequence"]
+                connection.execute(
+                    "INSERT INTO workflow_execution_events "
+                    "(execution_id, sequence, kind, from_state, to_state, actor, "
+                    "metadata_json, created_at) VALUES (?, ?, "
+                    "'workflow.completed', 'active', 'completed', ?, ?, ?)",
+                    (
+                        execution_id,
+                        event_sequence,
+                        source["requested_by"],
+                        canonical_json(
+                            {
+                                "from_stage": "completion",
+                                "to_stage": "completion",
+                                "from_correction_round": source["correction_round"],
+                                "to_correction_round": source["correction_round"],
+                                "candidate_id": source["candidate_id"],
+                                "policy_id": source["policy_id"],
+                                "queue_item_id": source["queue_item_id"],
+                                "receipt_id": source["receipt_id"],
+                                "outcome_entry_id": outcome_entry_id,
+                            }
+                        ),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow completion could not be recorded"
+                ) from exc
+        return self.get_workflow_execution(execution_id)
+
     def open_workflow_ruling(
         self,
         execution_id: str,
@@ -1051,6 +1757,8 @@ class WorkflowStorage:
         policy_id: str | None = None,
         run_id: str | None = None,
         gate_name: str | None = None,
+        provider_landing_id: str | None = None,
+        landing_plan_id: str | None = None,
     ) -> dict[str, Any]:
         execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
         self._positive_integer(expected_version, field="expected_version")
@@ -1060,6 +1768,9 @@ class WorkflowStorage:
             "reviewer_failed",
             "review_verdict_missing",
             "validation_failed",
+            "landing_failed",
+            "landing_authority_mismatch",
+            "landing_cancelled",
         }
         if kind not in allowed:
             raise ValidationError("workflow ruling kind is invalid")
@@ -1069,6 +1780,26 @@ class WorkflowStorage:
             run_id = require_string(run_id, field="run_id", max_bytes=64)
         if gate_name is not None:
             gate_name = require_string(gate_name, field="gate_name", max_bytes=128)
+        if provider_landing_id is not None:
+            provider_landing_id = require_string(
+                provider_landing_id, field="provider_landing_id", max_bytes=64
+            )
+        if landing_plan_id is not None:
+            landing_plan_id = require_string(
+                landing_plan_id, field="landing_plan_id", max_bytes=64
+            )
+        if kind == "landing_failed":
+            if provider_landing_id is None or landing_plan_id is not None:
+                raise ValidationError(
+                    "landing-failed ruling requires one provider landing"
+                )
+        elif kind == "landing_authority_mismatch":
+            if (provider_landing_id is None) == (landing_plan_id is None):
+                raise ValidationError(
+                    "landing-authority ruling requires exactly one authority"
+                )
+        elif provider_landing_id is not None or landing_plan_id is not None:
+            raise ValidationError("workflow ruling does not accept landing authority")
         ruling_id = self.new_id("wri")
         now = self.now()
         with self._connection() as connection:
@@ -1118,11 +1849,43 @@ class WorkflowStorage:
                     ).fetchone()
                     if bound_run is None:
                         raise ConflictError("workflow ruling run is not current")
+                if provider_landing_id is not None:
+                    provider_landing = connection.execute(
+                        "SELECT pl.state FROM integration_provider_landings pl "
+                        "JOIN workflow_landing_bindings b "
+                        "ON b.queue_item_id = pl.queue_item_id "
+                        "WHERE b.execution_id = ? AND pl.id = ?",
+                        (execution_id, provider_landing_id),
+                    ).fetchone()
+                    if provider_landing is None:
+                        raise ConflictError(
+                            "workflow ruling provider landing is not current"
+                        )
+                    if kind == "landing_failed" and provider_landing["state"] not in {
+                        "failed",
+                        "not_landed",
+                    }:
+                        raise ConflictError(
+                            "workflow ruling provider landing has not failed"
+                        )
+                if landing_plan_id is not None:
+                    landing_plan = connection.execute(
+                        "SELECT 1 FROM integration_landing_plans lp "
+                        "JOIN workflow_landing_bindings b "
+                        "ON b.queue_item_id = lp.queue_item_id "
+                        "WHERE b.execution_id = ? AND lp.id = ?",
+                        (execution_id, landing_plan_id),
+                    ).fetchone()
+                    if landing_plan is None:
+                        raise ConflictError(
+                            "workflow ruling landing plan is not current"
+                        )
                 connection.execute(
                     "INSERT INTO workflow_rulings "
                     "(id, execution_id, execution_version, correction_round, kind, "
-                    "state, version, policy_id, run_id, gate_name, created_at, "
-                    "updated_at) VALUES (?, ?, ?, ?, ?, 'open', 1, ?, ?, ?, ?, ?)",
+                    "state, version, policy_id, run_id, gate_name, "
+                    "provider_landing_id, landing_plan_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'open', 1, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         ruling_id,
                         execution_id,
@@ -1132,6 +1895,8 @@ class WorkflowStorage:
                         policy_id,
                         run_id,
                         gate_name,
+                        provider_landing_id,
+                        landing_plan_id,
                         now,
                         now,
                     ),
@@ -1141,6 +1906,18 @@ class WorkflowStorage:
                     "FROM workflow_execution_events WHERE execution_id = ?",
                     (execution_id,),
                 ).fetchone()["sequence"]
+                event_metadata = {
+                    "ruling_id": ruling_id,
+                    "kind": kind,
+                    "correction_round": execution["correction_round"],
+                    "policy_id": policy_id,
+                    "run_id": run_id,
+                    "gate_name": gate_name,
+                }
+                if provider_landing_id is not None:
+                    event_metadata["provider_landing_id"] = provider_landing_id
+                if landing_plan_id is not None:
+                    event_metadata["landing_plan_id"] = landing_plan_id
                 connection.execute(
                     "INSERT INTO workflow_execution_events "
                     "(execution_id, sequence, kind, from_state, to_state, actor, "
@@ -1150,16 +1927,7 @@ class WorkflowStorage:
                         execution_id,
                         sequence,
                         execution["requested_by"],
-                        canonical_json(
-                            {
-                                "ruling_id": ruling_id,
-                                "kind": kind,
-                                "correction_round": execution["correction_round"],
-                                "policy_id": policy_id,
-                                "run_id": run_id,
-                                "gate_name": gate_name,
-                            }
-                        ),
+                        canonical_json(event_metadata),
                         now,
                     ),
                 )
@@ -1244,17 +2012,37 @@ class WorkflowStorage:
                 ):
                     raise ConflictError("workflow execution changed after the ruling")
                 if decision == "continue":
-                    if ruling["kind"] != "correction_limit":
+                    if ruling["kind"] == "correction_limit":
+                        if execution["correction_round"] >= 8:
+                            raise ConflictError(
+                                "workflow reached the absolute correction-round limit"
+                            )
+                        target_stage = "build"
+                        target_round = execution["correction_round"] + 1
+                    elif ruling["kind"] == "landing_failed":
+                        if execution["stage"] != "landing":
+                            raise ConflictError(
+                                "landing retry ruling is outside the landing stage"
+                            )
+                        provider_landing = connection.execute(
+                            "SELECT state FROM integration_provider_landings "
+                            "WHERE id = ?",
+                            (ruling["provider_landing_id"],),
+                        ).fetchone()
+                        if provider_landing is None or provider_landing[
+                            "state"
+                        ] not in {"failed", "not_landed"}:
+                            raise ConflictError(
+                                "landing retry authority is no longer failed"
+                            )
+                        target_stage = "landing"
+                        target_round = execution["correction_round"]
+                    else:
                         raise ConflictError(
-                            "only a correction-limit ruling can continue the workflow"
-                        )
-                    if execution["correction_round"] >= 8:
-                        raise ConflictError(
-                            "workflow reached the absolute correction-round limit"
+                            "only a correction-limit or landing-failed ruling can "
+                            "continue the workflow"
                         )
                     target_state = "active"
-                    target_stage = "build"
-                    target_round = execution["correction_round"] + 1
                     cancel_reason = None
                     finished_at = None
                 else:
