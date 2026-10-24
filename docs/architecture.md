@@ -507,5 +507,6 @@ lost-response live GitHub exit proof are complete. See
 [work-memory.md](work-memory.md), and
 [workflow-templates.md](workflow-templates.md). The M12 immutable prescription,
 build/review/correction, and landing/closeout slices are implemented without
-introducing a general workflow engine; the real-repository M12 exit proof is
-the remaining milestone gate.
+introducing a general workflow engine. The completed real-repository M12 exit
+proof exercised correction, restart recovery, provider rotation, an explicit
+landing retry ruling, exact provider landing, and sealed closeout.

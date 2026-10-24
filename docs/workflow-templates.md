@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C implemented; live M12 exit proof pending**
+**Status: M12A-M12C complete, including the live repository exit proof**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -181,15 +181,20 @@ control-plane/workflow provenance, records the workflow completion, seals the
 work thread, and marks the execution completed. A crash can therefore expose
 the whole closeout or none of it.
 
-The implementation and local quality gates are separate from the milestone's
-live exit proof. M12 remains open until the real-repository exercise has also
-demonstrated one changes-requested round, maintainer approval, restart
-recovery, credential containment, provider-observed exact landing, and sealed
-closeout without an operator remembering a hidden transition.
+The live exit proof completed on 2026-10-24 against Imitation Krab PR #3. It
+exercised one changes-requested round, fresh independent review, maintainer
+approval, repeated process replacement, immutable correction-chain recovery,
+an explicit failed-landing ruling and one authorized retry, append-only
+provider deployment rotation, provider-observed head-enforced landing, bounded
+outcome creation, and sealed closeout. The target checkout remained clean;
+worker networking stayed denied; provider credentials remained outside worker
+plans. Already-successful publish and open effects were recovered from their
+durable receipts rather than replayed after controller rotation.
 
-Each slice gets its own RED-first happy and sad path suite, branch-aware
-coverage gate, focused mutation gate, and honest checkpoint. M12C's live proof
-must not rely on private operator knowledge to move a durable transition.
+Each slice passed its RED-first happy- and sad-path suite, branch-aware coverage
+gate, focused mutation gate, and honest checkpoint. M12C's live proof moved
+every mechanical transition through durable state; the two judgment points
+remained explicit maintainer approval and the bounded landing-retry ruling.
 
 ## Deliberate non-goals
 
@@ -202,5 +207,6 @@ must not rely on private operator knowledge to move a durable transition.
 - release-management or multi-repository workflows in the first pass.
 
 Discovery, adversarial review configurations, heterogeneous work providers,
-and controlled remote execution remain later milestones. They should reuse the
-same immutable prescription seam only after `implementation-v1` proves it.
+and controlled remote execution remain later milestones. The completed
+`implementation-v1` proof establishes the immutable prescription seam they can
+reuse.

@@ -1047,7 +1047,7 @@ their real use cases justify a versioned capability contract.
 
 ## Milestone 12: bounded implementation workflow
 
-**Status: implementation complete; live exit proof pending**
+**Status: complete, including live exit proof (2026-10-24)**
 
 M11 proved every important step of one real change, but the operator still
 selected and invoked those steps. M12 packages that exact practice as one
@@ -1151,7 +1151,7 @@ mutations and pre-existing generic supervisor branches outside the M12B path.
 
 ### M12C: landing and closeout director
 
-**Status: local implementation complete (2026-10-23); live proof pending**
+**Status: complete, including live Imitation Krab exit proof (2026-10-24)**
 
 - Enqueue only the ready exact candidate and preserve M7 dependency, serialized
   lane, refold, and gate recheck rules.
@@ -1198,10 +1198,37 @@ completes the execution. The transaction first rejects active runs,
 unfinished assignments, stale gates, wrong-mode receipts, and wrong provider
 targets.
 
-The implementation checkpoint does not satisfy the exit proof by itself. M12
-remains open until the prospective real-repository run demonstrates the
-changes-requested loop, maintainer approval, process replacement, provider
-credential containment, exact landing evidence, and final sealed thread.
+The real-repository exit proof completed against `psyberone/imitation-krab` PR
+#3. Four networkless worker runs produced and independently reviewed a
+two-round correction stack. The maintainer requested one exact CLI-output test
+correction, approved final candidate
+`ee501a809338934f970fa0e7e1f6942773622b2d`, and separately authorized
+landing. Five proof invocations demonstrated process replacement without
+another model call after review; all four worker runs remained succeeded.
+
+The first provider attempt truthfully returned `not_landed` because the old
+director treated the final correction head as an independent candidate.
+Schema v31 then accepted the complete immutable correction chain, requeued the
+same final head, and opened a `landing_failed` ruling bound to that exact
+attempt. An explicit `continue` authorized one retry. The GitHub controller had
+also changed deployment identity during the repair, so the live harness
+append-only rotated its sidecar registration, revoked the old controller, and
+reused the already-successful publish/open receipts instead of replaying either
+effect. Repository, account, credential scope, transport, limits, and semantic
+surface remained exact; any such change or unresolved old effect would have
+stopped closed.
+
+The retry squash-merged PR #3 as
+`84e7175b45aee5b5d4bb8cedd9f8f02020f6a0d6`. MGB retained head-enforced
+provider receipt `lrc_b2c215748813673ebdca26e7ce0562a2`, wrote the bounded
+outcome, sealed the work thread, and completed workflow
+`wfx_64158b9425d2e899da40916d9c630db6` with no open ruling. The operator's
+target checkout stayed clean at the pinned source while remote `main` advanced
+to the recorded squash commit. Direct worker network remained denied; neither
+ChatGPT nor GitHub credentials entered a worker plan. Accounted model use was
+1,598,546 microusd under the pinned 3,775,000-microusd ceiling. The final
+`workflow-report.json` digest is
+`06671725cdabc521c6b3686537ec51eee7c3f44ee2ab9832fd0da8e0b2aae97c`.
 
 The final local checkpoint passes 1,073 tests and Ruff format/lint with 86%
 aggregate statement-plus-branch coverage. A focused Mutmut wave across the
@@ -1225,9 +1252,15 @@ conservative effective result is 123/145 (84.83%). The remaining reviewed
 survivors are diagnostic changes, relationally equivalent guards, or trusted-
 state inconsistency branches outside the accepted workflow path.
 
+The deployment-rotation follow-up brings the suite to 1,099 passing tests with
+the same 86% aggregate statement-plus-branch coverage and clean Ruff
+format/lint. The changed production package remains the already measured v31
+code; this follow-up changes only the live proof harness and its contract tests.
+The completed proof above is the milestone's external golden test.
+
 ## Milestone 13: discovery and review prescriptions
 
-**Status: candidate milestone; schedule after the M12 live proof**
+**Status: candidate milestone; ready for planning after completed M12**
 
 - Add a bounded Discovery prescription that produces a structured ruling and
   work-ready brief without changing source.

@@ -192,10 +192,12 @@ surface to avoid a version change.
 
 ## Post-M11 sequence
 
-Provider breadth waits while M12 turns the proven producer/reviewer/maintainer
-sequence into a durable bounded workflow. This is sequencing, not a change in
-the capability architecture: workflow templates consume semantic operations
-and never name GitHub, Jira, SSH, or a model provider.
+M12 now proves that the producer/reviewer/maintainer sequence can consume a
+provider through a durable bounded workflow, including controller deployment
+rotation and effect-receipt recovery. Provider breadth remains deliberately
+sequenced behind demonstrated needs, not blocked by the architecture: workflow
+templates consume semantic operations and never name GitHub, Jira, SSH, or a
+model provider.
 
 The next provider pressure tests are intentionally heterogeneous:
 
