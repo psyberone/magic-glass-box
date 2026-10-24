@@ -29,6 +29,7 @@ from magic_glass_box.domain import (
 from magic_glass_box.executor import DockerCLI, DockerExecutor
 from magic_glass_box.gates import MaintainerDecision, MaintainerReviewRequest
 from magic_glass_box.gateway import FileGatewayManager
+from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.openai_chatgpt import ChatGPTOAuth, ChatGPTProfileStore
 from magic_glass_box.orchestration import CandidateReviewWorkspaces, RunCoordinator
@@ -68,9 +69,9 @@ try:
         _write_report,
     )
     from scripts.check_live_openai_chatgpt import (
-        BUDGET_CEILING_MICROUSD,
         CONNECTOR_NAME,
         GRANT_NAME,
+        ROUTE_NAME,
         RUNTIME_IMAGE,
         _assert_no_secret,
         _assert_sandbox_boundaries,
@@ -84,7 +85,6 @@ try:
         _session_secrets,
         _start_connector,
         _stop_connector,
-        _write_connector_config,
     )
 except ModuleNotFoundError:  # Direct execution puts scripts/ on sys.path.
     from check_live_github_provider import (  # type: ignore[no-redef]
@@ -114,9 +114,9 @@ except ModuleNotFoundError:  # Direct execution puts scripts/ on sys.path.
         _write_report,
     )
     from check_live_openai_chatgpt import (  # type: ignore[no-redef]
-        BUDGET_CEILING_MICROUSD,
         CONNECTOR_NAME,
         GRANT_NAME,
+        ROUTE_NAME,
         RUNTIME_IMAGE,
         _assert_no_secret,
         _assert_sandbox_boundaries,
@@ -130,7 +130,6 @@ except ModuleNotFoundError:  # Direct execution puts scripts/ on sys.path.
         _session_secrets,
         _start_connector,
         _stop_connector,
-        _write_connector_config,
     )
 
 PROJECT_KEY = "imitation-krab-workflow"
@@ -145,9 +144,16 @@ GITHUB_MAPPING_NAME = "primary"
 REPORT_NAME = "workflow-report.json"
 MAX_REVIEW_BYTES = 64 * 1024
 MAX_WORKFLOW_SECONDS = 7200.0
+WORKFLOW_REQUEST_BYTES = 1024 * 1024
+WORKFLOW_BUDGET_CEILING_MICROUSD = 4_500_000
+WORKFLOW_INVOCATION_MICROUSD = 2_500_000
 ACKNOWLEDGEMENT_FLAG = (
     "--i-understand-an-approved-review-publishes-opens-and-merges-a-pr"
 )
+
+
+class WorkflowRulingRequired(RuntimeError):
+    """The durable workflow intentionally stopped for an operator ruling."""
 
 
 def _positive_integer(value: str) -> int:
@@ -438,6 +444,76 @@ def _workflow_spec(image_id: str) -> WorkflowConfigurationSpec:
     )
 
 
+def _workflow_connector_spec(
+    *,
+    socket_path: Path,
+    deployment_sha256: str,
+    scope_sha256: str,
+    model: str,
+) -> InferenceConnectorSpec:
+    value = _connector_spec(
+        socket_path=socket_path,
+        deployment_sha256=deployment_sha256,
+        scope_sha256=scope_sha256,
+        model=model,
+    ).to_dict()
+    value["request_bytes"] = WORKFLOW_REQUEST_BYTES
+    return InferenceConnectorSpec.from_mapping(value)
+
+
+def _workflow_grant_spec(
+    *, deployment_sha256: str, scope_sha256: str, model: str
+) -> InferenceGrantSpec:
+    value = _grant_spec(
+        deployment_sha256=deployment_sha256,
+        scope_sha256=scope_sha256,
+        model=model,
+    ).to_dict()
+    value["request_bytes"] = WORKFLOW_REQUEST_BYTES
+    value["budget"].update(
+        {
+            "invocation_microusd": WORKFLOW_INVOCATION_MICROUSD,
+            "run_microusd": WORKFLOW_BUDGET_CEILING_MICROUSD,
+            "project_microusd": WORKFLOW_BUDGET_CEILING_MICROUSD,
+            "grant_microusd": WORKFLOW_BUDGET_CEILING_MICROUSD,
+        }
+    )
+    return InferenceGrantSpec.from_mapping(value)
+
+
+def _write_workflow_connector_config(
+    path: Path,
+    *,
+    connector_id: str,
+    deployment_sha256: str,
+    scope_sha256: str,
+    model: str,
+    request_bytes: int = WORKFLOW_REQUEST_BYTES,
+    response_bytes: int = 4 * 1024 * 1024,
+    timeout_ms: int = 120_000,
+) -> None:
+    value = {
+        "schema_version": 1,
+        "connector_id": connector_id,
+        "deployment_sha256": deployment_sha256,
+        "routes": [
+            {
+                "name": ROUTE_NAME,
+                "credential_scope_sha256": scope_sha256,
+                "models": [model],
+                "request_bytes": request_bytes,
+                "response_bytes": response_bytes,
+                "timeout_ms": timeout_ms,
+            }
+        ],
+    }
+    path.write_text(
+        json.dumps(value, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o600)
+
+
 def _github_operation_spec(
     *,
     capability: str,
@@ -518,7 +594,7 @@ def _prepare_control_plane(
     )
     connector = control.register_inference_connector(
         name=CONNECTOR_NAME,
-        spec=_connector_spec(
+        spec=_workflow_connector_spec(
             socket_path=connector_socket,
             deployment_sha256=deployment_sha256,
             scope_sha256=scope_sha256,
@@ -528,7 +604,7 @@ def _prepare_control_plane(
     )
     control.add_connector_provider_grant(
         name=GRANT_NAME,
-        spec=_grant_spec(
+        spec=_workflow_grant_spec(
             deployment_sha256=deployment_sha256,
             scope_sha256=scope_sha256,
             model=model,
@@ -624,7 +700,7 @@ def _drive_until(
             item for item in execution["rulings"] if item["state"] == "open"
         ]
         if open_rulings:
-            raise RuntimeError(
+            raise WorkflowRulingRequired(
                 "workflow opened a ruling: " + str(open_rulings[0]["kind"])
             )
         signature = (
@@ -919,6 +995,8 @@ def _write_workflow_report(
             "accounted_microusd",
         )
     }
+    grant = database.get_provider_grant(GRANT_NAME)
+    budget_ceiling = grant["policy"]["budget"]["project_microusd"]
     proof_invocations = _previous_invocations(report_path)
     proof_invocations.append(dict(phase_evidence))
     report = {
@@ -928,7 +1006,7 @@ def _write_workflow_report(
         "state_directory": str(state_root),
         "database": str(database.path),
         "model": model,
-        "budget_ceiling_microusd": BUDGET_CEILING_MICROUSD,
+        "budget_ceiling_microusd": budget_ceiling,
         "provider_invocations": len(invocations),
         "usage": usage,
         "direct_worker_network": "denied",
@@ -1042,24 +1120,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "source repository no longer matches the pinned workflow"
             )
 
-    expected_connector = _connector_spec(
+    expected_connector = _workflow_connector_spec(
         socket_path=connector_socket,
         deployment_sha256=deployment_sha256,
         scope_sha256=session.credential_scope_sha256,
         model=args.model,
     )
+    acceptable_connector_specs = {expected_connector.canonical}
+    if not fresh:
+        acceptable_connector_specs.add(
+            _connector_spec(
+                socket_path=connector_socket,
+                deployment_sha256=deployment_sha256,
+                scope_sha256=session.credential_scope_sha256,
+                model=args.model,
+            ).canonical
+        )
+    stored_connector_spec = InferenceConnectorSpec.from_mapping(connector["spec"])
     if (
         connector["state"] != "active"
-        or connector["spec"] != expected_connector.to_dict()
+        or stored_connector_spec.canonical not in acceptable_connector_specs
     ):
         raise RuntimeError("existing connector does not match this workflow proof")
     connector_config = connector_root / "config.json"
-    _write_connector_config(
+    _write_workflow_connector_config(
         connector_config,
         connector_id=connector["id"],
         deployment_sha256=deployment_sha256,
         scope_sha256=session.credential_scope_sha256,
         model=args.model,
+        request_bytes=stored_connector_spec.request_bytes,
+        response_bytes=stored_connector_spec.response_bytes,
+        timeout_ms=stored_connector_spec.timeout_ms,
     )
 
     review = (
@@ -1266,6 +1358,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             execution = database.get_workflow_execution(execution["id"])
+    except WorkflowRulingRequired:
+        execution = database.get_workflow_execution(execution["id"])
     except BaseException as exc:
         proof_error = exc
         raise

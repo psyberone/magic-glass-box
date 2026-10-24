@@ -13,6 +13,10 @@ from scripts.check_live_imitation_krab_workflow import (
     GITHUB_SIDECAR_NAME,
     PROJECT_KEY,
     VALIDATION_NAME,
+    WORKFLOW_BUDGET_CEILING_MICROUSD,
+    WORKFLOW_REQUEST_BYTES,
+    WorkflowRulingRequired,
+    _drive_until,
     _github_operation_spec,
     _load_maintainer_review,
     _prepare_control_plane,
@@ -20,6 +24,7 @@ from scripts.check_live_imitation_krab_workflow import (
     _require_approved_landing_authority,
     _work_item,
     _workflow_spec,
+    _write_workflow_connector_config,
     parse_args,
 )
 
@@ -106,12 +111,67 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             self.assertEqual(execution["spec"]["landing_mode"], "provider")
             self.assertTrue(execution["spec"]["maintainer_approval"])
             self.assertEqual(connector["state"], "active")
+            self.assertEqual(connector["spec"]["request_bytes"], WORKFLOW_REQUEST_BYTES)
+            grant = database.get_provider_grant("openai-chatgpt")
+            self.assertEqual(grant["policy"]["request_bytes"], WORKFLOW_REQUEST_BYTES)
+            self.assertEqual(
+                grant["policy"]["budget"]["project_microusd"],
+                WORKFLOW_BUDGET_CEILING_MICROUSD,
+            )
             self.assertNotEqual(
                 profiles["producer"]["krab_identity_id"],
                 profiles["reviewer"]["krab_identity_id"],
             )
             self.assertEqual(
                 profiles["reviewer"]["spec"]["workspace_mode"], "read_only"
+            )
+
+    def test_connector_config_matches_the_larger_bounded_request_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            _write_workflow_connector_config(
+                path,
+                connector_id="ifc_" + "a" * 32,
+                deployment_sha256="b" * 64,
+                scope_sha256="c" * 64,
+                model="gpt-test",
+            )
+
+            document = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(document["routes"][0]["request_bytes"], 1024 * 1024)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_open_ruling_stops_the_driver_without_advancing(self) -> None:
+        execution = {
+            "id": "wfx_test",
+            "state": "active",
+            "stage": "build",
+            "correction_round": 0,
+            "version": 2,
+            "rulings": [{"state": "open", "kind": "producer_failed"}],
+        }
+
+        class Database:
+            @staticmethod
+            def get_workflow_execution(_execution_id: str):
+                return execution
+
+        class Supervisor:
+            @staticmethod
+            def drain(*, timeout: float) -> bool:
+                raise AssertionError(f"unexpected drain({timeout})")
+
+            @staticmethod
+            def tick() -> dict[str, int]:
+                raise AssertionError("unexpected tick")
+
+        with self.assertRaisesRegex(WorkflowRulingRequired, "producer_failed"):
+            _drive_until(
+                Supervisor(),  # type: ignore[arg-type]
+                Database(),  # type: ignore[arg-type]
+                "wfx_test",
+                predicate=lambda _item: False,
+                timeout=30,
             )
 
     def test_live_and_destructive_opt_ins_are_independent(self) -> None:
