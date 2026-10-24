@@ -118,8 +118,11 @@ exhausted correction budget open a durable workflow ruling. An open ruling
 stops action discovery for that execution and appears in the control-room
 attention projection. `workflow ruling-show` and `workflow ruling-resolve`
 provide the explicit operator boundary. A correction-limit ruling may authorize
-one additional bounded round, while an exact failed-provider-landing ruling may
-authorize one retry of that attempt. Other rulings can only cancel.
+one additional bounded round. A validation-failed ruling may rerun that exact
+immutable validation once, and an exact failed-provider-landing ruling may
+authorize one retry of that attempt. Each retry requires its own ruling; neither
+path can alter the pinned command, image, policy, or candidate. Other rulings
+can only cancel.
 
 Waiting at landing is not an operational failure and does not spend retry
 budget. Manual workflows wait for an explicitly issued plan and receipt;

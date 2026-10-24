@@ -134,6 +134,9 @@ integration ledger remains truthful.
 - The configured correction ceiling stops the loop and opens an explicit
   ruling. CLI resolution may authorize one more bounded round or cancel the
   workflow; it cannot silently weaken another failure.
+- A failed validation also stops at an explicit ruling. Continuing reruns only
+  that same pinned validation against the same exact candidate, once; another
+  failure requires another ruling and never becomes passing evidence.
 
 ### M12C: landing and closeout director
 

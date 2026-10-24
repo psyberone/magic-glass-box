@@ -2011,6 +2011,7 @@ class WorkflowStorage:
                     or execution["correction_round"] != ruling["correction_round"]
                 ):
                     raise ConflictError("workflow execution changed after the ruling")
+                resolution_metadata: dict[str, Any] = {}
                 if decision == "continue":
                     if ruling["kind"] == "correction_limit":
                         if execution["correction_round"] >= 8:
@@ -2019,6 +2020,29 @@ class WorkflowStorage:
                             )
                         target_stage = "build"
                         target_round = execution["correction_round"] + 1
+                    elif ruling["kind"] == "validation_failed":
+                        if execution["stage"] != "review":
+                            raise ConflictError(
+                                "validation retry ruling is outside the review stage"
+                            )
+                        failed_evidence = connection.execute(
+                            "SELECT id, outcome FROM integration_gate_evidence "
+                            "WHERE policy_id = ? AND gate_name = ? "
+                            "ORDER BY sequence DESC LIMIT 1",
+                            (ruling["policy_id"], ruling["gate_name"]),
+                        ).fetchone()
+                        if (
+                            failed_evidence is None
+                            or failed_evidence["outcome"] != "failed"
+                        ):
+                            raise ConflictError(
+                                "validation retry authority is no longer failed"
+                            )
+                        target_stage = "review"
+                        target_round = execution["correction_round"]
+                        resolution_metadata["failed_evidence_id"] = failed_evidence[
+                            "id"
+                        ]
                     elif ruling["kind"] == "landing_failed":
                         if execution["stage"] != "landing":
                             raise ConflictError(
@@ -2039,8 +2063,8 @@ class WorkflowStorage:
                         target_round = execution["correction_round"]
                     else:
                         raise ConflictError(
-                            "only a correction-limit or landing-failed ruling can "
-                            "continue the workflow"
+                            "only a correction-limit, validation-failed, or "
+                            "landing-failed ruling can continue the workflow"
                         )
                     target_state = "active"
                     cancel_reason = None
@@ -2107,6 +2131,7 @@ class WorkflowStorage:
                                 "to_stage": target_stage,
                                 "from_correction_round": execution["correction_round"],
                                 "to_correction_round": target_round,
+                                **resolution_metadata,
                             }
                         ),
                         now,

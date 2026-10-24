@@ -975,7 +975,15 @@ class ControlPlane:
                 run_id=sandbox_id,
                 profile=profile,
                 workspace=workspace,
-                launch=RuntimeLaunch(validation.command),
+                launch=RuntimeLaunch(
+                    validation.command,
+                    (
+                        (
+                            "COVERAGE_FILE",
+                            "/tmp/magic-glass-box-coverage",  # noqa: S108
+                        ),
+                    ),
+                ),
             )
             started = time.monotonic()
             result = executor.execute(request)

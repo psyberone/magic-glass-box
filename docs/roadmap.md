@@ -1129,10 +1129,12 @@ round metadata.
 Producer failure, reviewer failure or silence, validation failure, and the
 configured correction ceiling now open one durable ruling instead of guessing
 forward. Open rulings suspend automatic advancement. Maintainers may cancel any
-ruling, while only a correction-limit ruling may explicitly continue, and the
-absolute eight-round ceiling cannot be overridden. CLI, service, control-room,
-and runtime surfaces expose the ruling and typed-review contract without
-granting a worker landing authority.
+ruling. A correction-limit ruling may explicitly continue one bounded round,
+and a validation-failed ruling may retry the same immutable validation once;
+each repeat failure stops at a new ruling. The absolute eight-round ceiling
+cannot be overridden. CLI, service, control-room, and runtime surfaces expose
+the ruling and typed-review contract without granting a worker landing
+authority.
 
 The final checkpoint passes 1,059 tests and Ruff format/lint with 86% aggregate
 statement-plus-branch coverage; the director is at 92% and workflow storage at

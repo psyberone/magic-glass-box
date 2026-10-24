@@ -182,7 +182,12 @@ class WorkflowDirector:
         for validation in execution["spec"]["validations"]:
             gate_name = "validation:" + validation["name"]
             recorded = evidence_by_name.get(gate_name)
-            if recorded is None:
+            if recorded is None or self._validation_retry_authorized(
+                execution,
+                policy_id=gate["policy_id"],
+                gate_name=gate_name,
+                evidence_id=recorded["id"],
+            ):
                 recorded = self.control.run_local_validation(
                     gate["policy_id"],
                     validation_name=validation["name"],
@@ -228,6 +233,46 @@ class WorkflowDirector:
             },
         )
         return True
+
+    @staticmethod
+    def _validation_retry_authorized(
+        execution: dict[str, Any],
+        *,
+        policy_id: str,
+        gate_name: str,
+        evidence_id: str,
+    ) -> bool:
+        ruling = next(
+            (
+                item
+                for item in reversed(execution["rulings"])
+                if item["kind"] == "validation_failed"
+                and item["policy_id"] == policy_id
+                and item["gate_name"] == gate_name
+            ),
+            None,
+        )
+        if (
+            ruling is None
+            or ruling["state"] != "resolved"
+            or ruling["decision"] != "continue"
+            or ruling["execution_version"] + 1 != execution["version"]
+        ):
+            return False
+        resolution = next(
+            (
+                event
+                for event in reversed(execution["events"])
+                if event["kind"] == "workflow.ruling_resolved"
+                and event["metadata"]["ruling_id"] == ruling["id"]
+            ),
+            None,
+        )
+        return (
+            resolution is not None
+            and resolution["metadata"].get("decision") == "continue"
+            and resolution["metadata"].get("failed_evidence_id") == evidence_id
+        )
 
     def _advance_maintainer(self, execution: dict[str, Any]) -> bool:
         gate = self._required_gate(execution)

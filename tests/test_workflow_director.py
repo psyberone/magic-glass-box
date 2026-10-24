@@ -2619,7 +2619,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             },
         )
 
-    def test_failed_validation_opens_a_durable_ruling(self) -> None:
+    def test_failed_validation_requires_explicit_ruling_for_each_retry(self) -> None:
         execution = self.start_execution(
             configuration_name="failing-validation",
             external_id="workflow-director-failing-validation",
@@ -2651,14 +2651,18 @@ class WorkflowDirectorTests(unittest.TestCase):
             review_outcome="approved",
         )
 
+        exit_codes = [17, 23, 0]
+        requests: list[object] = []
+
         class Executor:
             @staticmethod
-            def execute(_request: object) -> SandboxResult:
+            def execute(request: object) -> SandboxResult:
+                requests.append(request)
                 return SandboxResult(
                     container_id="b" * 64,
                     container_name="validation",
                     image_id="sha256:" + "9" * 64,
-                    exit_code=17,
+                    exit_code=exit_codes.pop(0),
                 )
 
         director = WorkflowDirector(
@@ -2679,6 +2683,76 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         self.assertEqual(stopped["rulings"][0]["policy_id"], gate["policy_id"])
         self.assertFalse(self.database.gate_readiness(gate["policy_id"])["ready"])
+
+        first_failure = next(
+            evidence
+            for evidence in self.database.list_gate_evidence(gate["policy_id"])
+            if evidence["gate_name"] == "validation:unit"
+        )
+        first_ruling = stopped["rulings"][0]
+        self.control.resolve_workflow_ruling(
+            first_ruling["id"],
+            expected_version=first_ruling["version"],
+            decision="continue",
+            resolved_by_handle="operator",
+        )
+        resumed = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            resumed["events"][-1]["metadata"]["failed_evidence_id"],
+            first_failure["id"],
+        )
+
+        self.assertTrue(
+            director.advance(resumed["id"], expected_version=resumed["version"])
+        )
+        failed_again = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            [ruling["state"] for ruling in failed_again["rulings"]],
+            ["resolved", "open"],
+        )
+        second_failure = next(
+            evidence
+            for evidence in self.database.list_gate_evidence(gate["policy_id"])
+            if evidence["gate_name"] == "validation:unit"
+        )
+        self.assertNotEqual(second_failure["id"], first_failure["id"])
+
+        self.assertTrue(
+            director.advance(
+                failed_again["id"], expected_version=failed_again["version"]
+            )
+        )
+        self.assertEqual(len(requests), 2)
+
+        second_ruling = failed_again["rulings"][-1]
+        self.control.resolve_workflow_ruling(
+            second_ruling["id"],
+            expected_version=second_ruling["version"],
+            decision="continue",
+            resolved_by_handle="operator",
+        )
+        retry = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            retry["events"][-1]["metadata"]["failed_evidence_id"],
+            second_failure["id"],
+        )
+        self.assertTrue(
+            director.advance(retry["id"], expected_version=retry["version"])
+        )
+
+        landed = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual((landed["stage"], landed["correction_round"]), ("landing", 0))
+        validations = [
+            evidence
+            for evidence in self.database.list_gate_evidence(gate["policy_id"])
+            if evidence["gate_name"] == "validation:unit"
+        ]
+        self.assertEqual(
+            [evidence["outcome"] for evidence in validations],
+            ["passed", "failed", "failed"],
+        )
+        self.assertEqual(len(requests), 3)
 
 
 if __name__ == "__main__":

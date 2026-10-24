@@ -2262,6 +2262,15 @@ class GateLedgerTests(unittest.TestCase):
                 self.assertEqual(request.credential_files, {})
                 self.assertIsNone(request.gateway_directory)
                 self.assertEqual(
+                    request.launch.environment,
+                    (
+                        (
+                            "COVERAGE_FILE",
+                            "/tmp/magic-glass-box-coverage",  # noqa: S108
+                        ),
+                    ),
+                )
+                self.assertEqual(
                     (request.workspace / "file.txt").read_text(encoding="utf-8"),
                     "after\n",
                 )
