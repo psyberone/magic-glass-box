@@ -7,11 +7,12 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
-from magic_glass_box.db import Database
+from magic_glass_box.db import Database, NotFoundError
 from magic_glass_box.gates import MaintainerReviewRequest
 from magic_glass_box.service import ControlPlane
 from scripts.check_live_imitation_krab_workflow import (
     ACKNOWLEDGEMENT_FLAG,
+    GITHUB_MAPPING_NAME,
     GITHUB_SIDECAR_NAME,
     PROJECT_KEY,
     VALIDATION_NAME,
@@ -21,7 +22,9 @@ from scripts.check_live_imitation_krab_workflow import (
     WORKFLOW_REQUEST_BYTES,
     WorkflowRulingRequired,
     _drive_until,
+    _find_completed_github_effect,
     _github_operation_spec,
+    _github_provider_spec_path,
     _load_maintainer_review,
     _prepare_control_plane,
     _project_context,
@@ -533,6 +536,353 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "authority does not match"):
                 _register_github_authority(control, spec=changed_spec)
+
+    def test_github_authority_rotates_only_the_deployment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = Database(root / "control-plane.db")
+            control = ControlPlane(database)
+            _prepare_control_plane(
+                control,
+                repository=root / "source",
+                source_revision="d" * 40,
+                image="runtime-proof:local",
+                image_id="sha256:" + "a" * 64,
+                connector_socket=root / "connector.sock",
+                deployment_sha256="b" * 64,
+                scope_sha256="c" * 64,
+                model="gpt-test",
+            )
+            old_spec = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="f" * 64,
+            )
+            old_bindings = _register_github_authority(control, spec=old_spec)
+            new_spec = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="1" * 64,
+            )
+
+            rotated = _register_github_authority(control, spec=new_spec)
+            resumed = _register_github_authority(control, spec=new_spec)
+
+            self.assertEqual(rotated, resumed)
+            self.assertEqual(
+                {item["controller"]["deployment_sha256"] for item in rotated.values()},
+                {"1" * 64},
+            )
+            self.assertTrue(
+                all(
+                    item["controller"]["sidecar_name"].startswith(
+                        GITHUB_SIDECAR_NAME + "-"
+                    )
+                    for item in rotated.values()
+                )
+            )
+            self.assertEqual(
+                database.get_service_sidecar(GITHUB_SIDECAR_NAME)["state"],
+                "revoked",
+            )
+            history = database.list_project_capability_bindings(
+                project_key=PROJECT_KEY, include_unbound=True
+            )
+            self.assertEqual(len(history), 6)
+            self.assertEqual(
+                {
+                    item["state"]
+                    for item in history
+                    if item["id"]
+                    in {binding["id"] for binding in old_bindings.values()}
+                },
+                {"unbound"},
+            )
+
+    def test_github_authority_rotation_rejects_mapping_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = Database(root / "control-plane.db")
+            control = ControlPlane(database)
+            _prepare_control_plane(
+                control,
+                repository=root / "source",
+                source_revision="d" * 40,
+                image="runtime-proof:local",
+                image_id="sha256:" + "a" * 64,
+                connector_socket=root / "connector.sock",
+                deployment_sha256="b" * 64,
+                scope_sha256="c" * 64,
+                model="gpt-test",
+            )
+            original = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="f" * 64,
+            )
+            _register_github_authority(control, spec=original)
+            changed = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="another/repository",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="1" * 64,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "authority does not match"):
+                _register_github_authority(control, spec=changed)
+
+            self.assertEqual(
+                database.get_service_sidecar(GITHUB_SIDECAR_NAME)["state"], "active"
+            )
+            self.assertEqual(
+                len(database.list_project_capability_bindings(project_key=PROJECT_KEY)),
+                3,
+            )
+
+    def test_github_authority_rotation_rejects_unresolved_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = Database(root / "control-plane.db")
+            control = ControlPlane(database)
+            _prepare_control_plane(
+                control,
+                repository=root / "source",
+                source_revision="d" * 40,
+                image="runtime-proof:local",
+                image_id="sha256:" + "a" * 64,
+                connector_socket=root / "connector.sock",
+                deployment_sha256="b" * 64,
+                scope_sha256="c" * 64,
+                model="gpt-test",
+            )
+            old_spec = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="f" * 64,
+            )
+            bindings = _register_github_authority(control, spec=old_spec)
+            operation = _github_operation_spec(
+                capability="refs.publish",
+                mode="effect",
+                mapping=old_spec.mappings[0].to_dict(),
+                deployment_sha256=old_spec.deployment_sha256,
+                idempotency_key="workflow:wfx_test:head:publish",
+                resource_id="refs/heads/mgb/test",
+                object_format="sha1",
+                expected_revision=None,
+                desired_revision="d" * 40,
+                parameters={"source_repository": "/private/candidate.git"},
+            )
+            control.create_service_operation(
+                spec=operation,
+                created_by_handle="operator",
+                project_capability_binding_id=bindings["refs.publish"]["id"],
+            )
+            new_spec = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="1" * 64,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "unresolved operation"):
+                _register_github_authority(control, spec=new_spec)
+
+            self.assertEqual(
+                database.get_service_sidecar(GITHUB_SIDECAR_NAME)["state"], "active"
+            )
+
+    def test_github_authority_does_not_replace_an_unrelated_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = Database(root / "control-plane.db")
+            control = ControlPlane(database)
+            _prepare_control_plane(
+                control,
+                repository=root / "source",
+                source_revision="d" * 40,
+                image="runtime-proof:local",
+                image_id="sha256:" + "a" * 64,
+                connector_socket=root / "connector.sock",
+                deployment_sha256="b" * 64,
+                scope_sha256="c" * 64,
+                model="gpt-test",
+            )
+            other = _service_sidecar_spec(
+                socket_path=root / "other.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="f" * 64,
+            )
+            control.register_service_sidecar(
+                name="other-github",
+                spec=other,
+                created_by_handle="operator",
+            )
+            original_binding = control.bind_project_capability(
+                project_key=PROJECT_KEY,
+                capability_name="refs.publish",
+                capability_version=1,
+                sidecar_name="other-github",
+                mapping_name=GITHUB_MAPPING_NAME,
+                bound_by_handle="operator",
+            )
+            desired = _service_sidecar_spec(
+                socket_path=root / "github.sock",
+                repository="psyberone/imitation-krab",
+                account="psyberone",
+                credential_scope_sha256="e" * 64,
+                deployment_sha256="1" * 64,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "authority does not match"):
+                _register_github_authority(control, spec=desired)
+
+            observed = database.resolve_project_capability(
+                PROJECT_KEY, "refs.publish", 1
+            )
+            self.assertEqual(observed["id"], original_binding["id"])
+            with self.assertRaises(NotFoundError):
+                database.get_service_sidecar(GITHUB_SIDECAR_NAME)
+
+    def test_github_provider_specs_are_immutable_per_deployment(self) -> None:
+        root = Path("/private/github")
+        first = _service_sidecar_spec(
+            socket_path=root / "provider.sock",
+            repository="psyberone/imitation-krab",
+            account="psyberone",
+            credential_scope_sha256="e" * 64,
+            deployment_sha256="f" * 64,
+        )
+        second = _service_sidecar_spec(
+            socket_path=root / "provider.sock",
+            repository="psyberone/imitation-krab",
+            account="psyberone",
+            credential_scope_sha256="e" * 64,
+            deployment_sha256="1" * 64,
+        )
+
+        self.assertNotEqual(
+            _github_provider_spec_path(root, first),
+            _github_provider_spec_path(root, second),
+        )
+        self.assertEqual(
+            _github_provider_spec_path(root, first).parent,
+            root,
+        )
+
+    def test_completed_github_effect_is_reused_across_deployments(self) -> None:
+        expected = _github_operation_spec(
+            connector_name=GITHUB_SIDECAR_NAME + "-" + "1" * 48,
+            capability="refs.publish",
+            mode="effect",
+            mapping={
+                "name": "primary",
+                "service": "github",
+                "host": "github.com",
+                "repository": "psyberone/imitation-krab",
+                "account": "psyberone",
+                "credential_scope_sha256": "e" * 64,
+            },
+            deployment_sha256="1" * 64,
+            idempotency_key="workflow:wfx_test:head:publish",
+            resource_id="refs/heads/mgb/test",
+            object_format="sha1",
+            expected_revision=None,
+            desired_revision="d" * 40,
+            parameters={"source_repository": "/private/candidate.git"},
+        )
+        historical = expected.to_dict()
+        historical["connector_name"] = GITHUB_SIDECAR_NAME
+        historical["deployment_sha256"] = "f" * 64
+
+        class DatabaseStub:
+            @staticmethod
+            def list_service_operations(*, limit: int) -> list[dict[str, object]]:
+                self.assertEqual(limit, 1000)
+                return [
+                    {
+                        "id": "sop_historical",
+                        "state": "succeeded",
+                        "spec": historical,
+                        "attempts": [],
+                    }
+                ]
+
+        selected = _find_completed_github_effect(
+            DatabaseStub(),
+            expected,  # type: ignore[arg-type]
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["id"], "sop_historical")
+
+    def test_changed_or_unresolved_github_effect_is_not_replayed(self) -> None:
+        expected = _github_operation_spec(
+            capability="refs.publish",
+            mode="effect",
+            mapping={
+                "name": "primary",
+                "service": "github",
+                "host": "github.com",
+                "repository": "psyberone/imitation-krab",
+                "account": "psyberone",
+                "credential_scope_sha256": "e" * 64,
+            },
+            deployment_sha256="1" * 64,
+            idempotency_key="workflow:wfx_test:head:publish",
+            resource_id="refs/heads/mgb/test",
+            object_format="sha1",
+            expected_revision=None,
+            desired_revision="d" * 40,
+            parameters={"source_repository": "/private/candidate.git"},
+        )
+        historical = expected.to_dict()
+        historical["deployment_sha256"] = "f" * 64
+
+        for state, changed_revision, message in (
+            ("pending", "d" * 40, "unresolved"),
+            ("succeeded", "e" * 40, "reused with changes"),
+        ):
+            value = json.loads(json.dumps(historical))
+            value["target"]["desired_revision"] = changed_revision
+
+            class DatabaseStub:
+                def __init__(self, operation_state: str, operation_spec: object):
+                    self.operation_state = operation_state
+                    self.operation_spec = operation_spec
+
+                def list_service_operations(
+                    self, *, limit: int
+                ) -> list[dict[str, object]]:
+                    return [
+                        {
+                            "id": "sop_historical",
+                            "state": self.operation_state,
+                            "spec": self.operation_spec,
+                            "attempts": [],
+                        }
+                    ]
+
+            with (
+                self.subTest(state=state, changed_revision=changed_revision),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                _find_completed_github_effect(
+                    DatabaseStub(state, value),
+                    expected,  # type: ignore[arg-type]
+                )
 
 
 if __name__ == "__main__":

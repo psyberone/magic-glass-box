@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from magic_glass_box.candidates import CandidateManifest, GitCandidateStore
-from magic_glass_box.db import Database, NotFoundError
+from magic_glass_box.db import Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -613,11 +613,12 @@ def _github_operation_spec(
     expected_revision: str | None,
     desired_revision: str | None,
     parameters: Mapping[str, Any],
+    connector_name: str = GITHUB_SIDECAR_NAME,
 ) -> ServiceOperationSpec:
     return ServiceOperationSpec.from_mapping(
         {
             "schema_version": 1,
-            "connector_name": GITHUB_SIDECAR_NAME,
+            "connector_name": connector_name,
             "deployment_sha256": deployment_sha256,
             "mapping": dict(mapping),
             "capability": {"name": capability, "version": 1, "mode": mode},
@@ -831,6 +832,12 @@ def _ensure_spec_file(path: Path, spec: ServiceSidecarSpec) -> None:
     _write_spec(path, spec)
 
 
+def _github_provider_spec_path(root: Path, spec: ServiceSidecarSpec) -> Path:
+    """Give every immutable sidecar specification its own restart-safe path."""
+
+    return root / f"provider-{spec.digest}.json"
+
+
 def _clear_stale_socket(path: Path) -> None:
     try:
         info = path.lstat()
@@ -848,27 +855,166 @@ def _register_github_authority(
     *,
     spec: ServiceSidecarSpec,
 ) -> dict[str, dict[str, Any]]:
-    try:
-        sidecar = control.database.get_service_sidecar(GITHUB_SIDECAR_NAME)
-    except NotFoundError:
+    database = control.database
+    capabilities = ("refs.publish", "change.open", "landing.invoke")
+    sidecars = database.list_service_sidecars()
+    managed = [
+        item
+        for item in sidecars
+        if item["name"] == GITHUB_SIDECAR_NAME
+        or item["name"].startswith(GITHUB_SIDECAR_NAME + "-")
+    ]
+    exact = [
+        item
+        for item in managed
+        if item["state"] == "active" and item["content_sha256"] == spec.digest
+    ]
+    if len(exact) > 1:
+        raise RuntimeError("existing GitHub sidecar authority is ambiguous")
+
+    rotation_sources = [
+        item
+        for item in managed
+        if item["state"] == "active" and (not exact or item["id"] != exact[0]["id"])
+    ]
+    expected_identity = spec.to_dict()
+    expected_identity.pop("deployment_sha256")
+    for source in rotation_sources:
+        observed_identity = dict(source["spec"])
+        observed_identity.pop("deployment_sha256")
+        if observed_identity != expected_identity:
+            raise RuntimeError("existing GitHub sidecar authority does not match")
+
+    operations = database.list_service_operations(limit=1000)
+    if len(operations) == 1000 and rotation_sources:
+        raise RuntimeError("GitHub sidecar history is too large to rotate safely")
+    rotating_names = {item["name"] for item in rotation_sources}
+    unresolved = [
+        item
+        for item in operations
+        if item["sidecar"]["name"] in rotating_names
+        and item["state"] not in {"succeeded", "denied", "conflict", "cancelled"}
+    ]
+    if unresolved:
+        raise RuntimeError("existing GitHub sidecar has an unresolved operation")
+
+    active_bindings = database.list_project_capability_bindings()
+    foreign_bindings = [
+        item
+        for item in active_bindings
+        if item["controller"]["sidecar_name"] in rotating_names
+        and (
+            item["project"]["key"] != PROJECT_KEY
+            or item["capability"]["name"] not in capabilities
+        )
+    ]
+    if foreign_bindings:
+        raise RuntimeError(
+            "existing GitHub sidecar has authority outside this workflow"
+        )
+    current_bindings = database.list_project_capability_bindings(
+        project_key=PROJECT_KEY
+    )
+    managed_ids = {item["id"] for item in managed}
+    if any(
+        item["capability"]["name"] in capabilities
+        and item["controller"]["sidecar_id"] not in managed_ids
+        for item in current_bindings
+    ):
+        raise RuntimeError("existing GitHub capability authority does not match")
+
+    if exact:
+        sidecar = exact[0]
+    elif not managed:
         sidecar = control.register_service_sidecar(
             name=GITHUB_SIDECAR_NAME,
             spec=spec,
             created_by_handle="operator",
         )
-    if sidecar["state"] != "active" or sidecar["content_sha256"] != spec.digest:
-        raise RuntimeError("existing GitHub sidecar authority does not match")
+    elif rotation_sources:
+        rotated_name = GITHUB_SIDECAR_NAME + "-" + spec.deployment_sha256[:48]
+        named = [item for item in managed if item["name"] == rotated_name]
+        if named:
+            raise RuntimeError("existing GitHub sidecar authority does not match")
+        sidecar = control.register_service_sidecar(
+            name=rotated_name,
+            spec=spec,
+            created_by_handle="operator",
+        )
+    else:
+        raise RuntimeError("existing GitHub sidecar authority was revoked")
+
     bindings: dict[str, dict[str, Any]] = {}
-    for capability in ("refs.publish", "change.open", "landing.invoke"):
+    for capability in capabilities:
+        current = next(
+            (
+                item
+                for item in current_bindings
+                if item["capability"]["name"] == capability
+            ),
+            None,
+        )
+        if current is not None and current["controller"]["sidecar_id"] != sidecar["id"]:
+            control.unbind_project_capability(
+                current["id"],
+                expected_version=current["version"],
+                unbound_by_handle="operator",
+            )
         bindings[capability] = control.bind_project_capability(
             project_key=PROJECT_KEY,
             capability_name=capability,
             capability_version=1,
-            sidecar_name=GITHUB_SIDECAR_NAME,
+            sidecar_name=sidecar["name"],
             mapping_name=GITHUB_MAPPING_NAME,
             bound_by_handle="operator",
         )
+
+    rebound = database.list_project_capability_bindings()
+    for source in rotation_sources:
+        if any(item["controller"]["sidecar_id"] == source["id"] for item in rebound):
+            raise RuntimeError("existing GitHub sidecar remains bound")
+        control.revoke_service_sidecar(
+            source["name"],
+            expected_version=source["version"],
+            revoked_by_handle="operator",
+        )
     return bindings
+
+
+def _find_completed_github_effect(
+    database: Database,
+    expected: ServiceOperationSpec,
+) -> dict[str, Any] | None:
+    """Reuse a completed logical effect without replaying it after rotation."""
+
+    matching_key = [
+        item
+        for item in database.list_service_operations(limit=1000)
+        if item["spec"]["idempotency_key"] == expected.idempotency_key
+    ]
+    if not matching_key:
+        return None
+    if len(matching_key) != 1:
+        raise RuntimeError("GitHub effect history is ambiguous")
+    operation = matching_key[0]
+    observed = dict(operation["spec"])
+    expected_value = expected.to_dict()
+    observed_connector = observed.pop("connector_name")
+    expected_value.pop("connector_name")
+    observed.pop("deployment_sha256")
+    expected_value.pop("deployment_sha256")
+    if (
+        not isinstance(observed_connector, str)
+        or not (
+            observed_connector == GITHUB_SIDECAR_NAME
+            or observed_connector.startswith(GITHUB_SIDECAR_NAME + "-")
+        )
+        or observed != expected_value
+    ):
+        raise RuntimeError("GitHub effect idempotency key was reused with changes")
+    if operation["state"] != "succeeded":
+        raise RuntimeError("GitHub effect from an earlier deployment is unresolved")
+    return operation
 
 
 def _settle_effect(
@@ -934,15 +1080,18 @@ def _publish_and_open(
         expected_revision=None,
         desired_revision=candidate["head_revision"],
         parameters={"source_repository": str(candidate_repository)},
+        connector_name=bindings["refs.publish"]["controller"]["sidecar_name"],
     )
-    published = control.create_service_operation(
-        spec=publish_spec,
-        created_by_handle="operator",
-        project_capability_binding_id=bindings["refs.publish"]["id"],
-    )
-    published = _settle_effect(
-        control, published, owner_id=f"workflow-publish-{execution['id']}"
-    )
+    published = _find_completed_github_effect(control.database, publish_spec)
+    if published is None:
+        published = control.create_service_operation(
+            spec=publish_spec,
+            created_by_handle="operator",
+            project_capability_binding_id=bindings["refs.publish"]["id"],
+        )
+        published = _settle_effect(
+            control, published, owner_id=f"workflow-publish-{execution['id']}"
+        )
     publish_receipt = _operation_receipt(published)
     if publish_receipt["observed_revision"] != candidate["head_revision"]:
         raise RuntimeError("GitHub publish observed the wrong candidate")
@@ -970,15 +1119,18 @@ def _publish_and_open(
             "head_ref": SUGGESTED_BRANCH,
             "title": _work_item().title,
         },
+        connector_name=bindings["change.open"]["controller"]["sidecar_name"],
     )
-    opened = control.create_service_operation(
-        spec=open_spec,
-        created_by_handle="operator",
-        project_capability_binding_id=bindings["change.open"]["id"],
-    )
-    opened = _settle_effect(
-        control, opened, owner_id=f"workflow-open-{execution['id']}"
-    )
+    opened = _find_completed_github_effect(control.database, open_spec)
+    if opened is None:
+        opened = control.create_service_operation(
+            spec=open_spec,
+            created_by_handle="operator",
+            project_capability_binding_id=bindings["change.open"]["id"],
+        )
+        opened = _settle_effect(
+            control, opened, owner_id=f"workflow-open-{execution['id']}"
+        )
     open_receipt = _operation_receipt(opened)
     pull_number = _pull_number(
         open_receipt["remote_identity"],
@@ -1392,7 +1544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 credential_scope_sha256=identity["credential_scope_sha256"],
                 deployment_sha256=_github_deployment_sha256(source_root),
             )
-            github_spec_path = github_root / "provider.json"
+            github_spec_path = _github_provider_spec_path(github_root, github_spec)
             _ensure_spec_file(github_spec_path, github_spec)
             github_process = _start_provider(
                 python_bin=Path(sys.executable).resolve(),
