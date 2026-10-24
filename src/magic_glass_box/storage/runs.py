@@ -45,6 +45,9 @@ class RunStorage:
         change_review_evidence_id: str | None = None,
         change_review_entry_id: str | None = None,
         change_maintainer_review_id: str | None = None,
+        workflow_execution_id: str | None = None,
+        workflow_round: int | None = None,
+        workflow_role: str | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
@@ -100,6 +103,27 @@ class RunStorage:
             krab_session_id = validate_krab_id(krab_session_id, "ses")
         if krab_claim_id is not None:
             krab_claim_id = validate_krab_id(krab_claim_id, "clm")
+        workflow_values = (
+            workflow_execution_id,
+            workflow_round,
+            workflow_role,
+        )
+        if any(value is not None for value in workflow_values):
+            if any(value is None for value in workflow_values):
+                raise ValidationError("workflow run binding is incomplete")
+            workflow_execution_id = require_string(
+                workflow_execution_id,
+                field="workflow_execution_id",
+                max_bytes=64,
+            )
+            if (
+                isinstance(workflow_round, bool)
+                or not isinstance(workflow_round, int)
+                or not 0 <= workflow_round <= 8
+            ):
+                raise ValidationError("workflow_round must be between 0 and 8")
+            if workflow_role not in {"producer", "reviewer"}:
+                raise ValidationError("workflow_role is invalid")
         if supervision_policy is None:
             supervision_policy = SupervisionPolicy.disabled()
         elif not isinstance(supervision_policy, SupervisionPolicy):
@@ -117,6 +141,58 @@ class RunStorage:
                 ).fetchone()
                 if project is None or not project["active"]:
                     raise NotFoundError(f"active project not found: {project_key}")
+                workflow = None
+                if workflow_execution_id is not None:
+                    workflow = connection.execute(
+                        "SELECT e.project_id, e.context_version_id, "
+                        "e.work_item_id, e.work_item_version_id, e.work_thread_id, "
+                        "e.source_revision, e.state, e.stage, e.correction_round, "
+                        "e.requested_by, cv.producer_profile_version_id, "
+                        "cv.reviewer_profile_version_id "
+                        "FROM workflow_executions e "
+                        "JOIN workflow_configuration_versions cv "
+                        "ON cv.id = e.configuration_version_id WHERE e.id = ?",
+                        (workflow_execution_id,),
+                    ).fetchone()
+                    if workflow is None:
+                        raise NotFoundError(
+                            "workflow execution not found: " + workflow_execution_id
+                        )
+                    if workflow["state"] != "active":
+                        raise ConflictError("workflow execution is not active")
+                    if workflow["stage"] != "build":
+                        raise ConflictError("workflow execution is not building")
+                    if workflow["correction_round"] != workflow_round:
+                        raise ConflictError("workflow correction round changed")
+                    if workflow["project_id"] != project["id"]:
+                        raise ConflictError("workflow belongs to another project")
+                    if workflow["work_item_id"] != work_item_id:
+                        raise ConflictError("workflow belongs to another work item")
+                    if workflow["requested_by"] != requested_by:
+                        raise ConflictError("workflow requester changed")
+                    if workflow_role == "producer":
+                        if (
+                            workflow_round == 0
+                            and source_revision != workflow["source_revision"]
+                        ):
+                            raise ConflictError(
+                                "workflow producer source revision changed"
+                            )
+                        if workflow_round == 0 and (
+                            gate_policy_id is not None or change_policy_id is not None
+                        ):
+                            raise ConflictError(
+                                "initial workflow producer cannot bind a gate policy"
+                            )
+                        if workflow_round > 0 and change_policy_id is None:
+                            raise ConflictError(
+                                "workflow correction requires changes-requested "
+                                "evidence"
+                            )
+                    elif gate_policy_id is None:
+                        raise ConflictError(
+                            "workflow reviewer requires an exact gate policy"
+                        )
                 gate_policy = None
                 change_target = None
                 maintainer_change_target = None
@@ -222,10 +298,17 @@ class RunStorage:
                             raise ConflictError(
                                 "changes requested require a review work-log entry"
                             )
-                        if (
-                            not review_entry.summary.strip()
+                        legacy_changes_requested = (
+                            review_entry.review_outcome is None
+                            and review_entry.summary.strip()
                             .upper()
                             .startswith("CHANGES REQUESTED")
+                        )
+                        typed_changes_requested = (
+                            review_entry.review_outcome == "changes_requested"
+                        )
+                        if (
+                            not (legacy_changes_requested or typed_changes_requested)
                             or not review_entry.details
                         ):
                             raise ConflictError(
@@ -286,20 +369,46 @@ class RunStorage:
                             )
                         maintainer_change_target = maintainer_review
                 else:
-                    context = connection.execute(
-                        "SELECT id FROM project_context_versions "
-                        "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
-                        (project["id"],),
+                    context = (
+                        {"id": workflow["context_version_id"]}
+                        if workflow is not None
+                        else connection.execute(
+                            "SELECT id FROM project_context_versions "
+                            "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+                            (project["id"],),
+                        ).fetchone()
+                    )
+                if (
+                    workflow is not None
+                    and context["id"] != workflow["context_version_id"]
+                ):
+                    raise ConflictError(
+                        "workflow gate policy belongs to another project context"
+                    )
+                if workflow is None:
+                    work_item_version = connection.execute(
+                        "SELECT wiv.id, wt.id AS work_thread_id FROM work_items wi "
+                        "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
+                        "JOIN work_threads wt ON wt.work_item_id = wi.id "
+                        "WHERE wi.id = ? AND wi.project_id = ? "
+                        "AND wt.state = 'active' "
+                        "ORDER BY wiv.version DESC LIMIT 1",
+                        (work_item_id, project["id"]),
                     ).fetchone()
-                work_item_version = connection.execute(
-                    "SELECT wiv.id, wt.id AS work_thread_id FROM work_items wi "
-                    "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
-                    "JOIN work_threads wt ON wt.work_item_id = wi.id "
-                    "WHERE wi.id = ? AND wi.project_id = ? "
-                    "AND wt.state = 'active' "
-                    "ORDER BY wiv.version DESC LIMIT 1",
-                    (work_item_id, project["id"]),
-                ).fetchone()
+                else:
+                    work_item_version = connection.execute(
+                        "SELECT wiv.id, wt.id AS work_thread_id "
+                        "FROM work_item_versions wiv JOIN work_threads wt "
+                        "ON wt.id = ? WHERE wiv.id = ? "
+                        "AND wiv.work_item_id = ? AND wt.work_item_id = ? "
+                        "AND wt.state = 'active'",
+                        (
+                            workflow["work_thread_id"],
+                            workflow["work_item_version_id"],
+                            work_item_id,
+                            work_item_id,
+                        ),
+                    ).fetchone()
                 if work_item_version is None:
                     known_work_item = connection.execute(
                         "SELECT 1 FROM work_items WHERE id = ? AND project_id = ?",
@@ -321,22 +430,48 @@ class RunStorage:
                     raise ConflictError(
                         "gate review policy belongs to another work thread"
                     )
-                profile = connection.execute(
-                    "SELECT id, active FROM agent_profiles WHERE name = ?",
-                    (profile_name,),
-                ).fetchone()
+                expected_profile_version_id = None
+                if workflow is not None:
+                    expected_profile_version_id = workflow[
+                        f"{workflow_role}_profile_version_id"
+                    ]
+                    profile = connection.execute(
+                        "SELECT ap.id, ap.active, ap.name "
+                        "FROM agent_profile_versions av JOIN agent_profiles ap "
+                        "ON ap.id = av.profile_id WHERE av.id = ? AND ap.name = ?",
+                        (expected_profile_version_id, profile_name),
+                    ).fetchone()
+                else:
+                    profile = connection.execute(
+                        "SELECT id, active, name FROM agent_profiles WHERE name = ?",
+                        (profile_name,),
+                    ).fetchone()
                 if profile is None or not profile["active"]:
                     raise NotFoundError(
                         f"active agent profile not found: {profile_name}"
                     )
-                profile_version = connection.execute(
-                    "SELECT av.id, av.spec_json, av.krab_identity_id, "
-                    "ki.krab_instance_id "
-                    "FROM agent_profile_versions av "
-                    "JOIN krab_identities ki ON ki.id = av.krab_identity_id "
-                    "WHERE av.profile_id = ? ORDER BY av.version DESC LIMIT 1",
-                    (profile["id"],),
-                ).fetchone()
+                if expected_profile_version_id is None:
+                    profile_version = connection.execute(
+                        "SELECT av.id, av.spec_json, av.krab_identity_id, "
+                        "ki.krab_instance_id "
+                        "FROM agent_profile_versions av "
+                        "JOIN krab_identities ki ON ki.id = av.krab_identity_id "
+                        "WHERE av.profile_id = ? ORDER BY av.version DESC LIMIT 1",
+                        (profile["id"],),
+                    ).fetchone()
+                else:
+                    profile_version = connection.execute(
+                        "SELECT av.id, av.spec_json, av.krab_identity_id, "
+                        "ki.krab_instance_id "
+                        "FROM agent_profile_versions av "
+                        "JOIN krab_identities ki ON ki.id = av.krab_identity_id "
+                        "WHERE av.id = ? AND av.profile_id = ?",
+                        (expected_profile_version_id, profile["id"]),
+                    ).fetchone()
+                    if profile_version is None:
+                        raise StorageError(
+                            "workflow pinned profile version is unavailable"
+                        )
                 if profile_version["krab_instance_id"] != project["krab_instance_id"]:
                     raise ConflictError(
                         "agent profile and project belong to different Krab instances"
@@ -404,6 +539,19 @@ class RunStorage:
                         now,
                     ),
                 )
+                if workflow_execution_id is not None:
+                    connection.execute(
+                        "INSERT INTO workflow_run_bindings "
+                        "(run_id, execution_id, correction_round, role, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            workflow_execution_id,
+                            workflow_round,
+                            workflow_role,
+                            now,
+                        ),
+                    )
                 if gate_policy is not None:
                     if gate_policy_id is not None:
                         connection.execute(

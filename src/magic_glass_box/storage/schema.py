@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -3872,6 +3872,309 @@ BEGIN
 END;
 """
 
+WORKFLOW_DIRECTOR_SCHEMA = """
+ALTER TABLE workflow_executions ADD COLUMN correction_round INTEGER NOT NULL
+    DEFAULT 0 CHECK (correction_round BETWEEN 0 AND 8);
+
+CREATE TABLE workflow_run_bindings (
+    run_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    role TEXT NOT NULL CHECK (role IN ('producer', 'reviewer')),
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, correction_round, role),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_id) REFERENCES workflow_executions(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_gate_bindings (
+    execution_id TEXT NOT NULL,
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    candidate_id TEXT NOT NULL UNIQUE,
+    policy_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (execution_id, correction_round),
+    FOREIGN KEY (execution_id) REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE integration_review_verdicts (
+    work_log_entry_id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    head_revision TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('approved', 'changes_requested')),
+    reviewer_run_id TEXT NOT NULL,
+    reviewer_attempt_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (work_log_entry_id)
+        REFERENCES work_log_entries(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_attempt_id)
+        REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE UNIQUE INDEX integration_review_verdict_policy_attempt
+    ON integration_review_verdicts(policy_id, reviewer_attempt_id);
+
+CREATE TABLE workflow_rulings (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    execution_version INTEGER NOT NULL CHECK (execution_version >= 1),
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'correction_limit', 'producer_failed', 'reviewer_failed',
+            'review_verdict_missing', 'validation_failed'
+        )
+    ),
+    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    policy_id TEXT,
+    run_id TEXT,
+    gate_name TEXT,
+    resolved_by TEXT,
+    decision TEXT CHECK (decision IS NULL OR decision IN ('continue', 'cancel')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (execution_id, execution_version, kind),
+    FOREIGN KEY (execution_id) REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'open' AND resolved_by IS NULL AND decision IS NULL
+            AND resolved_at IS NULL)
+        OR
+        (state = 'resolved' AND resolved_by IS NOT NULL AND decision IS NOT NULL
+            AND resolved_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX workflow_ruling_one_open
+    ON workflow_rulings(execution_id) WHERE state = 'open';
+
+CREATE TRIGGER workflow_run_binding_immutable_update
+BEFORE UPDATE ON workflow_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow run bindings are immutable');
+END;
+CREATE TRIGGER workflow_run_binding_immutable_delete
+BEFORE DELETE ON workflow_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow run bindings cannot be deleted');
+END;
+CREATE TRIGGER workflow_gate_binding_immutable_update
+BEFORE UPDATE ON workflow_gate_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow gate bindings are immutable');
+END;
+CREATE TRIGGER workflow_gate_binding_immutable_delete
+BEFORE DELETE ON workflow_gate_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow gate bindings cannot be deleted');
+END;
+CREATE TRIGGER integration_review_verdict_immutable_update
+BEFORE UPDATE ON integration_review_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'integration review verdicts are immutable');
+END;
+CREATE TRIGGER integration_review_verdict_immutable_delete
+BEFORE DELETE ON integration_review_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'integration review verdicts cannot be deleted');
+END;
+CREATE TRIGGER workflow_ruling_identity_immutable
+BEFORE UPDATE OF
+    id, execution_id, execution_version, correction_round, kind,
+    policy_id, run_id, gate_name, created_at
+ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow ruling identity is immutable');
+END;
+CREATE TRIGGER workflow_ruling_immutable_delete
+BEFORE DELETE ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow rulings cannot be deleted');
+END;
+
+DROP TRIGGER workflow_execution_transition;
+CREATE TRIGGER workflow_execution_transition
+BEFORE UPDATE ON workflow_executions
+WHEN
+    OLD.state != 'active'
+    OR NEW.version != OLD.version + 1
+    OR NEW.state NOT IN ('active', 'cancelled', 'completed')
+    OR NEW.correction_round < OLD.correction_round
+    OR NEW.correction_round > OLD.correction_round + 1
+    OR (NEW.state = 'active'
+        AND (NEW.finished_at IS NOT NULL OR NEW.cancel_reason IS NOT NULL))
+    OR (NEW.state = 'cancelled'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NULL
+            OR NEW.stage != OLD.stage
+            OR NEW.correction_round != OLD.correction_round))
+    OR (NEW.state = 'completed'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NOT NULL))
+    OR (NEW.state = 'active' AND NOT (
+        (NEW.stage = OLD.stage
+            AND NEW.correction_round = OLD.correction_round)
+        OR (OLD.stage = 'build' AND NEW.stage = 'review'
+            AND NEW.correction_round = OLD.correction_round)
+        OR (OLD.stage = 'review' AND NEW.stage IN ('maintainer', 'landing')
+            AND NEW.correction_round = OLD.correction_round)
+        OR (OLD.stage IN ('review', 'maintainer') AND NEW.stage = 'build'
+            AND NEW.correction_round = OLD.correction_round + 1)
+        OR (OLD.stage = 'maintainer' AND NEW.stage = 'landing'
+            AND NEW.correction_round = OLD.correction_round)
+    ))
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution transition is invalid');
+END;
+
+DROP TRIGGER workflow_execution_event_immutable_update;
+DROP TRIGGER workflow_execution_event_immutable_delete;
+DROP INDEX workflow_execution_event_stream;
+ALTER TABLE workflow_execution_events RENAME TO workflow_execution_events_v28;
+CREATE TABLE workflow_execution_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'workflow.started', 'workflow.cancelled',
+            'workflow.review_started', 'workflow.correction_started',
+            'workflow.maintainer_pending', 'workflow.landing_ready',
+            'workflow.ruling_opened', 'workflow.ruling_resolved'
+        )
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL CHECK (
+        to_state IN ('active', 'cancelled', 'completed')
+    ),
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, sequence),
+    FOREIGN KEY (execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+INSERT INTO workflow_execution_events
+    (id, execution_id, sequence, kind, from_state, to_state, actor,
+     metadata_json, created_at)
+SELECT id, execution_id, sequence, kind, from_state, to_state, actor,
+       metadata_json, created_at
+FROM workflow_execution_events_v28;
+DROP TABLE workflow_execution_events_v28;
+CREATE INDEX workflow_execution_event_stream
+    ON workflow_execution_events(execution_id, sequence);
+CREATE TRIGGER workflow_execution_event_immutable_update
+BEFORE UPDATE ON workflow_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution events are immutable');
+END;
+CREATE TRIGGER workflow_execution_event_immutable_delete
+BEFORE DELETE ON workflow_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution events cannot be deleted');
+END;
+
+DROP TRIGGER supervisor_action_identity_immutable;
+DROP TRIGGER supervisor_action_immutable_delete;
+DROP INDEX supervisor_action_due;
+DROP INDEX supervisor_action_run;
+ALTER TABLE supervisor_actions RENAME TO supervisor_actions_v28;
+CREATE TABLE supervisor_actions (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'run.execute', 'attempt.reconcile', 'run.reconcile',
+            'workflow.advance'
+        )
+    ),
+    subject_id TEXT NOT NULL,
+    subject_version INTEGER NOT NULL CHECK (subject_version >= 1),
+    run_id TEXT,
+    workflow_execution_id TEXT,
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'claimed', 'succeeded', 'exhausted')
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 9),
+    retry_backoff_json TEXT NOT NULL,
+    available_at TEXT NOT NULL,
+    owner_id TEXT,
+    lease_expires_at TEXT,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (kind, subject_id, subject_version),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    CHECK (
+        (kind = 'workflow.advance' AND run_id IS NULL
+            AND workflow_execution_id = subject_id)
+        OR
+        (kind != 'workflow.advance' AND run_id IS NOT NULL
+            AND workflow_execution_id IS NULL)
+    ),
+    CHECK (
+        (
+            state = 'pending' AND owner_id IS NULL
+            AND lease_expires_at IS NULL AND finished_at IS NULL
+        ) OR (
+            state = 'claimed' AND owner_id IS NOT NULL
+            AND lease_expires_at IS NOT NULL AND finished_at IS NULL
+        ) OR (
+            state IN ('succeeded', 'exhausted') AND owner_id IS NULL
+            AND lease_expires_at IS NULL AND finished_at IS NOT NULL
+        )
+    )
+) STRICT;
+INSERT INTO supervisor_actions
+    (id, kind, subject_id, subject_version, run_id, workflow_execution_id,
+     state, version, attempt_count, max_attempts, retry_backoff_json,
+     available_at, owner_id, lease_expires_at, last_error_code, created_at,
+     updated_at, finished_at)
+SELECT id, kind, subject_id, subject_version, run_id, NULL,
+       state, version, attempt_count, max_attempts, retry_backoff_json,
+       available_at, owner_id, lease_expires_at, last_error_code, created_at,
+       updated_at, finished_at
+FROM supervisor_actions_v28;
+DROP TABLE supervisor_actions_v28;
+CREATE INDEX supervisor_action_due
+    ON supervisor_actions(state, available_at, lease_expires_at);
+CREATE INDEX supervisor_action_run
+    ON supervisor_actions(run_id, created_at DESC);
+CREATE INDEX supervisor_action_workflow
+    ON supervisor_actions(workflow_execution_id, created_at DESC);
+CREATE TRIGGER supervisor_action_identity_immutable
+BEFORE UPDATE OF
+    id, kind, subject_id, subject_version, run_id, workflow_execution_id,
+    max_attempts, retry_backoff_json, created_at
+ON supervisor_actions
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor action identity is immutable');
+END;
+CREATE TRIGGER supervisor_action_immutable_delete
+BEFORE DELETE ON supervisor_actions
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor actions cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -3903,6 +4206,7 @@ SCHEMA = (
     + GATE_CHANGE_SCHEMA
     + MAINTAINER_REVIEW_SCHEMA
     + WORKFLOW_TEMPLATE_SCHEMA
+    + WORKFLOW_DIRECTOR_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -3932,4 +4236,5 @@ MIGRATIONS = {
     25: GATE_CHANGE_SCHEMA,
     26: MAINTAINER_REVIEW_SCHEMA,
     27: WORKFLOW_TEMPLATE_SCHEMA,
+    28: WORKFLOW_DIRECTOR_SCHEMA,
 }

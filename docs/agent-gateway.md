@@ -116,9 +116,11 @@ and secret values.
 ### Work-memory operations
 
 `work.read` pages the bound work item's log from an optional sequence with a
-limit of 1 through 16. `work.append` accepts one v1 work-log entry, an optional
-assignment ID, and a stable idempotency key. The gateway supplies run identity
-and storage supplies attempt/profile/runtime provenance.
+limit of 1 through 16. `work.append` accepts one general v1 work-log entry or
+one typed review-v2 entry, an optional assignment ID, and a stable idempotency
+key. Review v2 is accepted only from a policy-bound reviewer attempt against
+its exact candidate head. The gateway supplies run identity and storage
+supplies attempt/profile/runtime provenance.
 
 `work.checkpoint` accepts one v1 checkpoint, the exact log sequence it covers,
 the observed thread version, and an idempotency key. Both the version and log

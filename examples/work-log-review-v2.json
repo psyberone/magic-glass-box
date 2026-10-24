@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "kind": "review",
+  "summary": "The candidate needs one bounded-read correction.",
+  "details": [
+    "Add a regression test that proves oversized health responses are rejected."
+  ],
+  "artifacts": [],
+  "related_interaction_ids": [],
+  "candidate_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "review_outcome": "changes_requested"
+}

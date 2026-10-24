@@ -262,6 +262,75 @@ class WorkStorage:
                     "related interaction does not belong to work thread"
                 )
 
+    @staticmethod
+    def _typed_review_target(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        attempt_id: str,
+        thread_id: str,
+        entry: WorkLogEntry,
+    ) -> sqlite3.Row | None:
+        if entry.review_outcome is None:
+            return None
+        target = connection.execute(
+            "SELECT grr.policy_id, grr.candidate_id, gp.head_revision, "
+            "gp.work_thread_id FROM integration_gate_review_runs grr "
+            "JOIN integration_gate_policies gp ON gp.id = grr.policy_id "
+            "WHERE grr.run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if target is None:
+            raise ConflictError(
+                "typed review verdict requires a policy-bound review run"
+            )
+        if target["work_thread_id"] != thread_id:
+            raise ConflictError("typed review verdict belongs to another work thread")
+        if entry.candidate_revision != target["head_revision"]:
+            raise ConflictError(
+                "typed review verdict is not pinned to the exact candidate"
+            )
+        existing = connection.execute(
+            "SELECT work_log_entry_id FROM integration_review_verdicts "
+            "WHERE reviewer_attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        if existing is not None:
+            raise ConflictError(
+                "reviewer attempt already recorded a typed review verdict"
+            )
+        return target
+
+    @staticmethod
+    def _insert_typed_review_verdict(
+        connection: sqlite3.Connection,
+        *,
+        entry_id: str,
+        run_id: str,
+        attempt_id: str,
+        entry: WorkLogEntry,
+        target: sqlite3.Row,
+        now: str,
+    ) -> None:
+        assert entry.review_outcome is not None
+        assert entry.candidate_revision is not None
+        connection.execute(
+            "INSERT INTO integration_review_verdicts "
+            "(work_log_entry_id, policy_id, candidate_id, head_revision, "
+            "outcome, reviewer_run_id, reviewer_attempt_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entry_id,
+                target["policy_id"],
+                target["candidate_id"],
+                entry.candidate_revision,
+                entry.review_outcome.value,
+                run_id,
+                attempt_id,
+                now,
+            ),
+        )
+
     def get_work_memory_for_run(
         self,
         run_id: str,
@@ -436,6 +505,13 @@ class WorkStorage:
                         thread_id=author["work_thread_id"],
                         entry=entry,
                     )
+                    review_target = self._typed_review_target(
+                        connection,
+                        run_id=run_id,
+                        attempt_id=author["attempt_id"],
+                        thread_id=author["work_thread_id"],
+                        entry=entry,
+                    )
                     thread = connection.execute(
                         "SELECT log_sequence FROM work_threads WHERE id = ?",
                         (author["work_thread_id"],),
@@ -461,6 +537,16 @@ class WorkStorage:
                             now,
                         ),
                     )
+                    if review_target is not None:
+                        self._insert_typed_review_verdict(
+                            connection,
+                            entry_id=entry_id,
+                            run_id=run_id,
+                            attempt_id=author["attempt_id"],
+                            entry=entry,
+                            target=review_target,
+                            now=now,
+                        )
                     connection.execute(
                         "UPDATE work_threads SET log_sequence = ?, "
                         "version = version + 1, updated_at = ? WHERE id = ?",
@@ -478,6 +564,24 @@ class WorkStorage:
                 connection.rollback()
                 raise ConflictError("work-log entry could not be recorded") from exc
         return result
+
+    def get_typed_review_verdict(
+        self, policy_id: str, reviewer_run_id: str
+    ) -> dict[str, Any] | None:
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        reviewer_run_id = require_string(
+            reviewer_run_id, field="reviewer_run_id", max_bytes=64
+        )
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT v.work_log_entry_id, v.policy_id, v.candidate_id, "
+                "v.head_revision, v.outcome, v.reviewer_run_id, "
+                "v.reviewer_attempt_id, v.created_at "
+                "FROM integration_review_verdicts v "
+                "WHERE v.policy_id = ? AND v.reviewer_run_id = ?",
+                (policy_id, reviewer_run_id),
+            ).fetchone()
+        return None if row is None else dict(row)
 
     def create_work_memory_checkpoint(
         self,

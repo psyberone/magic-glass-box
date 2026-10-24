@@ -9,7 +9,7 @@ import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from .db import (
@@ -35,6 +35,10 @@ class RunAdvancer(Protocol):
     def execute(self, run_id: str) -> dict[str, Any]: ...
 
     def reconcile(self, run_id: str | None = None) -> list[dict[str, Any]]: ...
+
+
+class WorkflowAdvancer(Protocol):
+    def advance(self, execution_id: str, *, expected_version: int) -> bool: ...
 
 
 class EscalationTransport(Protocol):
@@ -64,6 +68,7 @@ class Supervisor:
         coordinator: RunAdvancer,
         escalation_transport: EscalationTransport,
         *,
+        workflow_director: WorkflowAdvancer | None = None,
         supervisor_id: str | None = None,
         poll_interval: float = 2.0,
         max_workers: int = 4,
@@ -141,6 +146,7 @@ class Supervisor:
         self.database = database
         self.coordinator = coordinator
         self.escalation_transport = escalation_transport
+        self.workflow_director = workflow_director
         self.supervisor_id = supervisor_id
         self.poll_interval = float(poll_interval)
         self.max_workers = max_workers
@@ -414,6 +420,16 @@ class Supervisor:
                     return
             elif action["kind"] == "run.reconcile":
                 self.coordinator.reconcile(action["run_id"])
+            elif action["kind"] == "workflow.advance":
+                if self.workflow_director is None:
+                    raise SupervisorError("workflow director is unavailable")
+                finished = self.workflow_director.advance(
+                    action["workflow_execution_id"],
+                    expected_version=action["subject_version"],
+                )
+                if not finished:
+                    self._defer_workflow_action(action)
+                    return
             else:
                 raise SupervisorError("stored supervisor action kind is invalid")
         except Exception as exc:
@@ -463,6 +479,18 @@ class Supervisor:
             expected_version=int(action["version"]),
         )
 
+    def _defer_workflow_action(self, action: Mapping[str, Any]) -> None:
+        current = datetime.fromisoformat(self.database.now())
+        available_at = (current + timedelta(seconds=self.poll_interval)).isoformat(
+            timespec="microseconds"
+        )
+        self.database.defer_supervisor_action(
+            str(action["id"]),
+            owner_id=self.supervisor_id,
+            expected_version=int(action["version"]),
+            available_at=available_at,
+        )
+
     def _defer_renewed_attempt(self, action: Mapping[str, Any]) -> bool:
         attempt = self.database.get_run_attempt(str(action["subject_id"]))
         if (
@@ -510,6 +538,14 @@ class Supervisor:
                 return (
                     attempt["state"] not in {"preparing", "running"}
                     or attempt["version"] != action["subject_version"]
+                )
+            if action["kind"] == "workflow.advance":
+                execution = self.database.get_workflow_execution(
+                    str(action["workflow_execution_id"])
+                )
+                return (
+                    execution["state"] != "active"
+                    or execution["version"] != action["subject_version"]
                 )
             run = self.database.get_run(str(action["run_id"]))
             return (

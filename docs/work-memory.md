@@ -18,17 +18,25 @@ Work memory deliberately separates:
 - **assignments**, which delegate a bounded objective to one exact agent
   profile revision under a reclaimable lease.
 
-The v1 JSON contracts are published in
+The general v1 JSON contracts are published in
 [`schemas/work-log-entry-v1.schema.json`](../schemas/work-log-entry-v1.schema.json),
 [`schemas/work-memory-checkpoint-v1.schema.json`](../schemas/work-memory-checkpoint-v1.schema.json),
 and
 [`schemas/work-assignment-v1.schema.json`](../schemas/work-assignment-v1.schema.json).
-Examples live beside the other import examples.
+Typed exact-candidate reviewer verdicts use the narrower
+[`schemas/work-log-entry-v2.schema.json`](../schemas/work-log-entry-v2.schema.json)
+contract. Examples live beside the other import examples.
 
 A log entry has a typed kind, short summary, bounded details, artifact
 references, related interaction IDs, and an optional candidate revision. The
 orchestrator supplies its author run, attempt, profile revision, runtime
 adapter, sequence, and timestamp. A worker cannot forge that provenance.
+Schema v2 is reserved for `review` entries and adds a required
+`review_outcome` of `approved` or `changes_requested`. It requires the exact
+candidate revision, and a changes-requested verdict requires at least one
+actionable detail. Storage accepts that verdict authority only from a
+policy-bound reviewer attempt against the named exact head and permits one
+typed verdict per attempt. Summary wording remains ordinary evidence text.
 
 A checkpoint contains a summary, accepted decisions, artifact references,
 next steps, blockers, and an optional candidate revision. Creating one requires
@@ -100,7 +108,7 @@ magic-glass-box work-item reopen wki_<id> \
 Profiles grant each operation separately:
 
 - `work.read` pages through work memory;
-- `work.append` adds an idempotent evidence entry;
+- `work.append` adds an idempotent general v1 entry or typed review-v2 entry;
 - `work.checkpoint` publishes an optimistic compact view;
 - `work.assign` creates a profile-pinned assignment;
 - `work.assignment.claim` acquires or reclaims its lease; and

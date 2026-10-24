@@ -151,6 +151,14 @@ class FakeControlPlane:
     ) -> dict[str, object]:
         return self._called("workflow.cancel", execution_id=execution_id, **kwargs)
 
+    def get_workflow_ruling(self, ruling_id: str) -> dict[str, object]:
+        return self._called("workflow.ruling-show", ruling_id=ruling_id)
+
+    def resolve_workflow_ruling(
+        self, ruling_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("workflow.ruling-resolve", ruling_id=ruling_id, **kwargs)
+
     def revoke_provider_grant(self, name: str, **kwargs: object) -> dict[str, object]:
         return self._called("provider.revoke", name=name, **kwargs)
 
@@ -544,6 +552,8 @@ class CLITests(unittest.TestCase):
                     ("show", "show one workflow execution and event stream"),
                     ("list", "list bounded workflow executions"),
                     ("cancel", "cancel one active workflow execution"),
+                    ("ruling-show", "show one durable workflow ruling"),
+                    ("ruling-resolve", "resolve one durable workflow ruling"),
                 ),
             ),
             ("provider",): (
@@ -887,6 +897,11 @@ class CLITests(unittest.TestCase):
                     "--cancelled-by",
                     "--reason",
                 ),
+                ("workflow", "ruling-resolve"): (
+                    "--expected-version",
+                    "--decision",
+                    "--resolved-by",
+                ),
                 ("inference-connector", "register"): (
                     "--spec",
                     "--created-by",
@@ -1058,6 +1073,10 @@ class CLITests(unittest.TestCase):
                     "active",
                     "cancelled",
                     "completed",
+                ),
+                (("workflow", "ruling-resolve"), "decision"): (
+                    "continue",
+                    "cancel",
                 ),
                 (("integration", "provider-issue"), "merge_method"): (
                     "merge",
@@ -1891,6 +1910,8 @@ class CLITests(unittest.TestCase):
                 "show": "show one workflow execution and event stream",
                 "list": "list bounded workflow executions",
                 "cancel": "cancel one active workflow execution",
+                "ruling-show": "show one durable workflow ruling",
+                "ruling-resolve": "resolve one durable workflow ruling",
             },
             "provider": {
                 "connector-add": "add a connector-bound provider grant",
@@ -2196,6 +2217,35 @@ class CLITests(unittest.TestCase):
                     },
                 ),
             ),
+            (
+                ["workflow", "ruling-show", "wri_" + "5" * 32],
+                (
+                    "workflow.ruling-show",
+                    {"ruling_id": "wri_" + "5" * 32},
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "ruling-resolve",
+                    "wri_" + "5" * 32,
+                    "--expected-version",
+                    "1",
+                    "--decision",
+                    "continue",
+                    "--resolved-by",
+                    "operator",
+                ],
+                (
+                    "workflow.ruling-resolve",
+                    {
+                        "ruling_id": "wri_" + "5" * 32,
+                        "expected_version": 1,
+                        "decision": "continue",
+                        "resolved_by_handle": "operator",
+                    },
+                ),
+            ),
         )
         for arguments, expected_call in cases:
             with self.subTest(arguments=arguments):
@@ -2429,6 +2479,9 @@ class CLITests(unittest.TestCase):
             mock.patch(
                 "magic_glass_box.cli.Supervisor", return_value=supervisor
             ) as supervisor_type,
+            mock.patch(
+                "magic_glass_box.cli._build_workflow_director"
+            ) as build_workflow_director,
             mock.patch("magic_glass_box.cli.logging.basicConfig") as configure_logs,
             redirect_stdout(stdout),
         ):
@@ -2457,6 +2510,7 @@ class CLITests(unittest.TestCase):
             control.database,
             mock.ANY,
             control,
+            workflow_director=build_workflow_director.return_value,
             poll_interval=1.5,
             max_workers=3,
             action_lease_seconds=45,

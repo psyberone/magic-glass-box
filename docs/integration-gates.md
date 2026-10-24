@@ -88,13 +88,15 @@ Review profiles are required to use `workspace_mode: read_only`. That check is
 performed when review runs and replacements are created and again when review
 evidence is accepted; it is not merely a reviewer prompt convention.
 
-A reviewer requesting changes records actionable feedback as a `review`
-work-log entry before its attempt exits, with `candidate_revision` set to the
-exact reviewed head. After failed evidence is recorded, `gate changes-create`
-requires that current failed evidence and the note authored by its exact
-reviewer attempt. It creates an ordinary developer run whose workspace starts
-at the changes-requested candidate, and exposes the selected review entry
-explicitly through
+A reviewer records one typed v2 `review` work-log verdict before its attempt
+exits, with `review_outcome` set to `approved` or `changes_requested` and
+`candidate_revision` set to the exact reviewed head. Changes requested require
+actionable details. Storage atomically binds the entry to the policy, candidate,
+head, run, and attempt; summary prose is not interpreted as verdict authority.
+After failed evidence is recorded, `gate changes-create` requires that current
+failed evidence and the note authored by its exact reviewer attempt. It creates
+an ordinary developer run whose workspace starts at the changes-requested
+candidate, and exposes the selected review entry explicitly through
 `run.describe`. Retry or reassignment preserves this binding. The developer's
 result becomes a new child candidate; the prior candidate, policy, and failed
 evidence remain immutable, and the child requires a fresh policy and

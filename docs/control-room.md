@@ -46,6 +46,9 @@ contains:
 - current work-item generations and visible, explicitly untrusted titles;
 - local profile-pinned assignments and their visible, untrusted titles;
 - all active runs plus a bounded number of recent terminal runs;
+- all active workflows plus a bounded number of recent terminal workflows,
+  including current stage, correction round, current version-bound supervisor
+  action state, and any open ruling ID/kind/version;
 - attempts, owners, leases, cancellation signals, interactions, retained
   result summaries, run-bound provider authorities, pinned supervision
   policies, candidate-backed review bindings, redacted exact-input gate
@@ -58,7 +61,7 @@ contains:
   blocker evidence, expired attempt leases, cancellation requests, inconsistent
   active runs, paused provider recovery, unavailable authorities, required
   refolds, pending manual receipts or provider landings, expired integration
-  claims, and exhausted supervisor work. Every
+  claims, exhausted supervisor work, and open workflow rulings. Every
   current attention entry includes its age in seconds at the snapshot's
   consistency timestamp.
 

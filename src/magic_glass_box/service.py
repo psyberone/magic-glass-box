@@ -1974,6 +1974,25 @@ class ControlPlane:
             reason=reason,
         )
 
+    def get_workflow_ruling(self, ruling_id: str) -> dict[str, Any]:
+        return self.database.get_workflow_ruling(ruling_id)
+
+    def resolve_workflow_ruling(
+        self,
+        ruling_id: str,
+        *,
+        expected_version: int,
+        decision: str,
+        resolved_by_handle: str,
+    ) -> dict[str, Any]:
+        resolver = self.database.get_user(resolved_by_handle)
+        return self.database.resolve_workflow_ruling(
+            ruling_id,
+            expected_version=expected_version,
+            decision=decision,
+            resolved_by=resolver["id"],
+        )
+
     def import_work_item(
         self,
         *,

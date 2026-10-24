@@ -112,6 +112,17 @@ relational control-plane authority and are supplied separately; the runtime
 requires their workspace modes and selected separation rule to agree with the
 configuration.
 
+Control-plane schema v29 adds the M12B director ledger: immutable workflow run
+and gate bindings, typed exact-head review-verdict authority, correction-round
+state, durable workflow rulings, and workflow-scoped supervisor actions. The
+portable `schemas/work-log-entry-v2.schema.json` contract is deliberately
+narrower than the general work-log v1 contract: it is only a `review`, requires
+an explicit `approved` or `changes_requested` outcome and exact candidate
+revision, and requires actionable details for changes requested. Runtime and
+storage additionally prove that the author is the policy-bound reviewer
+attempt for that exact head; portable schema validation alone cannot grant
+review authority.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

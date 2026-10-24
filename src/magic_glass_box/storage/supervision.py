@@ -151,6 +151,29 @@ class SupervisionStorage:
                     )
                     if action_id is not None:
                         inserted.append(action_id)
+
+                workflows = connection.execute(
+                    "SELECT e.id, e.version FROM workflow_executions e "
+                    "WHERE e.state = 'active' "
+                    "AND e.stage IN ('build', 'review', 'maintainer') "
+                    "AND NOT EXISTS (SELECT 1 FROM workflow_rulings wr "
+                    "WHERE wr.execution_id = e.id AND wr.state = 'open') "
+                    "ORDER BY e.created_at, e.id"
+                ).fetchall()
+                workflow_policy = SupervisionPolicy.disabled()
+                for workflow in workflows:
+                    action_id = self._insert_supervisor_action(
+                        connection,
+                        kind="workflow.advance",
+                        subject_id=workflow["id"],
+                        subject_version=workflow["version"],
+                        run_id=None,
+                        workflow_execution_id=workflow["id"],
+                        policy=workflow_policy,
+                        now=now,
+                    )
+                    if action_id is not None:
+                        inserted.append(action_id)
                 connection.commit()
             except (ConflictError, StorageError, ValidationError):
                 connection.rollback()
@@ -167,23 +190,26 @@ class SupervisionStorage:
         kind: str,
         subject_id: str,
         subject_version: int,
-        run_id: str,
+        run_id: str | None,
+        workflow_execution_id: str | None = None,
         policy: SupervisionPolicy,
         now: str,
     ) -> str | None:
         action_id = self.new_id("act")
         changed = connection.execute(
             "INSERT OR IGNORE INTO supervisor_actions "
-            "(id, kind, subject_id, subject_version, run_id, state, version, "
+            "(id, kind, subject_id, subject_version, run_id, "
+            "workflow_execution_id, state, version, "
             "attempt_count, max_attempts, retry_backoff_json, available_at, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 'pending', 1, 0, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', 1, 0, ?, ?, ?, ?, ?)",
             (
                 action_id,
                 kind,
                 subject_id,
                 subject_version,
                 run_id,
+                workflow_execution_id,
                 len(policy.retry_backoff_seconds) + 1,
                 json.dumps(list(policy.retry_backoff_seconds), separators=(",", ":")),
                 now,

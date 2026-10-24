@@ -446,6 +446,10 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM integration_gate_evidence",
                 ),
                 (
+                    "integration_review_verdicts",
+                    "SELECT COUNT(*) FROM integration_review_verdicts",
+                ),
+                (
                     "work_item_landing_dependencies",
                     "SELECT COUNT(*) FROM work_item_landing_dependencies",
                 ),
@@ -517,6 +521,15 @@ class DatabaseCore:
                     "workflow_execution_events",
                     "SELECT COUNT(*) FROM workflow_execution_events",
                 ),
+                (
+                    "workflow_run_bindings",
+                    "SELECT COUNT(*) FROM workflow_run_bindings",
+                ),
+                (
+                    "workflow_gate_bindings",
+                    "SELECT COUNT(*) FROM workflow_gate_bindings",
+                ),
+                ("workflow_rulings", "SELECT COUNT(*) FROM workflow_rulings"),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]

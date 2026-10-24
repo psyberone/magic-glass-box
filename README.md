@@ -92,10 +92,11 @@ This repository currently contains the first executable vertical slice:
   coordinator to recover parallel Claude/Codex-style work;
 - operator-controlled work completion that seals audit history and an explicit
   reopen into a blank next-generation memory thread;
-- schema-v28 bounded workflow prescriptions with one immutable built-in
+- schema-v29 bounded workflow prescriptions with one immutable built-in
   `implementation-v1` definition, versioned producer/reviewer configurations,
-  and restart-safe executions pinned to exact project, work-item, work-thread,
-  profile, source, and policy revisions;
+  restart-safe executions pinned to exact project, work-item, work-thread,
+  profile, source, and policy revisions, and a durable supervisor-driven
+  build/review/validation/correction loop with typed exact-head verdicts;
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues,
   where upstream bodies and host-private failure details are reduced to fixed
@@ -285,9 +286,22 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --idempotency-key <stable-key> --requested-by operator
 ```
 
-At the M12A boundary, `workflow start` pins and audits the prescription but
-does not yet create a producer run. M12B adds the durable build/review/
-correction director. See
+With the supervisor running, `workflow start` now drives the pinned producer,
+candidate, independent reviewer, validation, and bounded correction stages.
+It stops at maintainer disposition when configured and at the `landing` stage
+for M12C to take over. A failed stage or exhausted correction budget opens a
+durable ruling instead of guessing:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow ruling-show wri_<id>
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow ruling-resolve wri_<id> --expected-version 1 \
+  --decision continue --resolved-by operator
+```
+
+Only a correction-limit ruling may continue into another bounded round; any
+ruling may be explicitly cancelled. See
 [docs/workflow-templates.md](docs/workflow-templates.md).
 
 `control-room serve` prints a per-process private URL and binds only to
@@ -353,9 +367,10 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
 PYTHONPATH=src python3.11 -m magic_glass_box gate readiness gpl_<id>
 ```
 
-A reviewer requesting changes first appends a candidate-pinned `review`
-work-log entry. The operator can then return that exact candidate and note to a
-developer run:
+A reviewer first appends a v2 candidate-pinned `review` work-log entry with a
+typed `approved` or `changes_requested` outcome. Summary prose is not verdict
+authority. The operator can then return that exact candidate and actionable
+note to a developer run:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \

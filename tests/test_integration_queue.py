@@ -554,7 +554,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 28)
+        self.assertEqual(SCHEMA_VERSION, 29)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -1464,6 +1464,10 @@ class IntegrationLedgerTests(unittest.TestCase):
             issued_by=self.user["id"],
         )
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE workflow_rulings")
+            connection.execute("DROP TABLE integration_review_verdicts")
+            connection.execute("DROP TABLE workflow_gate_bindings")
+            connection.execute("DROP TABLE workflow_run_bindings")
             connection.execute("DROP TABLE workflow_execution_events")
             connection.execute("DROP TABLE workflow_executions")
             connection.execute("DROP TABLE workflow_configuration_versions")
@@ -1567,6 +1571,10 @@ class IntegrationLedgerTests(unittest.TestCase):
                     SELECT RAISE(ABORT, 'landing receipts cannot be deleted');
                 END;
                 DROP TABLE integration_provider_landings;
+                DROP TABLE workflow_rulings;
+                DROP TABLE integration_review_verdicts;
+                DROP TABLE workflow_gate_bindings;
+                DROP TABLE workflow_run_bindings;
                 DROP TABLE workflow_execution_events;
                 DROP TABLE workflow_executions;
                 DROP TABLE workflow_configuration_versions;

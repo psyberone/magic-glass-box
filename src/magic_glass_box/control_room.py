@@ -153,6 +153,7 @@ class ControlRoom:
         runs, terminal_total = self._runs(connection, history_limit)
         workflows = self._workflows(connection, history_limit)
         run_ids = [run["id"] for run in runs]
+        workflow_ids = [workflow["id"] for workflow in workflows]
         attempts = self._attempts(connection, run_ids, generated_at)
         interactions = self._interactions(connection, run_ids)
         retained_results = self._results(connection, run_ids)
@@ -165,7 +166,7 @@ class ControlRoom:
         authorities = self._run_authorities(connection, run_ids, generated_at)
         provider_recoveries = self._provider_recoveries(connection, run_ids)
         provider_budgets = self._provider_budgets(connection, run_ids)
-        supervisor_actions = self._supervisor_actions(connection, run_ids)
+        supervisor_actions = self._supervisor_actions(connection, run_ids, workflow_ids)
         escalations = self._escalations(connection, run_ids)
         self._attach_run_counts(
             runs,
@@ -219,6 +220,7 @@ class ControlRoom:
             escalations,
             gate_policies,
             integration_queue,
+            workflows=workflows,
             generated_at=generated_at,
         )
         return (
@@ -740,11 +742,20 @@ class ControlRoom:
             "cv.id AS configuration_version_id, e.work_item_id, "
             "e.work_item_version_id, e.work_thread_id, "
             "e.work_thread_generation, e.context_version_id, e.source_revision, "
-            "e.state, e.stage, e.version, producer.name AS producer_profile_name, "
+            "e.state, e.stage, e.correction_round, e.version, "
+            "producer.name AS producer_profile_name, "
             "producer_v.version AS producer_profile_version, "
             "reviewer.name AS reviewer_profile_name, "
             "reviewer_v.version AS reviewer_profile_version, "
-            "requester.handle AS requested_by, e.created_at, e.updated_at, "
+            "requester.handle AS requested_by, action.id AS action_id, "
+            "action.state AS action_state, "
+            "action.attempt_count AS action_attempt_count, "
+            "action.max_attempts AS action_max_attempts, "
+            "action.last_error_code AS action_last_error_code, "
+            "ruling.id AS open_ruling_id, ruling.kind AS open_ruling_kind, "
+            "ruling.version AS open_ruling_version, "
+            "ruling.created_at AS open_ruling_created_at, "
+            "e.created_at, e.updated_at, "
             "e.finished_at FROM visible "
             "JOIN workflow_executions e ON e.id = visible.id "
             "JOIN projects p ON p.id = e.project_id "
@@ -760,6 +771,13 @@ class ControlRoom:
             "ON reviewer_v.id = cv.reviewer_profile_version_id "
             "JOIN agent_profiles reviewer ON reviewer.id = reviewer_v.profile_id "
             "JOIN users requester ON requester.id = e.requested_by "
+            "LEFT JOIN supervisor_actions action ON action.id = ("
+            "SELECT sa.id FROM supervisor_actions sa "
+            "WHERE sa.workflow_execution_id = e.id "
+            "AND sa.subject_version = e.version "
+            "ORDER BY sa.created_at DESC, sa.id DESC LIMIT 1) "
+            "LEFT JOIN workflow_rulings ruling ON ruling.execution_id = e.id "
+            "AND ruling.state = 'open' "
             "ORDER BY visible.group_order, e.updated_at DESC, e.id",
             (history_limit,),
         ).fetchall()
@@ -767,17 +785,33 @@ class ControlRoom:
 
     @classmethod
     def _supervisor_actions(
-        cls, connection: sqlite3.Connection, run_ids: list[str]
+        cls,
+        connection: sqlite3.Connection,
+        run_ids: list[str],
+        workflow_ids: list[str],
     ) -> list[dict[str, Any]]:
-        rows = cls._for_runs(
-            connection,
-            run_ids,
-            "SELECT id, kind, subject_id, subject_version, run_id, state, "
-            "version, attempt_count, max_attempts, available_at, owner_id, "
-            "lease_expires_at, last_error_code, created_at, updated_at, "
-            "finished_at FROM supervisor_actions WHERE run_id IN ({run_ids}) "
-            "ORDER BY created_at DESC, id",
-        )
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if run_ids:
+            clauses.append("run_id IN (" + ",".join("?" for _ in run_ids) + ")")
+            parameters.extend(run_ids)
+        if workflow_ids:
+            clauses.append(
+                "workflow_execution_id IN (" + ",".join("?" for _ in workflow_ids) + ")"
+            )
+            parameters.extend(workflow_ids)
+        if not clauses:
+            return []
+        rows = connection.execute(
+            "SELECT id, kind, subject_id, subject_version, run_id, "
+            "workflow_execution_id, state, version, attempt_count, "
+            "max_attempts, available_at, owner_id, lease_expires_at, "
+            "last_error_code, created_at, updated_at, finished_at "
+            "FROM supervisor_actions WHERE "
+            + " OR ".join(f"({clause})" for clause in clauses)
+            + " ORDER BY created_at DESC, id",
+            parameters,
+        ).fetchall()
         return [dict(row) for row in rows]
 
     @classmethod
@@ -1632,6 +1666,7 @@ class ControlRoom:
         gate_policies: list[dict[str, Any]] | None = None,
         integration_queue: list[dict[str, Any]] | None = None,
         *,
+        workflows: list[dict[str, Any]] | None = None,
         generated_at: str | None = None,
     ) -> list[dict[str, Any]]:
         attention: list[dict[str, Any]] = []
@@ -1822,11 +1857,26 @@ class ControlRoom:
                         "subject_type": "supervisor_action",
                         "subject_id": action["id"],
                         "run_id": action["run_id"],
+                        "workflow_execution_id": action["workflow_execution_id"],
                         "action_kind": action["kind"],
                         "last_error_code": action["last_error_code"],
                         "updated_at": action["updated_at"],
                     },
                     action["updated_at"],
+                )
+        for workflow in workflows or []:
+            if workflow["open_ruling_id"] is not None:
+                add(
+                    {
+                        "kind": "workflow.ruling_open",
+                        "severity": "action",
+                        "subject_type": "workflow_ruling",
+                        "subject_id": workflow["open_ruling_id"],
+                        "workflow_execution_id": workflow["id"],
+                        "ruling_kind": workflow["open_ruling_kind"],
+                        "ruling_version": workflow["open_ruling_version"],
+                    },
+                    workflow["open_ruling_created_at"],
                 )
         for escalation in escalations or []:
             if escalation["state"] == "exhausted":

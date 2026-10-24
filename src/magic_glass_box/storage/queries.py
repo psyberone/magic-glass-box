@@ -249,6 +249,9 @@ class QueryStorage:
                 "gmcr.policy_id AS maintainer_change_policy_id, "
                 "gmcr.candidate_id AS maintainer_change_candidate_id, "
                 "gmcr.maintainer_review_id AS change_maintainer_review_id, "
+                "wrb.execution_id AS workflow_execution_id, "
+                "wrb.correction_round AS workflow_round, "
+                "wrb.role AS workflow_role, "
                 "c.id AS context_version_id, c.version AS context_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
                 "av.version AS profile_version, u.handle AS requested_by, "
@@ -267,6 +270,7 @@ class QueryStorage:
                 "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
                 "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
                 "ON gmcr.run_id = r.id "
+                "LEFT JOIN workflow_run_bindings wrb ON wrb.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()

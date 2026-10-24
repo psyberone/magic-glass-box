@@ -11,6 +11,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as SchemaValidationError
+
 from magic_glass_box.db import (
     ATTEMPT_SCHEMA,
     INTERACTION_SCHEMA,
@@ -172,6 +175,69 @@ class WorkMemoryContractTests(unittest.TestCase):
                 self.assertRaisesRegex(ValidationError, message),
             ):
                 factory(value)
+
+    def test_v2_review_entry_carries_a_typed_exact_candidate_verdict(self) -> None:
+        entry = WorkLogEntry.from_mapping(
+            {
+                "schema_version": 2,
+                "kind": "review",
+                "summary": "The boundary still needs one focused correction.",
+                "details": ["Assert the bounded response read."],
+                "artifacts": [],
+                "related_interaction_ids": [],
+                "candidate_revision": "b" * 40,
+                "review_outcome": "changes_requested",
+            }
+        )
+
+        self.assertEqual(entry.review_outcome, "changes_requested")
+        self.assertEqual(entry.to_dict()["review_outcome"], "changes_requested")
+        self.assertEqual(WorkLogEntry.from_mapping(entry.to_dict()), entry)
+
+    def test_v2_review_entry_rejects_ambiguous_or_inactionable_verdicts(self) -> None:
+        valid = {
+            "schema_version": 2,
+            "kind": "review",
+            "summary": "Review complete.",
+            "details": ["Correct the timeout assertion."],
+            "artifacts": [],
+            "related_interaction_ids": [],
+            "candidate_revision": "b" * 40,
+            "review_outcome": "changes_requested",
+        }
+        cases = (
+            {**valid, "review_outcome": "failed"},
+            {**valid, "review_outcome": None},
+            {**valid, "candidate_revision": None},
+            {**valid, "details": []},
+            {**valid, "kind": "finding"},
+            {**valid, "schema_version": 1},
+        )
+        for value in cases:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                WorkLogEntry.from_mapping(value)
+
+    def test_published_v2_review_contract_matches_implementation(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        schema = json.loads(
+            (repository / "schemas/work-log-entry-v2.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        example = json.loads(
+            (repository / "examples/work-log-review-v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(schema["$id"], "urn:magic-glass-box:schema:work-log-entry:v2")
+        self.assertEqual(schema["properties"]["schema_version"]["const"], 2)
+        Draft202012Validator.check_schema(schema)
+        validator = Draft202012Validator(schema)
+        validator.validate(example)
+        self.assertEqual(WorkLogEntry.from_mapping(example).to_dict(), example)
+        with self.assertRaises(SchemaValidationError):
+            validator.validate({**example, "details": []})
 
     def test_contracts_reject_bad_references_and_oversized_content(self) -> None:
         entry = log_entry().to_dict()

@@ -1047,7 +1047,7 @@ their real use cases justify a versioned capability contract.
 
 ## Milestone 12: bounded implementation workflow
 
-**Status: in progress; M12A complete, M12B next**
+**Status: in progress; M12A and M12B complete, M12C next**
 
 M11 proved every important step of one real change, but the operator still
 selected and invoked those steps. M12 packages that exact practice as one
@@ -1098,6 +1098,8 @@ exhaustively instead.
 
 ### M12B: build/review/correction director
 
+**Status: complete (2026-10-23)**
+
 - Drive ordinary producer, candidate, gate, reviewer, validation, and
   correction primitives through durable supervisor actions.
 - Make transition decisions from authoritative object state, never agent prose.
@@ -1113,6 +1115,37 @@ exhaustively instead.
 **Exit proof:** a deterministic workflow requests changes once, survives an
 orchestrator restart at each transition boundary, resumes the exact child, and
 stops at maintainer disposition with exactly one durable action per stage.
+
+Schema v29 implements the durable director rather than a second orchestration
+stack. Version-bound `workflow.advance` supervisor actions drive the existing
+run, candidate, gate, evidence, and maintainer-review primitives. Producer and
+reviewer runs are unique per execution round, the reviewer is pinned to the
+gate's exact head, and only a policy-bound work-log v2 verdict can authorize an
+approval or correction. Prose remains context, never gate authority. Validation
+evidence is restart-reused, changes requested create a provenance-bound next
+round, and every transition records its exact candidate, policy, evidence, and
+round metadata.
+
+Producer failure, reviewer failure or silence, validation failure, and the
+configured correction ceiling now open one durable ruling instead of guessing
+forward. Open rulings suspend automatic advancement. Maintainers may cancel any
+ruling, while only a correction-limit ruling may explicitly continue, and the
+absolute eight-round ceiling cannot be overridden. CLI, service, control-room,
+and runtime surfaces expose the ruling and typed-review contract without
+granting a worker landing authority.
+
+The final checkpoint passes 1,059 tests and Ruff format/lint with 86% aggregate
+statement-plus-branch coverage; the director is at 92% and workflow storage at
+86%. An expanded focused Mutmut wave exercised 967 mutants across the director
+and its authority-bearing workflow, work-log, and supervisor seams, initially
+killing 781 (80.77%) with no timeouts, uncovered mutants, suspicious outcomes,
+or crashes. Survivor analysis added exact tests for producer-scoped gate
+binding, stale stage and round rejection, metadata limits, ruling idempotency,
+audit provenance, changed-execution fencing, cancellation, and the absolute
+correction ceiling. Targeted reruns killed all 59 selected behavior-changing
+former survivors, for a conservative effective result of at least 840/967
+(86.87%). The remaining reviewed survivors are chiefly diagnostic/boundary-label
+mutations and pre-existing generic supervisor branches outside the M12B path.
 
 ### M12C: landing and closeout director
 

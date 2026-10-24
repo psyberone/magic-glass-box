@@ -102,6 +102,22 @@ Answered interactions queue their run only when the previous attempt is gone.
 An opted-in queued run is then discovered by the same normal action path; no
 special in-memory resume signal is required.
 
+Active `implementation-v1` workflows use the same durable action ledger. One
+`workflow.advance` action is unique to the execution version that represents a
+logical build, review, or maintainer stage. The director may perform several
+idempotent micro-steps while that action remains pending—for example creating a
+producer, materializing its candidate, binding a policy, and creating the exact
+reviewer. Waiting for a worker or maintainer defers the claim without consuming
+its finite retry budget. A stage transition increments the execution version,
+settles the old action, and makes exactly one next-stage action discoverable.
+
+Failed producer/reviewer runs, missing typed verdicts, failed validations, and
+an exhausted correction budget open a durable workflow ruling. An open ruling
+stops action discovery for that execution and appears in the control-room
+attention projection. `workflow ruling-show` and `workflow ruling-resolve`
+provide the explicit operator boundary; only a correction-limit ruling may be
+continued into one additional bounded round.
+
 ## Provider recovery
 
 An explicit provider quota, rate-limit, or overload refusal creates one active

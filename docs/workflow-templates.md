@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A implemented; M12B next**
+**Status: M12A and M12B implemented; M12C next**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -114,12 +114,26 @@ integration ledger remains truthful.
 
 ### M12B: build/review/correction director
 
-- Create ordinary producer and candidate-backed reviewer runs through existing
-  services.
-- Derive every transition from exact candidate and gate records.
-- Return reviewer or maintainer changes to the configured producer, require a
-  child candidate and fresh gates, and enforce the configured round ceiling.
-- Let the existing supervisor drive queued actions idempotently after restart.
+**Implemented in schema v29.**
+
+- Ordinary producer and candidate-backed reviewer runs are pinned to the exact
+  workflow execution, correction round, role, profile revision, work item, and
+  context.
+- A typed v2 review entry creates exact-head verdict authority only for the
+  bound reviewer attempt. The director derives review evidence and transitions
+  from that record; summary prose never selects the outcome.
+- Passing review runs every configured immutable validation in the existing
+  networkless read-only sandbox. Failed validation, failed workers, and missing
+  verdicts open durable rulings rather than inventing success.
+- Reviewer or maintainer changes return their exact evidence to the configured
+  producer. The next result becomes one child candidate with a fresh gate,
+  reviewer, validation set, and optional maintainer disposition.
+- One version-bound `workflow.advance` supervisor action owns each logical
+  build, review, or maintainer stage. Waiting defers without consuming retry
+  budget; process death is recovered by the ordinary leased-action path.
+- The configured correction ceiling stops the loop and opens an explicit
+  ruling. CLI resolution may authorize one more bounded round or cancel the
+  workflow; it cannot silently weaken another failure.
 
 ### M12C: landing and closeout director
 

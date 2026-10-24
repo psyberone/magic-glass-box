@@ -29,13 +29,14 @@ not modify the workspace. Inspect the exact candidate, run appropriate tests,
 and explicitly assess whether it solves the requested problem with the smallest
 project-native primitive without importing orchestration concerns or weakening
 an existing boundary. Then use `work.append` to leave one `review` entry whose
-summary begins
-`APPROVED` or `CHANGES REQUESTED`, whose details are actionable, and whose
-`candidate_revision` equals `review_assignment.head_revision`. The
-`work.append` payload has exactly `assignment_id` (null), `idempotency_key`, and
-`entry`; the entry has `schema_version` 1, `kind`, `summary`, `details`,
-`artifacts`, `related_interaction_ids`, and `candidate_revision`. Exit cleanly
-after recording either verdict; requesting changes is not a process failure.
+`review_outcome` is exactly `approved` or `changes_requested`, and whose
+`candidate_revision` equals `review_assignment.head_revision`. A
+changes-requested verdict must include actionable details. The `work.append`
+payload has exactly `assignment_id` (null), `idempotency_key`, and `entry`; the
+entry has `"schema_version": 2`, `kind`, `summary`, `details`, `artifacts`,
+`related_interaction_ids`, `candidate_revision`, and `review_outcome`. Summary
+prose is not verdict authority. Exit cleanly after recording either verdict;
+requesting changes is not a process failure.
 
 If `changes_requested` is non-null, implement the requested corrections in its
 exact feedback (`review_entry` for independent review or `maintainer_review`

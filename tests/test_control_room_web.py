@@ -744,7 +744,7 @@ class ControlRoomWebTests(unittest.TestCase):
                 "Supervisor actions": [
                     [
                         "ID",
-                        "Run",
+                        "Run / workflow",
                         "Kind",
                         "State",
                         "Attempts",

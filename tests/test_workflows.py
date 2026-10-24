@@ -6,14 +6,18 @@ import unittest
 from pathlib import Path
 
 from magic_glass_box.db import (
+    SCHEMA,
+    WORKFLOW_DIRECTOR_SCHEMA,
     ConcurrentUpdateError,
     ConflictError,
     Database,
     NotFoundError,
+    StorageError,
 )
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
+    SupervisionPolicy,
     ValidationError,
     WorkItemEnvelope,
     WorkLogEntry,
@@ -577,6 +581,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 "source_revision",
                 "state",
                 "stage",
+                "correction_round",
                 "version",
                 "content_sha256",
                 "cancel_reason",
@@ -588,6 +593,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 "roles",
                 "spec",
                 "events",
+                "rulings",
             },
         )
         expected_request = {
@@ -616,6 +622,7 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertEqual(execution["configuration_name"], "default")
         self.assertEqual(execution["state"], "active")
         self.assertEqual(execution["stage"], "build")
+        self.assertEqual(execution["correction_round"], 0)
         self.assertEqual(execution["version"], 1)
         self.assertEqual(
             execution["configuration_version_id"],
@@ -655,6 +662,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(execution["rulings"], [])
         self.assertEqual(self.database.status()["counts"]["runs"], 0)
 
         restarted = Database(self.database.path)
@@ -1040,13 +1048,17 @@ class WorkflowStorageTests(unittest.TestCase):
             ):
                 connection.execute(statement, parameters)
 
-    def test_schema_twenty_eight_migrates_schema_twenty_seven_once(self) -> None:
+    def test_schema_twenty_nine_migrates_schema_twenty_seven_once(self) -> None:
         path = Path(self.temporary.name) / "schema-27.db"
         historical = Database(path)
         historical.initialize()
         connection = historical.connect()
         try:
             for statement in (
+                "DROP TABLE workflow_rulings",
+                "DROP TABLE integration_review_verdicts",
+                "DROP TABLE workflow_gate_bindings",
+                "DROP TABLE workflow_run_bindings",
                 "DROP TABLE workflow_execution_events",
                 "DROP TABLE workflow_executions",
                 "DROP TABLE workflow_configuration_versions",
@@ -1063,11 +1075,144 @@ class WorkflowStorageTests(unittest.TestCase):
         status = migrated.initialize()
         repeated = migrated.initialize()
 
-        self.assertEqual(status["schema_version"], 28)
-        self.assertEqual(repeated["schema_version"], 28)
+        self.assertEqual(status["schema_version"], 29)
+        self.assertEqual(repeated["schema_version"], 29)
         definitions = migrated.list_workflow_template_definitions()
         self.assertEqual(len(definitions), 1)
         self.assertEqual(definitions[0]["key"], "implementation-v1")
+
+    def test_schema_twenty_nine_preserves_schema_twenty_eight_workflow_state(
+        self,
+    ) -> None:
+        path = Path(self.temporary.name) / "schema-28.db"
+        with sqlite3.connect(path) as connection:
+            connection.executescript(SCHEMA[: SCHEMA.index(WORKFLOW_DIRECTOR_SCHEMA)])
+            connection.execute("PRAGMA user_version = 28")
+        path.chmod(0o600)
+        historical = Database(path)
+        user = historical.create_user("legacy-operator", "Legacy Operator")
+        instance = historical.create_krab_instance(
+            "Legacy Krab", "http://127.0.0.1:8765"
+        )
+        producer_identity = historical.store_krab_identity(
+            instance["id"],
+            KrabIdentity("usr_" + "4" * 32, "legacy-producer", 1),
+            "file:/private/legacy-producer",
+        )
+        reviewer_identity = historical.store_krab_identity(
+            instance["id"],
+            KrabIdentity("usr_" + "5" * 32, "legacy-reviewer", 1),
+            "file:/private/legacy-reviewer",
+        )
+        project = historical.create_project(
+            instance_id=instance["id"],
+            krab_project_id="prj_" + "6" * 32,
+            krab_project_key="legacy-workflow",
+            display_name="Legacy Workflow",
+            context=ProjectContext.from_mapping(
+                {"purpose": "Preserve an M12A execution"}
+            ),
+            created_by=user["id"],
+        )
+        item = historical.import_work_item(
+            project_key="legacy-workflow",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "legacy-workflow-1",
+                    "source_updated_at": "2026-10-23T12:00:00Z",
+                    "title": "Preserve the active execution",
+                    "brief": "Migrate without rewriting M12A authority.",
+                }
+            ),
+            imported_by=user["id"],
+        )
+        for name, identity, workspace_mode in (
+            ("Legacy Producer", producer_identity, "copy_on_write"),
+            ("Legacy Reviewer", reviewer_identity, "read_only"),
+        ):
+            historical.create_agent_profile(
+                name=name,
+                spec=AgentProfileSpec.create(
+                    image="agent@sha256:legacy",
+                    command=["agent", "run"],
+                    workspace_mode=workspace_mode,
+                    network_mode="none",
+                ),
+                krab_identity_id=identity["id"],
+                created_by=user["id"],
+            )
+        historical.create_workflow_configuration(
+            project_key="legacy-workflow",
+            name="default",
+            spec=self.configuration_spec(),
+            producer_profile_name="Legacy Producer",
+            reviewer_profile_name="Legacy Reviewer",
+            created_by=user["id"],
+        )
+        with self.assertRaises(StorageError):
+            historical.start_workflow_execution(
+                project_key="legacy-workflow",
+                configuration_name="default",
+                work_item_id=item["id"],
+                source_revision="d" * 40,
+                expected_configuration_version=1,
+                expected_context_version_id=project["context_version_id"],
+                expected_work_item_version_id=item["work_item_version_id"],
+                expected_thread_generation=1,
+                expected_thread_version=1,
+                idempotency_key="legacy-workflow-start",
+                requested_by=user["id"],
+            )
+        with self.assertRaises(StorageError):
+            historical.create_run(
+                project_key="legacy-workflow",
+                profile_name="Legacy Producer",
+                work_item_id=item["id"],
+                requested_by=user["id"],
+                source_revision="d" * 40,
+                supervision_policy=SupervisionPolicy.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "auto_execute": True,
+                        "retry_backoff_seconds": [5, 30, 300],
+                        "interaction_escalation_seconds": [],
+                        "attempt_idle_escalation_seconds": [],
+                        "attempt_lease_expired_escalation_seconds": [],
+                        "other_attention_escalation_seconds": [],
+                    }
+                ),
+            )
+        with historical.connect() as connection:
+            execution_id = connection.execute(
+                "SELECT id FROM workflow_executions"
+            ).fetchone()["id"]
+            run_id = connection.execute("SELECT id FROM runs").fetchone()["id"]
+            now = historical.now()
+            connection.execute(
+                "INSERT INTO supervisor_actions "
+                "(id, kind, subject_id, subject_version, run_id, state, version, "
+                "attempt_count, max_attempts, retry_backoff_json, available_at, "
+                "created_at, updated_at) VALUES (?, 'run.execute', ?, 1, ?, "
+                "'pending', 1, 0, 4, '[5,30,300]', ?, ?, ?)",
+                ("act_" + "7" * 32, run_id, run_id, now, now, now),
+            )
+
+        migrated = Database(path)
+        status = migrated.initialize()
+        execution = migrated.get_workflow_execution(execution_id)
+        action = migrated.get_supervisor_action("act_" + "7" * 32)
+
+        self.assertEqual(status["schema_version"], 29)
+        self.assertEqual(execution["correction_round"], 0)
+        self.assertEqual(execution["events"][0]["kind"], "workflow.started")
+        self.assertEqual(action["run_id"], run_id)
+        self.assertIsNone(action["workflow_execution_id"])
+        self.assertEqual(status["counts"]["workflow_run_bindings"], 0)
+        self.assertEqual(status["counts"]["workflow_gate_bindings"], 0)
+        self.assertEqual(status["counts"]["integration_review_verdicts"], 0)
+        self.assertEqual(status["counts"]["workflow_rulings"], 0)
 
 
 if __name__ == "__main__":

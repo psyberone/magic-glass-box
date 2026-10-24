@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:work-log-entry:v2",
+  "title": "Magic Glass Box typed review work-log entry v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "summary",
+    "details",
+    "artifacts",
+    "related_interaction_ids",
+    "candidate_revision",
+    "review_outcome"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "kind": {"const": "review"},
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S"
+    },
+    "details": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": "\\S"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "related_interaction_ids": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^int_[0-9a-f]{32}$"}
+    },
+    "candidate_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "\\S"
+    },
+    "review_outcome": {"enum": ["approved", "changes_requested"]}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"review_outcome": {"const": "changes_requested"}}
+      },
+      "then": {"properties": {"details": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "description"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "allOf": [
+            {"pattern": "\\S"},
+            {"pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\)(?!.*/$).+$"}
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "\\S"
+        }
+      }
+    }
+  }
+}

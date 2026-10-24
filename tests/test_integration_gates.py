@@ -1883,6 +1883,164 @@ class GateLedgerTests(unittest.TestCase):
                 expected_policy_revision=policy["policy_revision"],
             )
 
+    def test_typed_review_verdict_is_exact_idempotent_authority_not_prose(
+        self,
+    ) -> None:
+        policy = self.create_policy()
+        review_run = self.control.create_review_run(
+            policy["id"],
+            profile_name="Reviewer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        stored_entry: dict[str, object] = {}
+
+        def record_verdict(attempt: dict[str, object]) -> None:
+            entry = WorkLogEntry.from_mapping(
+                {
+                    "schema_version": 2,
+                    "kind": "review",
+                    "summary": "The timeout promise lacks an enforced test.",
+                    "details": ["Mutate away the timeout and assert the test fails."],
+                    "artifacts": [],
+                    "related_interaction_ids": [],
+                    "candidate_revision": self.candidate["head_revision"],
+                    "review_outcome": "changes_requested",
+                }
+            )
+            stored_entry.update(
+                self.control.append_work_log(
+                    review_run["id"],
+                    entry,
+                    idempotency_key="typed-review-verdict",
+                )
+            )
+            self.assertEqual(
+                self.control.append_work_log(
+                    review_run["id"],
+                    entry,
+                    idempotency_key="typed-review-verdict",
+                )["id"],
+                stored_entry["id"],
+            )
+            with self.assertRaisesRegex(ConflictError, "already recorded"):
+                self.control.append_work_log(
+                    review_run["id"],
+                    WorkLogEntry.from_mapping(
+                        {
+                            **entry.to_dict(),
+                            "summary": "A second verdict is not authority.",
+                        }
+                    ),
+                    idempotency_key="typed-review-verdict-duplicate",
+                )
+
+        review_attempt = self._succeed_attempt(
+            review_run,
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit="d",
+            while_running=record_verdict,
+        )
+        verdict = self.database.get_typed_review_verdict(policy["id"], review_run["id"])
+
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict["outcome"], "changes_requested")
+        self.assertEqual(verdict["work_log_entry_id"], stored_entry["id"])
+        self.assertEqual(verdict["reviewer_attempt_id"], review_attempt["id"])
+        evidence = self.control.record_review_evidence(
+            policy["id"],
+            reviewer_attempt_id=review_attempt["id"],
+            outcome="failed",
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        correction = self.control.create_changes_run(
+            policy["id"],
+            review_evidence_id=evidence["id"],
+            review_entry_id=stored_entry["id"],
+            profile_name="Producer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        self.assertEqual(correction["change_review_entry_id"], stored_entry["id"])
+
+    def test_typed_review_verdict_rejects_unbound_and_wrong_head_attempts(
+        self,
+    ) -> None:
+        unbound = self.database.create_run(
+            project_key="project",
+            profile_name="Reviewer",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+            source_revision=self.candidate["head_revision"],
+        )
+
+        def reject_unbound(_attempt: dict[str, object]) -> None:
+            with self.assertRaisesRegex(ConflictError, "policy-bound"):
+                self.control.append_work_log(
+                    unbound["id"],
+                    WorkLogEntry.from_mapping(
+                        {
+                            "schema_version": 2,
+                            "kind": "review",
+                            "summary": "A generic run cannot grant review authority.",
+                            "details": [],
+                            "artifacts": [],
+                            "related_interaction_ids": [],
+                            "candidate_revision": self.candidate["head_revision"],
+                            "review_outcome": "approved",
+                        }
+                    ),
+                    idempotency_key="unbound-typed-verdict",
+                )
+
+        self._succeed_attempt(
+            unbound,
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit="1",
+            while_running=reject_unbound,
+        )
+
+        policy = self.create_policy()
+        reviewer = self.control.create_review_run(
+            policy["id"],
+            profile_name="Reviewer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        def reject_wrong_head(_attempt: dict[str, object]) -> None:
+            with self.assertRaisesRegex(ConflictError, "exact candidate"):
+                self.control.append_work_log(
+                    reviewer["id"],
+                    WorkLogEntry.from_mapping(
+                        {
+                            "schema_version": 2,
+                            "kind": "review",
+                            "summary": "This verdict names the wrong revision.",
+                            "details": [],
+                            "artifacts": [],
+                            "related_interaction_ids": [],
+                            "candidate_revision": self.candidate["base_revision"],
+                            "review_outcome": "approved",
+                        }
+                    ),
+                    idempotency_key="wrong-head-typed-verdict",
+                )
+
+        self._succeed_attempt(
+            reviewer,
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit="2",
+            while_running=reject_wrong_head,
+        )
+        self.assertIsNone(
+            self.database.get_typed_review_verdict(policy["id"], reviewer["id"])
+        )
+
     def test_changes_run_requires_an_actionable_changes_requested_note(self) -> None:
         policy = self.create_policy()
         failed, approved_entry = self.rejected_review(

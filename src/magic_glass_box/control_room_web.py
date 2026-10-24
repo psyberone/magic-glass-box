@@ -504,7 +504,7 @@ def _render_control_room(
     supervisor_action_rows = [
         (
             row.get("id"),
-            row.get("run_id"),
+            row.get("run_id") or row.get("workflow_execution_id"),
             row.get("kind"),
             row.get("state"),
             f"{row.get('attempt_count')} / {row.get('max_attempts')}",
@@ -837,7 +837,7 @@ def _render_control_room(
             _table(
                 (
                     "ID",
-                    "Run",
+                    "Run / workflow",
                     "Kind",
                     "State",
                     "Attempts",

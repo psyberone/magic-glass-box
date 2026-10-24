@@ -1867,6 +1867,7 @@ class ControlRoomTests(unittest.TestCase):
             idempotency_key="control-room-workflow",
             requested_by=self.user["id"],
         )
+        action = self.database.enqueue_supervisor_actions()[0]
 
         snapshot = ControlRoom(self.database).snapshot()
 
@@ -1900,18 +1901,38 @@ class ControlRoomTests(unittest.TestCase):
                 "source_revision",
                 "state",
                 "stage",
+                "correction_round",
                 "version",
                 "producer_profile_name",
                 "producer_profile_version",
                 "reviewer_profile_name",
                 "reviewer_profile_version",
                 "requested_by",
+                "action_id",
+                "action_state",
+                "action_attempt_count",
+                "action_max_attempts",
+                "action_last_error_code",
+                "open_ruling_id",
+                "open_ruling_kind",
+                "open_ruling_version",
+                "open_ruling_created_at",
                 "created_at",
                 "updated_at",
                 "finished_at",
             },
         )
         self.assertEqual(projected["id"], execution["id"])
+        self.assertEqual(projected["correction_round"], 0)
+        self.assertEqual(
+            (projected["action_id"], projected["action_state"]),
+            (action["id"], "pending"),
+        )
+        self.assertIsNone(projected["open_ruling_id"])
+        self.assertEqual(
+            snapshot["supervisor_actions"][0]["workflow_execution_id"],
+            execution["id"],
+        )
         self.assertEqual(
             projected["configuration_version_id"],
             configuration["workflow_configuration_version_id"],
@@ -1925,6 +1946,29 @@ class ControlRoomTests(unittest.TestCase):
             "max_correction_rounds",
         ):
             self.assertNotIn(private, encoded)
+
+        ruling = self.database.open_workflow_ruling(
+            execution["id"],
+            expected_version=execution["version"],
+            kind="correction_limit",
+        )
+        ruling_snapshot = ControlRoom(self.database).snapshot()
+        projected = ruling_snapshot["workflows"][0]
+        self.assertEqual(
+            (
+                projected["open_ruling_id"],
+                projected["open_ruling_kind"],
+                projected["open_ruling_version"],
+            ),
+            (ruling["id"], "correction_limit", 1),
+        )
+        ruling_attention = [
+            item
+            for item in ruling_snapshot["attention"]
+            if item["kind"] == "workflow.ruling_open"
+        ]
+        self.assertEqual(len(ruling_attention), 1)
+        self.assertEqual(ruling_attention[0]["subject_id"], ruling["id"])
 
     def test_snapshot_surfaces_candidate_identity_without_manifest_content(
         self,

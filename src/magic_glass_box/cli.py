@@ -60,6 +60,7 @@ from .service_sidecar import (
 )
 from .supervision import Supervisor, SupervisorError
 from .worker_transport import WorkerTransportError
+from .workflow_director import WorkflowDirector
 from .workflows import WorkflowConfigurationSpec
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
@@ -401,6 +402,19 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_cancel.add_argument("--expected-version", required=True, type=int)
     workflow_cancel.add_argument("--cancelled-by", required=True)
     workflow_cancel.add_argument("--reason", required=True)
+    workflow_ruling_show = workflow_commands.add_parser(
+        "ruling-show", help="show one durable workflow ruling"
+    )
+    workflow_ruling_show.add_argument("ruling_id")
+    workflow_ruling_resolve = workflow_commands.add_parser(
+        "ruling-resolve", help="resolve one durable workflow ruling"
+    )
+    workflow_ruling_resolve.add_argument("ruling_id")
+    workflow_ruling_resolve.add_argument("--expected-version", required=True, type=int)
+    workflow_ruling_resolve.add_argument(
+        "--decision", required=True, choices=("continue", "cancel")
+    )
+    workflow_ruling_resolve.add_argument("--resolved-by", required=True)
 
     inference_connector = commands.add_parser(
         "inference-connector",
@@ -1042,6 +1056,17 @@ def _build_run_coordinator(
     )
 
 
+def _build_workflow_director(
+    control: ControlPlane, coordinator: RunCoordinator
+) -> WorkflowDirector:
+    return WorkflowDirector(
+        control,
+        coordinator.result_store,
+        _build_candidate_store(control),
+        coordinator.executor,
+    )
+
+
 def _serve_control_room(
     args: argparse.Namespace,
     control: ControlPlane,
@@ -1090,10 +1115,12 @@ def _serve_supervisor(
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     control.initialize()
+    workflow_director = _build_workflow_director(control, coordinator)
     supervisor = Supervisor(
         control.database,
         coordinator,
         control,
+        workflow_director=workflow_director,
         poll_interval=args.poll_interval,
         max_workers=args.max_workers,
         action_lease_seconds=args.action_lease_seconds,
@@ -1241,6 +1268,15 @@ def _dispatch(
                 expected_version=args.expected_version,
                 cancelled_by_handle=args.cancelled_by,
                 reason=args.reason,
+            )
+        if args.workflow_command == "ruling-show":
+            return control.get_workflow_ruling(args.ruling_id)
+        if args.workflow_command == "ruling-resolve":
+            return control.resolve_workflow_ruling(
+                args.ruling_id,
+                expected_version=args.expected_version,
+                decision=args.decision,
+                resolved_by_handle=args.resolved_by,
             )
     if args.command == "inference-connector":
         if args.inference_connector_command == "register":

@@ -740,7 +740,8 @@ class WorkflowStorage:
             "pc.version AS context_version, e.work_item_id, "
             "e.work_item_version_id, wiv.version AS work_item_version, "
             "e.work_thread_id, e.work_thread_generation, e.source_revision, "
-            "e.state, e.stage, e.version, e.content_sha256, e.cancel_reason, "
+            "e.state, e.stage, e.correction_round, e.version, "
+            "e.content_sha256, e.cancel_reason, "
             "u.handle AS requested_by, e.created_at, e.updated_at, e.finished_at "
             "FROM workflow_executions e "
             "JOIN projects p ON p.id = e.project_id "
@@ -776,6 +777,15 @@ class WorkflowStorage:
             raise StorageError("stored workflow event is invalid") from exc
         for event in parsed_events:
             event.pop("metadata_json")
+        rulings = connection.execute(
+            "SELECT wr.id, wr.execution_version, wr.correction_round, wr.kind, "
+            "wr.state, wr.version, wr.policy_id, wr.run_id, wr.gate_name, "
+            "resolver.handle AS resolved_by, wr.decision, wr.created_at, "
+            "wr.updated_at, wr.resolved_at FROM workflow_rulings wr "
+            "LEFT JOIN users resolver ON resolver.id = wr.resolved_by "
+            "WHERE wr.execution_id = ? ORDER BY wr.created_at, wr.id",
+            (execution_id,),
+        ).fetchall()
         return {
             **dict(row),
             "template": configuration["template"],
@@ -783,7 +793,550 @@ class WorkflowStorage:
             "roles": configuration["roles"],
             "spec": configuration["spec"],
             "events": parsed_events,
+            "rulings": [dict(ruling) for ruling in rulings],
         }
+
+    def find_workflow_run(
+        self, execution_id: str, correction_round: int, role: str
+    ) -> dict[str, Any] | None:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        if (
+            isinstance(correction_round, bool)
+            or not isinstance(correction_round, int)
+            or not 0 <= correction_round <= 8
+        ):
+            raise ValidationError("correction_round must be between 0 and 8")
+        if role not in {"producer", "reviewer"}:
+            raise ValidationError("workflow role is invalid")
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT run_id FROM workflow_run_bindings "
+                "WHERE execution_id = ? AND correction_round = ? AND role = ?",
+                (execution_id, correction_round, role),
+            ).fetchone()
+        return None if row is None else self.get_run(row["run_id"])
+
+    def bind_workflow_gate(
+        self,
+        execution_id: str,
+        *,
+        correction_round: int,
+        candidate_id: str,
+        policy_id: str,
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._nonnegative_correction_round(correction_round)
+        candidate_id = require_string(candidate_id, field="candidate_id", max_bytes=64)
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT candidate_id, policy_id, created_at "
+                    "FROM workflow_gate_bindings WHERE execution_id = ? "
+                    "AND correction_round = ?",
+                    (execution_id, correction_round),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["candidate_id"] != candidate_id
+                        or existing["policy_id"] != policy_id
+                    ):
+                        raise ConflictError(
+                            "workflow round already names another gate policy"
+                        )
+                    connection.commit()
+                    return {
+                        "execution_id": execution_id,
+                        "correction_round": correction_round,
+                        **dict(existing),
+                    }
+                source = connection.execute(
+                    "SELECT e.state, e.correction_round, e.project_id, "
+                    "e.context_version_id, e.work_thread_id, "
+                    "ic.producer_run_id, ic.project_id AS candidate_project_id, "
+                    "ic.context_version_id AS candidate_context_version_id, "
+                    "ic.work_thread_id AS candidate_work_thread_id, "
+                    "gp.candidate_id AS policy_candidate_id "
+                    "FROM workflow_executions e "
+                    "JOIN integration_candidates ic ON ic.id = ? "
+                    "JOIN integration_gate_policies gp ON gp.id = ? "
+                    "WHERE e.id = ?",
+                    (candidate_id, policy_id, execution_id),
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError("workflow candidate or policy not found")
+                if source["state"] != "active":
+                    raise ConflictError("workflow execution is not active")
+                if source["correction_round"] != correction_round:
+                    raise ConflictError("workflow correction round changed")
+                producer = connection.execute(
+                    "SELECT run_id FROM workflow_run_bindings "
+                    "WHERE execution_id = ? AND correction_round = ? "
+                    "AND role = 'producer'",
+                    (execution_id, correction_round),
+                ).fetchone()
+                if producer is None or producer["run_id"] != source["producer_run_id"]:
+                    raise ConflictError(
+                        "workflow candidate was not produced by this round"
+                    )
+                if source["policy_candidate_id"] != candidate_id:
+                    raise ConflictError("workflow gate policy names another candidate")
+                for candidate_field, execution_field in (
+                    ("candidate_project_id", "project_id"),
+                    ("candidate_context_version_id", "context_version_id"),
+                    ("candidate_work_thread_id", "work_thread_id"),
+                ):
+                    if source[candidate_field] != source[execution_field]:
+                        raise ConflictError(
+                            "workflow candidate belongs to another authority scope"
+                        )
+                connection.execute(
+                    "INSERT INTO workflow_gate_bindings "
+                    "(execution_id, correction_round, candidate_id, policy_id, "
+                    "created_at) VALUES (?, ?, ?, ?, ?)",
+                    (execution_id, correction_round, candidate_id, policy_id, now),
+                )
+                connection.commit()
+            except (ConflictError, NotFoundError, StorageError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("workflow gate could not be bound") from exc
+        return {
+            "execution_id": execution_id,
+            "correction_round": correction_round,
+            "candidate_id": candidate_id,
+            "policy_id": policy_id,
+            "created_at": now,
+        }
+
+    @staticmethod
+    def _nonnegative_correction_round(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 8:
+            raise ValidationError("correction_round must be between 0 and 8")
+        return value
+
+    def get_workflow_gate(
+        self, execution_id: str, correction_round: int
+    ) -> dict[str, Any] | None:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._nonnegative_correction_round(correction_round)
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT execution_id, correction_round, candidate_id, policy_id, "
+                "created_at FROM workflow_gate_bindings WHERE execution_id = ? "
+                "AND correction_round = ?",
+                (execution_id, correction_round),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def advance_workflow_execution(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        expected_stage: str,
+        expected_correction_round: int,
+        target_stage: str,
+        target_correction_round: int,
+        event_kind: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        self._nonnegative_correction_round(expected_correction_round)
+        self._nonnegative_correction_round(target_correction_round)
+        allowed_stages = {"build", "review", "maintainer", "landing", "completion"}
+        if expected_stage not in allowed_stages or target_stage not in allowed_stages:
+            raise ValidationError("workflow stage is invalid")
+        allowed_events = {
+            "workflow.review_started",
+            "workflow.correction_started",
+            "workflow.maintainer_pending",
+            "workflow.landing_ready",
+            "workflow.ruling_resolved",
+        }
+        if event_kind not in allowed_events:
+            raise ValidationError("workflow transition event is invalid")
+        if not isinstance(metadata, dict):
+            raise ValidationError("workflow transition metadata must be an object")
+        metadata_json = canonical_json(metadata)
+        if len(metadata_json.encode("utf-8")) > 16 * 1024:
+            raise ValidationError("workflow transition metadata is too large")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT state, stage, correction_round, version, requested_by "
+                    "FROM workflow_executions WHERE id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"workflow execution not found: {execution_id}")
+                if row["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if row["state"] != "active":
+                    raise ConflictError("workflow execution is not active")
+                if (
+                    row["stage"] != expected_stage
+                    or row["correction_round"] != expected_correction_round
+                ):
+                    raise ConcurrentUpdateError("workflow execution stage changed")
+                changed = connection.execute(
+                    "UPDATE workflow_executions SET stage = ?, "
+                    "correction_round = ?, version = version + 1, updated_at = ? "
+                    "WHERE id = ? AND version = ? AND state = 'active'",
+                    (
+                        target_stage,
+                        target_correction_round,
+                        now,
+                        execution_id,
+                        expected_version,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "workflow execution changed concurrently"
+                    )
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+                    "FROM workflow_execution_events WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()["sequence"]
+                event_metadata = {
+                    "from_stage": expected_stage,
+                    "to_stage": target_stage,
+                    "from_correction_round": expected_correction_round,
+                    "to_correction_round": target_correction_round,
+                    **metadata,
+                }
+                connection.execute(
+                    "INSERT INTO workflow_execution_events "
+                    "(execution_id, sequence, kind, from_state, to_state, actor, "
+                    "metadata_json, created_at) VALUES (?, ?, ?, 'active', "
+                    "'active', ?, ?, ?)",
+                    (
+                        execution_id,
+                        sequence,
+                        event_kind,
+                        row["requested_by"],
+                        canonical_json(event_metadata),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("workflow execution could not advance") from exc
+        return self.get_workflow_execution(execution_id)
+
+    def open_workflow_ruling(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        kind: str,
+        policy_id: str | None = None,
+        run_id: str | None = None,
+        gate_name: str | None = None,
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        allowed = {
+            "correction_limit",
+            "producer_failed",
+            "reviewer_failed",
+            "review_verdict_missing",
+            "validation_failed",
+        }
+        if kind not in allowed:
+            raise ValidationError("workflow ruling kind is invalid")
+        if policy_id is not None:
+            policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        if run_id is not None:
+            run_id = require_string(run_id, field="run_id", max_bytes=64)
+        if gate_name is not None:
+            gate_name = require_string(gate_name, field="gate_name", max_bytes=128)
+        ruling_id = self.new_id("wri")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                execution = connection.execute(
+                    "SELECT state, version, correction_round, requested_by "
+                    "FROM workflow_executions WHERE id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if execution is None:
+                    raise NotFoundError(f"workflow execution not found: {execution_id}")
+                existing = connection.execute(
+                    "SELECT * FROM workflow_rulings WHERE execution_id = ? "
+                    "AND execution_version = ? AND kind = ?",
+                    (execution_id, expected_version, kind),
+                ).fetchone()
+                if existing is not None:
+                    connection.commit()
+                    return self._workflow_ruling_record(connection, existing)
+                if execution["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if execution["state"] != "active":
+                    raise ConflictError("workflow execution is not active")
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM workflow_rulings WHERE execution_id = ? "
+                        "AND state = 'open'",
+                        (execution_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ConflictError("workflow execution already has an open ruling")
+                if policy_id is not None:
+                    gate = connection.execute(
+                        "SELECT 1 FROM workflow_gate_bindings WHERE execution_id = ? "
+                        "AND correction_round = ? AND policy_id = ?",
+                        (execution_id, execution["correction_round"], policy_id),
+                    ).fetchone()
+                    if gate is None:
+                        raise ConflictError("workflow ruling policy is not current")
+                if run_id is not None:
+                    bound_run = connection.execute(
+                        "SELECT 1 FROM workflow_run_bindings WHERE execution_id = ? "
+                        "AND correction_round = ? AND run_id = ?",
+                        (execution_id, execution["correction_round"], run_id),
+                    ).fetchone()
+                    if bound_run is None:
+                        raise ConflictError("workflow ruling run is not current")
+                connection.execute(
+                    "INSERT INTO workflow_rulings "
+                    "(id, execution_id, execution_version, correction_round, kind, "
+                    "state, version, policy_id, run_id, gate_name, created_at, "
+                    "updated_at) VALUES (?, ?, ?, ?, ?, 'open', 1, ?, ?, ?, ?, ?)",
+                    (
+                        ruling_id,
+                        execution_id,
+                        expected_version,
+                        execution["correction_round"],
+                        kind,
+                        policy_id,
+                        run_id,
+                        gate_name,
+                        now,
+                        now,
+                    ),
+                )
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+                    "FROM workflow_execution_events WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()["sequence"]
+                connection.execute(
+                    "INSERT INTO workflow_execution_events "
+                    "(execution_id, sequence, kind, from_state, to_state, actor, "
+                    "metadata_json, created_at) VALUES (?, ?, "
+                    "'workflow.ruling_opened', 'active', 'active', ?, ?, ?)",
+                    (
+                        execution_id,
+                        sequence,
+                        execution["requested_by"],
+                        canonical_json(
+                            {
+                                "ruling_id": ruling_id,
+                                "kind": kind,
+                                "correction_round": execution["correction_round"],
+                                "policy_id": policy_id,
+                                "run_id": run_id,
+                                "gate_name": gate_name,
+                            }
+                        ),
+                        now,
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM workflow_rulings WHERE id = ?", (ruling_id,)
+                ).fetchone()
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("workflow ruling could not be opened") from exc
+        return self._workflow_ruling_record(None, row)
+
+    @staticmethod
+    def _workflow_ruling_record(
+        connection: sqlite3.Connection | None, row: sqlite3.Row
+    ) -> dict[str, Any]:
+        record = dict(row)
+        if connection is not None and row["resolved_by"] is not None:
+            resolver = connection.execute(
+                "SELECT handle FROM users WHERE id = ?", (row["resolved_by"],)
+            ).fetchone()
+            if resolver is None:
+                raise StorageError("workflow ruling resolver is unavailable")
+            record["resolved_by"] = resolver["handle"]
+        return record
+
+    def get_workflow_ruling(self, ruling_id: str) -> dict[str, Any]:
+        ruling_id = require_string(ruling_id, field="ruling_id", max_bytes=64)
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_rulings WHERE id = ?", (ruling_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"workflow ruling not found: {ruling_id}")
+            return self._workflow_ruling_record(connection, row)
+
+    def resolve_workflow_ruling(
+        self,
+        ruling_id: str,
+        *,
+        expected_version: int,
+        decision: str,
+        resolved_by: str,
+    ) -> dict[str, Any]:
+        ruling_id = require_string(ruling_id, field="ruling_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        if decision not in {"continue", "cancel"}:
+            raise ValidationError("workflow ruling decision is invalid")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, resolved_by, role="workflow resolver")
+                ruling = connection.execute(
+                    "SELECT * FROM workflow_rulings WHERE id = ?", (ruling_id,)
+                ).fetchone()
+                if ruling is None:
+                    raise NotFoundError(f"workflow ruling not found: {ruling_id}")
+                if ruling["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow ruling version changed")
+                if ruling["state"] != "open":
+                    raise ConflictError("workflow ruling is not open")
+                execution = connection.execute(
+                    "SELECT state, stage, correction_round, version, requested_by "
+                    "FROM workflow_executions WHERE id = ?",
+                    (ruling["execution_id"],),
+                ).fetchone()
+                if execution is None:
+                    raise StorageError("workflow ruling execution is unavailable")
+                if (
+                    execution["state"] != "active"
+                    or execution["version"] != ruling["execution_version"]
+                    or execution["correction_round"] != ruling["correction_round"]
+                ):
+                    raise ConflictError("workflow execution changed after the ruling")
+                if decision == "continue":
+                    if ruling["kind"] != "correction_limit":
+                        raise ConflictError(
+                            "only a correction-limit ruling can continue the workflow"
+                        )
+                    if execution["correction_round"] >= 8:
+                        raise ConflictError(
+                            "workflow reached the absolute correction-round limit"
+                        )
+                    target_state = "active"
+                    target_stage = "build"
+                    target_round = execution["correction_round"] + 1
+                    cancel_reason = None
+                    finished_at = None
+                else:
+                    target_state = "cancelled"
+                    target_stage = execution["stage"]
+                    target_round = execution["correction_round"]
+                    cancel_reason = "workflow ruling cancelled by maintainer"
+                    finished_at = now
+                changed = connection.execute(
+                    "UPDATE workflow_executions SET state = ?, stage = ?, "
+                    "correction_round = ?, version = version + 1, "
+                    "cancel_reason = ?, updated_at = ?, finished_at = ? "
+                    "WHERE id = ? AND version = ? AND state = 'active'",
+                    (
+                        target_state,
+                        target_stage,
+                        target_round,
+                        cancel_reason,
+                        now,
+                        finished_at,
+                        ruling["execution_id"],
+                        execution["version"],
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "workflow execution changed concurrently"
+                    )
+                connection.execute(
+                    "UPDATE workflow_rulings SET state = 'resolved', "
+                    "version = version + 1, resolved_by = ?, decision = ?, "
+                    "updated_at = ?, resolved_at = ? WHERE id = ? AND version = ?",
+                    (
+                        resolved_by,
+                        decision,
+                        now,
+                        now,
+                        ruling_id,
+                        expected_version,
+                    ),
+                )
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence "
+                    "FROM workflow_execution_events WHERE execution_id = ?",
+                    (ruling["execution_id"],),
+                ).fetchone()["sequence"]
+                connection.execute(
+                    "INSERT INTO workflow_execution_events "
+                    "(execution_id, sequence, kind, from_state, to_state, actor, "
+                    "metadata_json, created_at) VALUES (?, ?, "
+                    "'workflow.ruling_resolved', 'active', ?, ?, ?, ?)",
+                    (
+                        ruling["execution_id"],
+                        sequence,
+                        target_state,
+                        resolved_by,
+                        canonical_json(
+                            {
+                                "ruling_id": ruling_id,
+                                "decision": decision,
+                                "from_stage": execution["stage"],
+                                "to_stage": target_stage,
+                                "from_correction_round": execution["correction_round"],
+                                "to_correction_round": target_round,
+                            }
+                        ),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("workflow ruling could not be resolved") from exc
+        return self.get_workflow_ruling(ruling_id)
 
     def get_workflow_execution(self, execution_id: str) -> dict[str, Any]:
         execution_id = require_string(execution_id, field="execution_id", max_bytes=64)

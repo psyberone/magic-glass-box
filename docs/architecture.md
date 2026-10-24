@@ -215,8 +215,11 @@ project-activity projection.
   definition, saved configuration revision, and execution are distinct: an
   execution pins exact producer/reviewer profile revisions, context and work
   item versions, work-thread generation and version, source object ID, and
-  configuration revision. M12A records this authority but does not yet create
-  runs; the director arrives in M12B.
+  configuration revision.
+- Schema v29 adds the M12B director. Immutable per-round run and gate bindings,
+  typed exact-head reviewer verdicts, durable workflow supervisor actions, and
+  explicit rulings drive producer, candidate, independent review, validation,
+  correction, and maintainer stages without treating agent prose as authority.
 - Schema v14 adds hard work-item landing dependencies, one serialized lane per
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks
@@ -317,7 +320,8 @@ generations and honest reported provider overruns advance it to schema v22.
 Provider-neutral service-sidecar registrations, durable operations, and
 dispatch/reconciliation attempts advance it to schema v23. Explicit capability
 bindings, provider landing, exact gate-change provenance, maintainer review,
-and bounded workflow prescriptions advance it through schemas v24-v28.
+bounded workflow prescriptions, and their build/review/correction director
+advance it through schemas v24-v29.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -490,6 +494,6 @@ lost-response live GitHub exit proof are complete. See
 [control-room.md](control-room.md), [worker-handoffs.md](worker-handoffs.md),
 [runtime-adapters.md](runtime-adapters.md), [supervision.md](supervision.md),
 [work-memory.md](work-memory.md), and
-[workflow-templates.md](workflow-templates.md). The M12A immutable
-prescription ledger is implemented; M12B and M12C add the director and
+[workflow-templates.md](workflow-templates.md). The M12A immutable prescription
+ledger and M12B build/review/correction director are implemented; M12C adds the
 landing/closeout choreography without introducing a general workflow engine.

@@ -31,6 +31,7 @@ MAX_WORK_ITEM_CONTENT_BYTES = 256 * 1024
 HANDOFF_SCHEMA_VERSION = 1
 MAX_HANDOFF_CONTENT_BYTES = 24 * 1024
 WORK_MEMORY_SCHEMA_VERSION = 1
+WORK_LOG_REVIEW_SCHEMA_VERSION = 2
 MAX_WORK_LOG_CONTENT_BYTES = 24 * 1024
 MAX_WORK_CHECKPOINT_CONTENT_BYTES = 24 * 1024
 MAX_WORK_ASSIGNMENT_CONTENT_BYTES = 16 * 1024
@@ -439,6 +440,11 @@ class WorkLogKind(StrEnum):
     OUTCOME = "outcome"
 
 
+class WorkLogReviewOutcome(StrEnum):
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+
+
 class HandoffWorkState(StrEnum):
     IN_PROGRESS = "in_progress"
     WAITING_FOR_INPUT = "waiting_for_input"
@@ -615,12 +621,13 @@ class WorkLogEntry:
     artifacts: tuple[HandoffArtifact, ...] = ()
     related_interaction_ids: tuple[str, ...] = ()
     candidate_revision: str | None = None
+    review_outcome: WorkLogReviewOutcome | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> WorkLogEntry:
         if not isinstance(value, dict):
             raise ValidationError("work-log entry must be an object")
-        fields = {
+        base_fields = {
             "schema_version",
             "kind",
             "summary",
@@ -629,6 +636,19 @@ class WorkLogEntry:
             "related_interaction_ids",
             "candidate_revision",
         }
+        schema_version = value.get("schema_version")
+        if isinstance(schema_version, bool) or schema_version not in {
+            WORK_MEMORY_SCHEMA_VERSION,
+            WORK_LOG_REVIEW_SCHEMA_VERSION,
+        }:
+            raise ValidationError(
+                f"schema_version must be 1 or {WORK_LOG_REVIEW_SCHEMA_VERSION}"
+            )
+        fields = (
+            base_fields
+            if schema_version == WORK_MEMORY_SCHEMA_VERSION
+            else base_fields | {"review_outcome"}
+        )
         unknown = set(value) - fields
         if unknown:
             raise ValidationError(
@@ -638,14 +658,6 @@ class WorkLogEntry:
         if missing:
             raise ValidationError(
                 "work-log entry is missing fields: " + ", ".join(sorted(missing))
-            )
-        schema_version = value["schema_version"]
-        if (
-            isinstance(schema_version, bool)
-            or schema_version != WORK_MEMORY_SCHEMA_VERSION
-        ):
-            raise ValidationError(
-                f"schema_version must be {WORK_MEMORY_SCHEMA_VERSION}"
             )
         try:
             kind = WorkLogKind(value["kind"])
@@ -681,6 +693,25 @@ class WorkLogEntry:
                 field="candidate_revision",
                 max_bytes=512,
             )
+        review_outcome = None
+        if schema_version == WORK_LOG_REVIEW_SCHEMA_VERSION:
+            try:
+                review_outcome = WorkLogReviewOutcome(value["review_outcome"])
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("review_outcome is invalid") from exc
+            if kind is not WorkLogKind.REVIEW:
+                raise ValidationError(
+                    "schema_version 2 is reserved for typed review entries"
+                )
+            if candidate_revision is None:
+                raise ValidationError("typed review entry requires candidate_revision")
+            if (
+                review_outcome is WorkLogReviewOutcome.CHANGES_REQUESTED
+                and not value["details"]
+            ):
+                raise ValidationError(
+                    "changes-requested review requires actionable details"
+                )
         result = cls(
             schema_version=schema_version,
             kind=kind,
@@ -694,6 +725,7 @@ class WorkLogEntry:
             artifacts=artifacts,
             related_interaction_ids=interactions,
             candidate_revision=candidate_revision,
+            review_outcome=review_outcome,
         )
         if len(result.canonical.encode("utf-8")) > MAX_WORK_LOG_CONTENT_BYTES:
             raise ValidationError(
@@ -702,7 +734,7 @@ class WorkLogEntry:
         return result
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "schema_version": self.schema_version,
             "kind": self.kind.value,
             "summary": self.summary,
@@ -711,6 +743,11 @@ class WorkLogEntry:
             "related_interaction_ids": list(self.related_interaction_ids),
             "candidate_revision": self.candidate_revision,
         }
+        if self.schema_version == WORK_LOG_REVIEW_SCHEMA_VERSION:
+            value["review_outcome"] = (
+                None if self.review_outcome is None else self.review_outcome.value
+            )
+        return value
 
     @property
     def canonical(self) -> str:
