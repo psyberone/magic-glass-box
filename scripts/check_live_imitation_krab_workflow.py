@@ -144,9 +144,13 @@ GITHUB_MAPPING_NAME = "primary"
 REPORT_NAME = "workflow-report.json"
 MAX_REVIEW_BYTES = 64 * 1024
 MAX_WORKFLOW_SECONDS = 7200.0
-WORKFLOW_REQUEST_BYTES = 1024 * 1024
+# The live workflow needs more than the 256 KiB one-turn golden envelope, but
+# keeping both context and output bounded makes the conservative reservation
+# useful instead of letting one worker monopolize the campaign budget.
+WORKFLOW_REQUEST_BYTES = 768 * 1024
 WORKFLOW_BUDGET_CEILING_MICROUSD = 4_500_000
-WORKFLOW_INVOCATION_MICROUSD = 2_500_000
+WORKFLOW_INVOCATION_MICROUSD = 1_700_000
+WORKFLOW_MAX_OUTPUT_TOKENS = 8_192
 MAX_LIVE_BUDGET_MICROUSD = 5_000_000
 ACKNOWLEDGEMENT_FLAG = (
     "--i-understand-an-approved-review-publishes-opens-and-merges-a-pr"
@@ -555,6 +559,7 @@ def _workflow_grant_spec(
     value["budget"].update(
         {
             "invocation_microusd": WORKFLOW_INVOCATION_MICROUSD,
+            "max_output_tokens": WORKFLOW_MAX_OUTPUT_TOKENS,
             "run_microusd": budget_ceiling_microusd,
             "project_microusd": budget_ceiling_microusd,
             "grant_microusd": budget_ceiling_microusd,

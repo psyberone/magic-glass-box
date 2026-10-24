@@ -16,6 +16,8 @@ from scripts.check_live_imitation_krab_workflow import (
     PROJECT_KEY,
     VALIDATION_NAME,
     WORKFLOW_BUDGET_CEILING_MICROUSD,
+    WORKFLOW_INVOCATION_MICROUSD,
+    WORKFLOW_MAX_OUTPUT_TOKENS,
     WORKFLOW_REQUEST_BYTES,
     WorkflowRulingRequired,
     _drive_until,
@@ -132,6 +134,14 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
                 grant["policy"]["budget"]["project_microusd"],
                 3_200_000,
             )
+            self.assertEqual(
+                grant["policy"]["budget"]["invocation_microusd"],
+                WORKFLOW_INVOCATION_MICROUSD,
+            )
+            self.assertEqual(
+                grant["policy"]["budget"]["max_output_tokens"],
+                WORKFLOW_MAX_OUTPUT_TOKENS,
+            )
             self.assertNotEqual(
                 profiles["producer"]["krab_identity_id"],
                 profiles["reviewer"]["krab_identity_id"],
@@ -152,7 +162,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             )
 
             document = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(document["routes"][0]["request_bytes"], 1024 * 1024)
+            self.assertEqual(document["routes"][0]["request_bytes"], 768 * 1024)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_open_ruling_stops_the_driver_without_advancing(self) -> None:
