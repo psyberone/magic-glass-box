@@ -1070,6 +1070,8 @@ class NetworkMode(StrEnum):
 
 class GatewayCapability(StrEnum):
     RUN_DESCRIBE = "run.describe"
+    DISCOVERY_TRACE_SUBMIT = "discovery.trace.submit"
+    DISCOVERY_RULING_SUBMIT = "discovery.ruling.submit"
     INTERACTION_OPEN = "interaction.open"
     INTERACTION_READ = "interaction.read"
     HANDOFF_SUBMIT = "handoff.submit"

@@ -1293,6 +1293,19 @@ prescription before creating any execution state.
 
 ### M13B: bounded Discovery v1
 
+**Status: in progress.** Schema v33 completes the first internal checkpoint:
+the built-in definition, generic configuration parsing, exact investigator and
+coordinator profile pins, and published typed configuration/trace/ruling
+contracts. The execution ledger, worker submission gateway, durable director,
+and operator proof remain before M13B is complete.
+
+Checkpoint evidence: 1,113 tests pass at 86% aggregate branch-aware coverage;
+the new Discovery contract module is at 97%. A focused 46-mutant contract and
+role-authority wave killed 41 (89%); the five survivors change diagnostic prose
+or field labels only. An initially masked missing-capability mutation received
+an isolated regression test and is now killed independently of the read-only,
+identity-separation, and credential guards.
+
 - Add one read-only investigator and one read-only coordinator as the default
   fixed topology. A separate higher-assurance prescription may add another
   blind investigator; a running prescription never expands itself silently.

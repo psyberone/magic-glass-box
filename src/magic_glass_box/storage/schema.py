@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -4703,6 +4703,22 @@ BEGIN
 END;
 """
 
+DISCOVERY_PRESCRIPTION_SCHEMA = """
+INSERT INTO workflow_template_definitions (
+    id, template_key, version, schema_version, definition_json,
+    content_sha256, built_in, created_at
+) VALUES (
+    'wtd_8671ed9e9520e91a5f88d5232d0b77b1',
+    'discovery-v1',
+    1,
+    1,
+    '{"correction_loop":false,"key":"discovery-v1","roles":[{"name":"investigator","workspace_mode":"read_only"},{"name":"coordinator","workspace_mode":"read_only"}],"schema_version":1,"stages":["investigate","coordinate","completion"],"version":1}',
+    '8671ed9e9520e91a5f88d5232d0b77b1311a076eb80c0d378a3b307cfae82def',
+    1,
+    '2026-10-25T00:00:00.000000+00:00'
+);
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -4738,6 +4754,7 @@ SCHEMA = (
     + WORKFLOW_LANDING_SCHEMA
     + WORKFLOW_LANDING_CHAIN_SCHEMA
     + WORKFLOW_PRESCRIPTION_SCHEMA
+    + DISCOVERY_PRESCRIPTION_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -4771,4 +4788,5 @@ MIGRATIONS = {
     29: WORKFLOW_LANDING_SCHEMA,
     30: WORKFLOW_LANDING_CHAIN_SCHEMA,
     31: WORKFLOW_PRESCRIPTION_SCHEMA,
+    32: DISCOVERY_PRESCRIPTION_SCHEMA,
 }

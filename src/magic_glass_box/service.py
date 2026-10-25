@@ -32,6 +32,7 @@ from .db import (
     Database,
     NotFoundError,
 )
+from .discovery import DiscoveryConfigurationSpec
 from .domain import (
     AgentProfileSpec,
     HandoffEnvelope,
@@ -1937,6 +1938,46 @@ class ControlPlane:
             spec=spec,
             producer_profile_name=producer_profile_name,
             reviewer_profile_name=reviewer_profile_name,
+            created_by=creator["id"],
+        )
+
+    def create_discovery_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: DiscoveryConfigurationSpec,
+        investigator_profile_name: str,
+        coordinator_profile_name: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.create_discovery_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            investigator_profile_name=investigator_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
+            created_by=creator["id"],
+        )
+
+    def revise_discovery_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: DiscoveryConfigurationSpec,
+        investigator_profile_name: str,
+        coordinator_profile_name: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.revise_discovery_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            investigator_profile_name=investigator_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
             created_by=creator["id"],
         )
 

@@ -5,8 +5,10 @@ import re
 import sqlite3
 from typing import Any
 
+from ..discovery import DiscoveryConfigurationSpec
 from ..domain import (
     AgentProfileSpec,
+    GatewayCapability,
     ValidationError,
     WorkLogEntry,
     WorkLogKind,
@@ -21,6 +23,8 @@ from ..gates import ReviewSeparation
 from ..krab import IDEMPOTENCY_KEY_RE
 from ..workflows import (
     BUILT_IN_WORKFLOW_TEMPLATE_DEFINITIONS,
+    DISCOVERY_TEMPLATE_ID,
+    DISCOVERY_TEMPLATE_REVISION,
     IMPLEMENTATION_TEMPLATE_ID,
     IMPLEMENTATION_TEMPLATE_REVISION,
     WorkflowConfigurationSpec,
@@ -60,7 +64,7 @@ class WorkflowStorage:
 
     @staticmethod
     def _configuration_manifest(
-        spec: WorkflowConfigurationSpec,
+        spec: WorkflowConfigurationSpec | DiscoveryConfigurationSpec,
         *,
         role_profile_version_ids: dict[str, str],
         template_definition_id: str = IMPLEMENTATION_TEMPLATE_ID,
@@ -156,6 +160,50 @@ class WorkflowStorage:
                 "workflow producer and reviewer require distinct Krab identities"
             )
 
+    @staticmethod
+    def _validate_discovery_roles(
+        _spec: DiscoveryConfigurationSpec,
+        investigator: dict[str, Any],
+        coordinator: dict[str, Any],
+    ) -> None:
+        if investigator["profile_id"] == coordinator["profile_id"]:
+            raise ConflictError(
+                "discovery investigator and coordinator require distinct profiles"
+            )
+        if investigator["krab_identity_id"] == coordinator["krab_identity_id"]:
+            raise ConflictError(
+                "discovery investigator and coordinator require distinct "
+                "Krab identities"
+            )
+        required = {
+            "investigator": {
+                GatewayCapability.RUN_DESCRIBE,
+                GatewayCapability.DISCOVERY_TRACE_SUBMIT,
+            },
+            "coordinator": {
+                GatewayCapability.RUN_DESCRIBE,
+                GatewayCapability.INTERACTION_OPEN,
+                GatewayCapability.INTERACTION_READ,
+                GatewayCapability.HANDOFF_SUBMIT,
+                GatewayCapability.DISCOVERY_RULING_SUBMIT,
+            },
+        }
+        for role, pin in (
+            ("investigator", investigator),
+            ("coordinator", coordinator),
+        ):
+            spec = pin["spec"]
+            if spec.workspace_mode is not WorkspaceMode.READ_ONLY:
+                raise ConflictError(f"discovery {role} must use a read-only workspace")
+            missing = required[role].difference(spec.gateway_capabilities)
+            if missing:
+                raise ConflictError(
+                    f"discovery {role} lacks gateway capability: "
+                    + ", ".join(sorted(capability.value for capability in missing))
+                )
+        if "krab" not in coordinator["spec"].credential_names:
+            raise ConflictError("discovery coordinator requires the krab authority")
+
     def list_workflow_template_definitions(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
@@ -212,10 +260,6 @@ class WorkflowStorage:
     def _configuration_record(
         self, connection: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, Any]:
-        try:
-            spec = WorkflowConfigurationSpec.from_mapping(json.loads(row["spec_json"]))
-        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
-            raise StorageError("stored workflow configuration is invalid") from exc
         definition = self._definition_record(
             {
                 "id": row["template_id"],
@@ -227,6 +271,18 @@ class WorkflowStorage:
                 "template_created_at": row["template_created_at"],
             }
         )
+        try:
+            raw_spec = json.loads(row["spec_json"])
+            if row["template_id"] == IMPLEMENTATION_TEMPLATE_ID:
+                spec: WorkflowConfigurationSpec | DiscoveryConfigurationSpec = (
+                    WorkflowConfigurationSpec.from_mapping(raw_spec)
+                )
+            elif row["template_id"] == DISCOVERY_TEMPLATE_ID:
+                spec = DiscoveryConfigurationSpec.from_mapping(raw_spec)
+            else:
+                raise ValidationError("workflow configuration template is unsupported")
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow configuration is invalid") from exc
         parsed_definition = WorkflowTemplateDefinition.from_mapping(
             definition["definition"]
         )
@@ -275,7 +331,15 @@ class WorkflowStorage:
                 "krab_handle": role["krab_handle"],
             }
         if row["template_id"] == IMPLEMENTATION_TEMPLATE_ID:
+            assert isinstance(spec, WorkflowConfigurationSpec)
             self._validate_roles(spec, role_pins["producer"], role_pins["reviewer"])
+        elif row["template_id"] == DISCOVERY_TEMPLATE_ID:
+            assert isinstance(spec, DiscoveryConfigurationSpec)
+            self._validate_discovery_roles(
+                spec,
+                role_pins["investigator"],
+                role_pins["coordinator"],
+            )
         manifest = self._configuration_manifest(
             spec,
             role_profile_version_ids=role_profile_version_ids,
@@ -351,16 +415,116 @@ class WorkflowStorage:
         created_by: str,
         create: bool,
     ) -> dict[str, Any]:
-        project_key = validate_project_key(project_key)
-        name = validate_name(name, field="workflow configuration name")
-        producer_profile_name = validate_name(
-            producer_profile_name, field="producer profile name"
-        )
-        reviewer_profile_name = validate_name(
-            reviewer_profile_name, field="reviewer profile name"
-        )
         if not isinstance(spec, WorkflowConfigurationSpec):
             raise ValidationError("spec must be a WorkflowConfigurationSpec")
+        return self._write_prescription_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            role_profile_names={
+                "producer": producer_profile_name,
+                "reviewer": reviewer_profile_name,
+            },
+            template_definition_id=IMPLEMENTATION_TEMPLATE_ID,
+            template_revision=IMPLEMENTATION_TEMPLATE_REVISION,
+            created_by=created_by,
+            create=create,
+        )
+
+    def create_discovery_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: DiscoveryConfigurationSpec,
+        investigator_profile_name: str,
+        coordinator_profile_name: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        return self._write_discovery_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            investigator_profile_name=investigator_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
+            created_by=created_by,
+            create=True,
+        )
+
+    def revise_discovery_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: DiscoveryConfigurationSpec,
+        investigator_profile_name: str,
+        coordinator_profile_name: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        return self._write_discovery_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            investigator_profile_name=investigator_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
+            created_by=created_by,
+            create=False,
+        )
+
+    def _write_discovery_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: DiscoveryConfigurationSpec,
+        investigator_profile_name: str,
+        coordinator_profile_name: str,
+        created_by: str,
+        create: bool,
+    ) -> dict[str, Any]:
+        if not isinstance(spec, DiscoveryConfigurationSpec):
+            raise ValidationError("spec must be a DiscoveryConfigurationSpec")
+        return self._write_prescription_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            role_profile_names={
+                "investigator": investigator_profile_name,
+                "coordinator": coordinator_profile_name,
+            },
+            template_definition_id=DISCOVERY_TEMPLATE_ID,
+            template_revision=DISCOVERY_TEMPLATE_REVISION,
+            created_by=created_by,
+            create=create,
+        )
+
+    def _write_prescription_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: WorkflowConfigurationSpec | DiscoveryConfigurationSpec,
+        role_profile_names: dict[str, str],
+        template_definition_id: str,
+        template_revision: str,
+        created_by: str,
+        create: bool,
+    ) -> dict[str, Any]:
+        project_key = validate_project_key(project_key)
+        name = validate_name(name, field="workflow configuration name")
+        definition_spec = BUILT_IN_WORKFLOW_TEMPLATE_DEFINITIONS.get(
+            template_definition_id
+        )
+        if (
+            definition_spec is None
+            or definition_spec.digest != template_revision
+            or set(role_profile_names) != set(definition_spec.role_workspace_modes)
+        ):
+            raise ValidationError("prescription role bindings are invalid")
+        role_profile_names = {
+            role: validate_name(profile_name, field=f"{role} profile name")
+            for role, profile_name in role_profile_names.items()
+        }
         configuration_id = self.new_id("wfc")
         version_id = self.new_id("wfv")
         now = self.now()
@@ -377,16 +541,29 @@ class WorkflowStorage:
                 definition = connection.execute(
                     "SELECT id, content_sha256 FROM workflow_template_definitions "
                     "WHERE id = ?",
-                    (IMPLEMENTATION_TEMPLATE_ID,),
+                    (template_definition_id,),
                 ).fetchone()
                 if (
                     definition is None
-                    or definition["content_sha256"] != IMPLEMENTATION_TEMPLATE_REVISION
+                    or definition["content_sha256"] != template_revision
                 ):
                     raise StorageError("built-in workflow definition is unavailable")
-                producer = self._profile_pin(connection, producer_profile_name)
-                reviewer = self._profile_pin(connection, reviewer_profile_name)
-                self._validate_roles(spec, producer, reviewer)
+                role_pins = {
+                    role: self._profile_pin(connection, profile_name)
+                    for role, profile_name in role_profile_names.items()
+                }
+                if template_definition_id == IMPLEMENTATION_TEMPLATE_ID:
+                    assert isinstance(spec, WorkflowConfigurationSpec)
+                    self._validate_roles(
+                        spec, role_pins["producer"], role_pins["reviewer"]
+                    )
+                elif template_definition_id == DISCOVERY_TEMPLATE_ID:
+                    assert isinstance(spec, DiscoveryConfigurationSpec)
+                    self._validate_discovery_roles(
+                        spec,
+                        role_pins["investigator"],
+                        role_pins["coordinator"],
+                    )
                 if create:
                     version = 1
                     connection.execute(
@@ -397,13 +574,26 @@ class WorkflowStorage:
                     )
                 else:
                     configuration = connection.execute(
-                        "SELECT id FROM workflow_configurations "
-                        "WHERE project_id = ? AND name = ?",
+                        "SELECT c.id, latest.template_definition_id "
+                        "FROM workflow_configurations c "
+                        "JOIN workflow_configuration_versions latest "
+                        "ON latest.id = (SELECT cv.id "
+                        "FROM workflow_configuration_versions cv "
+                        "WHERE cv.configuration_id = c.id "
+                        "ORDER BY cv.version DESC LIMIT 1) "
+                        "WHERE c.project_id = ? AND c.name = ?",
                         (project["id"], name),
                     ).fetchone()
                     if configuration is None:
                         raise NotFoundError(
                             f"workflow configuration not found: {project_key}/{name}"
+                        )
+                    if (
+                        configuration["template_definition_id"]
+                        != template_definition_id
+                    ):
+                        raise ConflictError(
+                            "workflow configuration belongs to another prescription"
                         )
                     configuration_id = configuration["id"]
                     version = connection.execute(
@@ -415,9 +605,10 @@ class WorkflowStorage:
                 manifest = self._configuration_manifest(
                     spec,
                     role_profile_version_ids={
-                        "producer": producer["profile_version_id"],
-                        "reviewer": reviewer["profile_version_id"],
+                        role: pin["profile_version_id"]
+                        for role, pin in role_pins.items()
                     },
+                    template_definition_id=template_definition_id,
                 )
                 connection.execute(
                     "INSERT INTO workflow_configuration_versions "
@@ -428,7 +619,7 @@ class WorkflowStorage:
                         version_id,
                         configuration_id,
                         version,
-                        IMPLEMENTATION_TEMPLATE_ID,
+                        template_definition_id,
                         spec.canonical,
                         content_sha256(canonical_json(manifest)),
                         created_by,
@@ -440,8 +631,8 @@ class WorkflowStorage:
                     "(configuration_version_id, role, profile_version_id) "
                     "VALUES (?, ?, ?)",
                     (
-                        (version_id, "producer", producer["profile_version_id"]),
-                        (version_id, "reviewer", reviewer["profile_version_id"]),
+                        (version_id, role, pin["profile_version_id"])
+                        for role, pin in role_pins.items()
                     ),
                 )
                 connection.commit()

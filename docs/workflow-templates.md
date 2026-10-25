@@ -35,6 +35,12 @@ seam, not permission to execute an unknown state machine: the implementation
 director explicitly rejects every definition except `implementation-v1` before
 it creates execution state.
 
+Schema v33 registers `discovery-v1` against the same ledger. Its investigator
+and coordinator roles are both read-only, distinct by profile and Krab
+identity, and pinned to role-specific gateway capabilities. Registration does
+not make it executable through the implementation director; its separate
+bounded director remains an M13B checkpoint.
+
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
 

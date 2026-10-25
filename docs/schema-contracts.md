@@ -144,6 +144,21 @@ changes-requested provenance is exact, every round stays in one project/thread/
 ref/object-format scope, the final gate remains ready, and the current
 integration ref still equals the workflow source.
 
+Control-plane schema v32 replaces the implementation prescription's fixed
+producer/reviewer configuration columns with immutable named-role bindings.
+The existing configuration manifest and digest are preserved exactly. Built-in
+definitions now pass through one bounded generic parser and an exact local
+catalog, while each director still refuses definitions it does not implement.
+
+Control-plane schema v33 registers the fixed `discovery-v1` prescription and
+publishes `discovery-configuration-v1.schema.json`,
+`discovery-trace-v1.schema.json`, and `discovery-ruling-v1.schema.json`.
+Discovery configurations pin distinct read-only investigator and coordinator
+profile revisions plus bounded output ceilings. Runtime validation additionally
+enforces UTF-8 limits, safe relative evidence paths, unique semantic keys, and
+source-reference relationships. A `GO` ruling is the only disposition that may
+carry a work-ready brief, and that brief contains at most five MUST items.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

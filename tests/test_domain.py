@@ -239,7 +239,18 @@ class AgentProfileTests(unittest.TestCase):
         )
         self.assertEqual(profile.network_mode, NetworkMode.GATEWAY_ONLY)
         self.assertEqual(profile.credential_names, ("krab", "openai-main"))
-        self.assertEqual(profile.gateway_capabilities, tuple(GatewayCapability))
+        role_specific = {
+            GatewayCapability.DISCOVERY_TRACE_SUBMIT,
+            GatewayCapability.DISCOVERY_RULING_SUBMIT,
+        }
+        self.assertEqual(
+            profile.gateway_capabilities,
+            tuple(
+                capability
+                for capability in GatewayCapability
+                if capability not in role_specific
+            ),
+        )
 
     def test_profile_uses_argv_without_implicit_authority(self) -> None:
         profile = AgentProfileSpec.from_mapping(

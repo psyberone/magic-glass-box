@@ -32,6 +32,9 @@ from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.workflows import (
+    DISCOVERY_TEMPLATE,
+    DISCOVERY_TEMPLATE_ID,
+    DISCOVERY_TEMPLATE_REVISION,
     IMPLEMENTATION_TEMPLATE,
     IMPLEMENTATION_TEMPLATE_ID,
     IMPLEMENTATION_TEMPLATE_REVISION,
@@ -330,6 +333,24 @@ class WorkflowStorageTests(unittest.TestCase):
             PRAGMA foreign_keys = ON;
             """
         )
+        WorkflowStorageTests.downgrade_discovery_to_v32(connection)
+
+    @staticmethod
+    def downgrade_discovery_to_v32(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            DROP TRIGGER workflow_template_definition_immutable_delete;
+            DELETE FROM workflow_template_definitions
+            WHERE template_key = 'discovery-v1';
+            CREATE TRIGGER workflow_template_definition_immutable_delete
+            BEFORE DELETE ON workflow_template_definitions
+            BEGIN
+                SELECT RAISE(
+                    ABORT, 'workflow template definitions cannot be deleted'
+                );
+            END;
+            """
+        )
 
     def start(
         self,
@@ -450,6 +471,15 @@ class WorkflowStorageTests(unittest.TestCase):
             definitions,
             [
                 {
+                    "id": DISCOVERY_TEMPLATE_ID,
+                    "key": "discovery-v1",
+                    "version": 1,
+                    "revision": DISCOVERY_TEMPLATE_REVISION,
+                    "built_in": True,
+                    "definition": DISCOVERY_TEMPLATE,
+                    "created_at": "2026-10-25T00:00:00.000000+00:00",
+                },
+                {
                     "id": IMPLEMENTATION_TEMPLATE_ID,
                     "key": "implementation-v1",
                     "version": 1,
@@ -457,12 +487,12 @@ class WorkflowStorageTests(unittest.TestCase):
                     "built_in": True,
                     "definition": IMPLEMENTATION_TEMPLATE,
                     "created_at": "2026-10-23T00:00:00.000000+00:00",
-                }
+                },
             ],
         )
         self.assertNotIn("credential_ref", repr(configuration))
         counts = self.database.status()["counts"]
-        self.assertEqual(counts["workflow_template_definitions"], 1)
+        self.assertEqual(counts["workflow_template_definitions"], 2)
         self.assertEqual(counts["workflow_configurations"], 1)
         self.assertEqual(counts["workflow_configuration_versions"], 1)
         self.assertEqual(counts["workflow_configuration_role_bindings"], 2)
@@ -1350,7 +1380,7 @@ class WorkflowStorageTests(unittest.TestCase):
             ):
                 connection.execute(statement, parameters)
 
-    def test_schema_thirty_two_migrates_role_pins_without_rewriting_authority(
+    def test_schema_thirty_three_migrates_role_pins_without_rewriting_authority(
         self,
     ) -> None:
         configuration = self.create_configuration()
@@ -1436,13 +1466,14 @@ class WorkflowStorageTests(unittest.TestCase):
                 PRAGMA foreign_keys = ON;
                 """
             )
+            self.downgrade_discovery_to_v32(connection)
 
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 32)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(first["counts"]["workflow_configuration_role_bindings"], 2)
         self.assertEqual(
             migrated.get_workflow_configuration("workflow-project", "default"),
@@ -1466,8 +1497,10 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         self.assertEqual(repeated["schema_version"], SCHEMA_VERSION)
         definitions = migrated.list_workflow_template_definitions()
-        self.assertEqual(len(definitions), 1)
-        self.assertEqual(definitions[0]["key"], "implementation-v1")
+        self.assertEqual(
+            {definition["key"] for definition in definitions},
+            {"discovery-v1", "implementation-v1"},
+        )
 
     def test_schema_thirty_one_adds_correction_chain_authority_once(self) -> None:
         path = Path(self.temporary.name) / "schema-30.db"
