@@ -7,6 +7,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 
+from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import (
     ConcurrentUpdateError,
     ConflictError,
@@ -1098,6 +1099,27 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         )
         self.assertEqual(stored["ruling"]["disposition"], "ASK_HUMAN")
         self.assertEqual(stored["interaction_id"], opened["id"])
+        waiting_snapshot = ControlRoom(Database(self.database.path)).snapshot()
+        projected = waiting_snapshot["discovery_executions"][0]
+        self.assertEqual(projected["coordinator_run_state"], "waiting_for_input")
+        self.assertEqual(
+            (
+                projected["latest_ruling_id"],
+                projected["latest_ruling_disposition"],
+                projected["latest_ruling_interaction_id"],
+                projected["latest_ruling_interaction_state"],
+            ),
+            (stored["id"], "ASK_HUMAN", opened["id"], "open"),
+        )
+        self.assertIn(
+            opened["id"],
+            {
+                item["subject_id"]
+                for item in waiting_snapshot["attention"]
+                if item["kind"] == "interaction.pending"
+            },
+        )
+        self.assertNotIn(ruling.summary, json.dumps(projected, sort_keys=True))
 
         with self.assertRaises(ConflictError):
             self.database.submit_discovery_ruling(
@@ -1283,6 +1305,26 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
             (finished["state"], finished["stage"]), ("completed", "completion")
         )
         self.assertEqual(finished["events"][-1]["kind"], "discovery.completed")
+        projected = ControlRoom(Database(self.database.path)).snapshot()[
+            "discovery_executions"
+        ][0]
+        self.assertEqual(projected["id"], finished["id"])
+        self.assertEqual(projected["state"], "completed")
+        self.assertEqual(projected["investigator_run_id"], investigator["id"])
+        self.assertEqual(projected["coordinator_run_id"], coordinator["id"])
+        self.assertEqual(projected["trace_id"], finished["trace"]["id"])
+        self.assertEqual(
+            (
+                projected["latest_ruling_id"],
+                projected["latest_ruling_disposition"],
+            ),
+            (finished["final_ruling"]["id"], "GO"),
+        )
+        encoded = json.dumps(projected, sort_keys=True)
+        self.assertNotIn(trace.summary, encoded)
+        self.assertNotIn(ruling.summary, encoded)
+        assert ruling.work_ready_brief is not None
+        self.assertNotIn(ruling.work_ready_brief.objective, encoded)
 
     def test_director_fails_closed_when_a_successful_role_omits_evidence(self) -> None:
         execution = self.start()

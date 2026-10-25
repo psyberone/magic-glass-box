@@ -2571,6 +2571,17 @@ class CLITests(unittest.TestCase):
                 ("discovery.show", {"execution_id": execution_id}),
             ),
             (
+                ["discovery", "list", "--project", "box-project"],
+                (
+                    "discovery.list",
+                    {
+                        "project_key": "box-project",
+                        "state": None,
+                        "limit": 100,
+                    },
+                ),
+            ),
+            (
                 [
                     "discovery",
                     "list",

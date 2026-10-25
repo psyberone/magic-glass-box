@@ -504,7 +504,9 @@ def _render_control_room(
     supervisor_action_rows = [
         (
             row.get("id"),
-            row.get("run_id") or row.get("workflow_execution_id"),
+            row.get("run_id")
+            or row.get("workflow_execution_id")
+            or row.get("discovery_execution_id"),
             row.get("kind"),
             row.get("state"),
             f"{row.get('attempt_count')} / {row.get('max_attempts')}",
@@ -545,6 +547,39 @@ def _render_control_room(
                 row.get("landing_mode"),
                 queue_summary,
                 row.get("open_ruling_kind"),
+            )
+        )
+    discovery_rows = []
+    for row in snapshot.get("discovery_executions", []):
+        if not isinstance(row, Mapping):
+            continue
+        krab_route = " · ".join(
+            str(value)
+            for value in (row.get("krab_session_id"), row.get("krab_claim_id"))
+            if value is not None
+        )
+        latest_ruling = " · ".join(
+            str(value)
+            for value in (
+                row.get("latest_ruling_disposition"),
+                row.get("latest_ruling_id"),
+                row.get("latest_ruling_interaction_state"),
+            )
+            if value is not None
+        )
+        discovery_rows.append(
+            (
+                row.get("id"),
+                row.get("project_key"),
+                row.get("state"),
+                row.get("stage"),
+                f"{row.get('configuration_name')}@{row.get('configuration_version')}",
+                f"{row.get('investigator_profile_name')}@{row.get('investigator_profile_version')}",
+                f"{row.get('coordinator_profile_name')}@{row.get('coordinator_profile_version')}",
+                row.get("decision_owner_krab_handle"),
+                krab_route,
+                row.get("trace_id"),
+                latest_ruling,
             )
         )
     escalation_rows = [
@@ -869,7 +904,7 @@ def _render_control_room(
             _table(
                 (
                     "ID",
-                    "Run / workflow",
+                    "Run / execution",
                     "Kind",
                     "State",
                     "Attempts",
@@ -897,6 +932,25 @@ def _render_control_room(
                     "Open ruling",
                 ),
                 workflow_rows,
+            ),
+        ),
+        _section(
+            "Discovery",
+            _table(
+                (
+                    "ID",
+                    "Project",
+                    "State",
+                    "Stage",
+                    "Configuration",
+                    "Investigator",
+                    "Coordinator",
+                    "Decision owner",
+                    "Krab route",
+                    "Trace",
+                    "Latest ruling",
+                ),
+                discovery_rows,
             ),
         ),
         _section(

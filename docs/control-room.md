@@ -51,6 +51,12 @@ contains:
   action state, landing mode, queue/policy/candidate identity, provider target
   and availability, latest manual/provider authority, landed receipt,
   completion outcome, and any open ruling ID/kind/version;
+- all active Discovery executions plus a bounded number of recent terminal
+  executions, including their immutable project, configuration, role/profile,
+  source, work-thread, Krab-route, and decision-owner pins; current stage and
+  action state; role-run states; and trace/ruling IDs, provenance, digests, and
+  disposition. Discovery specifications, requests, evidence bodies, and
+  work-ready briefs are not projected;
 - attempts, owners, leases, cancellation signals, interactions, retained
   result summaries, run-bound provider authorities, pinned supervision
   policies, candidate-backed review bindings, redacted exact-input gate
@@ -65,16 +71,19 @@ contains:
   refolds, workflow provider targets or capabilities that still need binding,
   manual plans, receipts, or retries that need operator action, pending
   provider landings, expired integration claims, exhausted supervisor work,
-  and open workflow rulings. Every
+  failed Discovery executions, and open workflow rulings. Every
   current attention entry includes its age in seconds at the snapshot's
   consistency timestamp.
 
-`--history-limit` accepts 0 through 500 and limits only terminal runs. It never
-hides an active run. The same bound selects the attempts, interactions,
-results, candidates, gate policies, review-run bindings, and authority bindings
-attached to the visible run set. Aggregate
-counts—including action and escalation lifecycle states—still describe all
-local state and the snapshot reports whether terminal history was truncated.
+`--history-limit` accepts 0 through 500 and independently limits terminal runs,
+workflows, and Discovery executions. It never hides an active object. The same
+bound selects the attempts, interactions, results, candidates, gate policies,
+review-run bindings, and authority bindings attached to the visible run set.
+Aggregate counts—including workflow, Discovery, action, and escalation
+lifecycle states—still describe all local state. The
+`terminal_history_truncated` flag specifically reports truncated terminal-run
+history; bounded workflow and Discovery collections remain distinguishable
+from their aggregate counts.
 
 The optional Krab overlay contains only the roles of identities already
 configured in Magic Glass Box. It is not a duplicate project-membership
@@ -91,6 +100,8 @@ The projection intentionally excludes:
 - work-item briefs, criteria, constraints, and context;
 - assignment objectives and acceptance-check text;
 - work-log and checkpoint text;
+- Discovery configuration/request documents, trace and ruling bodies,
+  work-ready briefs, and cancellation or failure reasons;
 - interaction titles, questions, answers, and message history;
 - handoff summaries and agent transcripts;
 - maintainer-disposition summaries and actionable details;
@@ -137,6 +148,12 @@ retain daemonized handler capacity or delay server shutdown indefinitely.
 Visible titles and every other rendered value are HTML-escaped. Errors returned
 to the browser do not include credential, filesystem, upstream, or cleanup
 details.
+
+The browser gives Discovery its own table rather than presenting it as an
+implementation workflow. It renders only the bounded projection above; a
+pending `ASK_HUMAN` ruling is represented by disposition, evidence and
+interaction identifiers, and interaction state, never by the ruling or
+question text.
 
 The process is a local administrative surface, not a multi-user authentication
 server. Anyone who can read the printed private URL and reach the loopback

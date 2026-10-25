@@ -511,6 +511,27 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
             coordinator_profile_name="Coordinator",
             created_by=self.user["id"],
         )
+        self.database.create_project(
+            instance_id=self.instance["id"],
+            krab_project_id="prj_" + "4" * 32,
+            krab_project_key="other-discovery-project",
+            display_name="Other Discovery Project",
+            context=ProjectContext.from_mapping(
+                {
+                    "purpose": "Prove project-bounded configuration reads",
+                    "instructions": ["Do not cross project boundaries"],
+                }
+            ),
+            created_by=self.user["id"],
+        )
+        self.database.create_discovery_configuration(
+            project_key="other-discovery-project",
+            name="other-discovery",
+            spec=self.spec(),
+            investigator_profile_name="Investigator",
+            coordinator_profile_name="Coordinator",
+            created_by=self.user["id"],
+        )
 
         self.assertEqual(
             self.database.get_discovery_configuration(

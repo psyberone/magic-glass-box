@@ -1260,7 +1260,7 @@ The completed proof above is the milestone's external golden test.
 
 ## Milestone 13: discovery and review prescriptions
 
-**Status: in progress; split into four honest checkpoints after completed M12**
+**Status: in progress; M13A and M13B complete in honest checkpoints after M12**
 
 M13 does not turn workflows into an arbitrary DAG engine. Each prescription is
 a versioned, immutable built-in with fixed roles, stages, workspace authority,
@@ -1293,7 +1293,7 @@ prescription before creating any execution state.
 
 ### M13B: bounded Discovery v1
 
-**Status: in progress.** Schema v33 completed the contract checkpoint: the
+**Status: complete.** Schema v33 completed the contract checkpoint: the
 built-in definition, generic configuration parsing, exact investigator and
 coordinator profile pins, and published typed configuration/trace/ruling
 contracts. Schema v34 completes the execution-ledger checkpoint. It pins the
@@ -1309,8 +1309,12 @@ implementation execution on the same work thread and prevents premature thread
 closure. A dedicated `discovery` CLI now creates and revises typed
 configurations, reads only Discovery configurations from the shared
 prescription ledger, and starts, inspects, lists, or cancels exact executions
-with explicit Krab session and optional claim pins. Control-room projection and
-the operator proof remain before M13B is complete.
+with explicit Krab session and optional claim pins. The control room completes
+the operator proof with aggregate lifecycle counts, bounded active/history
+projection, typed evidence provenance, failed-execution attention, durable
+supervisor-action visibility, and a distinct browser table. It excludes
+requests, evidence bodies, work-ready briefs, profile commands, credentials,
+and private failure or cancellation text.
 
 Checkpoint evidence: 1,113 tests pass at 86% aggregate branch-aware coverage;
 the new Discovery contract module is at 97%. A focused 46-mutant contract and
@@ -1338,13 +1342,25 @@ version-obsolescence paths were killed. RED-first tests first exposed and then
 closed both cross-prescription holes: implementation could otherwise start
 during active Discovery, and a work thread could otherwise close beneath it.
 
-Operator-CLI evidence: 1,141 tests pass at 86% aggregate branch-aware coverage;
-the CLI is at 97%. RED-first command-contract and dispatch tests cover the
-complete bounded surface, while storage and service tests prove that the
-Discovery namespace cannot return an implementation configuration and that an
-exact historical configuration version remains selectable. The final M13B
-mutation wave follows the control-room projection so the whole operator seam is
-measured together.
+Operator evidence: 1,145 tests pass at 86% aggregate branch-aware coverage; the
+CLI is at 97%, the control-room projection at 92%, the browser renderer at 96%,
+and the director at 98%. RED-first command-contract and dispatch tests cover
+the complete bounded surface. Storage and service tests prove that the
+Discovery namespace cannot return an implementation configuration, cannot
+cross a project boundary, and can select an exact historical configuration
+version. Control-room tests prove restart-safe projection of active,
+`ASK_HUMAN`, completed, failed, and cancelled paths while excluding private
+content.
+
+The final shared-seam mutation wave over Discovery configuration reads and the
+control-room projection initially killed 1,348/1,588 mutants. Three surviving
+project-filter and multi-execution action-selection mutations received direct
+regression tests and were then killed, for an effective 1,351/1,588 (85.08%).
+A separate CLI/browser operator wave initially killed 531/540; its nine
+survivors exposed an unasserted list default and two blank fixture columns.
+Survivor-derived tests killed all nine on a targeted rerun, producing 540/540
+(100%). Neither wave produced timeouts, uncovered mutants, suspicious outcomes,
+or crashes.
 
 - Add one read-only investigator and one read-only coordinator as the default
   fixed topology. A separate higher-assurance prescription may add another

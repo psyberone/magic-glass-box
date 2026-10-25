@@ -152,8 +152,12 @@ class ControlRoom:
         assignments = self._assignments(connection, generated_at)
         runs, terminal_total = self._runs(connection, history_limit)
         workflows = self._workflows(connection, history_limit)
+        discovery_executions = self._discovery_executions(connection, history_limit)
         run_ids = [run["id"] for run in runs]
         workflow_ids = [workflow["id"] for workflow in workflows]
+        discovery_execution_ids = [
+            execution["id"] for execution in discovery_executions
+        ]
         attempts = self._attempts(connection, run_ids, generated_at)
         interactions = self._interactions(connection, run_ids)
         retained_results = self._results(connection, run_ids)
@@ -166,7 +170,12 @@ class ControlRoom:
         authorities = self._run_authorities(connection, run_ids, generated_at)
         provider_recoveries = self._provider_recoveries(connection, run_ids)
         provider_budgets = self._provider_budgets(connection, run_ids)
-        supervisor_actions = self._supervisor_actions(connection, run_ids, workflow_ids)
+        supervisor_actions = self._supervisor_actions(
+            connection,
+            run_ids,
+            workflow_ids,
+            discovery_execution_ids,
+        )
         escalations = self._escalations(connection, run_ids)
         self._attach_run_counts(
             runs,
@@ -221,6 +230,7 @@ class ControlRoom:
             gate_policies,
             integration_queue,
             workflows=workflows,
+            discovery_executions=discovery_executions,
             generated_at=generated_at,
         )
         return (
@@ -244,6 +254,7 @@ class ControlRoom:
                 "assignments": assignments,
                 "runs": runs,
                 "workflows": workflows,
+                "discovery_executions": discovery_executions,
                 "attempts": attempts,
                 "interactions": interactions,
                 "retained_results": retained_results,
@@ -829,12 +840,116 @@ class ControlRoom:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _discovery_executions(
+        connection: sqlite3.Connection, history_limit: int
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            "WITH terminal AS (SELECT id FROM discovery_executions "
+            "WHERE state IN ('cancelled','completed','failed') "
+            "ORDER BY updated_at DESC, id LIMIT ?), visible AS ("
+            "SELECT id, 0 AS group_order FROM discovery_executions "
+            "WHERE state = 'active' UNION ALL "
+            "SELECT id, 1 AS group_order FROM terminal"
+            ") SELECT execution.id, "
+            "project.krab_project_key AS project_key, "
+            "template.template_key, template.version AS template_version, "
+            "template.content_sha256 AS template_revision, "
+            "named.name AS configuration_name, "
+            "configuration.version AS configuration_version, "
+            "configuration.id AS configuration_version_id, "
+            "execution.work_item_id, execution.work_item_version_id, "
+            "execution.work_thread_id, execution.work_thread_generation, "
+            "execution.context_version_id, execution.source_revision, "
+            "execution.krab_session_id, execution.krab_claim_id, "
+            "execution.state, execution.stage, execution.version, "
+            "investigator.name AS investigator_profile_name, "
+            "investigator_version.version AS investigator_profile_version, "
+            "coordinator.name AS coordinator_profile_name, "
+            "coordinator_version.version AS coordinator_profile_version, "
+            "requester.handle AS requested_by, "
+            "owner.handle AS decision_owner_krab_handle, "
+            "action.id AS action_id, action.state AS action_state, "
+            "action.attempt_count AS action_attempt_count, "
+            "action.max_attempts AS action_max_attempts, "
+            "action.last_error_code AS action_last_error_code, "
+            "investigator_run.run_id AS investigator_run_id, "
+            "investigator_state.state AS investigator_run_state, "
+            "coordinator_run.run_id AS coordinator_run_id, "
+            "coordinator_state.state AS coordinator_run_state, "
+            "trace.id AS trace_id, trace.run_id AS trace_run_id, "
+            "trace.attempt_id AS trace_attempt_id, "
+            "trace.content_sha256 AS trace_sha256, "
+            "ruling.id AS latest_ruling_id, "
+            "ruling.sequence AS latest_ruling_sequence, "
+            "ruling.run_id AS latest_ruling_run_id, "
+            "ruling.attempt_id AS latest_ruling_attempt_id, "
+            "ruling.disposition AS latest_ruling_disposition, "
+            "ruling.interaction_id AS latest_ruling_interaction_id, "
+            "interaction.state AS latest_ruling_interaction_state, "
+            "ruling.content_sha256 AS latest_ruling_sha256, "
+            "execution.created_at, execution.updated_at, execution.finished_at "
+            "FROM visible JOIN discovery_executions execution "
+            "ON execution.id = visible.id "
+            "JOIN projects project ON project.id = execution.project_id "
+            "JOIN workflow_template_definitions template "
+            "ON template.id = execution.template_definition_id "
+            "JOIN workflow_configuration_versions configuration "
+            "ON configuration.id = execution.configuration_version_id "
+            "JOIN workflow_configurations named "
+            "ON named.id = configuration.configuration_id "
+            "JOIN workflow_configuration_role_bindings investigator_binding "
+            "ON investigator_binding.configuration_version_id = configuration.id "
+            "AND investigator_binding.role = 'investigator' "
+            "JOIN agent_profile_versions investigator_version "
+            "ON investigator_version.id = investigator_binding.profile_version_id "
+            "JOIN agent_profiles investigator "
+            "ON investigator.id = investigator_version.profile_id "
+            "JOIN workflow_configuration_role_bindings coordinator_binding "
+            "ON coordinator_binding.configuration_version_id = configuration.id "
+            "AND coordinator_binding.role = 'coordinator' "
+            "JOIN agent_profile_versions coordinator_version "
+            "ON coordinator_version.id = coordinator_binding.profile_version_id "
+            "JOIN agent_profiles coordinator "
+            "ON coordinator.id = coordinator_version.profile_id "
+            "JOIN users requester ON requester.id = execution.requested_by "
+            "JOIN krab_identities owner "
+            "ON owner.id = execution.decision_owner_krab_identity_id "
+            "LEFT JOIN supervisor_actions action ON action.id = ("
+            "SELECT latest_action.id FROM supervisor_actions latest_action "
+            "WHERE latest_action.discovery_execution_id = execution.id "
+            "AND latest_action.subject_version = execution.version "
+            "ORDER BY latest_action.created_at DESC, latest_action.id DESC LIMIT 1) "
+            "LEFT JOIN discovery_run_bindings investigator_run "
+            "ON investigator_run.execution_id = execution.id "
+            "AND investigator_run.role = 'investigator' "
+            "LEFT JOIN runs investigator_state "
+            "ON investigator_state.id = investigator_run.run_id "
+            "LEFT JOIN discovery_run_bindings coordinator_run "
+            "ON coordinator_run.execution_id = execution.id "
+            "AND coordinator_run.role = 'coordinator' "
+            "LEFT JOIN runs coordinator_state "
+            "ON coordinator_state.id = coordinator_run.run_id "
+            "LEFT JOIN discovery_traces trace "
+            "ON trace.execution_id = execution.id "
+            "LEFT JOIN discovery_rulings ruling ON ruling.id = ("
+            "SELECT latest_ruling.id FROM discovery_rulings latest_ruling "
+            "WHERE latest_ruling.execution_id = execution.id "
+            "ORDER BY latest_ruling.sequence DESC LIMIT 1) "
+            "LEFT JOIN interactions interaction "
+            "ON interaction.id = ruling.interaction_id "
+            "ORDER BY visible.group_order, execution.updated_at DESC, execution.id",
+            (history_limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     @classmethod
     def _supervisor_actions(
         cls,
         connection: sqlite3.Connection,
         run_ids: list[str],
         workflow_ids: list[str],
+        discovery_execution_ids: list[str],
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         parameters: list[str] = []
@@ -846,11 +961,19 @@ class ControlRoom:
                 "workflow_execution_id IN (" + ",".join("?" for _ in workflow_ids) + ")"
             )
             parameters.extend(workflow_ids)
+        if discovery_execution_ids:
+            clauses.append(
+                "discovery_execution_id IN ("
+                + ",".join("?" for _ in discovery_execution_ids)
+                + ")"
+            )
+            parameters.extend(discovery_execution_ids)
         if not clauses:
             return []
         rows = connection.execute(
             "SELECT id, kind, subject_id, subject_version, run_id, "
-            "workflow_execution_id, state, version, attempt_count, "
+            "workflow_execution_id, discovery_execution_id, state, version, "
+            "attempt_count, "
             "max_attempts, available_at, owner_id, lease_expires_at, "
             "last_error_code, created_at, updated_at, finished_at "
             "FROM supervisor_actions WHERE "
@@ -1565,6 +1688,9 @@ class ControlRoom:
         workflow_states = states(
             "SELECT state, COUNT(*) AS count FROM workflow_executions GROUP BY state"
         )
+        discovery_states = states(
+            "SELECT state, COUNT(*) AS count FROM discovery_executions GROUP BY state"
+        )
         run_total = sum(run_states.values())
         attempt_total = sum(attempt_states.values())
         return {
@@ -1597,6 +1723,13 @@ class ControlRoom:
                 **{
                     state: workflow_states.get(state, 0)
                     for state in ("active", "cancelled", "completed")
+                },
+            },
+            "discovery_executions": {
+                "total": sum(discovery_states.values()),
+                **{
+                    state: discovery_states.get(state, 0)
+                    for state in ("active", "cancelled", "completed", "failed")
                 },
             },
             "attempts": {
@@ -1713,6 +1846,7 @@ class ControlRoom:
         integration_queue: list[dict[str, Any]] | None = None,
         *,
         workflows: list[dict[str, Any]] | None = None,
+        discovery_executions: list[dict[str, Any]] | None = None,
         generated_at: str | None = None,
     ) -> list[dict[str, Any]]:
         attention: list[dict[str, Any]] = []
@@ -1904,11 +2038,26 @@ class ControlRoom:
                         "subject_id": action["id"],
                         "run_id": action["run_id"],
                         "workflow_execution_id": action["workflow_execution_id"],
+                        "discovery_execution_id": action["discovery_execution_id"],
                         "action_kind": action["kind"],
                         "last_error_code": action["last_error_code"],
                         "updated_at": action["updated_at"],
                     },
                     action["updated_at"],
+                )
+        for execution in discovery_executions or []:
+            if execution["state"] == "failed":
+                add(
+                    {
+                        "kind": "discovery.failed",
+                        "severity": "warning",
+                        "subject_type": "discovery_execution",
+                        "subject_id": execution["id"],
+                        "discovery_execution_id": execution["id"],
+                        "stage": execution["stage"],
+                        "version": execution["version"],
+                    },
+                    execution["updated_at"],
                 )
         for workflow in workflows or []:
             if workflow["open_ruling_id"] is not None:

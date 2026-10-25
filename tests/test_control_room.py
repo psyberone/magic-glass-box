@@ -13,6 +13,7 @@ from magic_glass_box.candidates import CandidateManifest
 from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.credentials import CredentialError
 from magic_glass_box.db import SCHEMA_VERSION, Database, StorageError
+from magic_glass_box.discovery import DiscoveryConfigurationSpec
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -225,6 +226,85 @@ class ControlRoomTests(unittest.TestCase):
         )
         return run, running
 
+    def create_discovery_execution(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        investigator_identity = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "8" * 32, "investigator", 1),
+            "file:/private/investigator-secret",
+        )
+        coordinator_identity = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "9" * 32, "coordinator", 1),
+            "file:/private/coordinator-secret",
+        )
+        self.database.create_agent_profile(
+            name="Discovery Investigator",
+            spec=AgentProfileSpec.create(
+                image="investigator@sha256:abc",
+                command=["investigate", "private-investigator-argument"],
+                workspace_mode="read_only",
+                network_mode="gateway_only",
+                gateway_capabilities=[
+                    GatewayCapability.RUN_DESCRIBE,
+                    GatewayCapability.DISCOVERY_TRACE_SUBMIT,
+                ],
+            ),
+            krab_identity_id=investigator_identity["id"],
+            created_by=self.user["id"],
+        )
+        self.database.create_agent_profile(
+            name="Discovery Coordinator",
+            spec=AgentProfileSpec.create(
+                image="coordinator@sha256:abc",
+                command=["coordinate", "private-coordinator-argument"],
+                workspace_mode="read_only",
+                network_mode="gateway_only",
+                credential_names=["krab"],
+                gateway_capabilities=[
+                    GatewayCapability.RUN_DESCRIBE,
+                    GatewayCapability.INTERACTION_OPEN,
+                    GatewayCapability.INTERACTION_READ,
+                    GatewayCapability.HANDOFF_SUBMIT,
+                    GatewayCapability.DISCOVERY_RULING_SUBMIT,
+                ],
+            ),
+            krab_identity_id=coordinator_identity["id"],
+            created_by=self.user["id"],
+        )
+        configuration = self.database.create_discovery_configuration(
+            project_key="box-project",
+            name="default-discovery",
+            spec=DiscoveryConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "max_findings": 7,
+                    "max_must_items": 3,
+                    "max_follow_up_proposals": 4,
+                }
+            ),
+            investigator_profile_name="Discovery Investigator",
+            coordinator_profile_name="Discovery Coordinator",
+            created_by=self.user["id"],
+        )
+        execution = self.database.start_discovery_execution(
+            project_key="box-project",
+            configuration_name="default-discovery",
+            work_item_id=self.item["id"],
+            source_revision="d" * 40,
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=self.item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            krab_session_id="ses_" + "a" * 32,
+            krab_claim_id="clm_" + "b" * 32,
+            idempotency_key="control-room-discovery",
+            requested_by=self.user["id"],
+        )
+        return configuration, execution
+
     def test_snapshot_redacts_private_fields_present_in_the_fixture(self) -> None:
         run, attempt = self.start_run()
         assignment = self.database.create_work_assignment(
@@ -340,6 +420,7 @@ class ControlRoomTests(unittest.TestCase):
                 "assignments",
                 "runs",
                 "workflows",
+                "discovery_executions",
                 "attempts",
                 "interactions",
                 "retained_results",
@@ -377,6 +458,7 @@ class ControlRoomTests(unittest.TestCase):
                 "work_items",
                 "runs",
                 "workflows",
+                "discovery_executions",
                 "attempts",
                 "interactions",
                 "assignments",
@@ -1815,8 +1897,225 @@ class ControlRoomTests(unittest.TestCase):
             "supervisor_actions",
             "escalations",
             "workflows",
+            "discovery_executions",
         ):
             self.assertEqual(snapshot[collection], [])
+
+    def test_snapshot_projects_discovery_authority_after_process_replacement(
+        self,
+    ) -> None:
+        configuration, execution = self.create_discovery_execution()
+        action = self.database.enqueue_supervisor_actions()[0]
+
+        replacement = Database(self.database.path)
+        snapshot = ControlRoom(replacement).snapshot()
+
+        self.assertEqual(
+            snapshot["summary"]["discovery_executions"],
+            {
+                "total": 1,
+                "active": 1,
+                "cancelled": 0,
+                "completed": 0,
+                "failed": 0,
+            },
+        )
+        self.assertEqual(len(snapshot["discovery_executions"]), 1)
+        projected = snapshot["discovery_executions"][0]
+        self.assertEqual(
+            set(projected),
+            {
+                "id",
+                "project_key",
+                "template_key",
+                "template_version",
+                "template_revision",
+                "configuration_name",
+                "configuration_version",
+                "configuration_version_id",
+                "work_item_id",
+                "work_item_version_id",
+                "work_thread_id",
+                "work_thread_generation",
+                "context_version_id",
+                "source_revision",
+                "krab_session_id",
+                "krab_claim_id",
+                "state",
+                "stage",
+                "version",
+                "investigator_profile_name",
+                "investigator_profile_version",
+                "coordinator_profile_name",
+                "coordinator_profile_version",
+                "requested_by",
+                "decision_owner_krab_handle",
+                "action_id",
+                "action_state",
+                "action_attempt_count",
+                "action_max_attempts",
+                "action_last_error_code",
+                "investigator_run_id",
+                "investigator_run_state",
+                "coordinator_run_id",
+                "coordinator_run_state",
+                "trace_id",
+                "trace_run_id",
+                "trace_attempt_id",
+                "trace_sha256",
+                "latest_ruling_id",
+                "latest_ruling_sequence",
+                "latest_ruling_run_id",
+                "latest_ruling_attempt_id",
+                "latest_ruling_disposition",
+                "latest_ruling_interaction_id",
+                "latest_ruling_interaction_state",
+                "latest_ruling_sha256",
+                "created_at",
+                "updated_at",
+                "finished_at",
+            },
+        )
+        self.assertEqual(projected["id"], execution["id"])
+        self.assertEqual(projected["stage"], "investigate")
+        self.assertEqual(
+            projected["configuration_version_id"],
+            configuration["workflow_configuration_version_id"],
+        )
+        self.assertEqual(projected["decision_owner_krab_handle"], "agent_one")
+        self.assertEqual(
+            (projected["action_id"], projected["action_state"]),
+            (action["id"], "pending"),
+        )
+        self.assertEqual(
+            snapshot["supervisor_actions"][0]["discovery_execution_id"],
+            execution["id"],
+        )
+        for field in (
+            "investigator_run_id",
+            "coordinator_run_id",
+            "trace_id",
+            "latest_ruling_id",
+        ):
+            self.assertIsNone(projected[field])
+        encoded = json.dumps(projected, sort_keys=True)
+        for private in (
+            "investigator-secret",
+            "coordinator-secret",
+            "private-investigator-argument",
+            "private-coordinator-argument",
+            "max_findings",
+            "max_must_items",
+            "max_follow_up_proposals",
+            "request_json",
+            "trace_json",
+            "ruling_json",
+            "cancel_reason",
+            "failure_reason",
+        ):
+            self.assertNotIn(private, encoded)
+
+    def test_snapshot_projects_actions_for_multiple_discovery_executions(self) -> None:
+        configuration, first = self.create_discovery_execution()
+        second_item = self.database.import_work_item(
+            project_key="box-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "github",
+                    "external_id": "owner/repository#43",
+                    "source_updated_at": "2026-10-09T12:01:00Z",
+                    "title": "Second visible work-item title",
+                    "brief": "second private work item brief",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        second = self.database.start_discovery_execution(
+            project_key="box-project",
+            configuration_name="default-discovery",
+            work_item_id=second_item["id"],
+            source_revision="e" * 40,
+            expected_configuration_version=configuration["version"],
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=second_item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            krab_session_id="ses_" + "c" * 32,
+            krab_claim_id=None,
+            idempotency_key="control-room-discovery-second",
+            requested_by=self.user["id"],
+        )
+        self.database.enqueue_supervisor_actions()
+
+        snapshot = ControlRoom(Database(self.database.path)).snapshot()
+
+        self.assertEqual(
+            {
+                action["discovery_execution_id"]
+                for action in snapshot["supervisor_actions"]
+            },
+            {first["id"], second["id"]},
+        )
+
+    def test_snapshot_surfaces_failed_discovery_without_failure_text(self) -> None:
+        _configuration, execution = self.create_discovery_execution()
+        failed = self.database.fail_discovery_execution(
+            execution["id"],
+            expected_version=execution["version"],
+            reason="PRIVATE DISCOVERY FAILURE DETAIL",
+        )
+
+        snapshot = ControlRoom(Database(self.database.path)).snapshot(history_limit=1)
+
+        self.assertEqual(snapshot["discovery_executions"][0]["state"], "failed")
+        self.assertEqual(snapshot["summary"]["discovery_executions"]["failed"], 1)
+        attention = [
+            item for item in snapshot["attention"] if item["kind"] == "discovery.failed"
+        ]
+        self.assertEqual(
+            attention,
+            [
+                {
+                    "kind": "discovery.failed",
+                    "severity": "warning",
+                    "subject_type": "discovery_execution",
+                    "subject_id": failed["id"],
+                    "discovery_execution_id": failed["id"],
+                    "stage": "investigate",
+                    "version": failed["version"],
+                    "age_seconds": 0,
+                }
+            ],
+        )
+        self.assertNotIn("PRIVATE DISCOVERY FAILURE DETAIL", json.dumps(snapshot))
+
+        aggregate_only = ControlRoom(Database(self.database.path)).snapshot(
+            history_limit=0
+        )
+        self.assertEqual(aggregate_only["discovery_executions"], [])
+        self.assertEqual(aggregate_only["summary"]["discovery_executions"]["failed"], 1)
+
+    def test_snapshot_surfaces_cancelled_discovery_without_cancel_text(self) -> None:
+        _configuration, execution = self.create_discovery_execution()
+        cancelled = self.database.cancel_discovery_execution(
+            execution["id"],
+            expected_version=execution["version"],
+            cancelled_by=self.user["id"],
+            reason="PRIVATE DISCOVERY CANCELLATION DETAIL",
+        )
+
+        snapshot = ControlRoom(Database(self.database.path)).snapshot()
+
+        self.assertEqual(
+            (
+                snapshot["discovery_executions"][0]["id"],
+                snapshot["discovery_executions"][0]["state"],
+            ),
+            (cancelled["id"], "cancelled"),
+        )
+        self.assertEqual(snapshot["summary"]["discovery_executions"]["cancelled"], 1)
+        self.assertNotIn("PRIVATE DISCOVERY CANCELLATION DETAIL", json.dumps(snapshot))
 
     def test_snapshot_projects_workflow_authority_without_private_configuration(
         self,

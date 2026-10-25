@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C, M13A, and the M13B operator-CLI checkpoint complete**
+**Status: M12A-M12C, M13A, and M13B complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -39,7 +39,7 @@ Schema v33 registers `discovery-v1` against the same ledger. Its investigator
 and coordinator roles are both read-only, distinct by profile and Krab
 identity, and pinned to role-specific gateway capabilities. Registration does
 not make it executable through the implementation director; its separate
-bounded director remains an M13B checkpoint.
+bounded director is implemented independently in schema v35.
 
 Schema v34 adds the Discovery execution ledger without widening the
 prescription. One execution pins its definition and configuration revisions,
@@ -62,8 +62,7 @@ without its required evidence fails the execution; a stale action is harmless.
 The investigator receives no Krab routing, while the coordinator receives only
 the already-pinned session and optional claim needed for durable human
 questions. An active Discovery execution also excludes implementation on the
-same work thread and prevents that thread from being closed. The operator proof
-remains.
+same work thread and prevents that thread from being closed.
 
 The dedicated `discovery` CLI keeps this prescription distinct from the
 implementation workflow while reusing the generic immutable ledger. It can
@@ -71,6 +70,11 @@ create, revise, show, and list Discovery-only configurations, then start, show,
 list, or cancel an execution. Starting requires every ordinary immutable pin
 plus the exact Krab session; a claim is optional but, when supplied, is pinned
 before either role runs. No command accepts free-form topology or authority.
+The control room completes the operator surface with aggregate lifecycle
+counts, bounded active/history projection, failed-execution attention, durable
+supervisor-action visibility, and a separate browser table. It exposes typed
+evidence identity and provenance without exposing evidence bodies, prompts,
+profile commands, credentials, requests, work-ready briefs, or failure text.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
@@ -252,9 +256,8 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 - treating a three-agent advisory review as landing authority; and
 - release-management or multi-repository workflows in the first pass.
 
-The Discovery control-room projection and operator proof, followed by advisory
-review, are the next M13 checkpoints; heterogeneous work providers and
+Advisory review is the next M13 checkpoint; heterogeneous work providers and
 controlled remote execution remain later milestones. The completed
-`implementation-v1` proof, schema-v32
-named-role ledger, schema-v34 Discovery evidence ledger, and schema-v35 bounded
-director establish the immutable prescription seam they reuse.
+`implementation-v1` proof, schema-v32 named-role ledger, schema-v34 Discovery
+evidence ledger, schema-v35 bounded director, and bounded Discovery operator
+surface establish the immutable prescription seam they reuse.
