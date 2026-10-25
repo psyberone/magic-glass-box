@@ -514,6 +514,10 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM workflow_configuration_versions",
                 ),
                 (
+                    "workflow_configuration_role_bindings",
+                    "SELECT COUNT(*) FROM workflow_configuration_role_bindings",
+                ),
+                (
                     "workflow_executions",
                     "SELECT COUNT(*) FROM workflow_executions",
                 ),

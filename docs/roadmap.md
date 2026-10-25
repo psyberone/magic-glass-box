@@ -1260,17 +1260,77 @@ The completed proof above is the milestone's external golden test.
 
 ## Milestone 13: discovery and review prescriptions
 
-**Status: candidate milestone; ready for planning after completed M12**
+**Status: in progress; split into four honest checkpoints after completed M12**
 
-- Add a bounded Discovery prescription that produces a structured ruling and
-  work-ready brief without changing source.
-- Distinguish gate review, which can produce exact-candidate evidence, from
-  advisory multi-reviewer configurations such as The Furies, which cannot.
-- Carry MUST items only from the immutable work brief, retain reviewer PROBE
-  findings as follow-up proposals, and keep budgets fixed rather than allowing
-  a review to expand indefinitely.
-- Consider delta re-review only behind an explicit path allowlist and a
-  mechanical diff classification; it remains off by default.
+M13 does not turn workflows into an arbitrary DAG engine. Each prescription is
+a versioned, immutable built-in with fixed roles, stages, workspace authority,
+budgets, and output contracts. Configuration binds exact profile revisions to
+the prescription's named roles. The existing implementation workflow remains
+the only executable prescription until each new director and artifact contract
+is proven independently.
+
+### M13A: role-generic prescription foundation
+
+**Status: complete in schema v32.**
+
+- Replace the implementation-specific producer/reviewer columns on workflow
+  configuration versions with immutable named-role bindings. Schema v32
+  migrates both existing pins without rewriting the configuration digest or
+  any execution authority.
+- Parse and validate bounded built-in template definitions generically while
+  retaining an exact local catalog. Unknown or altered definitions fail
+  closed.
+- Preserve the M12 implementation API, director, control-room projection, and
+  producer/reviewer separation rules while moving their reads to the generic
+  binding ledger.
+
+Checkpoint evidence: 1,104 tests pass at 86% aggregate branch-aware coverage;
+the generic definition parser is at 100%. A focused 66-mutant authority-seam
+wave cleared at 100% after five initial survivors received direct regression
+tests. The v31 migration preserves the exact configuration digest and active
+execution role pins, and the implementation director rejects another
+prescription before creating any execution state.
+
+### M13B: bounded Discovery v1
+
+- Add one read-only investigator and one read-only coordinator as the default
+  fixed topology. A separate higher-assurance prescription may add another
+  blind investigator; a running prescription never expands itself silently.
+- Pin the project charter, work-item version, thread generation, source
+  revision, role/profile revisions, and fixed inference budgets before work
+  begins.
+- Produce a structured trace and a coordinator ruling of `GO`, `NO_GO`, or
+  `ASK_HUMAN`. `GO` emits a work-ready brief without changing source;
+  `ASK_HUMAN` uses the durable interaction path.
+- A brief may carry at most five `MUST` items, each traced to the immutable
+  work brief or acceptance criteria. New ideas and unresolved scope become
+  follow-up proposals rather than silently expanding the build.
+
+### M13C: advisory review v1
+
+- Add a fixed, blind-then-challenge multi-reviewer prescription (the personal
+  three-reviewer configuration may be named **The Furies**).
+- Its triangulated report is decision support only. It cannot emit gate
+  evidence, approve landing, satisfy maintainer authority, or mutate the
+  reviewed candidate.
+- Preserve the distinction between an exact-candidate gate reviewer and an
+  advisory reviewer in storage, service responses, the control room, and
+  audit language.
+
+### M13D: scope discipline and live proof
+
+- Carry `MUST` items only from the immutable work-ready brief. Reviewer
+  `PROBE` findings are classified mechanically: a head-only regression blocks;
+  a finding present on both base and head becomes a follow-up proposal.
+- Keep role and inference budgets fixed. Exhaustion pauses or fails according
+  to the pinned policy; no reviewer or coordinator can mint more authority.
+- Prove Discovery -> implementation -> gate review plus one advisory review on
+  a real repository, including an `ASK_HUMAN` or scope-ruling path and process
+  replacement from durable state.
+- Delta re-review remains off by default. Any later fast path requires an
+  explicit path allowlist, mechanical diff classification, and its own proof;
+  it is not required to complete M13.
+
 
 ## Milestone 14: heterogeneous work provider
 

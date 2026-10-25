@@ -555,7 +555,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 31)
+        self.assertEqual(SCHEMA_VERSION, 32)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -1475,6 +1475,7 @@ class IntegrationLedgerTests(unittest.TestCase):
             connection.execute("DROP TABLE workflow_run_bindings")
             connection.execute("DROP TABLE workflow_execution_events")
             connection.execute("DROP TABLE workflow_executions")
+            connection.execute("DROP TABLE workflow_configuration_role_bindings")
             connection.execute("DROP TABLE workflow_configuration_versions")
             connection.execute("DROP TABLE workflow_configurations")
             connection.execute("DROP TABLE workflow_template_definitions")
@@ -1586,6 +1587,7 @@ class IntegrationLedgerTests(unittest.TestCase):
                 DROP TABLE workflow_run_bindings;
                 DROP TABLE workflow_execution_events;
                 DROP TABLE workflow_executions;
+                DROP TABLE workflow_configuration_role_bindings;
                 DROP TABLE workflow_configuration_versions;
                 DROP TABLE workflow_configurations;
                 DROP TABLE workflow_template_definitions;

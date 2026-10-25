@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -4604,6 +4604,105 @@ BEGIN
 END;
 """
 
+WORKFLOW_PRESCRIPTION_SCHEMA = """
+DROP TRIGGER workflow_configuration_version_immutable_update;
+DROP TRIGGER workflow_configuration_version_immutable_delete;
+
+CREATE TABLE workflow_configuration_role_migration (
+    configuration_version_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    profile_version_id TEXT NOT NULL,
+    PRIMARY KEY (configuration_version_id, role)
+) STRICT;
+
+INSERT INTO workflow_configuration_role_migration (
+    configuration_version_id, role, profile_version_id
+)
+SELECT id, 'producer', producer_profile_version_id
+FROM workflow_configuration_versions
+UNION ALL
+SELECT id, 'reviewer', reviewer_profile_version_id
+FROM workflow_configuration_versions;
+
+CREATE TABLE workflow_configuration_versions_v32 (
+    id TEXT PRIMARY KEY,
+    configuration_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    template_definition_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (configuration_id, version),
+    UNIQUE (configuration_id, content_sha256),
+    FOREIGN KEY (configuration_id)
+        REFERENCES workflow_configurations(id) ON DELETE RESTRICT,
+    FOREIGN KEY (template_definition_id)
+        REFERENCES workflow_template_definitions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO workflow_configuration_versions_v32 (
+    id, configuration_id, version, template_definition_id, schema_version,
+    spec_json, content_sha256, created_by, created_at
+)
+SELECT
+    id, configuration_id, version, template_definition_id, schema_version,
+    spec_json, content_sha256, created_by, created_at
+FROM workflow_configuration_versions;
+
+DROP TABLE workflow_configuration_versions;
+ALTER TABLE workflow_configuration_versions_v32
+    RENAME TO workflow_configuration_versions;
+
+CREATE INDEX workflow_configuration_version_created
+    ON workflow_configuration_versions(configuration_id, version DESC);
+
+CREATE TABLE workflow_configuration_role_bindings (
+    configuration_version_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (length(role) BETWEEN 1 AND 32),
+    profile_version_id TEXT NOT NULL,
+    PRIMARY KEY (configuration_version_id, role),
+    FOREIGN KEY (configuration_version_id)
+        REFERENCES workflow_configuration_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (profile_version_id)
+        REFERENCES agent_profile_versions(id) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO workflow_configuration_role_bindings (
+    configuration_version_id, role, profile_version_id
+)
+SELECT configuration_version_id, role, profile_version_id
+FROM workflow_configuration_role_migration;
+
+DROP TABLE workflow_configuration_role_migration;
+
+CREATE INDEX workflow_configuration_role_profile
+    ON workflow_configuration_role_bindings(profile_version_id);
+
+CREATE TRIGGER workflow_configuration_version_immutable_update
+BEFORE UPDATE ON workflow_configuration_versions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configuration versions are immutable');
+END;
+CREATE TRIGGER workflow_configuration_version_immutable_delete
+BEFORE DELETE ON workflow_configuration_versions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configuration versions cannot be deleted');
+END;
+CREATE TRIGGER workflow_configuration_role_binding_immutable_update
+BEFORE UPDATE ON workflow_configuration_role_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configuration role bindings are immutable');
+END;
+CREATE TRIGGER workflow_configuration_role_binding_immutable_delete
+BEFORE DELETE ON workflow_configuration_role_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow configuration role bindings cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -4638,6 +4737,7 @@ SCHEMA = (
     + WORKFLOW_DIRECTOR_SCHEMA
     + WORKFLOW_LANDING_SCHEMA
     + WORKFLOW_LANDING_CHAIN_SCHEMA
+    + WORKFLOW_PRESCRIPTION_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -4670,4 +4770,5 @@ MIGRATIONS = {
     28: WORKFLOW_DIRECTOR_SCHEMA,
     29: WORKFLOW_LANDING_SCHEMA,
     30: WORKFLOW_LANDING_CHAIN_SCHEMA,
+    31: WORKFLOW_PRESCRIPTION_SCHEMA,
 }

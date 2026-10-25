@@ -20,13 +20,12 @@ from ..domain import (
 from ..gates import ReviewSeparation
 from ..krab import IDEMPOTENCY_KEY_RE
 from ..workflows import (
-    IMPLEMENTATION_TEMPLATE,
-    IMPLEMENTATION_TEMPLATE_CANONICAL,
+    BUILT_IN_WORKFLOW_TEMPLATE_DEFINITIONS,
     IMPLEMENTATION_TEMPLATE_ID,
-    IMPLEMENTATION_TEMPLATE_KEY,
     IMPLEMENTATION_TEMPLATE_REVISION,
     WorkflowConfigurationSpec,
     WorkflowLandingMode,
+    WorkflowTemplateDefinition,
 )
 from .errors import (
     ConcurrentUpdateError,
@@ -63,36 +62,34 @@ class WorkflowStorage:
     def _configuration_manifest(
         spec: WorkflowConfigurationSpec,
         *,
-        producer_profile_version_id: str,
-        reviewer_profile_version_id: str,
+        role_profile_version_ids: dict[str, str],
+        template_definition_id: str = IMPLEMENTATION_TEMPLATE_ID,
     ) -> dict[str, Any]:
         return {
             "schema_version": 1,
-            "template_definition_id": IMPLEMENTATION_TEMPLATE_ID,
+            "template_definition_id": template_definition_id,
             "spec": spec.to_dict(),
-            "roles": {
-                "producer": producer_profile_version_id,
-                "reviewer": reviewer_profile_version_id,
-            },
+            "roles": dict(role_profile_version_ids),
         }
 
     @staticmethod
     def _definition_record(row: sqlite3.Row) -> dict[str, Any]:
         try:
-            definition = json.loads(row["definition_json"])
-        except (json.JSONDecodeError, TypeError) as exc:
+            definition = WorkflowTemplateDefinition.from_mapping(
+                json.loads(row["definition_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
             raise StorageError(
                 "stored workflow template definition is invalid"
             ) from exc
-        canonical = canonical_json(definition)
+        expected = BUILT_IN_WORKFLOW_TEMPLATE_DEFINITIONS.get(row["id"])
         if (
-            row["id"] != IMPLEMENTATION_TEMPLATE_ID
-            or row["template_key"] != IMPLEMENTATION_TEMPLATE_KEY
-            or row["version"] != 1
-            or canonical != IMPLEMENTATION_TEMPLATE_CANONICAL
-            or content_sha256(canonical) != row["content_sha256"]
-            or row["content_sha256"] != IMPLEMENTATION_TEMPLATE_REVISION
-            or definition != IMPLEMENTATION_TEMPLATE
+            expected is None
+            or row["template_key"] != definition.key
+            or row["version"] != definition.version
+            or row["content_sha256"] != definition.digest
+            or definition != expected
+            or row["built_in"] != 1
         ):
             raise StorageError("stored workflow template definition does not match")
         return {
@@ -101,7 +98,7 @@ class WorkflowStorage:
             "version": row["version"],
             "revision": row["content_sha256"],
             "built_in": bool(row["built_in"]),
-            "definition": definition,
+            "definition": definition.to_dict(),
             "created_at": row["template_created_at"],
         }
 
@@ -184,25 +181,7 @@ class WorkflowStorage:
             "creator.handle AS created_by, t.id AS template_id, "
             "t.template_key, t.version AS template_version, "
             "t.definition_json, t.content_sha256 AS template_revision, "
-            "t.built_in, t.created_at AS template_created_at, "
-            "producer.id AS producer_profile_id, "
-            "producer.name AS producer_profile_name, "
-            "producer.active AS producer_active, "
-            "producer_v.id AS producer_profile_version_id, "
-            "producer_v.version AS producer_profile_version, "
-            "producer_v.spec_json AS producer_spec_json, "
-            "producer_v.content_sha256 AS producer_spec_sha256, "
-            "producer_v.krab_identity_id AS producer_identity_id, "
-            "producer_ki.handle AS producer_krab_handle, "
-            "reviewer.id AS reviewer_profile_id, "
-            "reviewer.name AS reviewer_profile_name, "
-            "reviewer.active AS reviewer_active, "
-            "reviewer_v.id AS reviewer_profile_version_id, "
-            "reviewer_v.version AS reviewer_profile_version, "
-            "reviewer_v.spec_json AS reviewer_spec_json, "
-            "reviewer_v.content_sha256 AS reviewer_spec_sha256, "
-            "reviewer_v.krab_identity_id AS reviewer_identity_id, "
-            "reviewer_ki.handle AS reviewer_krab_handle "
+            "t.built_in, t.created_at AS template_created_at "
             "FROM workflow_configurations c "
             "JOIN projects p ON p.id = c.project_id "
             "JOIN workflow_configuration_versions cv "
@@ -210,16 +189,7 @@ class WorkflowStorage:
             "JOIN workflow_template_definitions t "
             "ON t.id = cv.template_definition_id "
             "JOIN users creator ON creator.id = cv.created_by "
-            "JOIN agent_profile_versions producer_v "
-            "ON producer_v.id = cv.producer_profile_version_id "
-            "JOIN agent_profiles producer ON producer.id = producer_v.profile_id "
-            "JOIN krab_identities producer_ki "
-            "ON producer_ki.id = producer_v.krab_identity_id "
-            "JOIN agent_profile_versions reviewer_v "
-            "ON reviewer_v.id = cv.reviewer_profile_version_id "
-            "JOIN agent_profiles reviewer ON reviewer.id = reviewer_v.profile_id "
-            "JOIN krab_identities reviewer_ki "
-            "ON reviewer_ki.id = reviewer_v.krab_identity_id WHERE "
+            "WHERE "
             "((? IS NOT NULL AND cv.id = ?) OR "
             "(? IS NULL AND p.krab_project_key = ? AND c.name = ? "
             "AND (? IS NULL OR cv.version = ?))) "
@@ -244,26 +214,8 @@ class WorkflowStorage:
     ) -> dict[str, Any]:
         try:
             spec = WorkflowConfigurationSpec.from_mapping(json.loads(row["spec_json"]))
-            producer_spec = AgentProfileSpec.from_mapping(
-                json.loads(row["producer_spec_json"])
-            )
-            reviewer_spec = AgentProfileSpec.from_mapping(
-                json.loads(row["reviewer_spec_json"])
-            )
         except (json.JSONDecodeError, TypeError, ValidationError) as exc:
             raise StorageError("stored workflow configuration is invalid") from exc
-        if (
-            producer_spec.digest != row["producer_spec_sha256"]
-            or reviewer_spec.digest != row["reviewer_spec_sha256"]
-        ):
-            raise StorageError("stored workflow profile digest does not match")
-        manifest = self._configuration_manifest(
-            spec,
-            producer_profile_version_id=row["producer_profile_version_id"],
-            reviewer_profile_version_id=row["reviewer_profile_version_id"],
-        )
-        if content_sha256(canonical_json(manifest)) != row["content_sha256"]:
-            raise StorageError("stored workflow configuration digest does not match")
         definition = self._definition_record(
             {
                 "id": row["template_id"],
@@ -275,6 +227,62 @@ class WorkflowStorage:
                 "template_created_at": row["template_created_at"],
             }
         )
+        parsed_definition = WorkflowTemplateDefinition.from_mapping(
+            definition["definition"]
+        )
+        role_rows = connection.execute(
+            "SELECT binding.role, profile.id AS profile_id, "
+            "profile.name AS profile_name, profile.active AS profile_active, "
+            "version.id AS profile_version_id, "
+            "version.version AS profile_version, version.spec_json, "
+            "version.content_sha256 AS spec_sha256, "
+            "version.krab_identity_id, identity.handle AS krab_handle "
+            "FROM workflow_configuration_role_bindings binding "
+            "JOIN agent_profile_versions version "
+            "ON version.id = binding.profile_version_id "
+            "JOIN agent_profiles profile ON profile.id = version.profile_id "
+            "JOIN krab_identities identity "
+            "ON identity.id = version.krab_identity_id "
+            "WHERE binding.configuration_version_id = ? ORDER BY binding.role",
+            (row["version_id"],),
+        ).fetchall()
+        expected_modes = parsed_definition.role_workspace_modes
+        if {role["role"] for role in role_rows} != set(expected_modes):
+            raise StorageError("stored workflow configuration roles do not match")
+        roles: dict[str, dict[str, Any]] = {}
+        role_pins: dict[str, dict[str, Any]] = {}
+        role_profile_version_ids: dict[str, str] = {}
+        for role in role_rows:
+            try:
+                profile_spec = AgentProfileSpec.from_mapping(
+                    json.loads(role["spec_json"])
+                )
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError("stored workflow profile is invalid") from exc
+            if profile_spec.digest != role["spec_sha256"]:
+                raise StorageError("stored workflow profile digest does not match")
+            if profile_spec.workspace_mode.value != expected_modes[role["role"]]:
+                raise StorageError("stored workflow role workspace does not match")
+            role_pins[role["role"]] = {**dict(role), "spec": profile_spec}
+            role_profile_version_ids[role["role"]] = role["profile_version_id"]
+            roles[role["role"]] = {
+                "profile_id": role["profile_id"],
+                "profile_name": role["profile_name"],
+                "profile_version_id": role["profile_version_id"],
+                "profile_version": role["profile_version"],
+                "workspace_mode": profile_spec.workspace_mode.value,
+                "krab_identity_id": role["krab_identity_id"],
+                "krab_handle": role["krab_handle"],
+            }
+        if row["template_id"] == IMPLEMENTATION_TEMPLATE_ID:
+            self._validate_roles(spec, role_pins["producer"], role_pins["reviewer"])
+        manifest = self._configuration_manifest(
+            spec,
+            role_profile_version_ids=role_profile_version_ids,
+            template_definition_id=row["template_id"],
+        )
+        if content_sha256(canonical_json(manifest)) != row["content_sha256"]:
+            raise StorageError("stored workflow configuration digest does not match")
         definition.pop("definition")
         return {
             "id": row["id"],
@@ -286,26 +294,7 @@ class WorkflowStorage:
             "content_sha256": row["content_sha256"],
             "template": definition,
             "spec": spec.to_dict(),
-            "roles": {
-                "producer": {
-                    "profile_id": row["producer_profile_id"],
-                    "profile_name": row["producer_profile_name"],
-                    "profile_version_id": row["producer_profile_version_id"],
-                    "profile_version": row["producer_profile_version"],
-                    "workspace_mode": producer_spec.workspace_mode.value,
-                    "krab_identity_id": row["producer_identity_id"],
-                    "krab_handle": row["producer_krab_handle"],
-                },
-                "reviewer": {
-                    "profile_id": row["reviewer_profile_id"],
-                    "profile_name": row["reviewer_profile_name"],
-                    "profile_version_id": row["reviewer_profile_version_id"],
-                    "profile_version": row["reviewer_profile_version"],
-                    "workspace_mode": reviewer_spec.workspace_mode.value,
-                    "krab_identity_id": row["reviewer_identity_id"],
-                    "krab_handle": row["reviewer_krab_handle"],
-                },
-            },
+            "roles": roles,
             "created_by": row["created_by"],
             "created_at": row["created_at"],
             "configuration_created_at": row["config_created_at"],
@@ -425,26 +414,34 @@ class WorkflowStorage:
                     ).fetchone()["version"]
                 manifest = self._configuration_manifest(
                     spec,
-                    producer_profile_version_id=producer["profile_version_id"],
-                    reviewer_profile_version_id=reviewer["profile_version_id"],
+                    role_profile_version_ids={
+                        "producer": producer["profile_version_id"],
+                        "reviewer": reviewer["profile_version_id"],
+                    },
                 )
                 connection.execute(
                     "INSERT INTO workflow_configuration_versions "
                     "(id, configuration_id, version, template_definition_id, "
-                    "schema_version, spec_json, producer_profile_version_id, "
-                    "reviewer_profile_version_id, content_sha256, created_by, "
-                    "created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+                    "schema_version, spec_json, content_sha256, created_by, "
+                    "created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)",
                     (
                         version_id,
                         configuration_id,
                         version,
                         IMPLEMENTATION_TEMPLATE_ID,
                         spec.canonical,
-                        producer["profile_version_id"],
-                        reviewer["profile_version_id"],
                         content_sha256(canonical_json(manifest)),
                         created_by,
                         now,
+                    ),
+                )
+                connection.executemany(
+                    "INSERT INTO workflow_configuration_role_bindings "
+                    "(configuration_version_id, role, profile_version_id) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        (version_id, "producer", producer["profile_version_id"]),
+                        (version_id, "reviewer", reviewer["profile_version_id"]),
                     ),
                 )
                 connection.commit()
@@ -617,19 +614,21 @@ class WorkflowStorage:
                     configuration = connection.execute(
                         "SELECT c.id, cv.id AS version_id, cv.version, "
                         "cv.template_definition_id, "
-                        "producer.active AS producer_active, "
-                        "reviewer.active AS reviewer_active "
+                        "(SELECT COUNT(*) "
+                        "FROM workflow_configuration_role_bindings binding "
+                        "WHERE binding.configuration_version_id = cv.id) "
+                        "AS role_count, "
+                        "(SELECT COUNT(*) "
+                        "FROM workflow_configuration_role_bindings binding "
+                        "JOIN agent_profile_versions profile_version "
+                        "ON profile_version.id = binding.profile_version_id "
+                        "JOIN agent_profiles profile "
+                        "ON profile.id = profile_version.profile_id "
+                        "WHERE binding.configuration_version_id = cv.id "
+                        "AND profile.active = 1) AS active_role_count "
                         "FROM workflow_configurations c "
                         "JOIN workflow_configuration_versions cv "
                         "ON cv.configuration_id = c.id "
-                        "JOIN agent_profile_versions producer_v "
-                        "ON producer_v.id = cv.producer_profile_version_id "
-                        "JOIN agent_profiles producer "
-                        "ON producer.id = producer_v.profile_id "
-                        "JOIN agent_profile_versions reviewer_v "
-                        "ON reviewer_v.id = cv.reviewer_profile_version_id "
-                        "JOIN agent_profiles reviewer "
-                        "ON reviewer.id = reviewer_v.profile_id "
                         "WHERE c.project_id = ? AND c.name = ? "
                         "ORDER BY cv.version DESC LIMIT 1",
                         (project["id"], configuration_name),
@@ -642,9 +641,18 @@ class WorkflowStorage:
                     if configuration["version"] != expected_configuration_version:
                         raise ConflictError("workflow configuration version changed")
                     if (
-                        configuration["producer_active"] != 1
-                        or configuration["reviewer_active"] != 1
+                        configuration["template_definition_id"]
+                        != IMPLEMENTATION_TEMPLATE_ID
                     ):
+                        raise ConflictError(
+                            "workflow prescription is not executable by the "
+                            "implementation director"
+                        )
+                    if configuration["role_count"] != 2:
+                        raise StorageError(
+                            "stored workflow configuration roles do not match"
+                        )
+                    if configuration["active_role_count"] != 2:
                         raise ConflictError("workflow role profile is inactive")
                     work_item = connection.execute(
                         "SELECT wi.project_id, wiv.id AS work_item_version_id, "

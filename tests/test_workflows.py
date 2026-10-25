@@ -7,6 +7,7 @@ from pathlib import Path
 
 from magic_glass_box.db import (
     SCHEMA,
+    SCHEMA_VERSION,
     WORKFLOW_DIRECTOR_SCHEMA,
     WORKFLOW_LANDING_CHAIN_SCHEMA,
     WORKFLOW_TEMPLATE_SCHEMA,
@@ -35,6 +36,7 @@ from magic_glass_box.workflows import (
     IMPLEMENTATION_TEMPLATE_ID,
     IMPLEMENTATION_TEMPLATE_REVISION,
     WorkflowConfigurationSpec,
+    WorkflowTemplateDefinition,
 )
 
 
@@ -92,6 +94,70 @@ class WorkflowConfigurationSpecTests(unittest.TestCase):
         for value in cases:
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 WorkflowConfigurationSpec.from_mapping(value)  # type: ignore[arg-type]
+
+
+class WorkflowTemplateDefinitionTests(unittest.TestCase):
+    @staticmethod
+    def value(**overrides: object) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "key": "bounded-probe-v1",
+            "version": 1,
+            "roles": [
+                {"name": "investigator", "workspace_mode": "read_only"},
+                {"name": "coordinator", "workspace_mode": "read_only"},
+            ],
+            "stages": ["investigate", "rule"],
+            "correction_loop": False,
+            **overrides,
+        }
+
+    def test_definition_normalizes_generic_roles_and_stages(self) -> None:
+        definition = WorkflowTemplateDefinition.from_mapping(self.value())
+
+        self.assertEqual(definition.to_dict(), self.value())
+        self.assertEqual(
+            definition.role_workspace_modes,
+            {"investigator": "read_only", "coordinator": "read_only"},
+        )
+        self.assertEqual(len(definition.digest), 64)
+
+    def test_definition_rejects_ambiguous_or_unbounded_shape(self) -> None:
+        cases = (
+            None,
+            {**self.value(), "extra": True},
+            self.value(schema_version=2),
+            self.value(schema_version=1.0),
+            self.value(key="Not A Key"),
+            self.value(version=True),
+            self.value(version=0),
+            self.value(roles=[]),
+            self.value(roles=[None]),
+            self.value(roles=[{"name": "investigator"}]),
+            self.value(roles=[{"name": "Bad Role", "workspace_mode": "read_only"}]),
+            self.value(
+                roles=[
+                    {"name": f"role_{index}", "workspace_mode": "read_only"}
+                    for index in range(9)
+                ]
+            ),
+            self.value(
+                roles=[
+                    {"name": "investigator", "workspace_mode": "read_only"},
+                    {"name": "investigator", "workspace_mode": "read_only"},
+                ]
+            ),
+            self.value(roles=[{"name": "investigator", "workspace_mode": "mounted"}]),
+            self.value(stages=[]),
+            self.value(stages=[1]),
+            self.value(stages=["Bad Stage"]),
+            self.value(stages=[f"stage_{index}" for index in range(17)]),
+            self.value(stages=["investigate", "investigate"]),
+            self.value(correction_loop=1),
+        )
+        for value in cases:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                WorkflowTemplateDefinition.from_mapping(value)  # type: ignore[arg-type]
 
 
 class WorkflowStorageTests(unittest.TestCase):
@@ -188,6 +254,81 @@ class WorkflowStorageTests(unittest.TestCase):
             producer_profile_name="Producer",
             reviewer_profile_name="Reviewer",
             created_by=self.user["id"],
+        )
+
+    @staticmethod
+    def downgrade_configuration_roles_to_v31(
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            DROP TRIGGER workflow_configuration_version_immutable_update;
+            DROP TRIGGER workflow_configuration_version_immutable_delete;
+            CREATE TABLE workflow_configuration_versions_v31 (
+                id TEXT PRIMARY KEY,
+                configuration_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version >= 1),
+                template_definition_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                spec_json TEXT NOT NULL,
+                producer_profile_version_id TEXT NOT NULL,
+                reviewer_profile_version_id TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (configuration_id, version),
+                UNIQUE (configuration_id, content_sha256),
+                FOREIGN KEY (configuration_id)
+                    REFERENCES workflow_configurations(id) ON DELETE RESTRICT,
+                FOREIGN KEY (template_definition_id)
+                    REFERENCES workflow_template_definitions(id) ON DELETE RESTRICT,
+                FOREIGN KEY (producer_profile_version_id)
+                    REFERENCES agent_profile_versions(id) ON DELETE RESTRICT,
+                FOREIGN KEY (reviewer_profile_version_id)
+                    REFERENCES agent_profile_versions(id) ON DELETE RESTRICT,
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+            ) STRICT;
+            INSERT INTO workflow_configuration_versions_v31 (
+                id, configuration_id, version, template_definition_id,
+                schema_version, spec_json, producer_profile_version_id,
+                reviewer_profile_version_id, content_sha256, created_by, created_at
+            )
+            SELECT
+                cv.id, cv.configuration_id, cv.version,
+                cv.template_definition_id, cv.schema_version, cv.spec_json,
+                (SELECT profile_version_id
+                 FROM workflow_configuration_role_bindings
+                 WHERE configuration_version_id = cv.id AND role = 'producer'),
+                (SELECT profile_version_id
+                 FROM workflow_configuration_role_bindings
+                 WHERE configuration_version_id = cv.id AND role = 'reviewer'),
+                cv.content_sha256, cv.created_by, cv.created_at
+            FROM workflow_configuration_versions cv;
+            DROP TRIGGER workflow_configuration_role_binding_immutable_update;
+            DROP TRIGGER workflow_configuration_role_binding_immutable_delete;
+            DROP TABLE workflow_configuration_role_bindings;
+            DROP TABLE workflow_configuration_versions;
+            ALTER TABLE workflow_configuration_versions_v31
+                RENAME TO workflow_configuration_versions;
+            CREATE INDEX workflow_configuration_version_created
+                ON workflow_configuration_versions(configuration_id, version DESC);
+            CREATE TRIGGER workflow_configuration_version_immutable_update
+            BEFORE UPDATE ON workflow_configuration_versions
+            BEGIN
+                SELECT RAISE(
+                    ABORT, 'workflow configuration versions are immutable'
+                );
+            END;
+            CREATE TRIGGER workflow_configuration_version_immutable_delete
+            BEFORE DELETE ON workflow_configuration_versions
+            BEGIN
+                SELECT RAISE(
+                    ABORT, 'workflow configuration versions cannot be deleted'
+                );
+            END;
+            PRAGMA foreign_keys = ON;
+            """
         )
 
     def start(
@@ -324,6 +465,60 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertEqual(counts["workflow_template_definitions"], 1)
         self.assertEqual(counts["workflow_configurations"], 1)
         self.assertEqual(counts["workflow_configuration_versions"], 1)
+        self.assertEqual(counts["workflow_configuration_role_bindings"], 2)
+        with self.database.connect() as connection:
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(workflow_configuration_versions)"
+                )
+            }
+            bindings = connection.execute(
+                "SELECT role, profile_version_id "
+                "FROM workflow_configuration_role_bindings "
+                "WHERE configuration_version_id = ? ORDER BY role",
+                (configuration["workflow_configuration_version_id"],),
+            ).fetchall()
+        self.assertNotIn("producer_profile_version_id", columns)
+        self.assertNotIn("reviewer_profile_version_id", columns)
+        self.assertEqual(
+            [tuple(binding) for binding in bindings],
+            [
+                ("producer", self.producer["profile_version_id"]),
+                ("reviewer", self.reviewer["profile_version_id"]),
+            ],
+        )
+
+    def test_definition_catalog_rejects_each_independent_drift_dimension(self) -> None:
+        base = {
+            "id": IMPLEMENTATION_TEMPLATE_ID,
+            "template_key": "implementation-v1",
+            "version": 1,
+            "definition_json": canonical_json(IMPLEMENTATION_TEMPLATE),
+            "content_sha256": IMPLEMENTATION_TEMPLATE_REVISION,
+            "built_in": 1,
+            "template_created_at": "2026-10-23T00:00:00.000000+00:00",
+        }
+        altered_definition = {
+            **IMPLEMENTATION_TEMPLATE,
+            "correction_loop": False,
+        }
+        cases = (
+            {**base, "id": "wtd_" + "0" * 32},
+            {**base, "template_key": "another-v1"},
+            {**base, "version": 2},
+            {**base, "content_sha256": "0" * 64},
+            {
+                **base,
+                "definition_json": canonical_json(altered_definition),
+                "content_sha256": content_sha256(canonical_json(altered_definition)),
+            },
+            {**base, "built_in": 0},
+        )
+
+        for row in cases:
+            with self.subTest(row=row), self.assertRaises(StorageError):
+                self.database._definition_record(row)  # type: ignore[arg-type]
 
     def test_configuration_rejects_role_or_workspace_boundary_violations(self) -> None:
         connection = self.database.connect()
@@ -697,6 +892,97 @@ class WorkflowStorageTests(unittest.TestCase):
             self.start(idempotency_key="start-workflow-2")
         self.assertEqual(self.database.get_workflow_execution(first["id"]), first)
 
+    def test_implementation_start_rejects_another_prescription(self) -> None:
+        definition = WorkflowTemplateDefinition.from_mapping(
+            {
+                "schema_version": 1,
+                "key": "alternate-v1",
+                "version": 1,
+                "roles": [
+                    {"name": "producer", "workspace_mode": "copy_on_write"},
+                    {"name": "reviewer", "workspace_mode": "read_only"},
+                ],
+                "stages": ["build"],
+                "correction_loop": False,
+            }
+        )
+        definition_id = f"wtd_{definition.digest[:32]}"
+        configuration_id = "wfc_" + "d" * 32
+        configuration_version_id = "wfv_" + "e" * 32
+        spec = self.configuration_spec()
+        roles = {
+            "producer": self.producer["profile_version_id"],
+            "reviewer": self.reviewer["profile_version_id"],
+        }
+        manifest = {
+            "schema_version": 1,
+            "template_definition_id": definition_id,
+            "spec": spec.to_dict(),
+            "roles": roles,
+        }
+        now = self.database.now()
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO workflow_template_definitions "
+                "(id, template_key, version, schema_version, definition_json, "
+                "content_sha256, built_in, created_at) "
+                "VALUES (?, ?, ?, 1, ?, ?, 1, ?)",
+                (
+                    definition_id,
+                    definition.key,
+                    definition.version,
+                    definition.canonical,
+                    definition.digest,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO workflow_configurations "
+                "(id, project_id, name, created_by, created_at) "
+                "VALUES (?, ?, 'alternate', ?, ?)",
+                (configuration_id, self.project["id"], self.user["id"], now),
+            )
+            connection.execute(
+                "INSERT INTO workflow_configuration_versions "
+                "(id, configuration_id, version, template_definition_id, "
+                "schema_version, spec_json, content_sha256, created_by, "
+                "created_at) VALUES (?, ?, 1, ?, 1, ?, ?, ?, ?)",
+                (
+                    configuration_version_id,
+                    configuration_id,
+                    definition_id,
+                    spec.canonical,
+                    content_sha256(canonical_json(manifest)),
+                    self.user["id"],
+                    now,
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO workflow_configuration_role_bindings "
+                "(configuration_version_id, role, profile_version_id) "
+                "VALUES (?, ?, ?)",
+                (
+                    (configuration_version_id, "producer", roles["producer"]),
+                    (configuration_version_id, "reviewer", roles["reviewer"]),
+                ),
+            )
+
+        with self.assertRaisesRegex(ConflictError, "implementation director"):
+            self.database.start_workflow_execution(
+                project_key="workflow-project",
+                configuration_name="alternate",
+                work_item_id=self.work_item["id"],
+                source_revision="a" * 40,
+                expected_configuration_version=1,
+                expected_context_version_id=self.project["context_version_id"],
+                expected_work_item_version_id=self.work_item["work_item_version_id"],
+                expected_thread_generation=1,
+                expected_thread_version=1,
+                idempotency_key="alternate-prescription",
+                requested_by=self.user["id"],
+            )
+        self.assertEqual(self.database.status()["counts"]["workflow_executions"], 0)
+
     def test_start_rejects_inactive_authority_and_foreign_work_item(self) -> None:
         self.create_configuration()
         connection = self.database.connect()
@@ -1043,6 +1329,16 @@ class WorkflowStorageTests(unittest.TestCase):
                 (configuration["workflow_configuration_version_id"],),
             ),
             (
+                "UPDATE workflow_configuration_role_bindings "
+                "SET role = 'other' WHERE configuration_version_id = ?",
+                (configuration["workflow_configuration_version_id"],),
+            ),
+            (
+                "DELETE FROM workflow_configuration_role_bindings "
+                "WHERE configuration_version_id = ?",
+                (configuration["workflow_configuration_version_id"],),
+            ),
+            (
                 "DELETE FROM workflow_execution_events WHERE execution_id = ?",
                 (execution["id"],),
             ),
@@ -1053,6 +1349,108 @@ class WorkflowStorageTests(unittest.TestCase):
                 self.assertRaises(sqlite3.IntegrityError),
             ):
                 connection.execute(statement, parameters)
+
+    def test_schema_thirty_two_migrates_role_pins_without_rewriting_authority(
+        self,
+    ) -> None:
+        configuration = self.create_configuration()
+        execution = self.start()
+        expected_configuration = dict(configuration)
+
+        with sqlite3.connect(self.database.path) as connection:
+            connection.executescript(
+                """
+                PRAGMA foreign_keys = OFF;
+                DROP TRIGGER workflow_configuration_version_immutable_update;
+                DROP TRIGGER workflow_configuration_version_immutable_delete;
+                CREATE TABLE workflow_configuration_versions_v31 (
+                    id TEXT PRIMARY KEY,
+                    configuration_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK (version >= 1),
+                    template_definition_id TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                    spec_json TEXT NOT NULL,
+                    producer_profile_version_id TEXT NOT NULL,
+                    reviewer_profile_version_id TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (configuration_id, version),
+                    UNIQUE (configuration_id, content_sha256),
+                    FOREIGN KEY (configuration_id)
+                        REFERENCES workflow_configurations(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (template_definition_id)
+                        REFERENCES workflow_template_definitions(id)
+                        ON DELETE RESTRICT,
+                    FOREIGN KEY (producer_profile_version_id)
+                        REFERENCES agent_profile_versions(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (reviewer_profile_version_id)
+                        REFERENCES agent_profile_versions(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (created_by)
+                        REFERENCES users(id) ON DELETE RESTRICT
+                ) STRICT;
+                INSERT INTO workflow_configuration_versions_v31 (
+                    id, configuration_id, version, template_definition_id,
+                    schema_version, spec_json, producer_profile_version_id,
+                    reviewer_profile_version_id, content_sha256, created_by,
+                    created_at
+                )
+                SELECT
+                    cv.id, cv.configuration_id, cv.version,
+                    cv.template_definition_id, cv.schema_version, cv.spec_json,
+                    (SELECT profile_version_id
+                     FROM workflow_configuration_role_bindings
+                     WHERE configuration_version_id = cv.id
+                       AND role = 'producer'),
+                    (SELECT profile_version_id
+                     FROM workflow_configuration_role_bindings
+                     WHERE configuration_version_id = cv.id
+                       AND role = 'reviewer'),
+                    cv.content_sha256, cv.created_by, cv.created_at
+                FROM workflow_configuration_versions cv;
+                DROP TRIGGER workflow_configuration_role_binding_immutable_update;
+                DROP TRIGGER workflow_configuration_role_binding_immutable_delete;
+                DROP TABLE workflow_configuration_role_bindings;
+                DROP TABLE workflow_configuration_versions;
+                ALTER TABLE workflow_configuration_versions_v31
+                    RENAME TO workflow_configuration_versions;
+                CREATE INDEX workflow_configuration_version_created
+                    ON workflow_configuration_versions(
+                        configuration_id, version DESC
+                    );
+                CREATE TRIGGER workflow_configuration_version_immutable_update
+                BEFORE UPDATE ON workflow_configuration_versions
+                BEGIN
+                    SELECT RAISE(
+                        ABORT, 'workflow configuration versions are immutable'
+                    );
+                END;
+                CREATE TRIGGER workflow_configuration_version_immutable_delete
+                BEFORE DELETE ON workflow_configuration_versions
+                BEGIN
+                    SELECT RAISE(
+                        ABORT, 'workflow configuration versions cannot be deleted'
+                    );
+                END;
+                PRAGMA user_version = 31;
+                PRAGMA foreign_keys = ON;
+                """
+            )
+
+        migrated = Database(self.database.path)
+        first = migrated.initialize()
+        second = migrated.initialize()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema_version"], 32)
+        self.assertEqual(first["counts"]["workflow_configuration_role_bindings"], 2)
+        self.assertEqual(
+            migrated.get_workflow_configuration("workflow-project", "default"),
+            expected_configuration,
+        )
+        migrated_execution = migrated.get_workflow_execution(execution["id"])
+        self.assertEqual(migrated_execution["id"], execution["id"])
+        self.assertEqual(migrated_execution["roles"], execution["roles"])
 
     def test_schema_thirty_migrates_schema_twenty_seven_once(self) -> None:
         path = Path(self.temporary.name) / "schema-27.db"
@@ -1065,8 +1463,8 @@ class WorkflowStorageTests(unittest.TestCase):
         status = migrated.initialize()
         repeated = migrated.initialize()
 
-        self.assertEqual(status["schema_version"], 31)
-        self.assertEqual(repeated["schema_version"], 31)
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(repeated["schema_version"], SCHEMA_VERSION)
         definitions = migrated.list_workflow_template_definitions()
         self.assertEqual(len(definitions), 1)
         self.assertEqual(definitions[0]["key"], "implementation-v1")
@@ -1084,7 +1482,7 @@ class WorkflowStorageTests(unittest.TestCase):
         first = migrated.initialize()
         repeated = migrated.initialize()
 
-        self.assertEqual(first["schema_version"], 31)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(repeated, first)
         self.assertEqual(first["counts"]["workflow_landing_chains"], 0)
         with migrated.connect() as connection:
@@ -1141,11 +1539,12 @@ class WorkflowStorageTests(unittest.TestCase):
             ),
             imported_by=user["id"],
         )
+        profiles = {}
         for name, identity, workspace_mode in (
             ("Legacy Producer", producer_identity, "copy_on_write"),
             ("Legacy Reviewer", reviewer_identity, "read_only"),
         ):
-            historical.create_agent_profile(
+            profiles[name] = historical.create_agent_profile(
                 name=name,
                 spec=AgentProfileSpec.create(
                     image="agent@sha256:legacy",
@@ -1156,27 +1555,94 @@ class WorkflowStorageTests(unittest.TestCase):
                 krab_identity_id=identity["id"],
                 created_by=user["id"],
             )
-        historical.create_workflow_configuration(
-            project_key="legacy-workflow",
-            name="default",
-            spec=self.configuration_spec(),
-            producer_profile_name="Legacy Producer",
-            reviewer_profile_name="Legacy Reviewer",
-            created_by=user["id"],
-        )
-        with self.assertRaises(StorageError):
-            historical.start_workflow_execution(
-                project_key="legacy-workflow",
-                configuration_name="default",
-                work_item_id=item["id"],
-                source_revision="d" * 40,
-                expected_configuration_version=1,
-                expected_context_version_id=project["context_version_id"],
-                expected_work_item_version_id=item["work_item_version_id"],
-                expected_thread_generation=1,
-                expected_thread_version=1,
-                idempotency_key="legacy-workflow-start",
-                requested_by=user["id"],
+        configuration_id = "wfc_" + "1" * 32
+        configuration_version_id = "wfv_" + "2" * 32
+        execution_id = "wfx_" + "3" * 32
+        configuration_spec = self.configuration_spec()
+        manifest = {
+            "schema_version": 1,
+            "template_definition_id": IMPLEMENTATION_TEMPLATE_ID,
+            "spec": configuration_spec.to_dict(),
+            "roles": {
+                "producer": profiles["Legacy Producer"]["profile_version_id"],
+                "reviewer": profiles["Legacy Reviewer"]["profile_version_id"],
+            },
+        }
+        request = {
+            "schema_version": 1,
+            "project_key": "legacy-workflow",
+            "configuration_name": "default",
+            "work_item_id": item["id"],
+            "source_revision": "d" * 40,
+            "expected_configuration_version": 1,
+            "expected_context_version_id": project["context_version_id"],
+            "expected_work_item_version_id": item["work_item_version_id"],
+            "expected_thread_generation": 1,
+            "expected_thread_version": 1,
+        }
+        request_json = canonical_json(request)
+        now = historical.now()
+        with historical.connect() as connection:
+            thread = connection.execute(
+                "SELECT id FROM work_threads WHERE work_item_id = ?",
+                (item["id"],),
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO workflow_configurations "
+                "(id, project_id, name, created_by, created_at) "
+                "VALUES (?, ?, 'default', ?, ?)",
+                (configuration_id, project["id"], user["id"], now),
+            )
+            connection.execute(
+                "INSERT INTO workflow_configuration_versions "
+                "(id, configuration_id, version, template_definition_id, "
+                "schema_version, spec_json, producer_profile_version_id, "
+                "reviewer_profile_version_id, content_sha256, created_by, "
+                "created_at) VALUES (?, ?, 1, ?, 1, ?, ?, ?, ?, ?, ?)",
+                (
+                    configuration_version_id,
+                    configuration_id,
+                    IMPLEMENTATION_TEMPLATE_ID,
+                    configuration_spec.canonical,
+                    profiles["Legacy Producer"]["profile_version_id"],
+                    profiles["Legacy Reviewer"]["profile_version_id"],
+                    content_sha256(canonical_json(manifest)),
+                    user["id"],
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO workflow_executions "
+                "(id, project_id, template_definition_id, "
+                "configuration_version_id, context_version_id, work_item_id, "
+                "work_item_version_id, work_thread_id, work_thread_generation, "
+                "source_revision, state, stage, version, request_json, "
+                "content_sha256, idempotency_key, requested_by, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'active', "
+                "'build', 1, ?, ?, 'legacy-workflow-start', ?, ?, ?)",
+                (
+                    execution_id,
+                    project["id"],
+                    IMPLEMENTATION_TEMPLATE_ID,
+                    configuration_version_id,
+                    project["context_version_id"],
+                    item["id"],
+                    item["work_item_version_id"],
+                    thread["id"],
+                    "d" * 40,
+                    request_json,
+                    content_sha256(request_json),
+                    user["id"],
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO workflow_execution_events "
+                "(execution_id, sequence, kind, from_state, to_state, actor, "
+                "metadata_json, created_at) VALUES (?, 1, 'workflow.started', "
+                "NULL, 'active', ?, '{}', ?)",
+                (execution_id, user["id"], now),
             )
         with self.assertRaises(StorageError):
             historical.create_run(
@@ -1198,9 +1664,6 @@ class WorkflowStorageTests(unittest.TestCase):
                 ),
             )
         with historical.connect() as connection:
-            execution_id = connection.execute(
-                "SELECT id FROM workflow_executions"
-            ).fetchone()["id"]
             run_id = connection.execute("SELECT id FROM runs").fetchone()["id"]
             now = historical.now()
             connection.execute(
@@ -1217,7 +1680,7 @@ class WorkflowStorageTests(unittest.TestCase):
         execution = migrated.get_workflow_execution(execution_id)
         action = migrated.get_supervisor_action("act_" + "7" * 32)
 
-        self.assertEqual(status["schema_version"], 31)
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         self.assertEqual(execution["correction_round"], 0)
         self.assertEqual(execution["events"][0]["kind"], "workflow.started")
         self.assertEqual(action["run_id"], run_id)
@@ -1419,6 +1882,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 PRAGMA foreign_keys = ON;
                 """
             )
+            self.downgrade_configuration_roles_to_v31(connection)
 
         migrated = Database(self.database.path)
         first = migrated.initialize()
@@ -1427,7 +1891,7 @@ class WorkflowStorageTests(unittest.TestCase):
         migrated_ruling = migrated.get_workflow_ruling(ruling["id"])
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 31)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(memory["entries"][0]["id"], entry["id"])
         self.assertEqual(
             memory["entries"][0]["author"],

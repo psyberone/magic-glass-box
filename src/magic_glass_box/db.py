@@ -65,6 +65,7 @@ from .storage.schema import (
     WORKFLOW_DIRECTOR_SCHEMA,
     WORKFLOW_LANDING_CHAIN_SCHEMA,
     WORKFLOW_LANDING_SCHEMA,
+    WORKFLOW_PRESCRIPTION_SCHEMA,
     WORKFLOW_TEMPLATE_SCHEMA,
 )
 from .storage.service_sidecars import ServiceSidecarStorage
@@ -123,6 +124,7 @@ __all__ = [
     "WORKFLOW_DIRECTOR_SCHEMA",
     "WORKFLOW_LANDING_CHAIN_SCHEMA",
     "WORKFLOW_LANDING_SCHEMA",
+    "WORKFLOW_PRESCRIPTION_SCHEMA",
     "WORKFLOW_TEMPLATE_SCHEMA",
     "default_db_path",
 ]

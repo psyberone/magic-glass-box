@@ -147,12 +147,14 @@ class RunStorage:
                         "SELECT e.project_id, e.context_version_id, "
                         "e.work_item_id, e.work_item_version_id, e.work_thread_id, "
                         "e.source_revision, e.state, e.stage, e.correction_round, "
-                        "e.requested_by, cv.producer_profile_version_id, "
-                        "cv.reviewer_profile_version_id "
+                        "e.requested_by, binding.profile_version_id "
+                        "AS workflow_profile_version_id "
                         "FROM workflow_executions e "
-                        "JOIN workflow_configuration_versions cv "
-                        "ON cv.id = e.configuration_version_id WHERE e.id = ?",
-                        (workflow_execution_id,),
+                        "JOIN workflow_configuration_role_bindings binding "
+                        "ON binding.configuration_version_id = "
+                        "e.configuration_version_id AND binding.role = ? "
+                        "WHERE e.id = ?",
+                        (workflow_role, workflow_execution_id),
                     ).fetchone()
                     if workflow is None:
                         raise NotFoundError(
@@ -433,7 +435,7 @@ class RunStorage:
                 expected_profile_version_id = None
                 if workflow is not None:
                     expected_profile_version_id = workflow[
-                        f"{workflow_role}_profile_version_id"
+                        "workflow_profile_version_id"
                     ]
                     profile = connection.execute(
                         "SELECT ap.id, ap.active, ap.name "

@@ -1484,6 +1484,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 DROP TABLE workflow_run_bindings;
                 DROP TABLE workflow_execution_events;
                 DROP TABLE workflow_executions;
+                DROP TABLE workflow_configuration_role_bindings;
                 DROP TABLE workflow_configuration_versions;
                 DROP TABLE workflow_configurations;
                 DROP TABLE workflow_template_definitions;

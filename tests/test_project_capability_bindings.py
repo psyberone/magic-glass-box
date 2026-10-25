@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from magic_glass_box.db import (
+    SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
     Database,
@@ -339,6 +340,7 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
             connection.execute("DROP TABLE workflow_run_bindings")
             connection.execute("DROP TABLE workflow_execution_events")
             connection.execute("DROP TABLE workflow_executions")
+            connection.execute("DROP TABLE workflow_configuration_role_bindings")
             connection.execute("DROP TABLE workflow_configuration_versions")
             connection.execute("DROP TABLE workflow_configurations")
             connection.execute("DROP TABLE workflow_template_definitions")
@@ -354,7 +356,7 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
         first = self.database.initialize()
         second = self.database.initialize()
 
-        self.assertEqual(first["schema_version"], 31)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(second, first)
         with closing(self.database.connect()) as connection:
             tables = {

@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C complete, including the live repository exit proof**
+**Status: M12A-M12C and the M13A prescription foundation complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -25,6 +25,15 @@ creates a new version; an active or historical execution never changes under
 it. A configuration can reduce authority but cannot add credentials, network,
 filesystem access, provider grants, capabilities, or limits absent from project
 and profile policy.
+
+Schema v32 makes those role pins prescription-generic. A configuration version
+owns an immutable set of named role bindings rather than fixed producer and
+reviewer columns, and each binding still points to one exact agent-profile
+version. Built-in definitions are parsed through a bounded generic contract but
+must also match MGB's exact local catalog. This is a storage and validation
+seam, not permission to execute an unknown state machine: the implementation
+director explicitly rejects every definition except `implementation-v1` before
+it creates execution state.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
@@ -206,7 +215,7 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 - treating a three-agent advisory review as landing authority; and
 - release-management or multi-repository workflows in the first pass.
 
-Discovery, adversarial review configurations, heterogeneous work providers,
-and controlled remote execution remain later milestones. The completed
-`implementation-v1` proof establishes the immutable prescription seam they can
-reuse.
+Bounded Discovery and advisory review are the next M13 checkpoints;
+heterogeneous work providers and controlled remote execution remain later
+milestones. The completed `implementation-v1` proof and schema-v32 named-role
+ledger establish the immutable prescription seam they can reuse.
