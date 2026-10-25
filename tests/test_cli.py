@@ -27,6 +27,7 @@ from magic_glass_box.cli import (
     main,
 )
 from magic_glass_box.db import SCHEMA_VERSION, Database
+from magic_glass_box.discovery import DiscoveryConfigurationSpec
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
@@ -150,6 +151,32 @@ class FakeControlPlane:
         self, execution_id: str, **kwargs: object
     ) -> dict[str, object]:
         return self._called("workflow.cancel", execution_id=execution_id, **kwargs)
+
+    def create_discovery_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("discovery.config-create", **kwargs)
+
+    def revise_discovery_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("discovery.config-revise", **kwargs)
+
+    def get_discovery_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("discovery.config-show", **kwargs)
+
+    def list_discovery_configurations(self, **kwargs: object) -> dict[str, object]:
+        return self._called("discovery.config-list", **kwargs)
+
+    def start_discovery_execution(self, **kwargs: object) -> dict[str, object]:
+        return self._called("discovery.start", **kwargs)
+
+    def get_discovery_execution(self, execution_id: str) -> dict[str, object]:
+        return self._called("discovery.show", execution_id=execution_id)
+
+    def list_discovery_executions(self, **kwargs: object) -> dict[str, object]:
+        return self._called("discovery.list", **kwargs)
+
+    def cancel_discovery_execution(
+        self, execution_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("discovery.cancel", execution_id=execution_id, **kwargs)
 
     def get_workflow_ruling(self, ruling_id: str) -> dict[str, object]:
         return self._called("workflow.ruling-show", ruling_id=ruling_id)
@@ -476,6 +503,7 @@ class CLITests(unittest.TestCase):
                     ("project", "manage project context"),
                     ("profile", "manage agent profiles"),
                     ("workflow", "manage bounded workflow prescriptions"),
+                    ("discovery", "manage bounded Discovery prescriptions"),
                     (
                         "inference-connector",
                         "manage credential-isolated inference connectors",
@@ -574,6 +602,29 @@ class CLITests(unittest.TestCase):
                         "manual-plan",
                         "issue the workflow's exact manual landing plan",
                     ),
+                ),
+            ),
+            ("discovery",): (
+                "discovery_command",
+                True,
+                (
+                    (
+                        "config-create",
+                        "create a versioned Discovery configuration",
+                    ),
+                    (
+                        "config-revise",
+                        "append an immutable Discovery configuration revision",
+                    ),
+                    (
+                        "config-show",
+                        "show one Discovery configuration revision",
+                    ),
+                    ("config-list", "list latest Discovery configurations"),
+                    ("start", "start one exact pinned Discovery execution"),
+                    ("show", "show one Discovery execution and event stream"),
+                    ("list", "list bounded Discovery executions"),
+                    ("cancel", "cancel one active Discovery execution"),
                 ),
             ),
             ("provider",): (
@@ -932,6 +983,39 @@ class CLITests(unittest.TestCase):
                     "--expected-version",
                     "--issued-by",
                 ),
+                ("discovery", "config-create"): (
+                    "--project",
+                    "--investigator",
+                    "--coordinator",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("discovery", "config-revise"): (
+                    "--project",
+                    "--investigator",
+                    "--coordinator",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("discovery", "config-show"): ("--project",),
+                ("discovery", "start"): (
+                    "--project",
+                    "--work-item",
+                    "--source-revision",
+                    "--expected-configuration-version",
+                    "--expected-context-version",
+                    "--expected-work-item-version",
+                    "--expected-thread-generation",
+                    "--expected-thread-version",
+                    "--krab-session",
+                    "--idempotency-key",
+                    "--requested-by",
+                ),
+                ("discovery", "cancel"): (
+                    "--expected-version",
+                    "--cancelled-by",
+                    "--reason",
+                ),
                 ("inference-connector", "register"): (
                     "--spec",
                     "--created-by",
@@ -1103,6 +1187,12 @@ class CLITests(unittest.TestCase):
                     "active",
                     "cancelled",
                     "completed",
+                ),
+                (("discovery", "list"), "state"): (
+                    "active",
+                    "cancelled",
+                    "completed",
+                    "failed",
                 ),
                 (("workflow", "ruling-resolve"), "decision"): (
                     "continue",
@@ -1906,6 +1996,7 @@ class CLITests(unittest.TestCase):
                 ),
                 "capability": ("bind project capabilities to explicit controllers"),
                 "workflow": "manage bounded workflow prescriptions",
+                "discovery": "manage bounded Discovery prescriptions",
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "interaction": "resolve durable agent interactions",
@@ -1949,6 +2040,18 @@ class CLITests(unittest.TestCase):
                 "ruling-resolve": "resolve one durable workflow ruling",
                 "provider-target": "bind one provider resource to an exact workflow",
                 "manual-plan": "issue the workflow's exact manual landing plan",
+            },
+            "discovery": {
+                "config-create": "create a versioned Discovery configuration",
+                "config-revise": (
+                    "append an immutable Discovery configuration revision"
+                ),
+                "config-show": "show one Discovery configuration revision",
+                "config-list": "list latest Discovery configurations",
+                "start": "start one exact pinned Discovery execution",
+                "show": "show one Discovery execution and event stream",
+                "list": "list bounded Discovery executions",
+                "cancel": "cancel one active Discovery execution",
             },
             "provider": {
                 "connector-add": "add a connector-bound provider grant",
@@ -2305,6 +2408,207 @@ class CLITests(unittest.TestCase):
                         "resource_id": "42",
                         "merge_method": "squash",
                         "configured_by_handle": "operator",
+                    },
+                ),
+            ),
+        )
+        for arguments, expected_call in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch("magic_glass_box.cli.ControlPlane", return_value=fake),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(fake.calls[-1], expected_call)
+
+    def test_discovery_commands_parse_documents_and_dispatch_exact_authority(
+        self,
+    ) -> None:
+        spec_path = Path(self.temporary.name) / "discovery.json"
+        spec_value = {
+            "schema_version": 1,
+            "max_findings": 16,
+            "max_must_items": 5,
+            "max_follow_up_proposals": 8,
+        }
+        spec_path.write_text(json.dumps(spec_value), encoding="utf-8")
+        expected_spec = DiscoveryConfigurationSpec.from_mapping(spec_value)
+        fake = FakeControlPlane()
+        execution_id = "dex_" + "4" * 32
+        cases = (
+            (
+                [
+                    "discovery",
+                    "config-create",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--investigator",
+                    "Investigator",
+                    "--coordinator",
+                    "Coordinator",
+                    "--spec",
+                    str(spec_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "discovery.config-create",
+                    {
+                        "project_key": "box-project",
+                        "name": "default",
+                        "spec": expected_spec,
+                        "investigator_profile_name": "Investigator",
+                        "coordinator_profile_name": "Coordinator",
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "discovery",
+                    "config-revise",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--investigator",
+                    "Investigator",
+                    "--coordinator",
+                    "Coordinator",
+                    "--spec",
+                    str(spec_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "discovery.config-revise",
+                    {
+                        "project_key": "box-project",
+                        "name": "default",
+                        "spec": expected_spec,
+                        "investigator_profile_name": "Investigator",
+                        "coordinator_profile_name": "Coordinator",
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "discovery",
+                    "config-show",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--version",
+                    "2",
+                ],
+                (
+                    "discovery.config-show",
+                    {
+                        "project_key": "box-project",
+                        "name": "default",
+                        "version": 2,
+                    },
+                ),
+            ),
+            (
+                ["discovery", "config-list", "--project", "box-project"],
+                ("discovery.config-list", {"project_key": "box-project"}),
+            ),
+            (
+                [
+                    "discovery",
+                    "start",
+                    "default",
+                    "--project",
+                    "box-project",
+                    "--work-item",
+                    "wki_" + "1" * 32,
+                    "--source-revision",
+                    "a" * 40,
+                    "--expected-configuration-version",
+                    "2",
+                    "--expected-context-version",
+                    "ctx_" + "2" * 32,
+                    "--expected-work-item-version",
+                    "wiv_" + "3" * 32,
+                    "--expected-thread-generation",
+                    "1",
+                    "--expected-thread-version",
+                    "4",
+                    "--krab-session",
+                    "ses_" + "5" * 32,
+                    "--krab-claim",
+                    "clm_" + "6" * 32,
+                    "--idempotency-key",
+                    "discovery-start-1",
+                    "--requested-by",
+                    "operator",
+                ],
+                (
+                    "discovery.start",
+                    {
+                        "project_key": "box-project",
+                        "configuration_name": "default",
+                        "work_item_id": "wki_" + "1" * 32,
+                        "source_revision": "a" * 40,
+                        "expected_configuration_version": 2,
+                        "expected_context_version_id": "ctx_" + "2" * 32,
+                        "expected_work_item_version_id": "wiv_" + "3" * 32,
+                        "expected_thread_generation": 1,
+                        "expected_thread_version": 4,
+                        "krab_session_id": "ses_" + "5" * 32,
+                        "krab_claim_id": "clm_" + "6" * 32,
+                        "idempotency_key": "discovery-start-1",
+                        "requested_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                ["discovery", "show", execution_id],
+                ("discovery.show", {"execution_id": execution_id}),
+            ),
+            (
+                [
+                    "discovery",
+                    "list",
+                    "--project",
+                    "box-project",
+                    "--state",
+                    "failed",
+                    "--limit",
+                    "25",
+                ],
+                (
+                    "discovery.list",
+                    {
+                        "project_key": "box-project",
+                        "state": "failed",
+                        "limit": 25,
+                    },
+                ),
+            ),
+            (
+                [
+                    "discovery",
+                    "cancel",
+                    execution_id,
+                    "--expected-version",
+                    "1",
+                    "--cancelled-by",
+                    "operator",
+                    "--reason",
+                    "stop now",
+                ],
+                (
+                    "discovery.cancel",
+                    {
+                        "execution_id": execution_id,
+                        "expected_version": 1,
+                        "cancelled_by_handle": "operator",
+                        "reason": "stop now",
                     },
                 ),
             ),

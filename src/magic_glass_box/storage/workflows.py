@@ -694,6 +694,29 @@ class WorkflowStorage:
                 for row in rows
             ]
 
+    def get_discovery_configuration(
+        self, project_key: str, name: str, *, version: int | None = None
+    ) -> dict[str, Any]:
+        configuration = self.get_workflow_configuration(
+            project_key, name, version=version
+        )
+        if configuration["template"]["id"] != DISCOVERY_TEMPLATE_ID:
+            raise NotFoundError(
+                f"discovery configuration not found: {project_key}/{name}"
+            )
+        return configuration
+
+    def list_discovery_configurations(
+        self, *, project_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        return [
+            configuration
+            for configuration in self.list_workflow_configurations(
+                project_key=project_key
+            )
+            if configuration["template"]["id"] == DISCOVERY_TEMPLATE_ID
+        ]
+
     @staticmethod
     def _start_request(
         *,

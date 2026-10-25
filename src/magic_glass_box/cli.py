@@ -22,6 +22,7 @@ from .candidates import (
 from .control_room_web import build_control_room_server
 from .credentials import CredentialError
 from .db import Database, StorageError, default_db_path
+from .discovery import DiscoveryConfigurationSpec
 from .discovery_director import DiscoveryDirector
 from .domain import (
     AgentProfileSpec,
@@ -439,6 +440,83 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_seconds,
         default=DEFAULT_GIT_TIMEOUT_SECONDS,
     )
+
+    discovery = commands.add_parser(
+        "discovery", help="manage bounded Discovery prescriptions"
+    )
+    discovery_commands = discovery.add_subparsers(
+        dest="discovery_command", required=True
+    )
+    for verb in ("config-create", "config-revise"):
+        configuration = discovery_commands.add_parser(
+            verb,
+            help=(
+                "create a versioned Discovery configuration"
+                if verb == "config-create"
+                else "append an immutable Discovery configuration revision"
+            ),
+        )
+        configuration.add_argument("name")
+        configuration.add_argument("--project", required=True)
+        configuration.add_argument("--investigator", required=True)
+        configuration.add_argument("--coordinator", required=True)
+        configuration.add_argument("--spec", required=True, type=Path)
+        configuration.add_argument("--created-by", required=True)
+    discovery_config_show = discovery_commands.add_parser(
+        "config-show", help="show one Discovery configuration revision"
+    )
+    discovery_config_show.add_argument("name")
+    discovery_config_show.add_argument("--project", required=True)
+    discovery_config_show.add_argument("--version", type=int)
+    discovery_config_list = discovery_commands.add_parser(
+        "config-list", help="list latest Discovery configurations"
+    )
+    discovery_config_list.add_argument("--project")
+    discovery_start = discovery_commands.add_parser(
+        "start", help="start one exact pinned Discovery execution"
+    )
+    discovery_start.add_argument("configuration_name")
+    discovery_start.add_argument("--project", required=True)
+    discovery_start.add_argument("--work-item", required=True)
+    discovery_start.add_argument("--source-revision", required=True)
+    discovery_start.add_argument(
+        "--expected-configuration-version", required=True, type=int
+    )
+    discovery_start.add_argument(
+        "--expected-context-version", required=True, dest="expected_context_version_id"
+    )
+    discovery_start.add_argument(
+        "--expected-work-item-version",
+        required=True,
+        dest="expected_work_item_version_id",
+    )
+    discovery_start.add_argument(
+        "--expected-thread-generation", required=True, type=int
+    )
+    discovery_start.add_argument("--expected-thread-version", required=True, type=int)
+    discovery_start.add_argument("--krab-session", required=True)
+    discovery_start.add_argument("--krab-claim")
+    discovery_start.add_argument("--idempotency-key", required=True)
+    discovery_start.add_argument("--requested-by", required=True)
+    discovery_show = discovery_commands.add_parser(
+        "show", help="show one Discovery execution and event stream"
+    )
+    discovery_show.add_argument("execution_id")
+    discovery_list = discovery_commands.add_parser(
+        "list", help="list bounded Discovery executions"
+    )
+    discovery_list.add_argument("--project")
+    discovery_list.add_argument(
+        "--state", choices=("active", "cancelled", "completed", "failed")
+    )
+    discovery_list.add_argument("--limit", type=_candidate_limit, default=100)
+    discovery_cancel = discovery_commands.add_parser(
+        "cancel", help="cancel one active Discovery execution"
+    )
+    discovery_cancel.add_argument("execution_id")
+    discovery_cancel.add_argument("--expected-version", required=True, type=int)
+    discovery_cancel.add_argument("--cancelled-by", required=True)
+    discovery_cancel.add_argument("--reason", required=True)
 
     inference_connector = commands.add_parser(
         "inference-connector",
@@ -1324,6 +1402,58 @@ def _dispatch(
                 issued_by_handle=args.issued_by,
                 result_store=result_store,
                 candidate_store=candidate_store,
+            )
+    if args.command == "discovery":
+        if args.discovery_command in {"config-create", "config-revise"}:
+            kwargs = {
+                "project_key": args.project,
+                "name": args.name,
+                "spec": DiscoveryConfigurationSpec.from_mapping(_json_file(args.spec)),
+                "investigator_profile_name": args.investigator,
+                "coordinator_profile_name": args.coordinator,
+                "created_by_handle": args.created_by,
+            }
+            if args.discovery_command == "config-create":
+                return control.create_discovery_configuration(**kwargs)
+            return control.revise_discovery_configuration(**kwargs)
+        if args.discovery_command == "config-show":
+            return control.get_discovery_configuration(
+                project_key=args.project,
+                name=args.name,
+                version=args.version,
+            )
+        if args.discovery_command == "config-list":
+            return control.list_discovery_configurations(project_key=args.project)
+        if args.discovery_command == "start":
+            return control.start_discovery_execution(
+                project_key=args.project,
+                configuration_name=args.configuration_name,
+                work_item_id=args.work_item,
+                source_revision=args.source_revision,
+                expected_configuration_version=(args.expected_configuration_version),
+                expected_context_version_id=args.expected_context_version_id,
+                expected_work_item_version_id=(args.expected_work_item_version_id),
+                expected_thread_generation=args.expected_thread_generation,
+                expected_thread_version=args.expected_thread_version,
+                krab_session_id=args.krab_session,
+                krab_claim_id=args.krab_claim,
+                idempotency_key=args.idempotency_key,
+                requested_by_handle=args.requested_by,
+            )
+        if args.discovery_command == "show":
+            return control.get_discovery_execution(args.execution_id)
+        if args.discovery_command == "list":
+            return control.list_discovery_executions(
+                project_key=args.project,
+                state=args.state,
+                limit=args.limit,
+            )
+        if args.discovery_command == "cancel":
+            return control.cancel_discovery_execution(
+                args.execution_id,
+                expected_version=args.expected_version,
+                cancelled_by_handle=args.cancelled_by,
+                reason=args.reason,
             )
     if args.command == "inference-connector":
         if args.inference_connector_command == "register":

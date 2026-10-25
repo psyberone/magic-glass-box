@@ -1306,7 +1306,11 @@ version-bound supervisor action creates each exact pinned role, waits for its
 terminal run and typed evidence, records exact evidence provenance on the stage
 transition, and completes restart-safely. Active Discovery now excludes an
 implementation execution on the same work thread and prevents premature thread
-closure. The operator proof remains before M13B is complete.
+closure. A dedicated `discovery` CLI now creates and revises typed
+configurations, reads only Discovery configurations from the shared
+prescription ledger, and starts, inspects, lists, or cancels exact executions
+with explicit Krab session and optional claim pins. Control-room projection and
+the operator proof remain before M13B is complete.
 
 Checkpoint evidence: 1,113 tests pass at 86% aggregate branch-aware coverage;
 the new Discovery contract module is at 97%. A focused 46-mutant contract and
@@ -1333,6 +1337,14 @@ or previously measured lifecycle branches; the new Discovery dispatch and
 version-obsolescence paths were killed. RED-first tests first exposed and then
 closed both cross-prescription holes: implementation could otherwise start
 during active Discovery, and a work thread could otherwise close beneath it.
+
+Operator-CLI evidence: 1,141 tests pass at 86% aggregate branch-aware coverage;
+the CLI is at 97%. RED-first command-contract and dispatch tests cover the
+complete bounded surface, while storage and service tests prove that the
+Discovery namespace cannot return an implementation configuration and that an
+exact historical configuration version remains selectable. The final M13B
+mutation wave follows the control-room projection so the whole operator seam is
+measured together.
 
 - Add one read-only investigator and one read-only coordinator as the default
   fixed topology. A separate higher-assurance prescription may add another

@@ -1993,6 +1993,18 @@ class ControlPlane:
     ) -> list[dict[str, Any]]:
         return self.database.list_workflow_configurations(project_key=project_key)
 
+    def get_discovery_configuration(
+        self, *, project_key: str, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        return self.database.get_discovery_configuration(
+            project_key, name, version=version
+        )
+
+    def list_discovery_configurations(
+        self, *, project_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.database.list_discovery_configurations(project_key=project_key)
+
     def start_discovery_execution(
         self,
         *,

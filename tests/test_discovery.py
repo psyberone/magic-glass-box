@@ -8,7 +8,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 
-from magic_glass_box.db import SCHEMA_VERSION, ConflictError, Database
+from magic_glass_box.db import SCHEMA_VERSION, ConflictError, Database, NotFoundError
 from magic_glass_box.discovery import (
     DiscoveryConfigurationSpec,
     DiscoveryRuling,
@@ -20,6 +20,7 @@ from magic_glass_box.domain import (
     ValidationError,
 )
 from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.service import ControlPlane
 from magic_glass_box.workflows import (
     DISCOVERY_TEMPLATE_ID,
     DISCOVERY_TEMPLATE_REVISION,
@@ -461,6 +462,85 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
                 "discovery-project", "default-discovery"
             ),
             configuration,
+        )
+
+    def test_discovery_configuration_reads_exclude_other_prescriptions(self) -> None:
+        from magic_glass_box.workflows import WorkflowConfigurationSpec
+
+        discovery = self.database.create_discovery_configuration(
+            project_key="discovery-project",
+            name="default-discovery",
+            spec=self.spec(),
+            investigator_profile_name="Investigator",
+            coordinator_profile_name="Coordinator",
+            created_by=self.user["id"],
+        )
+        producer = self.profile(
+            "Producer",
+            self.identity("producer", "5")["id"],
+            capabilities=[],
+            workspace_mode="copy_on_write",
+        )
+        reviewer = self.profile(
+            "Reviewer",
+            self.identity("reviewer", "6")["id"],
+            capabilities=[],
+        )
+        self.database.create_workflow_configuration(
+            project_key="discovery-project",
+            name="implementation",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [],
+                    "max_correction_rounds": 1,
+                    "landing_mode": "manual",
+                }
+            ),
+            producer_profile_name=producer["name"],
+            reviewer_profile_name=reviewer["name"],
+            created_by=self.user["id"],
+        )
+        latest = self.database.revise_discovery_configuration(
+            project_key="discovery-project",
+            name="default-discovery",
+            spec=self.spec(max_findings=8),
+            investigator_profile_name="Investigator",
+            coordinator_profile_name="Coordinator",
+            created_by=self.user["id"],
+        )
+
+        self.assertEqual(
+            self.database.get_discovery_configuration(
+                "discovery-project", "default-discovery", version=1
+            ),
+            discovery,
+        )
+        self.assertEqual(
+            self.database.list_discovery_configurations(
+                project_key="discovery-project"
+            ),
+            [latest],
+        )
+        with self.assertRaisesRegex(NotFoundError, "discovery configuration"):
+            self.database.get_discovery_configuration(
+                "discovery-project", "implementation"
+            )
+
+        control = ControlPlane(self.database)
+        self.assertEqual(
+            control.get_discovery_configuration(
+                project_key="discovery-project",
+                name="default-discovery",
+                version=1,
+            ),
+            discovery,
+        )
+        self.assertEqual(
+            control.list_discovery_configurations(project_key="discovery-project"),
+            [latest],
         )
 
     def test_configuration_requires_distinct_bounded_read_only_roles(self) -> None:

@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C, M13A, and the M13B durable-director checkpoint complete**
+**Status: M12A-M12C, M13A, and the M13B operator-CLI checkpoint complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -64,6 +64,13 @@ the already-pinned session and optional claim needed for durable human
 questions. An active Discovery execution also excludes implementation on the
 same work thread and prevents that thread from being closed. The operator proof
 remains.
+
+The dedicated `discovery` CLI keeps this prescription distinct from the
+implementation workflow while reusing the generic immutable ledger. It can
+create, revise, show, and list Discovery-only configurations, then start, show,
+list, or cancel an execution. Starting requires every ordinary immutable pin
+plus the exact Krab session; a claim is optional but, when supplied, is pinned
+before either role runs. No command accepts free-form topology or authority.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
@@ -245,8 +252,9 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 - treating a three-agent advisory review as landing authority; and
 - release-management or multi-repository workflows in the first pass.
 
-The Discovery operator proof, followed by advisory review, is the next M13
-checkpoint; heterogeneous work providers and controlled remote execution remain
-later milestones. The completed `implementation-v1` proof, schema-v32
+The Discovery control-room projection and operator proof, followed by advisory
+review, are the next M13 checkpoints; heterogeneous work providers and
+controlled remote execution remain later milestones. The completed
+`implementation-v1` proof, schema-v32
 named-role ledger, schema-v34 Discovery evidence ledger, and schema-v35 bounded
 director establish the immutable prescription seam they reuse.
