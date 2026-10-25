@@ -872,14 +872,20 @@ class WorkflowStorage:
                         raise ConcurrentUpdateError("work thread generation changed")
                     if work_item["thread_version"] != expected_thread_version:
                         raise ConcurrentUpdateError("work thread version changed")
-                    active = connection.execute(
+                    active_workflow = connection.execute(
                         "SELECT id FROM workflow_executions "
                         "WHERE work_thread_id = ? AND state = 'active'",
                         (work_item["work_thread_id"],),
                     ).fetchone()
-                    if active is not None:
+                    active_discovery = connection.execute(
+                        "SELECT id FROM discovery_executions "
+                        "WHERE work_thread_id = ? AND state = 'active'",
+                        (work_item["work_thread_id"],),
+                    ).fetchone()
+                    if active_workflow is not None or active_discovery is not None:
                         raise ConflictError(
-                            "work thread already has an active workflow"
+                            "work thread already has an active workflow or active "
+                            "prescription"
                         )
                     connection.execute(
                         "INSERT INTO workflow_executions "

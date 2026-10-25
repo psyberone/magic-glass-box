@@ -131,6 +131,18 @@ dependency or ref drift waits for the existing queue's dependency/refold
 actions. A landed receipt advances through a separate `completion` version so
 a replacement supervisor can finish the atomic closeout after process death.
 
+Active `discovery-v1` executions follow the same restart-safe shape through a
+version-bound `discovery.advance` action. The Discovery director creates at
+most the exact pinned investigator or coordinator run for the current stage,
+then defers without spending retry budget while that run is active. A terminal
+investigator must have produced its exact typed trace; a terminal coordinator
+must have produced a final `GO` or `NO_GO` ruling. Those evidence IDs and
+digests are retained in the stage-transition event before the next version is
+discoverable. Failed runs and successful runs missing required evidence fail
+the prescription explicitly. `ASK_HUMAN` remains on the ordinary durable
+interaction path, so a replacement supervisor can continue after the answer
+without an in-memory wake-up.
+
 ## Provider recovery
 
 An explicit provider quota, rate-limit, or overload refusal creates one active

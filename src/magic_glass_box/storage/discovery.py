@@ -262,7 +262,8 @@ class DiscoveryStorage:
                     ).fetchone()
                     if active_discovery is not None or active_workflow is not None:
                         raise ConflictError(
-                            "work thread already has an active prescription"
+                            "work thread already has an active workflow or active "
+                            "prescription"
                         )
                     decision_owners = connection.execute(
                         "SELECT identity.id, identity.handle "

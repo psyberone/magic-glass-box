@@ -1301,8 +1301,12 @@ exact project context, work-item version, work-thread generation, source,
 configuration, role/profile revisions, Krab routing, and human decision owner;
 binds role-correct runs; retains typed traces and rulings with attempt
 provenance; and exposes only the two bounded submission operations through the
-worker gateway. The durable director and operator proof remain before M13B is
-complete.
+worker gateway. Schema v35 completes the durable-director checkpoint: a
+version-bound supervisor action creates each exact pinned role, waits for its
+terminal run and typed evidence, records exact evidence provenance on the stage
+transition, and completes restart-safely. Active Discovery now excludes an
+implementation execution on the same work thread and prevents premature thread
+closure. The operator proof remains before M13B is complete.
 
 Checkpoint evidence: 1,113 tests pass at 86% aggregate branch-aware coverage;
 the new Discovery contract module is at 97%. A focused 46-mutant contract and
@@ -1318,6 +1322,17 @@ Happy- and sad-path tests cover stale pins, wrong roles and stages, inactive
 attempts, source and work-item bounds, idempotent retries, immutable evidence,
 decision-owner-only questions, final rulings after answers, cancellation
 authority, and terminal event provenance.
+
+Durable-director evidence: 1,139 tests pass at 86% aggregate branch-aware
+coverage; the new director is at 98%. Its final-code mutation wave killed all
+281 director mutants. A wider wave across the supervisor dispatcher, action
+ledger, CLI wiring, and work-thread exclusion seams killed 1,035/1,140
+(90.79%), with no uncovered mutants, timeouts, suspicious outcomes, or crashes.
+The surviving cross-module mutants are older diagnostics, serialization form,
+or previously measured lifecycle branches; the new Discovery dispatch and
+version-obsolescence paths were killed. RED-first tests first exposed and then
+closed both cross-prescription holes: implementation could otherwise start
+during active Discovery, and a work thread could otherwise close beneath it.
 
 - Add one read-only investigator and one read-only coordinator as the default
   fixed topology. A separate higher-assurance prescription may add another

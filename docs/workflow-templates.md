@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C, M13A, and the M13B execution-ledger checkpoint complete**
+**Status: M12A-M12C, M13A, and the M13B durable-director checkpoint complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -51,7 +51,19 @@ provenance. The investigator can submit only a trace and the coordinator only
 a ruling through their explicitly granted gateway operations. An `ASK_HUMAN`
 ruling must name the current open question or choice addressed to that pinned
 decision owner; a later `GO` or `NO_GO` must follow the latest answered
-interaction. The separate durable director and operator proof remain.
+interaction.
+
+Schema v35 connects that ledger to the durable supervisor. One version-bound
+`discovery.advance` action drives each investigate, coordinate, and completion
+stage. The bounded director creates only the prescription's exact pinned role,
+waits for a terminal run plus its typed evidence, and records the evidence IDs
+and digests in the transition event. A failed role run or a successful run
+without its required evidence fails the execution; a stale action is harmless.
+The investigator receives no Krab routing, while the coordinator receives only
+the already-pinned session and optional claim needed for durable human
+questions. An active Discovery execution also excludes implementation on the
+same work thread and prevents that thread from being closed. The operator proof
+remains.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
@@ -233,8 +245,8 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 - treating a three-agent advisory review as landing authority; and
 - release-management or multi-repository workflows in the first pass.
 
-The bounded Discovery director and operator proof, followed by advisory review,
-are the next M13 checkpoints; heterogeneous work providers and controlled
-remote execution remain later milestones. The completed `implementation-v1`
-proof, schema-v32 named-role ledger, and schema-v34 Discovery evidence ledger
-establish the immutable prescription seam they reuse.
+The Discovery operator proof, followed by advisory review, is the next M13
+checkpoint; heterogeneous work providers and controlled remote execution remain
+later milestones. The completed `implementation-v1` proof, schema-v32
+named-role ledger, schema-v34 Discovery evidence ledger, and schema-v35 bounded
+director establish the immutable prescription seam they reuse.

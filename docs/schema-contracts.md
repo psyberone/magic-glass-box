@@ -170,6 +170,13 @@ final `GO` or `NO_GO` after a question must reference the latest answered
 interaction. These are control-plane authority relationships beyond the
 portable JSON schemas.
 
+Control-plane schema v35 extends the private supervisor-action ledger with the
+version-bound `discovery.advance` operation and an exact Discovery execution
+foreign key. The table-level checks keep run, implementation-workflow, and
+Discovery subjects mutually exclusive. This is durable control-plane state,
+not a portable document or a new worker-facing capability. Existing actions
+are preserved during migration with a null Discovery subject.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

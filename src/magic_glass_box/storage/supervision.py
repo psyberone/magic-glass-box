@@ -175,6 +175,26 @@ class SupervisionStorage:
                     )
                     if action_id is not None:
                         inserted.append(action_id)
+
+                discoveries = connection.execute(
+                    "SELECT id, version FROM discovery_executions "
+                    "WHERE state = 'active' "
+                    "AND stage IN ('investigate', 'coordinate', 'completion') "
+                    "ORDER BY created_at, id"
+                ).fetchall()
+                for discovery in discoveries:
+                    action_id = self._insert_supervisor_action(
+                        connection,
+                        kind="discovery.advance",
+                        subject_id=discovery["id"],
+                        subject_version=discovery["version"],
+                        run_id=None,
+                        discovery_execution_id=discovery["id"],
+                        policy=workflow_policy,
+                        now=now,
+                    )
+                    if action_id is not None:
+                        inserted.append(action_id)
                 connection.commit()
             except (ConflictError, StorageError, ValidationError):
                 connection.rollback()
@@ -193,6 +213,7 @@ class SupervisionStorage:
         subject_version: int,
         run_id: str | None,
         workflow_execution_id: str | None = None,
+        discovery_execution_id: str | None = None,
         policy: SupervisionPolicy,
         now: str,
     ) -> str | None:
@@ -200,10 +221,10 @@ class SupervisionStorage:
         changed = connection.execute(
             "INSERT OR IGNORE INTO supervisor_actions "
             "(id, kind, subject_id, subject_version, run_id, "
-            "workflow_execution_id, state, version, "
+            "workflow_execution_id, discovery_execution_id, state, version, "
             "attempt_count, max_attempts, retry_backoff_json, available_at, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'pending', 1, 0, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 1, 0, ?, ?, ?, ?, ?)",
             (
                 action_id,
                 kind,
@@ -211,6 +232,7 @@ class SupervisionStorage:
                 subject_version,
                 run_id,
                 workflow_execution_id,
+                discovery_execution_id,
                 len(policy.retry_backoff_seconds) + 1,
                 json.dumps(list(policy.retry_backoff_seconds), separators=(",", ":")),
                 now,

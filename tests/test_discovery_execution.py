@@ -18,6 +18,10 @@ from magic_glass_box.discovery import (
     DiscoveryRuling,
     DiscoveryTrace,
 )
+from magic_glass_box.discovery_director import (
+    DISCOVERY_RUN_SUPERVISION,
+    DiscoveryDirector,
+)
 from magic_glass_box.domain import (
     AgentProfileSpec,
     InteractionKind,
@@ -29,7 +33,10 @@ from magic_glass_box.domain import (
 )
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import WorkspaceResultStore
+from magic_glass_box.service import ControlPlane
 from magic_glass_box.storage.schema import SCHEMA_VERSION
+from magic_glass_box.supervision import Supervisor
+from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 OWNER_ID = "discovery-ledger-test"
 IMAGE_ID = "sha256:" + "9" * 64
@@ -246,6 +253,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         submit: Callable[[dict[str, object]], object] | None = None,
         *,
         complete: bool = True,
+        exit_code: int = 0,
     ) -> dict[str, object]:
         preparing = self.database.begin_run_attempt(
             run["id"],
@@ -277,7 +285,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
             attempt["id"],
             owner_id=OWNER_ID,
             expected_attempt_version=attempt["version"],
-            exit_code=0,
+            exit_code=exit_code,
             image_id=IMAGE_ID,
         )
 
@@ -510,7 +518,9 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 self.start(**overrides)
 
         self.start(idempotency_key="first-active")
-        with self.assertRaisesRegex(ConflictError, "active prescription"):
+        with self.assertRaisesRegex(
+            ConflictError, "active workflow or active prescription"
+        ):
             self.start(idempotency_key="second-active")
 
     def test_start_requires_one_decision_owner_and_only_owner_may_cancel(self) -> None:
@@ -1177,7 +1187,331 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 idempotency_key="bounded-ask-8",
             )
 
-    def test_execution_ledger_is_immutable_and_schema_34_migrates_once(self) -> None:
+    def test_director_runs_fixed_roles_and_completes_from_final_ruling(self) -> None:
+        execution = self.start()
+        director = DiscoveryDirector(ControlPlane(self.database))
+
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        created = self.database.get_discovery_execution(execution["id"])
+        investigator = self.database.get_run(created["runs"]["investigator"]["run_id"])
+        self.assertEqual(
+            self.database.get_run_execution(investigator["id"])["supervision_policy"],
+            DISCOVERY_RUN_SUPERVISION.to_dict(),
+        )
+        self.assertFalse(
+            DiscoveryDirector(ControlPlane(self.database)).advance(
+                execution["id"], expected_version=execution["version"]
+            )
+        )
+        self.assertEqual(
+            len(self.database.get_discovery_execution(execution["id"])["runs"]), 1
+        )
+
+        trace = DiscoveryTrace.from_mapping(trace_value())
+        self.run_attempt(
+            investigator,
+            lambda _attempt: self.database.submit_discovery_trace(
+                investigator["id"], trace=trace, idempotency_key="directed-trace"
+            ),
+        )
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        coordinate = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(
+            (coordinate["stage"], coordinate["version"]), ("coordinate", 2)
+        )
+        self.assertEqual(
+            coordinate["events"][-1]["metadata"],
+            {
+                "from_stage": "investigate",
+                "investigator_run_id": investigator["id"],
+                "to_stage": "coordinate",
+                "trace_id": coordinate["trace"]["id"],
+                "trace_sha256": trace.digest,
+            },
+        )
+
+        self.assertFalse(
+            director.advance(coordinate["id"], expected_version=coordinate["version"])
+        )
+        directed = self.database.get_discovery_execution(execution["id"])
+        coordinator = self.database.get_run(directed["runs"]["coordinator"]["run_id"])
+        self.assertEqual(
+            self.database.get_run_execution(coordinator["id"])["supervision_policy"],
+            DISCOVERY_RUN_SUPERVISION.to_dict(),
+        )
+        self.assertFalse(
+            director.advance(directed["id"], expected_version=directed["version"])
+        )
+        ruling = DiscoveryRuling.from_mapping(ruling_value())
+        self.run_attempt(
+            coordinator,
+            lambda _attempt: self.database.submit_discovery_ruling(
+                coordinator["id"],
+                ruling=ruling,
+                idempotency_key="directed-ruling",
+            ),
+        )
+        self.assertTrue(
+            director.advance(directed["id"], expected_version=directed["version"])
+        )
+        completion = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(
+            (completion["stage"], completion["version"]), ("completion", 3)
+        )
+        self.assertEqual(
+            completion["events"][-1]["metadata"],
+            {
+                "coordinator_run_id": coordinator["id"],
+                "disposition": "GO",
+                "from_stage": "coordinate",
+                "ruling_id": completion["final_ruling"]["id"],
+                "ruling_sha256": ruling.digest,
+                "to_stage": "completion",
+            },
+        )
+        self.assertTrue(
+            DiscoveryDirector(ControlPlane(self.database)).advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        finished = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(
+            (finished["state"], finished["stage"]), ("completed", "completion")
+        )
+        self.assertEqual(finished["events"][-1]["kind"], "discovery.completed")
+
+    def test_director_fails_closed_when_a_successful_role_omits_evidence(self) -> None:
+        execution = self.start()
+        director = DiscoveryDirector(ControlPlane(self.database))
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        created = self.database.get_discovery_execution(execution["id"])
+        investigator = self.database.get_run(created["runs"]["investigator"]["run_id"])
+        self.run_attempt(investigator)
+
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        failed = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("succeeded without a Discovery trace", failed["failure_reason"])
+        self.assertEqual(failed["events"][-1]["kind"], "discovery.failed")
+
+    def test_director_fails_closed_when_a_role_run_fails(self) -> None:
+        execution = self.start()
+        director = DiscoveryDirector(ControlPlane(self.database))
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        created = self.database.get_discovery_execution(execution["id"])
+        investigator = self.database.get_run(created["runs"]["investigator"]["run_id"])
+        self.run_attempt(investigator, exit_code=17)
+
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        failed = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("investigator run", failed["failure_reason"])
+        self.assertIn("failed", failed["failure_reason"])
+
+    def test_director_fails_closed_when_coordinator_omits_a_final_ruling(self) -> None:
+        execution, _investigator = self.prepare_coordinate()
+        director = DiscoveryDirector(ControlPlane(self.database))
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        created = self.database.get_discovery_execution(execution["id"])
+        coordinator = self.database.get_run(created["runs"]["coordinator"]["run_id"])
+        self.run_attempt(coordinator)
+
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        failed = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn(
+            "succeeded without a final Discovery ruling", failed["failure_reason"]
+        )
+
+    def test_director_fails_closed_when_the_coordinator_run_fails(self) -> None:
+        execution, _investigator = self.prepare_coordinate()
+        director = DiscoveryDirector(ControlPlane(self.database))
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        created = self.database.get_discovery_execution(execution["id"])
+        coordinator = self.database.get_run(created["runs"]["coordinator"]["run_id"])
+        self.run_attempt(coordinator, exit_code=17)
+
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        failed = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("coordinator run", failed["failure_reason"])
+        self.assertIn("failed", failed["failure_reason"])
+
+    def test_director_treats_stale_or_terminal_execution_as_finished(self) -> None:
+        execution = self.start()
+        director = DiscoveryDirector(ControlPlane(self.database))
+
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"] + 1)
+        )
+        self.assertEqual(
+            self.database.get_discovery_execution(execution["id"])["runs"], {}
+        )
+        cancelled = self.database.cancel_discovery_execution(
+            execution["id"],
+            expected_version=execution["version"],
+            cancelled_by=self.user["id"],
+            reason="operator stopped the discovery",
+        )
+        self.assertTrue(
+            director.advance(cancelled["id"], expected_version=cancelled["version"])
+        )
+
+    def test_director_waits_for_every_nonterminal_run_state(self) -> None:
+        for state in (
+            "queued",
+            "preparing",
+            "running",
+            "waiting_for_input",
+            "paused",
+        ):
+            with self.subTest(state=state):
+                self.assertTrue(DiscoveryDirector._run_is_active({"state": state}))
+        for state in ("succeeded", "failed", "cancelled"):
+            with self.subTest(state=state):
+                self.assertFalse(DiscoveryDirector._run_is_active({"state": state}))
+
+    def test_active_discovery_excludes_an_implementation_prescription(self) -> None:
+        producer = self.database.create_agent_profile(
+            name="Producer",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:producer",
+                command=["agent", "run"],
+                workspace_mode="copy_on_write",
+                network_mode="none",
+            ),
+            krab_identity_id=self.investigator_identity["id"],
+            created_by=self.user["id"],
+        )
+        reviewer = self.database.create_agent_profile(
+            name="Reviewer",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:reviewer",
+                command=["agent", "run"],
+                workspace_mode="read_only",
+                network_mode="none",
+            ),
+            krab_identity_id=self.coordinator_identity["id"],
+            created_by=self.user["id"],
+        )
+        self.database.create_workflow_configuration(
+            project_key="discovery-project",
+            name="implementation",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [],
+                    "max_correction_rounds": 2,
+                    "landing_mode": "manual",
+                }
+            ),
+            producer_profile_name=producer["name"],
+            reviewer_profile_name=reviewer["name"],
+            created_by=self.user["id"],
+        )
+        self.start()
+
+        with self.assertRaisesRegex(
+            ConflictError, "active workflow or active prescription"
+        ):
+            self.database.start_workflow_execution(
+                project_key="discovery-project",
+                configuration_name="implementation",
+                work_item_id=self.work_item["id"],
+                source_revision=SOURCE_REVISION,
+                expected_configuration_version=1,
+                expected_context_version_id=self.project["context_version_id"],
+                expected_work_item_version_id=self.work_item["work_item_version_id"],
+                expected_thread_generation=1,
+                expected_thread_version=1,
+                idempotency_key="implementation-during-discovery",
+                requested_by=self.user["id"],
+            )
+
+    def test_active_discovery_keeps_its_work_thread_open(self) -> None:
+        self.start()
+
+        with self.assertRaisesRegex(ConflictError, "active Discovery prescription"):
+            self.database.complete_work_item(
+                self.work_item["id"],
+                completed_by=self.user["id"],
+                expected_thread_version=1,
+                reason="must not close around active discovery",
+            )
+
+    def test_supervisor_keeps_one_version_bound_discovery_action(self) -> None:
+        class Coordinator:
+            @staticmethod
+            def execute(_run_id: str) -> dict[str, object]:
+                return {}
+
+            @staticmethod
+            def reconcile(_run_id: str | None = None) -> list[dict[str, object]]:
+                return []
+
+        class Director:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int]] = []
+
+            def advance(self, execution_id: str, *, expected_version: int) -> bool:
+                self.calls.append((execution_id, expected_version))
+                return False
+
+        class Transport:
+            @staticmethod
+            def remind_interaction(*_args: object, **_kwargs: object) -> int:
+                return 1
+
+        execution = self.start()
+        created = self.database.enqueue_supervisor_actions()
+        self.assertEqual(len(created), 1)
+        self.assertEqual(self.database.enqueue_supervisor_actions(), [])
+        self.assertEqual(created[0]["kind"], "discovery.advance")
+        self.assertIsNone(created[0]["run_id"])
+        self.assertIsNone(created[0]["workflow_execution_id"])
+        self.assertEqual(created[0]["discovery_execution_id"], execution["id"])
+
+        director = Director()
+        supervisor = Supervisor(
+            self.database,
+            Coordinator(),
+            Transport(),
+            discovery_director=director,
+            poll_interval=0.05,
+            action_lease_seconds=10,
+            action_timeout=1,
+        )
+        supervisor.tick(wait=True)
+
+        action = self.database.get_supervisor_action(created[0]["id"])
+        self.assertEqual(action["state"], "pending")
+        self.assertEqual(action["attempt_count"], 0)
+        self.assertEqual(director.calls, [(execution["id"], execution["version"])])
+        self.assertEqual(len(self.database.list_supervisor_actions()), 1)
+
+    def test_execution_ledger_is_immutable_and_schemas_34_35_migrate_once(self) -> None:
         execution, _investigator = self.prepare_coordinate()
         coordinator = self.create_role_run(execution, "coordinator")
         self.run_attempt(
@@ -1247,7 +1581,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 34)
+        self.assertEqual(SCHEMA_VERSION, 35)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:
@@ -1258,6 +1592,10 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                     "AND name LIKE 'discovery_%'"
                 )
             }
+            supervisor_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(supervisor_actions)")
+            }
         self.assertTrue(
             {
                 "discovery_executions",
@@ -1267,6 +1605,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 "discovery_rulings",
             }.issubset(tables)
         )
+        self.assertIn("discovery_execution_id", supervisor_columns)
 
 
 if __name__ == "__main__":

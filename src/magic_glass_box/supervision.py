@@ -41,6 +41,10 @@ class WorkflowAdvancer(Protocol):
     def advance(self, execution_id: str, *, expected_version: int) -> bool: ...
 
 
+class DiscoveryAdvancer(Protocol):
+    def advance(self, execution_id: str, *, expected_version: int) -> bool: ...
+
+
 class EscalationTransport(Protocol):
     def remind_interaction(
         self,
@@ -69,6 +73,7 @@ class Supervisor:
         escalation_transport: EscalationTransport,
         *,
         workflow_director: WorkflowAdvancer | None = None,
+        discovery_director: DiscoveryAdvancer | None = None,
         supervisor_id: str | None = None,
         poll_interval: float = 2.0,
         max_workers: int = 4,
@@ -147,6 +152,7 @@ class Supervisor:
         self.coordinator = coordinator
         self.escalation_transport = escalation_transport
         self.workflow_director = workflow_director
+        self.discovery_director = discovery_director
         self.supervisor_id = supervisor_id
         self.poll_interval = float(poll_interval)
         self.max_workers = max_workers
@@ -428,7 +434,17 @@ class Supervisor:
                     expected_version=action["subject_version"],
                 )
                 if not finished:
-                    self._defer_workflow_action(action)
+                    self._defer_prescription_action(action)
+                    return
+            elif action["kind"] == "discovery.advance":
+                if self.discovery_director is None:
+                    raise SupervisorError("Discovery director is unavailable")
+                finished = self.discovery_director.advance(
+                    action["discovery_execution_id"],
+                    expected_version=action["subject_version"],
+                )
+                if not finished:
+                    self._defer_prescription_action(action)
                     return
             else:
                 raise SupervisorError("stored supervisor action kind is invalid")
@@ -479,7 +495,7 @@ class Supervisor:
             expected_version=int(action["version"]),
         )
 
-    def _defer_workflow_action(self, action: Mapping[str, Any]) -> None:
+    def _defer_prescription_action(self, action: Mapping[str, Any]) -> None:
         current = datetime.fromisoformat(self.database.now())
         available_at = (current + timedelta(seconds=self.poll_interval)).isoformat(
             timespec="microseconds"
@@ -542,6 +558,14 @@ class Supervisor:
             if action["kind"] == "workflow.advance":
                 execution = self.database.get_workflow_execution(
                     str(action["workflow_execution_id"])
+                )
+                return (
+                    execution["state"] != "active"
+                    or execution["version"] != action["subject_version"]
+                )
+            if action["kind"] == "discovery.advance":
+                execution = self.database.get_discovery_execution(
+                    str(action["discovery_execution_id"])
                 )
                 return (
                     execution["state"] != "active"

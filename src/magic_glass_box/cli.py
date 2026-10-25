@@ -22,6 +22,7 @@ from .candidates import (
 from .control_room_web import build_control_room_server
 from .credentials import CredentialError
 from .db import Database, StorageError, default_db_path
+from .discovery_director import DiscoveryDirector
 from .domain import (
     AgentProfileSpec,
     ProjectContext,
@@ -1139,11 +1140,13 @@ def _serve_supervisor(
     )
     control.initialize()
     workflow_director = _build_workflow_director(control, coordinator)
+    discovery_director = DiscoveryDirector(control)
     supervisor = Supervisor(
         control.database,
         coordinator,
         control,
         workflow_director=workflow_director,
+        discovery_director=discovery_director,
         poll_interval=args.poll_interval,
         max_workers=args.max_workers,
         action_lease_seconds=args.action_lease_seconds,
