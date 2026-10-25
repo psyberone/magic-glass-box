@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -4719,6 +4719,248 @@ INSERT INTO workflow_template_definitions (
 );
 """
 
+DISCOVERY_EXECUTION_SCHEMA = """
+CREATE TABLE discovery_executions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    template_definition_id TEXT NOT NULL,
+    configuration_version_id TEXT NOT NULL,
+    context_version_id TEXT NOT NULL,
+    work_item_id TEXT NOT NULL,
+    work_item_version_id TEXT NOT NULL,
+    work_thread_id TEXT NOT NULL,
+    work_thread_generation INTEGER NOT NULL CHECK (work_thread_generation >= 1),
+    source_revision TEXT NOT NULL,
+    decision_owner_krab_identity_id TEXT NOT NULL,
+    krab_session_id TEXT NOT NULL,
+    krab_claim_id TEXT,
+    state TEXT NOT NULL CHECK (
+        state IN ('active', 'cancelled', 'completed', 'failed')
+    ),
+    stage TEXT NOT NULL CHECK (
+        stage IN ('investigate', 'coordinate', 'completion')
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    request_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    cancel_reason TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (requested_by, idempotency_key),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (template_definition_id)
+        REFERENCES workflow_template_definitions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (configuration_version_id)
+        REFERENCES workflow_configuration_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (context_version_id)
+        REFERENCES project_context_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_version_id)
+        REFERENCES work_item_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (decision_owner_krab_identity_id)
+        REFERENCES krab_identities(id) ON DELETE RESTRICT,
+    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND finished_at IS NULL
+            AND cancel_reason IS NULL AND failure_reason IS NULL)
+        OR (state = 'cancelled' AND finished_at IS NOT NULL
+            AND cancel_reason IS NOT NULL AND failure_reason IS NULL)
+        OR (state = 'failed' AND finished_at IS NOT NULL
+            AND cancel_reason IS NULL AND failure_reason IS NOT NULL)
+        OR (state = 'completed' AND finished_at IS NOT NULL
+            AND cancel_reason IS NULL AND failure_reason IS NULL
+            AND stage = 'completion')
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX discovery_execution_one_active_thread
+    ON discovery_executions(work_thread_id) WHERE state = 'active';
+CREATE INDEX discovery_execution_project_created
+    ON discovery_executions(project_id, created_at DESC, id DESC);
+CREATE INDEX discovery_execution_state_created
+    ON discovery_executions(state, created_at, id);
+
+CREATE TABLE discovery_execution_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'discovery.started',
+            'discovery.investigation_completed',
+            'discovery.coordination_completed',
+            'discovery.completed',
+            'discovery.cancelled',
+            'discovery.failed'
+        )
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL CHECK (
+        to_state IN ('active', 'cancelled', 'completed', 'failed')
+    ),
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, sequence),
+    FOREIGN KEY (execution_id)
+        REFERENCES discovery_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX discovery_execution_event_stream
+    ON discovery_execution_events(execution_id, sequence);
+
+CREATE TABLE discovery_run_bindings (
+    run_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('investigator', 'coordinator')),
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, role),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_id)
+        REFERENCES discovery_executions(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE discovery_traces (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    trace_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, idempotency_key),
+    FOREIGN KEY (execution_id)
+        REFERENCES discovery_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE discovery_rulings (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK (
+        disposition IN ('GO', 'NO_GO', 'ASK_HUMAN')
+    ),
+    interaction_id TEXT,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    ruling_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, sequence),
+    UNIQUE (run_id, idempotency_key),
+    FOREIGN KEY (execution_id)
+        REFERENCES discovery_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (interaction_id) REFERENCES interactions(id) ON DELETE RESTRICT,
+    CHECK (
+        (disposition = 'ASK_HUMAN' AND interaction_id IS NOT NULL)
+        OR disposition IN ('GO', 'NO_GO')
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX discovery_ruling_one_final
+    ON discovery_rulings(execution_id)
+    WHERE disposition IN ('GO', 'NO_GO');
+
+CREATE TRIGGER discovery_execution_identity_immutable
+BEFORE UPDATE OF
+    id, project_id, template_definition_id, configuration_version_id,
+    context_version_id, work_item_id, work_item_version_id, work_thread_id,
+    work_thread_generation, source_revision, decision_owner_krab_identity_id,
+    krab_session_id, krab_claim_id, request_json, content_sha256,
+    idempotency_key, requested_by, created_at
+ON discovery_executions
+BEGIN
+    SELECT RAISE(ABORT, 'discovery execution identity is immutable');
+END;
+
+CREATE TRIGGER discovery_execution_transition
+BEFORE UPDATE ON discovery_executions
+WHEN
+    OLD.state != 'active'
+    OR NEW.version != OLD.version + 1
+    OR NEW.state NOT IN ('active', 'cancelled', 'completed', 'failed')
+    OR (OLD.stage = 'investigate'
+        AND NEW.stage NOT IN ('investigate', 'coordinate'))
+    OR (OLD.stage = 'coordinate'
+        AND NEW.stage NOT IN ('coordinate', 'completion'))
+    OR (OLD.stage = 'completion' AND NEW.stage != 'completion')
+    OR (NEW.state = 'active'
+        AND (NEW.finished_at IS NOT NULL OR NEW.cancel_reason IS NOT NULL
+            OR NEW.failure_reason IS NOT NULL))
+    OR (NEW.state = 'cancelled'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NULL
+            OR NEW.failure_reason IS NOT NULL))
+    OR (NEW.state = 'failed'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NOT NULL
+            OR NEW.failure_reason IS NULL))
+    OR (NEW.state = 'completed'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NOT NULL
+            OR NEW.failure_reason IS NOT NULL OR NEW.stage != 'completion'))
+BEGIN
+    SELECT RAISE(ABORT, 'discovery execution transition is invalid');
+END;
+
+CREATE TRIGGER discovery_execution_immutable_delete
+BEFORE DELETE ON discovery_executions
+BEGIN
+    SELECT RAISE(ABORT, 'discovery executions cannot be deleted');
+END;
+CREATE TRIGGER discovery_execution_event_immutable_update
+BEFORE UPDATE ON discovery_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'discovery execution events are immutable');
+END;
+CREATE TRIGGER discovery_execution_event_immutable_delete
+BEFORE DELETE ON discovery_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'discovery execution events cannot be deleted');
+END;
+CREATE TRIGGER discovery_run_binding_immutable_update
+BEFORE UPDATE ON discovery_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'discovery run bindings are immutable');
+END;
+CREATE TRIGGER discovery_run_binding_immutable_delete
+BEFORE DELETE ON discovery_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'discovery run bindings cannot be deleted');
+END;
+CREATE TRIGGER discovery_trace_immutable_update
+BEFORE UPDATE ON discovery_traces
+BEGIN
+    SELECT RAISE(ABORT, 'discovery traces are immutable');
+END;
+CREATE TRIGGER discovery_trace_immutable_delete
+BEFORE DELETE ON discovery_traces
+BEGIN
+    SELECT RAISE(ABORT, 'discovery traces cannot be deleted');
+END;
+CREATE TRIGGER discovery_ruling_immutable_update
+BEFORE UPDATE ON discovery_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'discovery rulings are immutable');
+END;
+CREATE TRIGGER discovery_ruling_immutable_delete
+BEFORE DELETE ON discovery_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'discovery rulings cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -4755,6 +4997,7 @@ SCHEMA = (
     + WORKFLOW_LANDING_CHAIN_SCHEMA
     + WORKFLOW_PRESCRIPTION_SCHEMA
     + DISCOVERY_PRESCRIPTION_SCHEMA
+    + DISCOVERY_EXECUTION_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -4789,4 +5032,5 @@ MIGRATIONS = {
     30: WORKFLOW_LANDING_CHAIN_SCHEMA,
     31: WORKFLOW_PRESCRIPTION_SCHEMA,
     32: DISCOVERY_PRESCRIPTION_SCHEMA,
+    33: DISCOVERY_EXECUTION_SCHEMA,
 }

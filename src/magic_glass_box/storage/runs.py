@@ -48,6 +48,8 @@ class RunStorage:
         workflow_execution_id: str | None = None,
         workflow_round: int | None = None,
         workflow_role: str | None = None,
+        discovery_execution_id: str | None = None,
+        discovery_role: str | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
@@ -124,6 +126,25 @@ class RunStorage:
                 raise ValidationError("workflow_round must be between 0 and 8")
             if workflow_role not in {"producer", "reviewer"}:
                 raise ValidationError("workflow_role is invalid")
+        discovery_values = (discovery_execution_id, discovery_role)
+        if any(value is not None for value in discovery_values):
+            if any(value is None for value in discovery_values):
+                raise ValidationError("Discovery run binding is incomplete")
+            if any(value is not None for value in workflow_values):
+                raise ValidationError(
+                    "a run cannot bind both workflow and Discovery executions"
+                )
+            if gate_policy_id is not None or change_policy_id is not None:
+                raise ValidationError(
+                    "a Discovery run cannot bind an integration gate policy"
+                )
+            discovery_execution_id = require_string(
+                discovery_execution_id,
+                field="discovery_execution_id",
+                max_bytes=64,
+            )
+            if discovery_role not in {"investigator", "coordinator"}:
+                raise ValidationError("discovery_role is invalid")
         if supervision_policy is None:
             supervision_policy = SupervisionPolicy.disabled()
         elif not isinstance(supervision_policy, SupervisionPolicy):
@@ -194,6 +215,57 @@ class RunStorage:
                     elif gate_policy_id is None:
                         raise ConflictError(
                             "workflow reviewer requires an exact gate policy"
+                        )
+                discovery = None
+                if discovery_execution_id is not None:
+                    discovery = connection.execute(
+                        "SELECT execution.project_id, "
+                        "execution.context_version_id, execution.work_item_id, "
+                        "execution.work_item_version_id, execution.work_thread_id, "
+                        "execution.source_revision, execution.state, "
+                        "execution.stage, execution.requested_by, "
+                        "execution.krab_session_id, execution.krab_claim_id, "
+                        "binding.profile_version_id "
+                        "AS discovery_profile_version_id "
+                        "FROM discovery_executions execution "
+                        "JOIN workflow_configuration_role_bindings binding "
+                        "ON binding.configuration_version_id = "
+                        "execution.configuration_version_id "
+                        "AND binding.role = ? WHERE execution.id = ?",
+                        (discovery_role, discovery_execution_id),
+                    ).fetchone()
+                    if discovery is None:
+                        raise NotFoundError(
+                            "Discovery execution not found: " + discovery_execution_id
+                        )
+                    expected_stage = (
+                        "investigate"
+                        if discovery_role == "investigator"
+                        else "coordinate"
+                    )
+                    if discovery["state"] != "active":
+                        raise ConflictError("Discovery execution is not active")
+                    if discovery["stage"] != expected_stage:
+                        raise ConflictError("Discovery execution stage changed")
+                    if discovery["project_id"] != project["id"]:
+                        raise ConflictError("Discovery belongs to another project")
+                    if discovery["work_item_id"] != work_item_id:
+                        raise ConflictError("Discovery belongs to another work item")
+                    if discovery["requested_by"] != requested_by:
+                        raise ConflictError("Discovery requester changed")
+                    if source_revision != discovery["source_revision"]:
+                        raise ConflictError("Discovery run source revision changed")
+                    if discovery_role == "investigator":
+                        if krab_session_id is not None or krab_claim_id is not None:
+                            raise ConflictError(
+                                "Discovery investigator cannot receive Krab routing"
+                            )
+                    elif (
+                        krab_session_id != discovery["krab_session_id"]
+                        or krab_claim_id != discovery["krab_claim_id"]
+                    ):
+                        raise ConflictError(
+                            "Discovery coordinator Krab routing changed"
                         )
                 gate_policy = None
                 change_target = None
@@ -374,11 +446,15 @@ class RunStorage:
                     context = (
                         {"id": workflow["context_version_id"]}
                         if workflow is not None
-                        else connection.execute(
-                            "SELECT id FROM project_context_versions "
-                            "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
-                            (project["id"],),
-                        ).fetchone()
+                        else (
+                            {"id": discovery["context_version_id"]}
+                            if discovery is not None
+                            else connection.execute(
+                                "SELECT id FROM project_context_versions "
+                                "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+                                (project["id"],),
+                            ).fetchone()
+                        )
                     )
                 if (
                     workflow is not None
@@ -387,7 +463,7 @@ class RunStorage:
                     raise ConflictError(
                         "workflow gate policy belongs to another project context"
                     )
-                if workflow is None:
+                if workflow is None and discovery is None:
                     work_item_version = connection.execute(
                         "SELECT wiv.id, wt.id AS work_thread_id FROM work_items wi "
                         "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
@@ -398,6 +474,8 @@ class RunStorage:
                         (work_item_id, project["id"]),
                     ).fetchone()
                 else:
+                    pinned = workflow if workflow is not None else discovery
+                    assert pinned is not None
                     work_item_version = connection.execute(
                         "SELECT wiv.id, wt.id AS work_thread_id "
                         "FROM work_item_versions wiv JOIN work_threads wt "
@@ -405,8 +483,8 @@ class RunStorage:
                         "AND wiv.work_item_id = ? AND wt.work_item_id = ? "
                         "AND wt.state = 'active'",
                         (
-                            workflow["work_thread_id"],
-                            workflow["work_item_version_id"],
+                            pinned["work_thread_id"],
+                            pinned["work_item_version_id"],
                             work_item_id,
                             work_item_id,
                         ),
@@ -437,6 +515,11 @@ class RunStorage:
                     expected_profile_version_id = workflow[
                         "workflow_profile_version_id"
                     ]
+                elif discovery is not None:
+                    expected_profile_version_id = discovery[
+                        "discovery_profile_version_id"
+                    ]
+                if expected_profile_version_id is not None:
                     profile = connection.execute(
                         "SELECT ap.id, ap.active, ap.name "
                         "FROM agent_profile_versions av JOIN agent_profiles ap "
@@ -472,7 +555,7 @@ class RunStorage:
                     ).fetchone()
                     if profile_version is None:
                         raise StorageError(
-                            "workflow pinned profile version is unavailable"
+                            "prescription-pinned profile version is unavailable"
                         )
                 if profile_version["krab_instance_id"] != project["krab_instance_id"]:
                     raise ConflictError(
@@ -551,6 +634,18 @@ class RunStorage:
                             workflow_execution_id,
                             workflow_round,
                             workflow_role,
+                            now,
+                        ),
+                    )
+                if discovery_execution_id is not None:
+                    connection.execute(
+                        "INSERT INTO discovery_run_bindings "
+                        "(run_id, execution_id, role, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            run_id,
+                            discovery_execution_id,
+                            discovery_role,
                             now,
                         ),
                     )

@@ -113,6 +113,32 @@ with at most the latest 16 lifecycle events per assignment. It omits the host
 repository path, image and command details, credential references, file bodies,
 and secret values.
 
+A Discovery-bound run also receives `discovery_assignment`: its execution ID,
+fixed role and stage, pinned human decision-owner handle, accepted trace when
+present, and prior typed rulings. This is bounded prescription state, not an
+agent transcript or a grant of authority beyond the run's capability list.
+
+### Discovery evidence operations
+
+`discovery.trace.submit` accepts exactly a published
+`discovery-trace-v1` object and stable `idempotency_key`. Only the pinned
+investigator may call it, during the `investigate` stage, from a live running
+attempt at the execution's exact source. Storage revalidates configured output
+ceilings and every work-brief, acceptance-criterion, and repository evidence
+reference before retaining the canonical trace with run and attempt
+provenance. The response returns its ID and digest with
+`agent_action: "exit"`.
+
+`discovery.ruling.submit` accepts exactly a published
+`discovery-ruling-v1` object and stable `idempotency_key`. Only the pinned
+coordinator may call it during `coordinate`, from its active attempt, and every
+finding and MUST item must trace back through the accepted trace and configured
+bounds. `ASK_HUMAN` must name the current open question or choice sent to the
+pinned decision owner and returns `agent_action: "submit_handoff_then_exit"`.
+A later `GO` or `NO_GO` must name the latest answered interaction and returns
+`agent_action: "exit"`. Identical retries are idempotent; a reused key with
+different evidence is rejected.
+
 ### Work-memory operations
 
 `work.read` pages the bound work item's log from an optional sequence with a
@@ -256,10 +282,10 @@ durable wait is closed as interrupted while its handoff remains available.
 ## Current boundary
 
 The gateway brokers run context, Krab interactions, structured handoffs, named
-provider grants, and work-item-scoped coordination. It does not grant
-transparent Internet access, relay arbitrary URLs, expose administrator
-credentials, accept destinations selected by the worker, export forge
-comments, or store transcripts.
+provider grants, work-item-scoped coordination, and fixed-role Discovery
+evidence. It does not grant transparent Internet access, relay arbitrary URLs,
+expose administrator credentials, accept destinations selected by the worker,
+export forge comments, or store transcripts.
 
 Run the carrier and isolation proof with:
 

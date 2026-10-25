@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .db import ConcurrentUpdateError, ConflictError, NotFoundError, StorageError
+from .discovery import DiscoveryRuling, DiscoveryTrace
 from .domain import (
     PROVIDER_NAME_RE,
     GatewayCapability,
@@ -89,6 +90,22 @@ class GatewayControlPlane(Protocol):
 
     def submit_handoff(
         self, run_id: str, handoff: HandoffEnvelope
+    ) -> dict[str, Any]: ...
+
+    def submit_discovery_trace(
+        self,
+        run_id: str,
+        *,
+        trace: DiscoveryTrace,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def submit_discovery_ruling(
+        self,
+        run_id: str,
+        *,
+        ruling: DiscoveryRuling,
+        idempotency_key: str,
     ) -> dict[str, Any]: ...
 
     def append_work_log(
@@ -321,6 +338,10 @@ class RunGateway:
                 )
             if operation is GatewayCapability.RUN_DESCRIBE:
                 result = self._describe(value["payload"])
+            elif operation is GatewayCapability.DISCOVERY_TRACE_SUBMIT:
+                result = self._submit_discovery_trace(value["payload"])
+            elif operation is GatewayCapability.DISCOVERY_RULING_SUBMIT:
+                result = self._submit_discovery_ruling(value["payload"])
             elif operation is GatewayCapability.INTERACTION_OPEN:
                 result = self._open_interaction(value["payload"])
             elif operation is GatewayCapability.INTERACTION_READ:
@@ -434,6 +455,7 @@ class RunGateway:
             "recovery_checkpoint": execution["recovery_checkpoint"],
             "review_assignment": execution["review_assignment"],
             "changes_requested": execution["changes_requested"],
+            "discovery_assignment": execution.get("discovery_assignment"),
             "work_memory": execution["work_memory"],
             "authority": {
                 "workspace_mode": profile["workspace_mode"],
@@ -521,6 +543,46 @@ class RunGateway:
             "attempt_id": stored["attempt_id"],
             "content_sha256": stored["content_sha256"],
             "agent_action": "exit",
+        }
+
+    def _submit_discovery_trace(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"trace", "idempotency_key"})
+        trace_value = item["trace"]
+        if not isinstance(trace_value, Mapping):
+            raise _RequestFailure("invalid_request", "trace must be an object")
+        trace = DiscoveryTrace.from_mapping(trace_value)
+        stored = self.control.submit_discovery_trace(
+            self.run_id,
+            trace=trace,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "trace_id": stored["id"],
+            "content_sha256": stored.get("content_sha256", trace.digest),
+            "agent_action": "exit",
+        }
+
+    def _submit_discovery_ruling(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"ruling", "idempotency_key"})
+        ruling_value = item["ruling"]
+        if not isinstance(ruling_value, Mapping):
+            raise _RequestFailure("invalid_request", "ruling must be an object")
+        ruling = DiscoveryRuling.from_mapping(ruling_value)
+        stored = self.control.submit_discovery_ruling(
+            self.run_id,
+            ruling=ruling,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "ruling_id": stored["id"],
+            "sequence": stored.get("sequence"),
+            "disposition": ruling.disposition.value,
+            "content_sha256": stored.get("content_sha256", ruling.digest),
+            "agent_action": (
+                "submit_handoff_then_exit"
+                if ruling.disposition.value == "ASK_HUMAN"
+                else "exit"
+            ),
         }
 
     def _invoke_provider(self, payload: object) -> dict[str, Any]:

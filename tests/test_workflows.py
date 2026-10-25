@@ -339,6 +339,22 @@ class WorkflowStorageTests(unittest.TestCase):
     def downgrade_discovery_to_v32(connection: sqlite3.Connection) -> None:
         connection.executescript(
             """
+            DROP TRIGGER discovery_ruling_immutable_delete;
+            DROP TRIGGER discovery_ruling_immutable_update;
+            DROP TRIGGER discovery_trace_immutable_delete;
+            DROP TRIGGER discovery_trace_immutable_update;
+            DROP TRIGGER discovery_run_binding_immutable_delete;
+            DROP TRIGGER discovery_run_binding_immutable_update;
+            DROP TRIGGER discovery_execution_event_immutable_delete;
+            DROP TRIGGER discovery_execution_event_immutable_update;
+            DROP TRIGGER discovery_execution_immutable_delete;
+            DROP TRIGGER discovery_execution_transition;
+            DROP TRIGGER discovery_execution_identity_immutable;
+            DROP TABLE discovery_rulings;
+            DROP TABLE discovery_traces;
+            DROP TABLE discovery_run_bindings;
+            DROP TABLE discovery_execution_events;
+            DROP TABLE discovery_executions;
             DROP TRIGGER workflow_template_definition_immutable_delete;
             DELETE FROM workflow_template_definitions
             WHERE template_key = 'discovery-v1';

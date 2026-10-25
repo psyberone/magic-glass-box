@@ -1487,6 +1487,11 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 DROP TABLE workflow_configuration_role_bindings;
                 DROP TABLE workflow_configuration_versions;
                 DROP TABLE workflow_configurations;
+                DROP TABLE discovery_rulings;
+                DROP TABLE discovery_traces;
+                DROP TABLE discovery_run_bindings;
+                DROP TABLE discovery_execution_events;
+                DROP TABLE discovery_executions;
                 DROP TABLE workflow_template_definitions;
                 DROP TABLE integration_gate_maintainer_change_runs;
                 DROP TABLE integration_maintainer_reviews;

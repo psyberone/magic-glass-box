@@ -551,6 +551,26 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
 
     def test_schema_thirty_three_adds_discovery_without_rewriting_m12(self) -> None:
         with self.database.connect() as connection:
+            connection.executescript(
+                """
+                DROP TRIGGER discovery_ruling_immutable_delete;
+                DROP TRIGGER discovery_ruling_immutable_update;
+                DROP TRIGGER discovery_trace_immutable_delete;
+                DROP TRIGGER discovery_trace_immutable_update;
+                DROP TRIGGER discovery_run_binding_immutable_delete;
+                DROP TRIGGER discovery_run_binding_immutable_update;
+                DROP TRIGGER discovery_execution_event_immutable_delete;
+                DROP TRIGGER discovery_execution_event_immutable_update;
+                DROP TRIGGER discovery_execution_immutable_delete;
+                DROP TRIGGER discovery_execution_transition;
+                DROP TRIGGER discovery_execution_identity_immutable;
+                DROP TABLE discovery_rulings;
+                DROP TABLE discovery_traces;
+                DROP TABLE discovery_run_bindings;
+                DROP TABLE discovery_execution_events;
+                DROP TABLE discovery_executions;
+                """
+            )
             connection.execute(
                 "DROP TRIGGER workflow_template_definition_immutable_delete"
             )
@@ -564,7 +584,7 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 33)
+        self.assertEqual(SCHEMA_VERSION, 34)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         definitions = migrated.list_workflow_template_definitions()

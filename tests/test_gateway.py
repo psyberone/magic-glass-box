@@ -13,6 +13,7 @@ from typing import Any
 from unittest import mock
 
 from magic_glass_box.db import ConflictError, NotFoundError, StorageError
+from magic_glass_box.discovery import DiscoveryRuling, DiscoveryTrace
 from magic_glass_box.domain import (
     GatewayCapability,
     HandoffEnvelope,
@@ -192,6 +193,7 @@ class FakeGatewayControl:
         self.provider_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.handoff_calls: list[tuple[str, HandoffEnvelope]] = []
         self.work_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.discovery_calls: list[tuple[str, str, object, str]] = []
         self.provider_failure: Exception | None = None
 
     def open_interaction(self, run_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -369,6 +371,36 @@ class FakeGatewayControl:
             "result_entry_id": WORK_ENTRY_ID,
         }
 
+    def submit_discovery_trace(
+        self,
+        run_id: str,
+        *,
+        trace: DiscoveryTrace,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.discovery_calls.append(("trace", run_id, trace, idempotency_key))
+        return {
+            "id": "dtr_" + "8" * 32,
+            "run_id": run_id,
+            "trace": trace.to_dict(),
+            "content_sha256": trace.digest,
+        }
+
+    def submit_discovery_ruling(
+        self,
+        run_id: str,
+        *,
+        ruling: DiscoveryRuling,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.discovery_calls.append(("ruling", run_id, ruling, idempotency_key))
+        return {
+            "id": "drl_" + "9" * 32,
+            "run_id": run_id,
+            "ruling": ruling.to_dict(),
+            "content_sha256": ruling.digest,
+        }
+
 
 def request(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
@@ -403,6 +435,7 @@ class RunGatewayTests(unittest.TestCase):
         self.assertIsNone(result["recovery_checkpoint"])
         self.assertIsNone(result["review_assignment"])
         self.assertIsNone(result["changes_requested"])
+        self.assertIsNone(result["discovery_assignment"])
         self.assertEqual(result["work_memory"]["version"], 3)
         self.assertEqual(
             result["authority"],
@@ -434,6 +467,100 @@ class RunGatewayTests(unittest.TestCase):
         self.assertNotIn("credential_references", encoded)
         self.assertNotIn("agent.token", encoded)
         self.assertNotIn("secret-host-policy", encoded)
+
+    def test_discovery_submissions_are_typed_and_bound_to_the_gateway_run(self) -> None:
+        trace = {
+            "schema_version": 1,
+            "summary": "The request is bounded by an existing catalog.",
+            "findings": [
+                {
+                    "key": "catalog-boundary",
+                    "classification": "constraint",
+                    "summary": "The catalog owns the requested primitive.",
+                    "source_refs": [{"kind": "brief", "index": None}],
+                    "evidence": [],
+                }
+            ],
+            "recommended_checks": [],
+            "open_questions": [],
+        }
+        ruling = {
+            "schema_version": 1,
+            "disposition": "NO_GO",
+            "summary": "The request needs a narrower product decision.",
+            "trace_finding_keys": ["catalog-boundary"],
+            "interaction_id": None,
+            "work_ready_brief": None,
+        }
+
+        trace_response = self.gateway.handle(
+            request(
+                "discovery.trace.submit",
+                {"trace": trace, "idempotency_key": "discovery-trace-1"},
+            )
+        )
+        ruling_response = self.gateway.handle(
+            request(
+                "discovery.ruling.submit",
+                {"ruling": ruling, "idempotency_key": "discovery-ruling-1"},
+            )
+        )
+
+        self.assertTrue(trace_response["ok"])
+        self.assertTrue(ruling_response["ok"])
+        self.assertEqual(trace_response["result"]["agent_action"], "exit")
+        self.assertEqual(ruling_response["result"]["disposition"], "NO_GO")
+        self.assertEqual(ruling_response["result"]["agent_action"], "exit")
+        self.assertEqual(
+            [(call[0], call[1], call[3]) for call in self.control.discovery_calls],
+            [
+                ("trace", RUN_ID, "discovery-trace-1"),
+                ("ruling", RUN_ID, "discovery-ruling-1"),
+            ],
+        )
+        self.assertIsInstance(self.control.discovery_calls[0][2], DiscoveryTrace)
+        self.assertIsInstance(self.control.discovery_calls[1][2], DiscoveryRuling)
+
+        for operation, payload in (
+            (
+                "discovery.trace.submit",
+                {"trace": trace, "idempotency_key": "short", "extra": True},
+            ),
+            (
+                "discovery.ruling.submit",
+                {
+                    "ruling": {**ruling, "disposition": "MAYBE"},
+                    "idempotency_key": "invalid-ruling-1",
+                },
+            ),
+        ):
+            with self.subTest(operation=operation):
+                response = self.gateway.handle(request(operation, payload))
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertEqual(len(self.control.discovery_calls), 2)
+
+    def test_discovery_question_ruling_directs_a_durable_handoff(self) -> None:
+        response = self.gateway.handle(
+            request(
+                "discovery.ruling.submit",
+                {
+                    "ruling": {
+                        "schema_version": 1,
+                        "disposition": "ASK_HUMAN",
+                        "summary": "The owner must choose the supported boundary.",
+                        "trace_finding_keys": ["catalog-boundary"],
+                        "interaction_id": INTERACTION_ID,
+                        "work_ready_brief": None,
+                    },
+                    "idempotency_key": "discovery-question-1",
+                },
+            )
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["disposition"], "ASK_HUMAN")
+        self.assertEqual(response["result"]["agent_action"], "submit_handoff_then_exit")
 
     def test_work_memory_operations_are_typed_and_bound_to_the_run(self) -> None:
         entry = {

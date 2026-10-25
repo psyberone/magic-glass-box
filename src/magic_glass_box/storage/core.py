@@ -550,6 +550,20 @@ class DatabaseCore:
                     "workflow_completions",
                     "SELECT COUNT(*) FROM workflow_completions",
                 ),
+                (
+                    "discovery_executions",
+                    "SELECT COUNT(*) FROM discovery_executions",
+                ),
+                (
+                    "discovery_execution_events",
+                    "SELECT COUNT(*) FROM discovery_execution_events",
+                ),
+                (
+                    "discovery_run_bindings",
+                    "SELECT COUNT(*) FROM discovery_run_bindings",
+                ),
+                ("discovery_traces", "SELECT COUNT(*) FROM discovery_traces"),
+                ("discovery_rulings", "SELECT COUNT(*) FROM discovery_rulings"),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]

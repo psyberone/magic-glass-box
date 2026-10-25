@@ -53,7 +53,11 @@ class QueryStorage:
                 "gcr.review_entry_id AS change_review_entry_id, "
                 "gmcr.policy_id AS maintainer_change_policy_id, "
                 "gmcr.candidate_id AS maintainer_change_candidate_id, "
-                "gmcr.maintainer_review_id AS change_maintainer_review_id "
+                "gmcr.maintainer_review_id AS change_maintainer_review_id, "
+                "drb.execution_id AS discovery_execution_id, "
+                "drb.role AS discovery_role, "
+                "discovery.stage AS discovery_stage, "
+                "decision_owner.handle AS discovery_decision_owner_handle "
                 "FROM runs r JOIN projects p ON p.id = r.project_id "
                 "JOIN project_context_versions c ON c.id = r.context_version_id "
                 "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
@@ -67,6 +71,12 @@ class QueryStorage:
                 "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
                 "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
                 "ON gmcr.run_id = r.id "
+                "LEFT JOIN discovery_run_bindings drb ON drb.run_id = r.id "
+                "LEFT JOIN discovery_executions discovery "
+                "ON discovery.id = drb.execution_id "
+                "LEFT JOIN krab_identities decision_owner "
+                "ON decision_owner.id = "
+                "discovery.decision_owner_krab_identity_id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
@@ -100,6 +110,18 @@ class QueryStorage:
                 ")",
                 (run_id,),
             ).fetchone()
+            discovery_trace_row = None
+            discovery_ruling_rows: list[sqlite3.Row] = []
+            if row is not None and row["discovery_execution_id"] is not None:
+                discovery_trace_row = connection.execute(
+                    "SELECT * FROM discovery_traces WHERE execution_id = ?",
+                    (row["discovery_execution_id"],),
+                ).fetchone()
+                discovery_ruling_rows = connection.execute(
+                    "SELECT * FROM discovery_rulings WHERE execution_id = ? "
+                    "ORDER BY sequence",
+                    (row["discovery_execution_id"],),
+                ).fetchall()
         if row is None:
             raise NotFoundError(f"run not found: {run_id}")
         result = dict(row)
@@ -153,6 +175,27 @@ class QueryStorage:
             if checkpoint_row is None
             else self._recovery_checkpoint_record(checkpoint_row)
         )
+        discovery_execution_id = result.pop("discovery_execution_id")
+        discovery_role = result.pop("discovery_role")
+        discovery_stage = result.pop("discovery_stage")
+        discovery_decision_owner_handle = result.pop("discovery_decision_owner_handle")
+        if discovery_execution_id is None:
+            result["discovery_assignment"] = None
+        else:
+            trace = None
+            if discovery_trace_row is not None:
+                trace = self._discovery_trace_record(discovery_trace_row)
+            rulings = [
+                self._discovery_ruling_record(item) for item in discovery_ruling_rows
+            ]
+            result["discovery_assignment"] = {
+                "execution_id": discovery_execution_id,
+                "role": discovery_role,
+                "stage": discovery_stage,
+                "decision_owner_handle": discovery_decision_owner_handle,
+                "trace": trace,
+                "rulings": rulings,
+            }
         result["work_memory"] = self._get_work_memory_for_run(
             connection,
             run_id,
@@ -252,6 +295,8 @@ class QueryStorage:
                 "wrb.execution_id AS workflow_execution_id, "
                 "wrb.correction_round AS workflow_round, "
                 "wrb.role AS workflow_role, "
+                "drb.execution_id AS discovery_execution_id, "
+                "drb.role AS discovery_role, "
                 "c.id AS context_version_id, c.version AS context_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
                 "av.version AS profile_version, u.handle AS requested_by, "
@@ -271,6 +316,7 @@ class QueryStorage:
                 "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
                 "ON gmcr.run_id = r.id "
                 "LEFT JOIN workflow_run_bindings wrb ON wrb.run_id = r.id "
+                "LEFT JOIN discovery_run_bindings drb ON drb.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()

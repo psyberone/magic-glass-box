@@ -5,6 +5,7 @@ from .storage.attempts import AttemptStorage
 from .storage.candidates import CandidateStorage
 from .storage.catalog import CatalogStorage
 from .storage.core import DatabaseCore, default_db_path
+from .storage.discovery import DiscoveryStorage
 from .storage.errors import (
     BudgetExceededError,
     ConcurrentUpdateError,
@@ -28,6 +29,7 @@ from .storage.schema import (
     CANDIDATE_SCHEMA,
     CAPABILITY_BINDING_SCHEMA,
     DATABASE_FILENAME,
+    DISCOVERY_EXECUTION_SCHEMA,
     DISCOVERY_PRESCRIPTION_SCHEMA,
     EXECUTION_INTEGRITY_SCHEMA,
     GATE_CHANGE_SCHEMA,
@@ -83,6 +85,7 @@ __all__ = [
     "ConcurrentUpdateError",
     "ConflictError",
     "DATABASE_FILENAME",
+    "DISCOVERY_EXECUTION_SCHEMA",
     "DISCOVERY_PRESCRIPTION_SCHEMA",
     "Database",
     "EXECUTION_INTEGRITY_SCHEMA",
@@ -133,6 +136,7 @@ __all__ = [
 
 
 class Database(
+    DiscoveryStorage,
     WorkflowStorage,
     SupervisionStorage,
     ServiceSidecarStorage,

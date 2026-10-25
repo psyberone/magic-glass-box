@@ -32,7 +32,7 @@ from .db import (
     Database,
     NotFoundError,
 )
-from .discovery import DiscoveryConfigurationSpec
+from .discovery import DiscoveryConfigurationSpec, DiscoveryRuling, DiscoveryTrace
 from .domain import (
     AgentProfileSpec,
     HandoffEnvelope,
@@ -1993,6 +1993,70 @@ class ControlPlane:
     ) -> list[dict[str, Any]]:
         return self.database.list_workflow_configurations(project_key=project_key)
 
+    def start_discovery_execution(
+        self,
+        *,
+        project_key: str,
+        configuration_name: str,
+        work_item_id: str,
+        source_revision: str,
+        expected_configuration_version: int,
+        expected_context_version_id: str,
+        expected_work_item_version_id: str,
+        expected_thread_generation: int,
+        expected_thread_version: int,
+        krab_session_id: str,
+        krab_claim_id: str | None,
+        idempotency_key: str,
+        requested_by_handle: str,
+    ) -> dict[str, Any]:
+        requester = self.database.get_user(requested_by_handle)
+        return self.database.start_discovery_execution(
+            project_key=project_key,
+            configuration_name=configuration_name,
+            work_item_id=work_item_id,
+            source_revision=source_revision,
+            expected_configuration_version=expected_configuration_version,
+            expected_context_version_id=expected_context_version_id,
+            expected_work_item_version_id=expected_work_item_version_id,
+            expected_thread_generation=expected_thread_generation,
+            expected_thread_version=expected_thread_version,
+            krab_session_id=krab_session_id,
+            krab_claim_id=krab_claim_id,
+            idempotency_key=idempotency_key,
+            requested_by=requester["id"],
+        )
+
+    def get_discovery_execution(self, execution_id: str) -> dict[str, Any]:
+        return self.database.get_discovery_execution(execution_id)
+
+    def list_discovery_executions(
+        self,
+        *,
+        project_key: str | None = None,
+        state: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.database.list_discovery_executions(
+            project_key=project_key, state=state, limit=limit
+        )
+
+    def cancel_discovery_execution(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        cancelled_by_handle: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(cancelled_by_handle)
+        return self.database.cancel_discovery_execution(
+            execution_id,
+            expected_version=expected_version,
+            cancelled_by=operator["id"],
+            reason=reason,
+        )
+
     def start_workflow_execution(
         self,
         *,
@@ -2274,6 +2338,28 @@ class ControlPlane:
         """Persist bounded replacement state for the run's active attempt."""
 
         return self.database.create_attempt_handoff(run_id, handoff)
+
+    def submit_discovery_trace(
+        self,
+        run_id: str,
+        *,
+        trace: DiscoveryTrace,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.submit_discovery_trace(
+            run_id, trace=trace, idempotency_key=idempotency_key
+        )
+
+    def submit_discovery_ruling(
+        self,
+        run_id: str,
+        *,
+        ruling: DiscoveryRuling,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.submit_discovery_ruling(
+            run_id, ruling=ruling, idempotency_key=idempotency_key
+        )
 
     def read_work_memory(
         self,

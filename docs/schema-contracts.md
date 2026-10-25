@@ -159,6 +159,17 @@ enforces UTF-8 limits, safe relative evidence paths, unique semantic keys, and
 source-reference relationships. A `GO` ruling is the only disposition that may
 carry a work-ready brief, and that brief contains at most five MUST items.
 
+Control-plane schema v34 adds relational Discovery execution, run-binding,
+trace, ruling, and event records; it does not add another portable document
+contract. An execution pins the exact v33 inputs, Krab routing, and one human
+decision-owner identity before either role runs. Trace and ruling rows retain
+their producing run and active attempt, canonical digest, and idempotency key.
+The gateway accepts them only from the configured role at its fixed stage and
+source. `ASK_HUMAN` rulings bind an open decision-owner interaction, while a
+final `GO` or `NO_GO` after a question must reference the latest answered
+interaction. These are control-plane authority relationships beyond the
+portable JSON schemas.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,
