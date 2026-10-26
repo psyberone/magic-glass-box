@@ -878,6 +878,15 @@ def _drive_until(
     raise RuntimeError("M13 proof timed out before its durable stop")
 
 
+def _workflow_requires_stop(database: Database, execution_id: str) -> bool:
+    current = database.get_workflow_execution(execution_id)
+    return (
+        current["state"] != "active"
+        or current["stage"] == "maintainer"
+        or any(ruling["state"] == "open" for ruling in current["rulings"])
+    )
+
+
 def _start_workflow_if_ready(
     control: ControlPlane, discovery: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -1426,18 +1435,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             workflow = _start_workflow_if_ready(control, discovery)
 
-            def workflow_stop() -> bool:
-                current = database.get_workflow_execution(workflow["id"])
-                return current["state"] != "active" or current["stage"] == "maintainer"
-
             if workflow["state"] == "active" and workflow["stage"] != "maintainer":
                 _drive_until(
                     supervisor,
-                    predicate=workflow_stop,
+                    predicate=lambda: _workflow_requires_stop(database, workflow["id"]),
                     timeout=args.proof_timeout,
                     before_tick=connector_waves.before_tick,
                 )
             workflow = database.get_workflow_execution(workflow["id"])
+            open_rulings = [
+                ruling for ruling in workflow["rulings"] if ruling["state"] == "open"
+            ]
+            if open_rulings:
+                raise RuntimeError(
+                    "scoped implementation requires operator ruling: "
+                    + open_rulings[-1]["kind"]
+                )
             if workflow["state"] != "active" or workflow["stage"] != "maintainer":
                 raise RuntimeError(
                     "scoped implementation did not reach maintainer gate"

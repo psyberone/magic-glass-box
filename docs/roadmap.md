@@ -1536,6 +1536,33 @@ remained clean and no Krab or ChatGPT credential entered a worker. The second
 process invocation, replacement-coordinator completion, scoped implementation,
 exact-head review, and advisory run remain before M13D completes.
 
+## Milestone 13.5: self-describing worker gateway contracts
+
+**Status: planned hardening; follows M13D and precedes the first M14 provider**
+
+The first M13 live run proved that naming an authorized operation is not enough
+for a disposable headless worker: it also needs the exact bounded wire contract.
+The immediate bootstrap correction is deliberately narrow. The durable fix is
+to make the run-scoped gateway itself the source of truth:
+
+- expose a versioned, machine-readable catalog for only the operations granted
+  to that run, including exact request and response shapes, field bounds, and
+  required follow-up actions;
+- derive the catalog from the same validators or published schemas used at the
+  enforcement boundary so documentation cannot silently drift from runtime;
+- let `run.describe` advertise the catalog version and provide a bounded
+  discovery operation, while keeping credential values, private bodies, and
+  unauthorized operations absent;
+- keep prompts focused on role, authority, and product judgment instead of
+  duplicating wire-level payload schemas; and
+- fail closed on unknown catalog versions or oversized descriptions, with
+  RED-first happy/sad tests and focused mutation coverage.
+
+**Exit proof:** a headless worker starts with behavioral guidance but no
+operation-specific payload example, discovers an authorized interaction and
+handoff contract from the gateway, completes the durable wait/resume path, and
+cannot discover or invoke an ungranted operation.
+
 
 ## Milestone 14: heterogeneous work provider
 

@@ -108,6 +108,30 @@ class FileGatewayClientTests(unittest.TestCase):
             finally:
                 manager.close()
 
+    def test_published_hyphenated_operation_reaches_the_gateway_mailbox(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            client = FileGatewayClient(mailbox, timeout=0.1)
+
+            with mock.patch.object(
+                client,
+                "_wait_response",
+                return_value={"ok": True},
+            ):
+                response = client.exchange("workflow.scope-review.submit", {})
+
+            self.assertEqual(response, {"ok": True})
+            committed = json.loads((mailbox / "request.json").read_bytes())
+            self.assertEqual(committed["operation"], "workflow.scope-review.submit")
+
     def test_missing_or_unsafe_mailbox_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
             missing = Path(temporary) / "missing"

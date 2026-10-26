@@ -22,6 +22,7 @@ from scripts.check_live_m13 import (
     _prepare_control_plane,
     _profile,
     _work_item,
+    _workflow_requires_stop,
     _workflow_spec,
     parse_args,
 )
@@ -190,6 +191,28 @@ class LiveM13ContractTests(unittest.TestCase):
             path.write_bytes(b"{" + b" " * 4096)
             with self.assertRaisesRegex(RuntimeError, "too large"):
                 _load_scope_answer(path)
+
+    def test_workflow_wait_stops_immediately_for_an_operator_ruling(self) -> None:
+        class Ledger:
+            execution: dict[str, object]
+
+            def get_workflow_execution(self, _execution_id: str) -> dict[str, object]:
+                return self.execution
+
+        ledger = Ledger()
+        ledger.execution = {
+            "state": "active",
+            "stage": "review",
+            "rulings": [{"state": "open", "kind": "review_verdict_missing"}],
+        }
+        self.assertTrue(_workflow_requires_stop(ledger, "wfx_1"))
+
+        ledger.execution = {
+            "state": "active",
+            "stage": "review",
+            "rulings": [],
+        }
+        self.assertFalse(_workflow_requires_stop(ledger, "wfx_1"))
 
     def test_cli_requires_explicit_paths_and_caps_the_budget(self) -> None:
         arguments = [

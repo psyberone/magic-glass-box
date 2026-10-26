@@ -40,7 +40,7 @@ TRANSPORT_PORT = 8766
 MAX_VENDOR_REQUEST_BYTES = 2 * 1024 * 1024
 PROVIDER_GATEWAY_TIMEOUT_SECONDS = 30.0
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-OPERATION_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+OPERATION_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _DEFAULT_GATEWAY_TIMEOUT = object()
 
 
