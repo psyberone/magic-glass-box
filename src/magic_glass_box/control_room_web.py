@@ -506,7 +506,8 @@ def _render_control_room(
             row.get("id"),
             row.get("run_id")
             or row.get("workflow_execution_id")
-            or row.get("discovery_execution_id"),
+            or row.get("discovery_execution_id")
+            or row.get("advisory_execution_id"),
             row.get("kind"),
             row.get("state"),
             f"{row.get('attempt_count')} / {row.get('max_attempts')}",
@@ -580,6 +581,64 @@ def _render_control_room(
                 krab_route,
                 row.get("trace_id"),
                 latest_ruling,
+            )
+        )
+    advisory_rows = []
+    for row in snapshot.get("advisory_executions", []):
+        if not isinstance(row, Mapping):
+            continue
+        reviewers = " · ".join(
+            f"{row.get(f'reviewer_{number}_profile_name')}@"
+            f"{row.get(f'reviewer_{number}_profile_version')}"
+            for number in ("one", "two", "three")
+        )
+        coordinator = (
+            f"{row.get('coordinator_profile_name')}@"
+            f"{row.get('coordinator_profile_version')}"
+        )
+        if row.get("coordinator_run_id") is not None:
+            coordinator += " · " + " · ".join(
+                str(value)
+                for value in (
+                    row.get("coordinator_run_id"),
+                    row.get("coordinator_run_state"),
+                )
+                if value is not None
+            )
+        candidate = " · ".join(
+            str(value)
+            for value in (row.get("candidate_id"), row.get("candidate_head_revision"))
+            if value is not None
+        )
+        report = (
+            " · ".join(
+                str(value)
+                for value in (
+                    row.get("report_attention"),
+                    row.get("report_authority"),
+                    row.get("report_id"),
+                )
+                if value is not None
+            )
+            or None
+        )
+        advisory_rows.append(
+            (
+                row.get("id"),
+                row.get("project_key"),
+                row.get("state"),
+                row.get("stage"),
+                f"{row.get('configuration_name')}@{row.get('configuration_version')}",
+                candidate,
+                reviewers,
+                coordinator,
+                f"{row.get('blind_succeeded_count')} / "
+                f"{row.get('blind_run_count')} runs · "
+                f"{row.get('blind_review_count')} artifacts",
+                f"{row.get('challenge_succeeded_count')} / "
+                f"{row.get('challenge_run_count')} runs · "
+                f"{row.get('challenge_review_count')} artifacts",
+                report,
             )
         )
     escalation_rows = [
@@ -951,6 +1010,25 @@ def _render_control_room(
                     "Latest ruling",
                 ),
                 discovery_rows,
+            ),
+        ),
+        _section(
+            "Advisory reviews (no gate authority)",
+            _table(
+                (
+                    "ID",
+                    "Project",
+                    "State",
+                    "Stage",
+                    "Configuration",
+                    "Candidate",
+                    "Reviewers",
+                    "Coordinator",
+                    "Blind progress",
+                    "Challenge progress",
+                    "Report",
+                ),
+                advisory_rows,
             ),
         ),
         _section(

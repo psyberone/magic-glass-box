@@ -727,6 +727,7 @@ class ControlRoomWebTests(unittest.TestCase):
                 ("h2", "Supervisor actions"),
                 ("h2", "Workflows"),
                 ("h2", "Discovery"),
+                ("h2", "Advisory reviews (no gate authority)"),
                 ("h2", "Escalations"),
                 ("h2", "Runs"),
                 ("h2", "Attempts"),
@@ -785,8 +786,8 @@ class ControlRoomWebTests(unittest.TestCase):
                 "main": 1,
                 "header": 1,
                 "h1": 1,
-                "h2": 24,
-                "section": 24,
+                "h2": 25,
+                "section": 25,
                 "table": 23,
                 "tr": 50,
                 "th": 170,
@@ -1834,6 +1835,84 @@ class ControlRoomWebTests(unittest.TestCase):
                 )
                 self.assertEqual(status, expected_status)
                 self.assertNotIn(str(error), body)
+
+    def test_renderer_labels_advisory_progress_without_gate_authority(self) -> None:
+        snapshot = snapshot_fixture()
+        snapshot["advisory_executions"] = [
+            {
+                "id": "arx_one",
+                "project_key": "box-project",
+                "state": "active",
+                "stage": "challenge",
+                "configuration_name": "default-advisory",
+                "configuration_version": 2,
+                "candidate_id": "cnd_one",
+                "candidate_head_revision": "b" * 40,
+                "reviewer_one_profile_name": "Reviewer One",
+                "reviewer_one_profile_version": 1,
+                "reviewer_two_profile_name": "Reviewer Two",
+                "reviewer_two_profile_version": 2,
+                "reviewer_three_profile_name": "Reviewer Three",
+                "reviewer_three_profile_version": 3,
+                "coordinator_profile_name": "Advisory Coordinator",
+                "coordinator_profile_version": 4,
+                "blind_run_count": 3,
+                "blind_succeeded_count": 3,
+                "blind_review_count": 3,
+                "challenge_run_count": 3,
+                "challenge_succeeded_count": 1,
+                "challenge_review_count": 1,
+                "coordinator_run_id": None,
+                "coordinator_run_state": None,
+                "report_id": None,
+                "report_authority": None,
+                "report_attention": None,
+            }
+        ]
+
+        body, _nonce = _render_control_room(
+            snapshot,
+            root="/private/",
+            csrf_token=CSRF_TOKEN,
+            receipt=None,
+        )
+        parser = ControlRoomHTMLParser()
+        parser.feed(body.decode("utf-8"))
+        parser.close()
+
+        self.assertEqual(
+            parser.tables["Advisory reviews (no gate authority)"],
+            [
+                [
+                    "ID",
+                    "Project",
+                    "State",
+                    "Stage",
+                    "Configuration",
+                    "Candidate",
+                    "Reviewers",
+                    "Coordinator",
+                    "Blind progress",
+                    "Challenge progress",
+                    "Report",
+                ],
+                [
+                    "arx_one",
+                    "box-project",
+                    "active",
+                    "challenge",
+                    "default-advisory@2",
+                    "cnd_one · " + "b" * 40,
+                    "Reviewer One@1 · Reviewer Two@2 · Reviewer Three@3",
+                    "Advisory Coordinator@4",
+                    "3 / 3 runs · 3 artifacts",
+                    "1 / 3 runs · 1 artifacts",
+                    "—",
+                ],
+            ],
+        )
+        rendered = body.decode("utf-8")
+        self.assertNotIn("gate passed", rendered.lower())
 
     def test_renderer_surfaces_budget_usage_reservations_and_remaining(self) -> None:
         snapshot = snapshot_fixture()

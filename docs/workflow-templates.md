@@ -1,7 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C, M13A, and M13B complete; M13C contract, execution-ledger,
-worker-gateway, and durable-director checkpoints complete**
+**Status: M12A-M12C and M13A-M13C complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -96,7 +95,8 @@ one triangulation run, and completion. Failed runs and successful runs missing
 their required artifacts fail explicitly; active runs defer without spending
 retry budget; stale actions settle harmlessly. This makes the seven-run
 sequence autonomous and restart-safe. Its dedicated operator CLI and
-control-room projection remain the final M13C surface checkpoint.
+control-room projection complete the M13C surface without granting gate,
+approval, landing, or maintainer authority.
 
 The dedicated `discovery` CLI keeps this prescription distinct from the
 implementation workflow while reusing the generic immutable ledger. It can
@@ -109,6 +109,16 @@ counts, bounded active/history projection, failed-execution attention, durable
 supervisor-action visibility, and a separate browser table. It exposes typed
 evidence identity and provenance without exposing evidence bodies, prompts,
 profile commands, credentials, requests, work-ready briefs, or failure text.
+
+The dedicated `advisory` CLI applies the same bounded shape to advisory review.
+It can create and revise four-role configurations, read only advisory
+configurations from the shared ledger, and start, show, list, or cancel an
+execution pinned to one exact candidate and work-thread generation. The
+control room projects exact-candidate and role identity, seven-run phase
+progress, final-report provenance, and advisory attention while excluding all
+finding, challenge, and report prose. Both the command surface and browser
+label the result as advisory-only; neither can satisfy a candidate gate or
+authorize landing.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
@@ -291,9 +301,9 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 - release-management or multi-repository workflows in the first pass.
 
 The advisory contract, configuration, execution ledger, structural blindness,
-worker gateway, and bounded director are now fixed; its dedicated operator
-surface is the next M13 checkpoint. Heterogeneous work providers and
-controlled remote execution remain later milestones. The completed
+worker gateway, bounded director, and non-gating operator surface are now
+fixed. Heterogeneous work providers and controlled remote execution remain
+later milestones. The completed
 `implementation-v1` proof, schema-v32 named-role ledger, schema-v34 Discovery
 evidence ledger, schema-v35 bounded director, and bounded Discovery operator
 surface establish the immutable prescription seam they reuse.

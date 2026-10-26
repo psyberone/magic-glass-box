@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from magic_glass_box.advisory import (
+    AdvisoryBlindReview,
+    AdvisoryChallengeReview,
+    AdvisoryConfigurationSpec,
+    AdvisoryReport,
+)
+from magic_glass_box.advisory_director import AdvisoryDirector
 from magic_glass_box.candidates import CandidateManifest
 from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.credentials import CredentialError
@@ -305,6 +312,140 @@ class ControlRoomTests(unittest.TestCase):
         )
         return configuration, execution
 
+    def create_advisory_execution(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        producer_run, attempt = self.start_run()
+        result = self.database.record_attempt_result(
+            attempt["id"], ResultManifest(1, attempt["id"], "a" * 40, ())
+        )
+        self.database.complete_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-primary",
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id="sha256:" + "c" * 64,
+        )
+        source = self.database.get_candidate_source(attempt["id"])
+        candidate = self.database.create_candidate(
+            CandidateManifest(
+                schema_version=1,
+                attempt_id=attempt["id"],
+                attempt_result_id=result["id"],
+                producer_run_id=producer_run["id"],
+                project_id=source["project_id"],
+                context_version_id=source["context_version_id"],
+                work_thread_id=source["work_thread_id"],
+                base_revision="a" * 40,
+                result_content_sha256=result["content_sha256"],
+                head_revision="b" * 40,
+                tree_revision="c" * 40,
+                object_format="sha1",
+            ),
+            created_by=self.user["id"],
+        )
+        roles = (
+            ("Advisory Reviewer One", "3", "advisory_reviewer_one", False),
+            ("Advisory Reviewer Two", "4", "advisory_reviewer_two", False),
+            ("Advisory Reviewer Three", "5", "advisory_reviewer_three", False),
+            ("Advisory Coordinator", "6", "advisory_coordinator", True),
+        )
+        for name, fill, handle, coordinator in roles:
+            identity = self.database.store_krab_identity(
+                self.instance["id"],
+                KrabIdentity("usr_" + fill * 32, handle, 1),
+                f"file:/private/{handle}-secret",
+            )
+            self.database.create_agent_profile(
+                name=name,
+                spec=AgentProfileSpec.create(
+                    image="advisory@sha256:abc",
+                    command=["review", f"private-{handle}-argument"],
+                    workspace_mode="read_only",
+                    network_mode="gateway_only",
+                    gateway_capabilities=(
+                        [
+                            GatewayCapability.RUN_DESCRIBE,
+                            GatewayCapability.ADVISORY_REPORT_SUBMIT,
+                        ]
+                        if coordinator
+                        else [
+                            GatewayCapability.RUN_DESCRIBE,
+                            GatewayCapability.ADVISORY_BLIND_SUBMIT,
+                            GatewayCapability.ADVISORY_CHALLENGE_SUBMIT,
+                        ]
+                    ),
+                ),
+                krab_identity_id=identity["id"],
+                created_by=self.user["id"],
+            )
+        configuration = self.database.create_advisory_configuration(
+            project_key="box-project",
+            name="default-advisory",
+            spec=AdvisoryConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "max_findings_per_reviewer": 4,
+                    "max_challenges_per_reviewer": 3,
+                    "max_report_items": 8,
+                }
+            ),
+            reviewer_one_profile_name="Advisory Reviewer One",
+            reviewer_two_profile_name="Advisory Reviewer Two",
+            reviewer_three_profile_name="Advisory Reviewer Three",
+            coordinator_profile_name="Advisory Coordinator",
+            created_by=self.user["id"],
+        )
+        execution = self.database.start_advisory_execution(
+            project_key="box-project",
+            configuration_name="default-advisory",
+            candidate_id=candidate["id"],
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=self.item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            idempotency_key="control-room-advisory",
+            requested_by=self.user["id"],
+        )
+        return configuration, candidate, execution
+
+    def complete_advisory_run(
+        self,
+        run: dict[str, Any],
+        submit: Any,
+    ) -> None:
+        sequence = getattr(self, "advisory_attempt_sequence", 0) + 1
+        self.advisory_attempt_sequence = sequence
+        preparing = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="docker",
+            owner_id="control-room-advisory",
+            expected_run_version=run["version"],
+        )
+        attempt = self.database.start_run_attempt(
+            preparing["id"],
+            owner_id="control-room-advisory",
+            expected_attempt_version=preparing["version"],
+            expected_run_version=preparing["run_version"],
+            source_revision=run["source_revision"],
+            container_id=f"{sequence:x}" * 64,
+            container_name=f"control-room-advisory-{sequence}",
+            image_id="sha256:" + "d" * 64,
+        )
+        submit(run["id"])
+        self.database.record_attempt_result(
+            attempt["id"],
+            ResultManifest(1, attempt["id"], run["source_revision"], ()),
+        )
+        self.database.complete_run_attempt(
+            attempt["id"],
+            owner_id="control-room-advisory",
+            expected_attempt_version=attempt["version"],
+            exit_code=0,
+            image_id="sha256:" + "d" * 64,
+        )
+
     def test_snapshot_redacts_private_fields_present_in_the_fixture(self) -> None:
         run, attempt = self.start_run()
         assignment = self.database.create_work_assignment(
@@ -421,6 +562,7 @@ class ControlRoomTests(unittest.TestCase):
                 "runs",
                 "workflows",
                 "discovery_executions",
+                "advisory_executions",
                 "attempts",
                 "interactions",
                 "retained_results",
@@ -459,6 +601,7 @@ class ControlRoomTests(unittest.TestCase):
                 "runs",
                 "workflows",
                 "discovery_executions",
+                "advisory_executions",
                 "attempts",
                 "interactions",
                 "assignments",
@@ -1898,6 +2041,7 @@ class ControlRoomTests(unittest.TestCase):
             "escalations",
             "workflows",
             "discovery_executions",
+            "advisory_executions",
         ):
             self.assertEqual(snapshot[collection], [])
 
@@ -2116,6 +2260,352 @@ class ControlRoomTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["summary"]["discovery_executions"]["cancelled"], 1)
         self.assertNotIn("PRIVATE DISCOVERY CANCELLATION DETAIL", json.dumps(snapshot))
+
+    def test_snapshot_projects_advisory_metadata_without_review_bodies(self) -> None:
+        configuration, candidate, execution = self.create_advisory_execution()
+        action = self.database.enqueue_supervisor_actions()[0]
+
+        snapshot = ControlRoom(Database(self.database.path)).snapshot()
+
+        self.assertEqual(
+            snapshot["summary"]["advisory_executions"],
+            {
+                "total": 1,
+                "active": 1,
+                "cancelled": 0,
+                "completed": 0,
+                "failed": 0,
+            },
+        )
+        self.assertEqual(len(snapshot["advisory_executions"]), 1)
+        projected = snapshot["advisory_executions"][0]
+        self.assertEqual(
+            set(projected),
+            {
+                "id",
+                "project_key",
+                "template_key",
+                "template_version",
+                "template_revision",
+                "configuration_name",
+                "configuration_version",
+                "configuration_version_id",
+                "work_item_id",
+                "work_item_version_id",
+                "work_thread_id",
+                "work_thread_generation",
+                "context_version_id",
+                "candidate_id",
+                "candidate_head_revision",
+                "state",
+                "stage",
+                "version",
+                "reviewer_one_profile_name",
+                "reviewer_one_profile_version",
+                "reviewer_two_profile_name",
+                "reviewer_two_profile_version",
+                "reviewer_three_profile_name",
+                "reviewer_three_profile_version",
+                "coordinator_profile_name",
+                "coordinator_profile_version",
+                "requested_by",
+                "action_id",
+                "action_state",
+                "action_attempt_count",
+                "action_max_attempts",
+                "action_last_error_code",
+                "blind_run_count",
+                "blind_succeeded_count",
+                "blind_review_count",
+                "challenge_run_count",
+                "challenge_succeeded_count",
+                "challenge_review_count",
+                "coordinator_run_id",
+                "coordinator_run_state",
+                "report_id",
+                "report_run_id",
+                "report_attempt_id",
+                "report_authority",
+                "report_attention",
+                "report_sha256",
+                "created_at",
+                "updated_at",
+                "finished_at",
+            },
+        )
+        self.assertEqual(projected["id"], execution["id"])
+        self.assertEqual(projected["candidate_id"], candidate["id"])
+        self.assertEqual(projected["candidate_head_revision"], "b" * 40)
+        self.assertEqual(
+            projected["configuration_version_id"],
+            configuration["workflow_configuration_version_id"],
+        )
+        self.assertEqual(
+            (projected["action_id"], projected["action_state"]),
+            (action["id"], "pending"),
+        )
+        self.assertEqual(
+            (
+                projected["blind_run_count"],
+                projected["blind_succeeded_count"],
+                projected["blind_review_count"],
+                projected["challenge_run_count"],
+                projected["challenge_succeeded_count"],
+                projected["challenge_review_count"],
+            ),
+            (0, 0, 0, 0, 0, 0),
+        )
+        self.assertEqual(
+            snapshot["supervisor_actions"][0]["advisory_execution_id"],
+            execution["id"],
+        )
+        for field in (
+            "coordinator_run_id",
+            "report_id",
+            "report_authority",
+            "report_attention",
+        ):
+            self.assertIsNone(projected[field])
+        encoded = json.dumps(projected, sort_keys=True)
+        for private in (
+            "advisory_reviewer_one-secret",
+            "private-advisory_reviewer_one-argument",
+            "max_findings_per_reviewer",
+            "max_challenges_per_reviewer",
+            "max_report_items",
+            "request_json",
+            "review_json",
+            "report_json",
+            "cancel_reason",
+            "failure_reason",
+        ):
+            self.assertNotIn(private, encoded)
+
+    def test_snapshot_surfaces_failed_advisory_without_failure_text(self) -> None:
+        _configuration, _candidate, execution = self.create_advisory_execution()
+        failed = self.database.fail_advisory_execution(
+            execution["id"],
+            expected_version=execution["version"],
+            reason="PRIVATE ADVISORY FAILURE DETAIL",
+        )
+
+        snapshot = ControlRoom(Database(self.database.path)).snapshot(history_limit=1)
+
+        self.assertEqual(snapshot["advisory_executions"][0]["state"], "failed")
+        self.assertEqual(snapshot["summary"]["advisory_executions"]["failed"], 1)
+        attention = [
+            item for item in snapshot["attention"] if item["kind"] == "advisory.failed"
+        ]
+        self.assertEqual(
+            attention,
+            [
+                {
+                    "kind": "advisory.failed",
+                    "severity": "warning",
+                    "subject_type": "advisory_execution",
+                    "subject_id": failed["id"],
+                    "advisory_execution_id": failed["id"],
+                    "stage": "blind_review",
+                    "version": failed["version"],
+                    "age_seconds": 0,
+                }
+            ],
+        )
+        self.assertNotIn("PRIVATE ADVISORY FAILURE DETAIL", json.dumps(snapshot))
+
+        aggregate_only = ControlRoom(Database(self.database.path)).snapshot(
+            history_limit=0
+        )
+        self.assertEqual(aggregate_only["advisory_executions"], [])
+        self.assertEqual(aggregate_only["summary"]["advisory_executions"]["failed"], 1)
+
+    def test_snapshot_surfaces_advisory_report_attention_without_report_body(
+        self,
+    ) -> None:
+        _configuration, _candidate, execution = self.create_advisory_execution()
+        director = AdvisoryDirector(ControlPlane(self.database))
+        reviewer_roles = ("reviewer_one", "reviewer_two", "reviewer_three")
+
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        bound = self.database.get_advisory_execution(execution["id"])
+        for role in reviewer_roles:
+            run = self.database.get_run(bound["runs"]["blind_review"][role]["run_id"])
+            review = AdvisoryBlindReview.from_mapping(
+                {
+                    "schema_version": 1,
+                    "summary": f"PRIVATE BLIND SUMMARY {role}",
+                    "risk_level": "moderate",
+                    "findings": [
+                        {
+                            "key": f"{role.replace('_', '-')}-finding",
+                            "category": "correctness",
+                            "severity": "major",
+                            "summary": f"PRIVATE FINDING SUMMARY {role}",
+                            "rationale": "PRIVATE FINDING RATIONALE",
+                            "evidence": [
+                                {
+                                    "path": "src/reviewed.py",
+                                    "line_start": 1,
+                                    "line_end": 1,
+                                    "summary": "PRIVATE EVIDENCE SUMMARY",
+                                }
+                            ],
+                            "suggested_check": "PRIVATE SUGGESTED CHECK",
+                        }
+                    ],
+                }
+            )
+            self.complete_advisory_run(
+                run,
+                lambda run_id, role=role, review=review: (
+                    self.database.submit_advisory_blind_review(
+                        run_id,
+                        review=review,
+                        idempotency_key=f"control-room-blind-{role}",
+                    )
+                ),
+            )
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+
+        challenge = self.database.get_advisory_execution(execution["id"])
+        self.assertFalse(
+            director.advance(challenge["id"], expected_version=challenge["version"])
+        )
+        bound = self.database.get_advisory_execution(execution["id"])
+        for role in reviewer_roles:
+            run = self.database.get_run(bound["runs"]["challenge"][role]["run_id"])
+            review = AdvisoryChallengeReview.from_mapping(
+                {
+                    "schema_version": 1,
+                    "summary": f"PRIVATE CHALLENGE SUMMARY {role}",
+                    "challenges": [],
+                }
+            )
+            self.complete_advisory_run(
+                run,
+                lambda run_id, role=role, review=review: (
+                    self.database.submit_advisory_challenge_review(
+                        run_id,
+                        review=review,
+                        idempotency_key=f"control-room-challenge-{role}",
+                    )
+                ),
+            )
+        self.assertTrue(
+            director.advance(challenge["id"], expected_version=challenge["version"])
+        )
+
+        triangulate = self.database.get_advisory_execution(execution["id"])
+        self.assertFalse(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        bound = self.database.get_advisory_execution(execution["id"])
+        coordinator = self.database.get_run(
+            bound["runs"]["triangulate"]["coordinator"]["run_id"]
+        )
+        report = AdvisoryReport.from_mapping(
+            {
+                "schema_version": 1,
+                "authority": "advisory_only",
+                "attention": "routine",
+                "summary": "PRIVATE ADVISORY REPORT SUMMARY",
+                "items": [
+                    {
+                        "key": "reviewer-one-finding",
+                        "classification": "corroborated",
+                        "severity": "major",
+                        "summary": "PRIVATE REPORT ITEM SUMMARY",
+                        "finding_refs": [
+                            {
+                                "reviewer_role": "reviewer_one",
+                                "finding_key": "reviewer-one-finding",
+                            }
+                        ],
+                        "challenge_refs": [],
+                        "recommended_action": "PRIVATE RECOMMENDED ACTION",
+                    }
+                ],
+                "follow_up_checks": ["PRIVATE FOLLOW-UP CHECK"],
+            }
+        )
+        self.complete_advisory_run(
+            coordinator,
+            lambda run_id: self.database.submit_advisory_report(
+                run_id,
+                report=report,
+                idempotency_key="control-room-report",
+            ),
+        )
+        self.assertTrue(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        completion = self.database.get_advisory_execution(execution["id"])
+        self.assertTrue(
+            director.advance(completion["id"], expected_version=completion["version"])
+        )
+
+        snapshot = ControlRoom(Database(self.database.path)).snapshot()
+
+        projected = snapshot["advisory_executions"][0]
+        self.assertEqual(projected["state"], "completed")
+        self.assertEqual(projected["report_authority"], "advisory_only")
+        self.assertEqual(projected["report_attention"], "routine")
+        self.assertEqual(projected["blind_review_count"], 3)
+        self.assertEqual(projected["challenge_review_count"], 3)
+        attention = [
+            item
+            for item in snapshot["attention"]
+            if item["kind"] == "advisory.report_attention"
+        ]
+        self.assertEqual(
+            attention,
+            [
+                {
+                    "kind": "advisory.report_attention",
+                    "severity": "action",
+                    "subject_type": "advisory_report",
+                    "subject_id": projected["report_id"],
+                    "advisory_execution_id": execution["id"],
+                    "attention": "routine",
+                    "authority": "advisory_only",
+                    "stage": "completion",
+                    "version": completion["version"] + 1,
+                    "age_seconds": 0,
+                }
+            ],
+        )
+        urgent = ControlRoom._attention(
+            work_items=[],
+            assignments=[],
+            runs=[],
+            attempts=[],
+            interactions=[],
+            authorities=[],
+            advisory_executions=[{**projected, "report_attention": "urgent"}],
+            generated_at=projected["updated_at"],
+        )
+        self.assertEqual(
+            [(item["kind"], item["severity"]) for item in urgent],
+            [("advisory.report_attention", "warning")],
+        )
+        encoded = json.dumps(snapshot, sort_keys=True)
+        for private in (
+            "PRIVATE BLIND SUMMARY",
+            "PRIVATE FINDING SUMMARY",
+            "PRIVATE FINDING RATIONALE",
+            "PRIVATE EVIDENCE SUMMARY",
+            "PRIVATE SUGGESTED CHECK",
+            "PRIVATE CHALLENGE SUMMARY",
+            "PRIVATE ADVISORY REPORT SUMMARY",
+            "PRIVATE REPORT ITEM SUMMARY",
+            "PRIVATE RECOMMENDED ACTION",
+            "PRIVATE FOLLOW-UP CHECK",
+        ):
+            self.assertNotIn(private, encoded)
 
     def test_snapshot_projects_workflow_authority_without_private_configuration(
         self,

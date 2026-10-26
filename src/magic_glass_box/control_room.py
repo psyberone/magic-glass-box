@@ -153,11 +153,13 @@ class ControlRoom:
         runs, terminal_total = self._runs(connection, history_limit)
         workflows = self._workflows(connection, history_limit)
         discovery_executions = self._discovery_executions(connection, history_limit)
+        advisory_executions = self._advisory_executions(connection, history_limit)
         run_ids = [run["id"] for run in runs]
         workflow_ids = [workflow["id"] for workflow in workflows]
         discovery_execution_ids = [
             execution["id"] for execution in discovery_executions
         ]
+        advisory_execution_ids = [execution["id"] for execution in advisory_executions]
         attempts = self._attempts(connection, run_ids, generated_at)
         interactions = self._interactions(connection, run_ids)
         retained_results = self._results(connection, run_ids)
@@ -175,6 +177,7 @@ class ControlRoom:
             run_ids,
             workflow_ids,
             discovery_execution_ids,
+            advisory_execution_ids,
         )
         escalations = self._escalations(connection, run_ids)
         self._attach_run_counts(
@@ -231,6 +234,7 @@ class ControlRoom:
             integration_queue,
             workflows=workflows,
             discovery_executions=discovery_executions,
+            advisory_executions=advisory_executions,
             generated_at=generated_at,
         )
         return (
@@ -255,6 +259,7 @@ class ControlRoom:
                 "runs": runs,
                 "workflows": workflows,
                 "discovery_executions": discovery_executions,
+                "advisory_executions": advisory_executions,
                 "attempts": attempts,
                 "interactions": interactions,
                 "retained_results": retained_results,
@@ -943,6 +948,142 @@ class ControlRoom:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _advisory_executions(
+        connection: sqlite3.Connection, history_limit: int
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            "WITH terminal AS (SELECT id FROM advisory_executions "
+            "WHERE state IN ('cancelled','completed','failed') "
+            "ORDER BY updated_at DESC, id LIMIT ?), visible AS ("
+            "SELECT id, 0 AS group_order FROM advisory_executions "
+            "WHERE state = 'active' UNION ALL "
+            "SELECT id, 1 AS group_order FROM terminal"
+            ") SELECT execution.id, "
+            "project.krab_project_key AS project_key, "
+            "template.template_key, template.version AS template_version, "
+            "template.content_sha256 AS template_revision, "
+            "named.name AS configuration_name, "
+            "configuration.version AS configuration_version, "
+            "configuration.id AS configuration_version_id, "
+            "execution.work_item_id, execution.work_item_version_id, "
+            "execution.work_thread_id, execution.work_thread_generation, "
+            "execution.context_version_id, execution.candidate_id, "
+            "candidate.head_revision AS candidate_head_revision, "
+            "execution.state, execution.stage, execution.version, "
+            "reviewer_one.name AS reviewer_one_profile_name, "
+            "reviewer_one_version.version AS reviewer_one_profile_version, "
+            "reviewer_two.name AS reviewer_two_profile_name, "
+            "reviewer_two_version.version AS reviewer_two_profile_version, "
+            "reviewer_three.name AS reviewer_three_profile_name, "
+            "reviewer_three_version.version AS reviewer_three_profile_version, "
+            "coordinator.name AS coordinator_profile_name, "
+            "coordinator_version.version AS coordinator_profile_version, "
+            "requester.handle AS requested_by, "
+            "action.id AS action_id, action.state AS action_state, "
+            "action.attempt_count AS action_attempt_count, "
+            "action.max_attempts AS action_max_attempts, "
+            "action.last_error_code AS action_last_error_code, "
+            "(SELECT COUNT(*) FROM advisory_run_bindings blind_binding "
+            "WHERE blind_binding.execution_id = execution.id "
+            "AND blind_binding.stage = 'blind_review') AS blind_run_count, "
+            "(SELECT COUNT(*) FROM advisory_run_bindings blind_binding "
+            "JOIN runs blind_run ON blind_run.id = blind_binding.run_id "
+            "WHERE blind_binding.execution_id = execution.id "
+            "AND blind_binding.stage = 'blind_review' "
+            "AND blind_run.state = 'succeeded') AS blind_succeeded_count, "
+            "(SELECT COUNT(*) FROM advisory_blind_reviews blind_review "
+            "WHERE blind_review.execution_id = execution.id) "
+            "AS blind_review_count, "
+            "(SELECT COUNT(*) FROM advisory_run_bindings challenge_binding "
+            "WHERE challenge_binding.execution_id = execution.id "
+            "AND challenge_binding.stage = 'challenge') AS challenge_run_count, "
+            "(SELECT COUNT(*) FROM advisory_run_bindings challenge_binding "
+            "JOIN runs challenge_run ON challenge_run.id = challenge_binding.run_id "
+            "WHERE challenge_binding.execution_id = execution.id "
+            "AND challenge_binding.stage = 'challenge' "
+            "AND challenge_run.state = 'succeeded') AS challenge_succeeded_count, "
+            "(SELECT COUNT(*) FROM advisory_challenge_reviews challenge_review "
+            "WHERE challenge_review.execution_id = execution.id) "
+            "AS challenge_review_count, "
+            "coordinator_run.run_id AS coordinator_run_id, "
+            "coordinator_state.state AS coordinator_run_state, "
+            "report.id AS report_id, report.run_id AS report_run_id, "
+            "report.attempt_id AS report_attempt_id, "
+            "report.authority AS report_authority, "
+            "report.report_json, report.content_sha256 AS report_sha256, "
+            "execution.created_at, execution.updated_at, execution.finished_at "
+            "FROM visible JOIN advisory_executions execution "
+            "ON execution.id = visible.id "
+            "JOIN projects project ON project.id = execution.project_id "
+            "JOIN workflow_template_definitions template "
+            "ON template.id = execution.template_definition_id "
+            "JOIN workflow_configuration_versions configuration "
+            "ON configuration.id = execution.configuration_version_id "
+            "JOIN workflow_configurations named "
+            "ON named.id = configuration.configuration_id "
+            "JOIN integration_candidates candidate "
+            "ON candidate.id = execution.candidate_id "
+            "JOIN workflow_configuration_role_bindings reviewer_one_binding "
+            "ON reviewer_one_binding.configuration_version_id = configuration.id "
+            "AND reviewer_one_binding.role = 'reviewer_one' "
+            "JOIN agent_profile_versions reviewer_one_version "
+            "ON reviewer_one_version.id = reviewer_one_binding.profile_version_id "
+            "JOIN agent_profiles reviewer_one "
+            "ON reviewer_one.id = reviewer_one_version.profile_id "
+            "JOIN workflow_configuration_role_bindings reviewer_two_binding "
+            "ON reviewer_two_binding.configuration_version_id = configuration.id "
+            "AND reviewer_two_binding.role = 'reviewer_two' "
+            "JOIN agent_profile_versions reviewer_two_version "
+            "ON reviewer_two_version.id = reviewer_two_binding.profile_version_id "
+            "JOIN agent_profiles reviewer_two "
+            "ON reviewer_two.id = reviewer_two_version.profile_id "
+            "JOIN workflow_configuration_role_bindings reviewer_three_binding "
+            "ON reviewer_three_binding.configuration_version_id = configuration.id "
+            "AND reviewer_three_binding.role = 'reviewer_three' "
+            "JOIN agent_profile_versions reviewer_three_version "
+            "ON reviewer_three_version.id = reviewer_three_binding.profile_version_id "
+            "JOIN agent_profiles reviewer_three "
+            "ON reviewer_three.id = reviewer_three_version.profile_id "
+            "JOIN workflow_configuration_role_bindings coordinator_binding "
+            "ON coordinator_binding.configuration_version_id = configuration.id "
+            "AND coordinator_binding.role = 'coordinator' "
+            "JOIN agent_profile_versions coordinator_version "
+            "ON coordinator_version.id = coordinator_binding.profile_version_id "
+            "JOIN agent_profiles coordinator "
+            "ON coordinator.id = coordinator_version.profile_id "
+            "JOIN users requester ON requester.id = execution.requested_by "
+            "LEFT JOIN supervisor_actions action ON action.id = ("
+            "SELECT latest_action.id FROM supervisor_actions latest_action "
+            "WHERE latest_action.advisory_execution_id = execution.id "
+            "AND latest_action.subject_version = execution.version "
+            "ORDER BY latest_action.created_at DESC, latest_action.id DESC LIMIT 1) "
+            "LEFT JOIN advisory_run_bindings coordinator_run "
+            "ON coordinator_run.execution_id = execution.id "
+            "AND coordinator_run.stage = 'triangulate' "
+            "AND coordinator_run.role = 'coordinator' "
+            "LEFT JOIN runs coordinator_state "
+            "ON coordinator_state.id = coordinator_run.run_id "
+            "LEFT JOIN advisory_reports report "
+            "ON report.execution_id = execution.id "
+            "ORDER BY visible.group_order, execution.updated_at DESC, execution.id",
+            (history_limit,),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            report_json = record.pop("report_json")
+            if report_json is None:
+                record["report_attention"] = None
+            else:
+                try:
+                    report_attention = json.loads(report_json)["attention"]
+                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                    raise StorageError("stored advisory report is invalid") from exc
+                record["report_attention"] = report_attention
+            result.append(record)
+        return result
+
     @classmethod
     def _supervisor_actions(
         cls,
@@ -950,6 +1091,7 @@ class ControlRoom:
         run_ids: list[str],
         workflow_ids: list[str],
         discovery_execution_ids: list[str],
+        advisory_execution_ids: list[str],
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         parameters: list[str] = []
@@ -968,12 +1110,19 @@ class ControlRoom:
                 + ")"
             )
             parameters.extend(discovery_execution_ids)
+        if advisory_execution_ids:
+            clauses.append(
+                "advisory_execution_id IN ("
+                + ",".join("?" for _ in advisory_execution_ids)
+                + ")"
+            )
+            parameters.extend(advisory_execution_ids)
         if not clauses:
             return []
         rows = connection.execute(
             "SELECT id, kind, subject_id, subject_version, run_id, "
-            "workflow_execution_id, discovery_execution_id, state, version, "
-            "attempt_count, "
+            "workflow_execution_id, discovery_execution_id, "
+            "advisory_execution_id, state, version, attempt_count, "
             "max_attempts, available_at, owner_id, lease_expires_at, "
             "last_error_code, created_at, updated_at, finished_at "
             "FROM supervisor_actions WHERE "
@@ -1691,6 +1840,9 @@ class ControlRoom:
         discovery_states = states(
             "SELECT state, COUNT(*) AS count FROM discovery_executions GROUP BY state"
         )
+        advisory_states = states(
+            "SELECT state, COUNT(*) AS count FROM advisory_executions GROUP BY state"
+        )
         run_total = sum(run_states.values())
         attempt_total = sum(attempt_states.values())
         return {
@@ -1729,6 +1881,13 @@ class ControlRoom:
                 "total": sum(discovery_states.values()),
                 **{
                     state: discovery_states.get(state, 0)
+                    for state in ("active", "cancelled", "completed", "failed")
+                },
+            },
+            "advisory_executions": {
+                "total": sum(advisory_states.values()),
+                **{
+                    state: advisory_states.get(state, 0)
                     for state in ("active", "cancelled", "completed", "failed")
                 },
             },
@@ -1847,6 +2006,7 @@ class ControlRoom:
         *,
         workflows: list[dict[str, Any]] | None = None,
         discovery_executions: list[dict[str, Any]] | None = None,
+        advisory_executions: list[dict[str, Any]] | None = None,
         generated_at: str | None = None,
     ) -> list[dict[str, Any]]:
         attention: list[dict[str, Any]] = []
@@ -2039,6 +2199,7 @@ class ControlRoom:
                         "run_id": action["run_id"],
                         "workflow_execution_id": action["workflow_execution_id"],
                         "discovery_execution_id": action["discovery_execution_id"],
+                        "advisory_execution_id": action.get("advisory_execution_id"),
                         "action_kind": action["kind"],
                         "last_error_code": action["last_error_code"],
                         "updated_at": action["updated_at"],
@@ -2054,6 +2215,41 @@ class ControlRoom:
                         "subject_type": "discovery_execution",
                         "subject_id": execution["id"],
                         "discovery_execution_id": execution["id"],
+                        "stage": execution["stage"],
+                        "version": execution["version"],
+                    },
+                    execution["updated_at"],
+                )
+        for execution in advisory_executions or []:
+            if execution["state"] == "failed":
+                add(
+                    {
+                        "kind": "advisory.failed",
+                        "severity": "warning",
+                        "subject_type": "advisory_execution",
+                        "subject_id": execution["id"],
+                        "advisory_execution_id": execution["id"],
+                        "stage": execution["stage"],
+                        "version": execution["version"],
+                    },
+                    execution["updated_at"],
+                )
+            attention_level = execution["report_attention"]
+            if execution["state"] == "completed" and attention_level in {
+                "routine",
+                "urgent",
+            }:
+                add(
+                    {
+                        "kind": "advisory.report_attention",
+                        "severity": (
+                            "warning" if attention_level == "urgent" else "action"
+                        ),
+                        "subject_type": "advisory_report",
+                        "subject_id": execution["report_id"],
+                        "advisory_execution_id": execution["id"],
+                        "attention": attention_level,
+                        "authority": execution["report_authority"],
                         "stage": execution["stage"],
                         "version": execution["version"],
                     },

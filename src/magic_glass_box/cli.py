@@ -13,6 +13,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from .advisory import AdvisoryConfigurationSpec
 from .advisory_director import AdvisoryDirector
 from .candidates import (
     DEFAULT_GIT_TIMEOUT_SECONDS,
@@ -518,6 +519,78 @@ def build_parser() -> argparse.ArgumentParser:
     discovery_cancel.add_argument("--expected-version", required=True, type=int)
     discovery_cancel.add_argument("--cancelled-by", required=True)
     discovery_cancel.add_argument("--reason", required=True)
+
+    advisory = commands.add_parser(
+        "advisory", help="manage bounded advisory review prescriptions"
+    )
+    advisory_commands = advisory.add_subparsers(dest="advisory_command", required=True)
+    for verb in ("config-create", "config-revise"):
+        configuration = advisory_commands.add_parser(
+            verb,
+            help=(
+                "create a versioned advisory configuration"
+                if verb == "config-create"
+                else "append an immutable advisory configuration revision"
+            ),
+        )
+        configuration.add_argument("name")
+        configuration.add_argument("--project", required=True)
+        configuration.add_argument("--reviewer-one", required=True)
+        configuration.add_argument("--reviewer-two", required=True)
+        configuration.add_argument("--reviewer-three", required=True)
+        configuration.add_argument("--coordinator", required=True)
+        configuration.add_argument("--spec", required=True, type=Path)
+        configuration.add_argument("--created-by", required=True)
+    advisory_config_show = advisory_commands.add_parser(
+        "config-show", help="show one advisory configuration revision"
+    )
+    advisory_config_show.add_argument("name")
+    advisory_config_show.add_argument("--project", required=True)
+    advisory_config_show.add_argument("--version", type=int)
+    advisory_config_list = advisory_commands.add_parser(
+        "config-list", help="list latest advisory configurations"
+    )
+    advisory_config_list.add_argument("--project")
+    advisory_start = advisory_commands.add_parser(
+        "start", help="start one exact-candidate advisory review"
+    )
+    advisory_start.add_argument("configuration_name")
+    advisory_start.add_argument("--project", required=True)
+    advisory_start.add_argument("--candidate", required=True)
+    advisory_start.add_argument(
+        "--expected-configuration-version", required=True, type=int
+    )
+    advisory_start.add_argument(
+        "--expected-context-version", required=True, dest="expected_context_version_id"
+    )
+    advisory_start.add_argument(
+        "--expected-work-item-version",
+        required=True,
+        dest="expected_work_item_version_id",
+    )
+    advisory_start.add_argument("--expected-thread-generation", required=True, type=int)
+    advisory_start.add_argument("--expected-thread-version", required=True, type=int)
+    advisory_start.add_argument("--idempotency-key", required=True)
+    advisory_start.add_argument("--requested-by", required=True)
+    advisory_show = advisory_commands.add_parser(
+        "show", help="show one advisory execution and event stream"
+    )
+    advisory_show.add_argument("execution_id")
+    advisory_list = advisory_commands.add_parser(
+        "list", help="list bounded advisory executions"
+    )
+    advisory_list.add_argument("--project")
+    advisory_list.add_argument(
+        "--state", choices=("active", "cancelled", "completed", "failed")
+    )
+    advisory_list.add_argument("--limit", type=_candidate_limit, default=100)
+    advisory_cancel = advisory_commands.add_parser(
+        "cancel", help="cancel one active advisory execution"
+    )
+    advisory_cancel.add_argument("execution_id")
+    advisory_cancel.add_argument("--expected-version", required=True, type=int)
+    advisory_cancel.add_argument("--cancelled-by", required=True)
+    advisory_cancel.add_argument("--reason", required=True)
 
     inference_connector = commands.add_parser(
         "inference-connector",
@@ -1453,6 +1526,57 @@ def _dispatch(
             )
         if args.discovery_command == "cancel":
             return control.cancel_discovery_execution(
+                args.execution_id,
+                expected_version=args.expected_version,
+                cancelled_by_handle=args.cancelled_by,
+                reason=args.reason,
+            )
+    if args.command == "advisory":
+        if args.advisory_command in {"config-create", "config-revise"}:
+            kwargs = {
+                "project_key": args.project,
+                "name": args.name,
+                "spec": AdvisoryConfigurationSpec.from_mapping(_json_file(args.spec)),
+                "reviewer_one_profile_name": args.reviewer_one,
+                "reviewer_two_profile_name": args.reviewer_two,
+                "reviewer_three_profile_name": args.reviewer_three,
+                "coordinator_profile_name": args.coordinator,
+                "created_by_handle": args.created_by,
+            }
+            if args.advisory_command == "config-create":
+                return control.create_advisory_configuration(**kwargs)
+            return control.revise_advisory_configuration(**kwargs)
+        if args.advisory_command == "config-show":
+            return control.get_advisory_configuration(
+                project_key=args.project,
+                name=args.name,
+                version=args.version,
+            )
+        if args.advisory_command == "config-list":
+            return control.list_advisory_configurations(project_key=args.project)
+        if args.advisory_command == "start":
+            return control.start_advisory_execution(
+                project_key=args.project,
+                configuration_name=args.configuration_name,
+                candidate_id=args.candidate,
+                expected_configuration_version=args.expected_configuration_version,
+                expected_context_version_id=args.expected_context_version_id,
+                expected_work_item_version_id=args.expected_work_item_version_id,
+                expected_thread_generation=args.expected_thread_generation,
+                expected_thread_version=args.expected_thread_version,
+                idempotency_key=args.idempotency_key,
+                requested_by_handle=args.requested_by,
+            )
+        if args.advisory_command == "show":
+            return control.get_advisory_execution(args.execution_id)
+        if args.advisory_command == "list":
+            return control.list_advisory_executions(
+                project_key=args.project,
+                state=args.state,
+                limit=args.limit,
+            )
+        if args.advisory_command == "cancel":
+            return control.cancel_advisory_execution(
                 args.execution_id,
                 expected_version=args.expected_version,
                 cancelled_by_handle=args.cancelled_by,

@@ -1260,9 +1260,7 @@ The completed proof above is the milestone's external golden test.
 
 ## Milestone 13: discovery and review prescriptions
 
-**Status: in progress; M13A and M13B complete, with the M13C contract,
-execution-ledger, worker-gateway, and durable-director checkpoints complete
-after M12**
+**Status: in progress; M13A, M13B, and M13C complete after M12; M13D remains**
 
 M13 does not turn workflows into an arbitrary DAG engine. Each prescription is
 a versioned, immutable built-in with fixed roles, stages, workspace authority,
@@ -1379,9 +1377,10 @@ or crashes.
 
 ### M13C: advisory review v1
 
-**Status: in progress; contract and configuration complete in schema v36,
-execution ledger complete in schema v37, and worker gateway plus durable
-director complete in schema v38.**
+**Status: complete.** The contract and configuration landed in schema v36,
+the execution ledger in schema v37, and the worker gateway plus durable
+director in schema v38. The bounded CLI and control-room surface complete the
+operator checkpoint without a schema change.
 
 Schema v36 registers one fixed `advisory-review-v1` prescription with three
 read-only reviewers and a separate read-only coordinator. All four bindings
@@ -1464,11 +1463,28 @@ suspicious outcomes, or crashes. The six reviewed survivors only toggle
 `zip(..., strict=True)` to its non-strict equivalents where both inputs are
 constructed from the same fixed three-role tuple.
 
-Remaining M13C work:
+Operator evidence: 1,182 tests pass at 87% aggregate statement-plus-branch
+coverage; the CLI is at 97%, the control-room projection at 92%, the browser
+renderer at 95%, and the advisory director remains at 98%. RED-first command,
+dispatch, projection, redaction, attention, bounded-history, and browser tests
+cover all eight CLI operations plus active, failed, and fully completed
+seven-run executions. The focused advisory-projection mutation wave killed six
+of eight generated mutants. The two survivors only change SQLite keywords and
+identifiers to lower or upper case, which SQLite defines as equivalent; the
+effective result is 6/6 (100%) with no uncovered mutants, timeouts, suspicious
+outcomes, or crashes.
 
-- Add the dedicated advisory CLI and bounded control-room projection.
-- Preserve the distinction between exact-candidate gate reviewers and advisory
-  reviewers in those operator surfaces and their audit language.
+The dedicated `advisory` CLI creates and revises typed configurations and can
+start, inspect, list, or cancel an execution pinned to an exact candidate and
+work-thread generation. The control room adds bounded active/history
+projection, lifecycle counts, durable action visibility, failed-execution and
+report-attention entries, and a separate browser table. It exposes only
+identity, progress, provenance, digest, and attention metadata. Configuration,
+request, finding, challenge, report, cancellation, and failure bodies remain
+private. Every operator surface calls the result advisory-only and gives it no
+gate, approval, landing, or maintainer authority.
+
+No M13C work remains. M13D is the scope-discipline and live-proof checkpoint.
 
 ### M13D: scope discipline and live proof
 

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+from magic_glass_box.advisory import AdvisoryConfigurationSpec
 from magic_glass_box.cli import (
     InputError,
     _build_run_coordinator,
@@ -177,6 +178,32 @@ class FakeControlPlane:
         self, execution_id: str, **kwargs: object
     ) -> dict[str, object]:
         return self._called("discovery.cancel", execution_id=execution_id, **kwargs)
+
+    def create_advisory_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("advisory.config-create", **kwargs)
+
+    def revise_advisory_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("advisory.config-revise", **kwargs)
+
+    def get_advisory_configuration(self, **kwargs: object) -> dict[str, object]:
+        return self._called("advisory.config-show", **kwargs)
+
+    def list_advisory_configurations(self, **kwargs: object) -> dict[str, object]:
+        return self._called("advisory.config-list", **kwargs)
+
+    def start_advisory_execution(self, **kwargs: object) -> dict[str, object]:
+        return self._called("advisory.start", **kwargs)
+
+    def get_advisory_execution(self, execution_id: str) -> dict[str, object]:
+        return self._called("advisory.show", execution_id=execution_id)
+
+    def list_advisory_executions(self, **kwargs: object) -> dict[str, object]:
+        return self._called("advisory.list", **kwargs)
+
+    def cancel_advisory_execution(
+        self, execution_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("advisory.cancel", execution_id=execution_id, **kwargs)
 
     def get_workflow_ruling(self, ruling_id: str) -> dict[str, object]:
         return self._called("workflow.ruling-show", ruling_id=ruling_id)
@@ -504,6 +531,7 @@ class CLITests(unittest.TestCase):
                     ("profile", "manage agent profiles"),
                     ("workflow", "manage bounded workflow prescriptions"),
                     ("discovery", "manage bounded Discovery prescriptions"),
+                    ("advisory", "manage bounded advisory review prescriptions"),
                     (
                         "inference-connector",
                         "manage credential-isolated inference connectors",
@@ -625,6 +653,29 @@ class CLITests(unittest.TestCase):
                     ("show", "show one Discovery execution and event stream"),
                     ("list", "list bounded Discovery executions"),
                     ("cancel", "cancel one active Discovery execution"),
+                ),
+            ),
+            ("advisory",): (
+                "advisory_command",
+                True,
+                (
+                    (
+                        "config-create",
+                        "create a versioned advisory configuration",
+                    ),
+                    (
+                        "config-revise",
+                        "append an immutable advisory configuration revision",
+                    ),
+                    (
+                        "config-show",
+                        "show one advisory configuration revision",
+                    ),
+                    ("config-list", "list latest advisory configurations"),
+                    ("start", "start one exact-candidate advisory review"),
+                    ("show", "show one advisory execution and event stream"),
+                    ("list", "list bounded advisory executions"),
+                    ("cancel", "cancel one active advisory execution"),
                 ),
             ),
             ("provider",): (
@@ -1016,6 +1067,41 @@ class CLITests(unittest.TestCase):
                     "--cancelled-by",
                     "--reason",
                 ),
+                ("advisory", "config-create"): (
+                    "--project",
+                    "--reviewer-one",
+                    "--reviewer-two",
+                    "--reviewer-three",
+                    "--coordinator",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("advisory", "config-revise"): (
+                    "--project",
+                    "--reviewer-one",
+                    "--reviewer-two",
+                    "--reviewer-three",
+                    "--coordinator",
+                    "--spec",
+                    "--created-by",
+                ),
+                ("advisory", "config-show"): ("--project",),
+                ("advisory", "start"): (
+                    "--project",
+                    "--candidate",
+                    "--expected-configuration-version",
+                    "--expected-context-version",
+                    "--expected-work-item-version",
+                    "--expected-thread-generation",
+                    "--expected-thread-version",
+                    "--idempotency-key",
+                    "--requested-by",
+                ),
+                ("advisory", "cancel"): (
+                    "--expected-version",
+                    "--cancelled-by",
+                    "--reason",
+                ),
                 ("inference-connector", "register"): (
                     "--spec",
                     "--created-by",
@@ -1189,6 +1275,12 @@ class CLITests(unittest.TestCase):
                     "completed",
                 ),
                 (("discovery", "list"), "state"): (
+                    "active",
+                    "cancelled",
+                    "completed",
+                    "failed",
+                ),
+                (("advisory", "list"), "state"): (
                     "active",
                     "cancelled",
                     "completed",
@@ -1997,6 +2089,7 @@ class CLITests(unittest.TestCase):
                 "capability": ("bind project capabilities to explicit controllers"),
                 "workflow": "manage bounded workflow prescriptions",
                 "discovery": "manage bounded Discovery prescriptions",
+                "advisory": "manage bounded advisory review prescriptions",
                 "provider": "manage scoped provider grants",
                 "work-item": "manage durable work items",
                 "interaction": "resolve durable agent interactions",
@@ -2052,6 +2145,18 @@ class CLITests(unittest.TestCase):
                 "show": "show one Discovery execution and event stream",
                 "list": "list bounded Discovery executions",
                 "cancel": "cancel one active Discovery execution",
+            },
+            "advisory": {
+                "config-create": "create a versioned advisory configuration",
+                "config-revise": (
+                    "append an immutable advisory configuration revision"
+                ),
+                "config-show": "show one advisory configuration revision",
+                "config-list": "list latest advisory configurations",
+                "start": "start one exact-candidate advisory review",
+                "show": "show one advisory execution and event stream",
+                "list": "list bounded advisory executions",
+                "cancel": "cancel one active advisory execution",
             },
             "provider": {
                 "connector-add": "add a connector-bound provider grant",
@@ -2620,6 +2725,210 @@ class CLITests(unittest.TestCase):
                         "expected_version": 1,
                         "cancelled_by_handle": "operator",
                         "reason": "stop now",
+                    },
+                ),
+            ),
+        )
+        for arguments, expected_call in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch("magic_glass_box.cli.ControlPlane", return_value=fake),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(fake.calls[-1], expected_call)
+
+    def test_advisory_commands_parse_documents_and_dispatch_advisory_only_authority(
+        self,
+    ) -> None:
+        spec_path = Path(self.temporary.name) / "advisory.json"
+        spec_value = {
+            "schema_version": 1,
+            "max_findings_per_reviewer": 4,
+            "max_challenges_per_reviewer": 3,
+            "max_report_items": 8,
+        }
+        spec_path.write_text(json.dumps(spec_value), encoding="utf-8")
+        expected_spec = AdvisoryConfigurationSpec.from_mapping(spec_value)
+        fake = FakeControlPlane()
+        execution_id = "arx_" + "4" * 32
+        cases = (
+            (
+                [
+                    "advisory",
+                    "config-create",
+                    "the-furies",
+                    "--project",
+                    "box-project",
+                    "--reviewer-one",
+                    "Reviewer One",
+                    "--reviewer-two",
+                    "Reviewer Two",
+                    "--reviewer-three",
+                    "Reviewer Three",
+                    "--coordinator",
+                    "Advisory Coordinator",
+                    "--spec",
+                    str(spec_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "advisory.config-create",
+                    {
+                        "project_key": "box-project",
+                        "name": "the-furies",
+                        "spec": expected_spec,
+                        "reviewer_one_profile_name": "Reviewer One",
+                        "reviewer_two_profile_name": "Reviewer Two",
+                        "reviewer_three_profile_name": "Reviewer Three",
+                        "coordinator_profile_name": "Advisory Coordinator",
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "advisory",
+                    "config-revise",
+                    "the-furies",
+                    "--project",
+                    "box-project",
+                    "--reviewer-one",
+                    "Reviewer One",
+                    "--reviewer-two",
+                    "Reviewer Two",
+                    "--reviewer-three",
+                    "Reviewer Three",
+                    "--coordinator",
+                    "Advisory Coordinator",
+                    "--spec",
+                    str(spec_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "advisory.config-revise",
+                    {
+                        "project_key": "box-project",
+                        "name": "the-furies",
+                        "spec": expected_spec,
+                        "reviewer_one_profile_name": "Reviewer One",
+                        "reviewer_two_profile_name": "Reviewer Two",
+                        "reviewer_three_profile_name": "Reviewer Three",
+                        "coordinator_profile_name": "Advisory Coordinator",
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "advisory",
+                    "config-show",
+                    "the-furies",
+                    "--project",
+                    "box-project",
+                    "--version",
+                    "2",
+                ],
+                (
+                    "advisory.config-show",
+                    {
+                        "project_key": "box-project",
+                        "name": "the-furies",
+                        "version": 2,
+                    },
+                ),
+            ),
+            (
+                ["advisory", "config-list", "--project", "box-project"],
+                ("advisory.config-list", {"project_key": "box-project"}),
+            ),
+            (
+                [
+                    "advisory",
+                    "start",
+                    "the-furies",
+                    "--project",
+                    "box-project",
+                    "--candidate",
+                    "icd_" + "1" * 32,
+                    "--expected-configuration-version",
+                    "2",
+                    "--expected-context-version",
+                    "ctx_" + "2" * 32,
+                    "--expected-work-item-version",
+                    "wiv_" + "3" * 32,
+                    "--expected-thread-generation",
+                    "1",
+                    "--expected-thread-version",
+                    "4",
+                    "--idempotency-key",
+                    "advisory-start-1",
+                    "--requested-by",
+                    "operator",
+                ],
+                (
+                    "advisory.start",
+                    {
+                        "project_key": "box-project",
+                        "configuration_name": "the-furies",
+                        "candidate_id": "icd_" + "1" * 32,
+                        "expected_configuration_version": 2,
+                        "expected_context_version_id": "ctx_" + "2" * 32,
+                        "expected_work_item_version_id": "wiv_" + "3" * 32,
+                        "expected_thread_generation": 1,
+                        "expected_thread_version": 4,
+                        "idempotency_key": "advisory-start-1",
+                        "requested_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                ["advisory", "show", execution_id],
+                ("advisory.show", {"execution_id": execution_id}),
+            ),
+            (
+                [
+                    "advisory",
+                    "list",
+                    "--project",
+                    "box-project",
+                    "--state",
+                    "completed",
+                    "--limit",
+                    "25",
+                ],
+                (
+                    "advisory.list",
+                    {
+                        "project_key": "box-project",
+                        "state": "completed",
+                        "limit": 25,
+                    },
+                ),
+            ),
+            (
+                [
+                    "advisory",
+                    "cancel",
+                    execution_id,
+                    "--expected-version",
+                    "3",
+                    "--cancelled-by",
+                    "operator",
+                    "--reason",
+                    "maintainer stopped advisory review",
+                ],
+                (
+                    "advisory.cancel",
+                    {
+                        "execution_id": execution_id,
+                        "expected_version": 3,
+                        "cancelled_by_handle": "operator",
+                        "reason": "maintainer stopped advisory review",
                     },
                 ),
             ),

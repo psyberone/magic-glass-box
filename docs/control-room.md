@@ -57,6 +57,14 @@ contains:
   action state; role-run states; and trace/ruling IDs, provenance, digests, and
   disposition. Discovery specifications, requests, evidence bodies, and
   work-ready briefs are not projected;
+- all active advisory-review executions plus a bounded number of recent
+  terminal executions, including their immutable project, template,
+  configuration, work-item, thread, context, exact-candidate head, and four
+  profile pins; current stage and action state; blind/challenge progress;
+  coordinator state; and final-report identity, provenance, authority,
+  attention classification, and digest. Advisory configuration documents,
+  requests, finding/challenge/report bodies, and private failure text are not
+  projected;
 - attempts, owners, leases, cancellation signals, interactions, retained
   result summaries, run-bound provider authorities, pinned supervision
   policies, candidate-backed review bindings, redacted exact-input gate
@@ -71,19 +79,23 @@ contains:
   refolds, workflow provider targets or capabilities that still need binding,
   manual plans, receipts, or retries that need operator action, pending
   provider landings, expired integration claims, exhausted supervisor work,
-  failed Discovery executions, and open workflow rulings. Every
+  failed Discovery or advisory executions, completed advisory reports that
+  request routine or urgent attention, and open workflow rulings. Advisory
+  attention is explicitly informational and never represents gate or landing
+  authority. Every
   current attention entry includes its age in seconds at the snapshot's
   consistency timestamp.
 
 `--history-limit` accepts 0 through 500 and independently limits terminal runs,
-workflows, and Discovery executions. It never hides an active object. The same
-bound selects the attempts, interactions, results, candidates, gate policies,
-review-run bindings, and authority bindings attached to the visible run set.
-Aggregate counts—including workflow, Discovery, action, and escalation
-lifecycle states—still describe all local state. The
+workflows, Discovery executions, and advisory-review executions. It never
+hides an active object. The same bound selects the attempts, interactions,
+results, candidates, gate policies, review-run bindings, and authority bindings
+attached to the visible run set. Aggregate counts—including workflow,
+Discovery, advisory, action, and escalation lifecycle states—still describe
+all local state. The
 `terminal_history_truncated` flag specifically reports truncated terminal-run
-history; bounded workflow and Discovery collections remain distinguishable
-from their aggregate counts.
+history; bounded workflow, Discovery, and advisory collections remain
+distinguishable from their aggregate counts.
 
 The optional Krab overlay contains only the roles of identities already
 configured in Magic Glass Box. It is not a duplicate project-membership
@@ -102,6 +114,8 @@ The projection intentionally excludes:
 - work-log and checkpoint text;
 - Discovery configuration/request documents, trace and ruling bodies,
   work-ready briefs, and cancellation or failure reasons;
+- advisory configuration/request documents, blind findings, challenges,
+  triangulated report bodies, and cancellation or failure reasons;
 - interaction titles, questions, answers, and message history;
 - handoff summaries and agent transcripts;
 - maintainer-disposition summaries and actionable details;
@@ -154,6 +168,11 @@ implementation workflow. It renders only the bounded projection above; a
 pending `ASK_HUMAN` ruling is represented by disposition, evidence and
 interaction identifiers, and interaction state, never by the ruling or
 question text.
+
+Advisory reviews likewise have their own table, explicitly labeled as having
+no gate authority. It shows exact-candidate identity, pinned roles, phase
+progress, coordinator state, and bounded report metadata without rendering any
+review, challenge, or report prose.
 
 The process is a local administrative surface, not a multi-user authentication
 server. Anyone who can read the printed private URL and reach the loopback
