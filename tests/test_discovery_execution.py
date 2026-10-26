@@ -1065,6 +1065,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 "role": "investigator",
                 "stage": "investigate",
                 "decision_owner_handle": "operator",
+                "configuration": self.configuration["spec"],
                 "trace": records[0],
                 "rulings": [],
             },

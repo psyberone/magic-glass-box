@@ -89,6 +89,8 @@ class RuntimeAdapterContractTests(unittest.TestCase):
         self.assertIn("review_assignment", codex.command[-1])
         self.assertIn("`review_outcome`", codex.command[-1])
         self.assertIn("workflow.scope-review.submit", codex.command[-1])
+        self.assertIn("`must_results`", codex.command[-1])
+        self.assertIn("`base_finding`", codex.command[-1])
         self.assertIn("expected_review_outcome", codex.command[-1])
         self.assertIn("do not supply probe classifications", codex.command[-1])
         self.assertIn("satisfy\nevery `MUST`", codex.command[-1])
@@ -100,6 +102,24 @@ class RuntimeAdapterContractTests(unittest.TestCase):
         self.assertIn("implement the requested corrections", codex.command[-1])
         self.assertIn("maintainer_review", codex.command[-1])
         self.assertIn("has not been rejected", codex.command[-1])
+        self.assertIn("discovery_assignment", codex.command[-1])
+        self.assertIn("discovery.trace.submit", codex.command[-1])
+        self.assertIn("discovery.ruling.submit", codex.command[-1])
+        self.assertIn("ASK_HUMAN", codex.command[-1])
+        self.assertIn('"kind":"choice"', codex.command[-1])
+        self.assertIn('"recipient_handle":decision_owner_handle', codex.command[-1])
+        self.assertIn('"interaction_id":the returned interaction_id', codex.command[-1])
+        self.assertIn('"work_state":"waiting_for_input"', codex.command[-1])
+        self.assertIn('"pending_interaction_ids":[interaction_id]', codex.command[-1])
+        self.assertIn(
+            '`interaction.read` with exactly `{"interaction_id":prior_id}`',
+            codex.command[-1],
+        )
+        self.assertIn("advisory_assignment", codex.command[-1])
+        self.assertIn("advisory.blind.submit", codex.command[-1])
+        self.assertIn("advisory.challenge.submit", codex.command[-1])
+        self.assertIn("advisory.report.submit", codex.command[-1])
+        self.assertIn("advisory_only", codex.command[-1])
         self.assertNotIn("openai-main", codex.environment)
         self.assertIn(
             ("MAGIC_GLASS_BOX_PROVIDER_TOKEN", "local-gateway-not-a-secret"),

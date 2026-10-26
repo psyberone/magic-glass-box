@@ -1519,6 +1519,23 @@ evidence from the derived result and carries the scope-review ID into approval
 or correction events. Unscoped workflows retain their prior behavior. The
 real-repository replacement and advisory proof remains before M13 closes.
 
+The live-proof harness now exists as `scripts/check_live_m13.py`. Its offline
+contract tests prove strict scope-answer parsing, role-minimal gateway
+capabilities, fixed budgets, and creation of all three prescriptions before
+execution. The worker bootstrap explains each published artifact shape, while
+`run.describe` supplies the immutable Discovery and advisory collection limits.
+
+The first quota-backed process checkpoint ran on 2026-10-25 against exact
+Imitation Krab revision `19caff352322f020e0c7d6328854d990b063c833`. An initial
+attempt failed closed when the Discovery coordinator lacked exact interaction
+and handoff payload instructions; a RED-first contract test captured that gap.
+After the bounded bootstrap fix, a fresh networkless investigator submitted the
+trace and a separate coordinator opened a real Krab choice, recorded its
+`ASK_HUMAN` ruling, submitted a durable handoff, and exited. The target checkout
+remained clean and no Krab or ChatGPT credential entered a worker. The second
+process invocation, replacement-coordinator completion, scoped implementation,
+exact-head review, and advisory run remain before M13D completes.
+
 
 ## Milestone 14: heterogeneous work provider
 

@@ -619,6 +619,49 @@ The connector turn limit is process-wide across all seats. If that sidecar
 exits after candidate creation, rerun against the existing state with
 `--resume-review-run run_<failed-review>`; the producer is not repeated.
 
+The explicitly opted-in M13 proof drives Discovery, one
+Discovery-scoped implementation and exact-head review, and the seven-run
+advisory prescription against a clean Imitation Krab checkout. It starts a
+real loopback Krab service, keeps both Krab and ChatGPT credentials on the
+host, denies worker networking, caps provider accounting at $5, and never
+publishes or lands the candidate. The proof intentionally takes two process
+invocations. First, build and run until the Discovery coordinator leaves a
+durable human question:
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_m13.py \
+  --profile-dir /absolute/private/openai-profile \
+  --repository /absolute/imitation-krab \
+  --state-dir /absolute/private/short-m13-state \
+  --source-revision <exact-commit> --model <account-visible-model> --build \
+  --i-understand-this-uses-live-quota
+```
+
+After the decision owner creates a private answer document, rerun against the
+same state without `--build`:
+
+```json
+{
+  "schema_version": 1,
+  "decision": "copy_only",
+  "rationale": "Keep the existing liveness-only behavior."
+}
+```
+
+```console
+PYTHONPATH=src python3.11 scripts/check_live_m13.py \
+  --profile-dir /absolute/private/openai-profile \
+  --repository /absolute/imitation-krab \
+  --state-dir /absolute/private/short-m13-state \
+  --source-revision <the-same-exact-commit> \
+  --model <the-same-account-visible-model> \
+  --scope-answer-file /absolute/private/scope-answer.json \
+  --i-understand-this-uses-live-quota
+```
+
+The resulting `m13-report.json` contains IDs, digests, transitions, usage, and
+replacement evidence, not the private response body or agent transcripts.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the exact scoring rules and workflow.
 
 See [docs/product-thesis.md](docs/product-thesis.md) for the product contract,

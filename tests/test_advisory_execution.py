@@ -642,6 +642,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
                 "stage": "blind_review",
                 "role": "reviewer_one",
                 "candidate": execution["candidate"],
+                "configuration": self.configuration["spec"],
                 "blind_reviews": {},
                 "challenge_reviews": {},
             },

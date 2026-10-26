@@ -5,6 +5,8 @@ import sqlite3
 from collections.abc import Iterator
 from typing import Any
 
+from ..advisory import AdvisoryConfigurationSpec
+from ..discovery import DiscoveryConfigurationSpec
 from ..domain import (
     SupervisionPolicy,
     ValidationError,
@@ -61,9 +63,13 @@ class QueryStorage:
                 "drb.execution_id AS discovery_execution_id, "
                 "drb.role AS discovery_role, "
                 "discovery.stage AS discovery_stage, "
+                "discovery_configuration.spec_json "
+                "AS discovery_configuration_json, "
                 "decision_owner.handle AS discovery_decision_owner_handle, "
                 "arb.execution_id AS advisory_execution_id, "
                 "arb.stage AS advisory_stage, arb.role AS advisory_role, "
+                "advisory_configuration.spec_json "
+                "AS advisory_configuration_json, "
                 "advisory_candidate.id AS advisory_candidate_id, "
                 "advisory_candidate.base_revision AS advisory_base_revision, "
                 "advisory_candidate.head_revision AS advisory_head_revision, "
@@ -90,12 +96,18 @@ class QueryStorage:
                 "LEFT JOIN discovery_run_bindings drb ON drb.run_id = r.id "
                 "LEFT JOIN discovery_executions discovery "
                 "ON discovery.id = drb.execution_id "
+                "LEFT JOIN workflow_configuration_versions "
+                "discovery_configuration ON discovery_configuration.id = "
+                "discovery.configuration_version_id "
                 "LEFT JOIN krab_identities decision_owner "
                 "ON decision_owner.id = "
                 "discovery.decision_owner_krab_identity_id "
                 "LEFT JOIN advisory_run_bindings arb ON arb.run_id = r.id "
                 "LEFT JOIN advisory_executions advisory "
                 "ON advisory.id = arb.execution_id "
+                "LEFT JOIN workflow_configuration_versions "
+                "advisory_configuration ON advisory_configuration.id = "
+                "advisory.configuration_version_id "
                 "LEFT JOIN integration_candidates advisory_candidate "
                 "ON advisory_candidate.id = advisory.candidate_id "
                 "WHERE r.id = ?",
@@ -230,6 +242,7 @@ class QueryStorage:
         discovery_execution_id = result.pop("discovery_execution_id")
         discovery_role = result.pop("discovery_role")
         discovery_stage = result.pop("discovery_stage")
+        discovery_configuration_json = result.pop("discovery_configuration_json")
         discovery_decision_owner_handle = result.pop("discovery_decision_owner_handle")
         if discovery_execution_id is None:
             result["discovery_assignment"] = None
@@ -240,17 +253,27 @@ class QueryStorage:
             rulings = [
                 self._discovery_ruling_record(item) for item in discovery_ruling_rows
             ]
+            try:
+                discovery_configuration = DiscoveryConfigurationSpec.from_mapping(
+                    json.loads(discovery_configuration_json)
+                ).to_dict()
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError(
+                    "stored Discovery run configuration is invalid"
+                ) from exc
             result["discovery_assignment"] = {
                 "execution_id": discovery_execution_id,
                 "role": discovery_role,
                 "stage": discovery_stage,
                 "decision_owner_handle": discovery_decision_owner_handle,
+                "configuration": discovery_configuration,
                 "trace": trace,
                 "rulings": rulings,
             }
         advisory_execution_id = result.pop("advisory_execution_id")
         advisory_stage = result.pop("advisory_stage")
         advisory_role = result.pop("advisory_role")
+        advisory_configuration_json = result.pop("advisory_configuration_json")
         advisory_candidate = {
             "id": result.pop("advisory_candidate_id"),
             "base_revision": result.pop("advisory_base_revision"),
@@ -262,11 +285,20 @@ class QueryStorage:
         if advisory_execution_id is None:
             result["advisory_assignment"] = None
         else:
+            try:
+                advisory_configuration = AdvisoryConfigurationSpec.from_mapping(
+                    json.loads(advisory_configuration_json)
+                ).to_dict()
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError(
+                    "stored advisory run configuration is invalid"
+                ) from exc
             result["advisory_assignment"] = {
                 "execution_id": advisory_execution_id,
                 "stage": advisory_stage,
                 "role": advisory_role,
                 "candidate": advisory_candidate,
+                "configuration": advisory_configuration,
                 "blind_reviews": {
                     item["reviewer_role"]: self._advisory_blind_record(item)
                     for item in advisory_blind_rows

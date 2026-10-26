@@ -146,6 +146,19 @@ director uses the derived result for gate evidence and durable correction or
 approval provenance. Legacy unscoped implementations continue through the
 existing review-v2 path.
 
+The M13 live harness creates all three immutable configurations before
+execution, runs a real loopback Imitation Krab for the scope question, and
+deliberately requires two OS-process invocations. Workers receive the public
+artifact and interaction shapes in the bootstrap prompt and the exact
+configured limits in `run.describe`.
+
+The quota-backed first invocation passed on 2026-10-25: it stopped on a real
+Krab interaction plus the matching `ASK_HUMAN` ruling and durable handoff, with
+networkless workers, host-only credentials, and an unchanged target checkout.
+The second invocation must accept one strict bounded answer, replace the
+Discovery coordinator attempt, then drive the scoped implementation and
+seven-run advisory review. Until that report passes, M13 remains in progress.
+
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
 

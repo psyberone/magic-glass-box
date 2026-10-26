@@ -114,9 +114,11 @@ repository path, image and command details, credential references, file bodies,
 and secret values.
 
 A Discovery-bound run also receives `discovery_assignment`: its execution ID,
-fixed role and stage, pinned human decision-owner handle, accepted trace when
-present, and prior typed rulings. This is bounded prescription state, not an
-agent transcript or a grant of authority beyond the run's capability list.
+fixed role and stage, the immutable configured output ceilings, pinned human
+decision-owner handle, accepted trace when present, and prior typed rulings.
+The worker therefore does not have to guess a project-specific collection
+limit. This is bounded prescription state, not an agent transcript or a grant
+of authority beyond the run's capability list.
 
 An implementation-bound run receives `workflow_assignment`: its execution,
 correction round, role, and stage. When the implementation was explicitly
@@ -126,11 +128,11 @@ legacy workflow reports a null scope binding. Neither form expands the run's
 capabilities or lets Discovery evidence satisfy an implementation gate.
 
 An advisory-bound run receives a separate `advisory_assignment`. It names the
-execution, phase-specific role, and exact candidate. A blind reviewer receives
-no peer evidence. A fresh challenge run receives all three completed blind
-reviews but no peer challenges. Only the triangulation coordinator receives
-both complete evidence sets. This field never creates an exact-candidate gate
-assignment or landing authority.
+execution, phase-specific role, exact candidate, and immutable configured
+output ceilings. A blind reviewer receives no peer evidence. A fresh challenge
+run receives all three completed blind reviews but no peer challenges. Only
+the triangulation coordinator receives both complete evidence sets. This field
+never creates an exact-candidate gate assignment or landing authority.
 
 ### Discovery evidence operations
 
