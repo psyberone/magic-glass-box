@@ -26,6 +26,7 @@ from .storage.queries import QueryStorage
 from .storage.recovery import RecoveryStorage
 from .storage.runs import RunStorage
 from .storage.schema import (
+    ADVISORY_DIRECTOR_SCHEMA,
     ADVISORY_EXECUTION_SCHEMA,
     ADVISORY_REVIEW_PRESCRIPTION_SCHEMA,
     ATTEMPT_SCHEMA,
@@ -82,6 +83,7 @@ from .storage.work_items import WorkItemStorage
 from .storage.workflows import WorkflowStorage
 
 __all__ = [
+    "ADVISORY_DIRECTOR_SCHEMA",
     "ADVISORY_EXECUTION_SCHEMA",
     "ADVISORY_REVIEW_PRESCRIPTION_SCHEMA",
     "ATTEMPT_SCHEMA",

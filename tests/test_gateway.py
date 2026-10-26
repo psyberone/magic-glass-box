@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from magic_glass_box.advisory import (
+    AdvisoryBlindReview,
+    AdvisoryChallengeReview,
+    AdvisoryReport,
+)
 from magic_glass_box.db import ConflictError, NotFoundError, StorageError
 from magic_glass_box.discovery import DiscoveryRuling, DiscoveryTrace
 from magic_glass_box.domain import (
@@ -136,6 +141,7 @@ class FakeGatewayDatabase:
             "recovery_checkpoint": self.recovery_checkpoint,
             "review_assignment": None,
             "changes_requested": None,
+            "advisory_assignment": None,
             "work_memory": {
                 "thread_id": "wth_" + "8" * 32,
                 "work_item_id": "wki_" + "4" * 32,
@@ -194,6 +200,7 @@ class FakeGatewayControl:
         self.handoff_calls: list[tuple[str, HandoffEnvelope]] = []
         self.work_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.discovery_calls: list[tuple[str, str, object, str]] = []
+        self.advisory_calls: list[tuple[str, str, object, str]] = []
         self.provider_failure: Exception | None = None
 
     def open_interaction(self, run_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -401,6 +408,51 @@ class FakeGatewayControl:
             "content_sha256": ruling.digest,
         }
 
+    def submit_advisory_blind_review(
+        self,
+        run_id: str,
+        *,
+        review: AdvisoryBlindReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.advisory_calls.append(("blind", run_id, review, idempotency_key))
+        return {
+            "id": "abr_" + "a" * 32,
+            "run_id": run_id,
+            "review": review.to_dict(),
+            "content_sha256": review.digest,
+        }
+
+    def submit_advisory_challenge_review(
+        self,
+        run_id: str,
+        *,
+        review: AdvisoryChallengeReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.advisory_calls.append(("challenge", run_id, review, idempotency_key))
+        return {
+            "id": "acr_" + "b" * 32,
+            "run_id": run_id,
+            "review": review.to_dict(),
+            "content_sha256": review.digest,
+        }
+
+    def submit_advisory_report(
+        self,
+        run_id: str,
+        *,
+        report: AdvisoryReport,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.advisory_calls.append(("report", run_id, report, idempotency_key))
+        return {
+            "id": "arp_" + "c" * 32,
+            "run_id": run_id,
+            "report": report.to_dict(),
+            "content_sha256": report.digest,
+        }
+
 
 def request(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
@@ -436,6 +488,7 @@ class RunGatewayTests(unittest.TestCase):
         self.assertIsNone(result["review_assignment"])
         self.assertIsNone(result["changes_requested"])
         self.assertIsNone(result["discovery_assignment"])
+        self.assertIsNone(result["advisory_assignment"])
         self.assertEqual(result["work_memory"]["version"], 3)
         self.assertEqual(
             result["authority"],
@@ -561,6 +614,116 @@ class RunGatewayTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["result"]["disposition"], "ASK_HUMAN")
         self.assertEqual(response["result"]["agent_action"], "submit_handoff_then_exit")
+
+    def test_advisory_submissions_are_typed_and_bound_to_the_gateway_run(self) -> None:
+        blind = {
+            "schema_version": 1,
+            "summary": "The exact candidate has no advisory findings.",
+            "risk_level": "none",
+            "findings": [],
+        }
+        challenge = {
+            "schema_version": 1,
+            "summary": "No peer findings require a challenge.",
+            "challenges": [],
+        }
+        report = {
+            "schema_version": 1,
+            "authority": "advisory_only",
+            "attention": "none",
+            "summary": "The advisory panel found no actionable concerns.",
+            "items": [],
+            "follow_up_checks": [],
+        }
+
+        responses = (
+            self.gateway.handle(
+                request(
+                    "advisory.blind.submit",
+                    {"review": blind, "idempotency_key": "advisory-blind-1"},
+                )
+            ),
+            self.gateway.handle(
+                request(
+                    "advisory.challenge.submit",
+                    {
+                        "review": challenge,
+                        "idempotency_key": "advisory-challenge-1",
+                    },
+                )
+            ),
+            self.gateway.handle(
+                request(
+                    "advisory.report.submit",
+                    {"report": report, "idempotency_key": "advisory-report-1"},
+                )
+            ),
+        )
+
+        self.assertTrue(all(response["ok"] for response in responses))
+        self.assertEqual(
+            [response["result"]["agent_action"] for response in responses],
+            ["exit", "exit", "exit"],
+        )
+        self.assertEqual(
+            [response["result"]["content_sha256"] for response in responses],
+            [call[2].digest for call in self.control.advisory_calls],
+        )
+        self.assertEqual(
+            [
+                response["result"][key]
+                for response, key in zip(
+                    responses,
+                    ("blind_review_id", "challenge_review_id", "report_id"),
+                    strict=True,
+                )
+            ],
+            ["abr_" + "a" * 32, "acr_" + "b" * 32, "arp_" + "c" * 32],
+        )
+        self.assertEqual(
+            [(call[0], call[1], call[3]) for call in self.control.advisory_calls],
+            [
+                ("blind", RUN_ID, "advisory-blind-1"),
+                ("challenge", RUN_ID, "advisory-challenge-1"),
+                ("report", RUN_ID, "advisory-report-1"),
+            ],
+        )
+        self.assertIsInstance(self.control.advisory_calls[0][2], AdvisoryBlindReview)
+        self.assertIsInstance(
+            self.control.advisory_calls[1][2], AdvisoryChallengeReview
+        )
+        self.assertIsInstance(self.control.advisory_calls[2][2], AdvisoryReport)
+
+        for operation, payload in (
+            (
+                "advisory.blind.submit",
+                {"review": blind, "idempotency_key": "short", "extra": True},
+            ),
+            (
+                "advisory.blind.submit",
+                {"review": [], "idempotency_key": "invalid-blind-1"},
+            ),
+            (
+                "advisory.challenge.submit",
+                {"review": [], "idempotency_key": "invalid-challenge-1"},
+            ),
+            (
+                "advisory.report.submit",
+                {"report": [], "idempotency_key": "invalid-report-shape-1"},
+            ),
+            (
+                "advisory.report.submit",
+                {
+                    "report": {**report, "authority": "gate"},
+                    "idempotency_key": "invalid-report-1",
+                },
+            ),
+        ):
+            with self.subTest(operation=operation):
+                response = self.gateway.handle(request(operation, payload))
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"]["code"], "invalid_request")
+        self.assertEqual(len(self.control.advisory_calls), 3)
 
     def test_work_memory_operations_are_typed_and_bound_to_the_run(self) -> None:
         entry = {

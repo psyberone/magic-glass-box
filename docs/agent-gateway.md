@@ -118,6 +118,13 @@ fixed role and stage, pinned human decision-owner handle, accepted trace when
 present, and prior typed rulings. This is bounded prescription state, not an
 agent transcript or a grant of authority beyond the run's capability list.
 
+An advisory-bound run receives a separate `advisory_assignment`. It names the
+execution, phase-specific role, and exact candidate. A blind reviewer receives
+no peer evidence. A fresh challenge run receives all three completed blind
+reviews but no peer challenges. Only the triangulation coordinator receives
+both complete evidence sets. This field never creates an exact-candidate gate
+assignment or landing authority.
+
 ### Discovery evidence operations
 
 `discovery.trace.submit` accepts exactly a published
@@ -138,6 +145,25 @@ pinned decision owner and returns `agent_action: "submit_handoff_then_exit"`.
 A later `GO` or `NO_GO` must name the latest answered interaction and returns
 `agent_action: "exit"`. Identical retries are idempotent; a reused key with
 different evidence is rejected.
+
+### Advisory evidence operations
+
+`advisory.blind.submit` accepts exactly one published
+`advisory-blind-review-v1` object and stable `idempotency_key` from the bound
+blind-review attempt. `advisory.challenge.submit` accepts the corresponding
+bounded challenge document only from a fresh challenge attempt; referenced
+findings must exist in another reviewer's accepted blind artifact.
+`advisory.report.submit` accepts the published report only from the separate
+triangulation coordinator, and the report authority must be literally
+`advisory_only`.
+
+All three operations obtain run identity from the mailbox, retain the exact
+active-attempt provenance and canonical digest, and return
+`agent_action: "exit"`. Identical retries are idempotent. Wrong roles, phases,
+candidate heads, inactive attempts, unknown evidence references, extra fields,
+and reused keys with different content are rejected. Advisory evidence cannot
+satisfy an integration gate, approve a candidate, mutate source, or authorize
+landing.
 
 ### Work-memory operations
 

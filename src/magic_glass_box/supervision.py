@@ -45,6 +45,10 @@ class DiscoveryAdvancer(Protocol):
     def advance(self, execution_id: str, *, expected_version: int) -> bool: ...
 
 
+class AdvisoryAdvancer(Protocol):
+    def advance(self, execution_id: str, *, expected_version: int) -> bool: ...
+
+
 class EscalationTransport(Protocol):
     def remind_interaction(
         self,
@@ -74,6 +78,7 @@ class Supervisor:
         *,
         workflow_director: WorkflowAdvancer | None = None,
         discovery_director: DiscoveryAdvancer | None = None,
+        advisory_director: AdvisoryAdvancer | None = None,
         supervisor_id: str | None = None,
         poll_interval: float = 2.0,
         max_workers: int = 4,
@@ -153,6 +158,7 @@ class Supervisor:
         self.escalation_transport = escalation_transport
         self.workflow_director = workflow_director
         self.discovery_director = discovery_director
+        self.advisory_director = advisory_director
         self.supervisor_id = supervisor_id
         self.poll_interval = float(poll_interval)
         self.max_workers = max_workers
@@ -446,6 +452,16 @@ class Supervisor:
                 if not finished:
                     self._defer_prescription_action(action)
                     return
+            elif action["kind"] == "advisory.advance":
+                if self.advisory_director is None:
+                    raise SupervisorError("advisory director is unavailable")
+                finished = self.advisory_director.advance(
+                    action["advisory_execution_id"],
+                    expected_version=action["subject_version"],
+                )
+                if not finished:
+                    self._defer_prescription_action(action)
+                    return
             else:
                 raise SupervisorError("stored supervisor action kind is invalid")
         except Exception as exc:
@@ -566,6 +582,14 @@ class Supervisor:
             if action["kind"] == "discovery.advance":
                 execution = self.database.get_discovery_execution(
                     str(action["discovery_execution_id"])
+                )
+                return (
+                    execution["state"] != "active"
+                    or execution["version"] != action["subject_version"]
+                )
+            if action["kind"] == "advisory.advance":
+                execution = self.database.get_advisory_execution(
+                    str(action["advisory_execution_id"])
                 )
                 return (
                     execution["state"] != "active"

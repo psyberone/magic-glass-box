@@ -177,6 +177,28 @@ Discovery subjects mutually exclusive. This is durable control-plane state,
 not a portable document or a new worker-facing capability. Existing actions
 are preserved during migration with a null Discovery subject.
 
+Control-plane schema v36 registers the fixed `advisory-review-v1`
+prescription and publishes `advisory-configuration-v1.schema.json`,
+`advisory-blind-review-v1.schema.json`,
+`advisory-challenge-review-v1.schema.json`, and
+`advisory-report-v1.schema.json`. Runtime validation additionally enforces
+bounded UTF-8 artifacts, safe evidence paths, semantic-key uniqueness,
+cross-reviewer references, distinct read-only role identities, and the final
+report's literal `advisory_only` authority.
+
+Control-plane schema v37 adds relational advisory execution, phase-bound run,
+blind-review, challenge-review, report, and event records. One execution pins
+the exact candidate and configuration inputs. Its seven runs preserve
+structural blindness and exact active-attempt provenance without creating an
+integration-gate relationship.
+
+Control-plane schema v38 adds the version-bound `advisory.advance` supervisor
+operation and exact advisory-execution foreign key. Table checks keep run,
+implementation, Discovery, and advisory action subjects mutually exclusive.
+The migration preserves existing action rows with a null advisory subject;
+the new subject is private control-plane state, not a portable document or a
+new source of review authority.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

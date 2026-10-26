@@ -2913,6 +2913,9 @@ class CLITests(unittest.TestCase):
             mock.patch(
                 "magic_glass_box.cli.DiscoveryDirector"
             ) as discovery_director_type,
+            mock.patch(
+                "magic_glass_box.cli.AdvisoryDirector"
+            ) as advisory_director_type,
             mock.patch("magic_glass_box.cli.logging.basicConfig") as configure_logs,
             redirect_stdout(stdout),
         ):
@@ -2943,12 +2946,14 @@ class CLITests(unittest.TestCase):
             control,
             workflow_director=build_workflow_director.return_value,
             discovery_director=discovery_director_type.return_value,
+            advisory_director=advisory_director_type.return_value,
             poll_interval=1.5,
             max_workers=3,
             action_lease_seconds=45,
             action_timeout=390.0,
         )
         discovery_director_type.assert_called_once_with(control)
+        advisory_director_type.assert_called_once_with(control)
 
     def test_sigterm_unwinds_a_service_and_restores_the_previous_handler(self) -> None:
         previous = mock.sentinel.previous_handler

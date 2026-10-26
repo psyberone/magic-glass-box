@@ -1261,7 +1261,8 @@ The completed proof above is the milestone's external golden test.
 ## Milestone 13: discovery and review prescriptions
 
 **Status: in progress; M13A and M13B complete, with the M13C contract,
-configuration, and execution-ledger checkpoints complete after M12**
+execution-ledger, worker-gateway, and durable-director checkpoints complete
+after M12**
 
 M13 does not turn workflows into an arbitrary DAG engine. Each prescription is
 a versioned, immutable built-in with fixed roles, stages, workspace authority,
@@ -1378,8 +1379,9 @@ or crashes.
 
 ### M13C: advisory review v1
 
-**Status: in progress; contract and configuration checkpoint complete in
-schema v36 and execution-ledger checkpoint complete in schema v37.**
+**Status: in progress; contract and configuration complete in schema v36,
+execution ledger complete in schema v37, and worker gateway plus durable
+director complete in schema v38.**
 
 Schema v36 registers one fixed `advisory-review-v1` prescription with three
 read-only reviewers and a separate read-only coordinator. All four bindings
@@ -1419,11 +1421,14 @@ separate from exact-candidate gate assignment data, and the final report
 retains only `advisory_only` authority. An active advisory execution also
 prevents premature work-thread completion.
 
-This checkpoint makes the state machine directly executable through storage
-and service APIs, but does not yet make it autonomous or worker-facing. No
-advisory worker-gateway handler, durable supervisor action, bounded director,
-CLI, or control-room projection exists yet. Those are the next bounded
-checkpoints.
+Schema v38 makes the state machine autonomous and worker-facing without
+widening its authority. The gateway accepts only the three typed advisory
+artifacts from the mailbox-bound run and returns an exit instruction. One
+version-bound `advisory.advance` supervisor action drives all four stages. The
+bounded director creates exactly the three blind reviewers, three fresh
+challenge reviewers, and separate coordinator; waits without spending retry
+budget; fails explicitly on failed or evidence-free runs; and treats stale
+actions as complete. Process replacement resumes from the ledger alone.
 
 Checkpoint evidence: 1,157 tests pass at 86% aggregate branch-aware coverage;
 the new advisory contract module is at 89%, and the generic template parser is
@@ -1448,12 +1453,22 @@ failed or incomplete phases, optimistic terminal transitions, requester-only
 cancellation, exact candidate recovery, work-thread closeout exclusion, and
 schema-v37 migration.
 
+Gateway-and-director evidence: 1,177 tests pass at 87% aggregate statement-
+plus-branch coverage, with the new bounded director at 98%. RED-first tests
+cover typed and run-bound gateway submissions, partial-panel recovery, the
+exact seven-run sequence, active waits, failed reviewers and coordinator,
+successful runs missing each required artifact, stale actions, a lost
+post-commit response, and schema-v38 migration. The focused director mutation
+wave killed 269/275 mutants (97.82%) with no timeouts, uncovered mutants,
+suspicious outcomes, or crashes. The six reviewed survivors only toggle
+`zip(..., strict=True)` to its non-strict equivalents where both inputs are
+constructed from the same fixed three-role tuple.
+
 Remaining M13C work:
 
-- Add the bounded director and gateway handlers that actually enforce the
-  blind, challenge, triangulation, and completion sequence restart-safely.
+- Add the dedicated advisory CLI and bounded control-room projection.
 - Preserve the distinction between exact-candidate gate reviewers and advisory
-  reviewers in service responses, the CLI, control room, and audit language.
+  reviewers in those operator surfaces and their audit language.
 
 ### M13D: scope discipline and live proof
 

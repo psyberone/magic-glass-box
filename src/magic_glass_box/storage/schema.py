@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5350,7 +5350,125 @@ BEGIN
 END;
 """
 
-SCHEMA = (
+ADVISORY_DIRECTOR_SCHEMA = """
+DROP TRIGGER supervisor_action_identity_immutable;
+DROP TRIGGER supervisor_action_immutable_delete;
+DROP INDEX supervisor_action_due;
+DROP INDEX supervisor_action_run;
+DROP INDEX supervisor_action_workflow;
+DROP INDEX supervisor_action_discovery;
+DROP INDEX IF EXISTS supervisor_action_advisory;
+ALTER TABLE supervisor_actions RENAME TO supervisor_actions_v37;
+CREATE TABLE supervisor_actions (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'run.execute', 'attempt.reconcile', 'run.reconcile',
+            'workflow.advance', 'discovery.advance', 'advisory.advance'
+        )
+    ),
+    subject_id TEXT NOT NULL,
+    subject_version INTEGER NOT NULL CHECK (subject_version >= 1),
+    run_id TEXT,
+    workflow_execution_id TEXT,
+    discovery_execution_id TEXT,
+    advisory_execution_id TEXT,
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'claimed', 'succeeded', 'exhausted')
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 9),
+    retry_backoff_json TEXT NOT NULL,
+    available_at TEXT NOT NULL,
+    owner_id TEXT,
+    lease_expires_at TEXT,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (kind, subject_id, subject_version),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (discovery_execution_id)
+        REFERENCES discovery_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (advisory_execution_id)
+        REFERENCES advisory_executions(id) ON DELETE RESTRICT,
+    CHECK (
+        (kind = 'workflow.advance' AND run_id IS NULL
+            AND workflow_execution_id = subject_id
+            AND discovery_execution_id IS NULL
+            AND advisory_execution_id IS NULL)
+        OR
+        (kind = 'discovery.advance' AND run_id IS NULL
+            AND workflow_execution_id IS NULL
+            AND discovery_execution_id = subject_id
+            AND advisory_execution_id IS NULL)
+        OR
+        (kind = 'advisory.advance' AND run_id IS NULL
+            AND workflow_execution_id IS NULL
+            AND discovery_execution_id IS NULL
+            AND advisory_execution_id = subject_id)
+        OR
+        (kind NOT IN (
+                'workflow.advance', 'discovery.advance', 'advisory.advance'
+            )
+            AND run_id IS NOT NULL AND workflow_execution_id IS NULL
+            AND discovery_execution_id IS NULL
+            AND advisory_execution_id IS NULL)
+    ),
+    CHECK (
+        (
+            state = 'pending' AND owner_id IS NULL
+            AND lease_expires_at IS NULL AND finished_at IS NULL
+        ) OR (
+            state = 'claimed' AND owner_id IS NOT NULL
+            AND lease_expires_at IS NOT NULL AND finished_at IS NULL
+        ) OR (
+            state IN ('succeeded', 'exhausted') AND owner_id IS NULL
+            AND lease_expires_at IS NULL AND finished_at IS NOT NULL
+        )
+    )
+) STRICT;
+INSERT INTO supervisor_actions
+    (id, kind, subject_id, subject_version, run_id, workflow_execution_id,
+     discovery_execution_id, advisory_execution_id, state, version,
+     attempt_count, max_attempts, retry_backoff_json, available_at, owner_id,
+     lease_expires_at, last_error_code, created_at, updated_at, finished_at)
+SELECT id, kind, subject_id, subject_version, run_id, workflow_execution_id,
+       discovery_execution_id, NULL, state, version, attempt_count,
+       max_attempts, retry_backoff_json, available_at, owner_id,
+       lease_expires_at, last_error_code, created_at, updated_at, finished_at
+FROM supervisor_actions_v37;
+DROP TABLE supervisor_actions_v37;
+CREATE INDEX supervisor_action_due
+    ON supervisor_actions(state, available_at, lease_expires_at);
+CREATE INDEX supervisor_action_run
+    ON supervisor_actions(run_id, created_at DESC);
+CREATE INDEX supervisor_action_workflow
+    ON supervisor_actions(workflow_execution_id, created_at DESC);
+CREATE INDEX supervisor_action_discovery
+    ON supervisor_actions(discovery_execution_id, created_at DESC);
+CREATE INDEX supervisor_action_advisory
+    ON supervisor_actions(advisory_execution_id, created_at DESC);
+CREATE TRIGGER supervisor_action_identity_immutable
+BEFORE UPDATE OF
+    id, kind, subject_id, subject_version, run_id, workflow_execution_id,
+    discovery_execution_id, advisory_execution_id, max_attempts,
+    retry_backoff_json, created_at
+ON supervisor_actions
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor action identity is immutable');
+END;
+CREATE TRIGGER supervisor_action_immutable_delete
+BEFORE DELETE ON supervisor_actions
+BEGIN
+    SELECT RAISE(ABORT, 'supervisor actions cannot be deleted');
+END;
+"""
+
+SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
     + WORK_ITEM_SCHEMA
@@ -5391,6 +5509,7 @@ SCHEMA = (
     + DISCOVERY_DIRECTOR_SCHEMA
     + ADVISORY_EXECUTION_SCHEMA
 )
+SCHEMA = SCHEMA_V37 + ADVISORY_DIRECTOR_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -5428,4 +5547,5 @@ MIGRATIONS = {
     34: DISCOVERY_DIRECTOR_SCHEMA,
     35: ADVISORY_REVIEW_PRESCRIPTION_SCHEMA,
     36: ADVISORY_EXECUTION_SCHEMA,
+    37: ADVISORY_DIRECTOR_SCHEMA,
 }

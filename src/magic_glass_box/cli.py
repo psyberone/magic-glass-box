@@ -13,6 +13,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from .advisory_director import AdvisoryDirector
 from .candidates import (
     DEFAULT_GIT_TIMEOUT_SECONDS,
     CandidateError,
@@ -1219,12 +1220,14 @@ def _serve_supervisor(
     control.initialize()
     workflow_director = _build_workflow_director(control, coordinator)
     discovery_director = DiscoveryDirector(control)
+    advisory_director = AdvisoryDirector(control)
     supervisor = Supervisor(
         control.database,
         coordinator,
         control,
         workflow_director=workflow_director,
         discovery_director=discovery_director,
+        advisory_director=advisory_director,
         poll_interval=args.poll_interval,
         max_workers=args.max_workers,
         action_lease_seconds=args.action_lease_seconds,

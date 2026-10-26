@@ -15,6 +15,10 @@ from magic_glass_box.advisory import (
     AdvisoryConfigurationSpec,
     AdvisoryReport,
 )
+from magic_glass_box.advisory_director import (
+    ADVISORY_RUN_SUPERVISION,
+    AdvisoryDirector,
+)
 from magic_glass_box.candidates import GitCandidateStore
 from magic_glass_box.db import (
     ConcurrentUpdateError,
@@ -32,7 +36,8 @@ from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.orchestration import CandidateReviewWorkspaces
 from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
-from magic_glass_box.storage.schema import SCHEMA_VERSION
+from magic_glass_box.storage.schema import SCHEMA_V37, SCHEMA_VERSION
+from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflows import ADVISORY_REVIEW_TEMPLATE_ID
 from magic_glass_box.workspace import GitSnapshotter, WorkspaceManager
 
@@ -1407,6 +1412,388 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
             with self.subTest(arguments=arguments), self.assertRaises(ValidationError):
                 self.database.list_advisory_executions(**arguments)
 
+    def test_director_runs_seven_phase_bound_roles_and_completes(self) -> None:
+        execution = self.start()
+        director = AdvisoryDirector(ControlPlane(self.database))
+        reviewer_roles = ("reviewer_one", "reviewer_two", "reviewer_three")
+
+        self.create_role_run(
+            execution,
+            "blind_review",
+            "reviewer_one",
+            supervision_policy=ADVISORY_RUN_SUPERVISION,
+        )
+
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        blind_stage = self.database.get_advisory_execution(execution["id"])
+        self.assertEqual(set(blind_stage["runs"]["blind_review"]), set(reviewer_roles))
+        blind_runs = {
+            role: self.database.get_run(
+                blind_stage["runs"]["blind_review"][role]["run_id"]
+            )
+            for role in reviewer_roles
+        }
+        for role, run in blind_runs.items():
+            assignment = self.database.get_run_execution(run["id"])
+            self.assertEqual(
+                assignment["supervision_policy"], ADVISORY_RUN_SUPERVISION.to_dict()
+            )
+            self.assertEqual(assignment["advisory_assignment"]["role"], role)
+            self.assertEqual(assignment["advisory_assignment"]["blind_reviews"], {})
+        self.assertFalse(
+            AdvisoryDirector(ControlPlane(self.database)).advance(
+                execution["id"], expected_version=execution["version"]
+            )
+        )
+        for role, run in blind_runs.items():
+            self.run_attempt(
+                run,
+                lambda _attempt, role=role, run=run: (
+                    self.database.submit_advisory_blind_review(
+                        run["id"],
+                        review=AdvisoryBlindReview.from_mapping(blind_value(role)),
+                        idempotency_key=f"directed-blind-{role}",
+                    )
+                ),
+            )
+
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        challenge_stage = self.database.get_advisory_execution(execution["id"])
+        self.assertEqual(
+            (challenge_stage["stage"], challenge_stage["version"]),
+            ("challenge", 2),
+        )
+        self.assertFalse(
+            director.advance(
+                challenge_stage["id"], expected_version=challenge_stage["version"]
+            )
+        )
+        challenge_bound = self.database.get_advisory_execution(execution["id"])
+        challenge_runs = {
+            role: self.database.get_run(
+                challenge_bound["runs"]["challenge"][role]["run_id"]
+            )
+            for role in reviewer_roles
+        }
+        self.assertTrue(
+            set(run["id"] for run in blind_runs.values()).isdisjoint(
+                run["id"] for run in challenge_runs.values()
+            )
+        )
+        targets = {
+            "reviewer_one": ("reviewer_two", "reviewer-two-0"),
+            "reviewer_two": ("reviewer_three", "reviewer-three-0"),
+            "reviewer_three": ("reviewer_one", "reviewer-one-0"),
+        }
+        for role, run in challenge_runs.items():
+            target_role, target_key = targets[role]
+            assignment = self.database.get_run_execution(run["id"])
+            self.assertEqual(
+                set(assignment["advisory_assignment"]["blind_reviews"]),
+                set(reviewer_roles),
+            )
+            self.assertEqual(assignment["advisory_assignment"]["challenge_reviews"], {})
+            self.run_attempt(
+                run,
+                self.challenge_submission(run, role, target_role, target_key),
+            )
+
+        self.assertTrue(
+            director.advance(
+                challenge_stage["id"], expected_version=challenge_stage["version"]
+            )
+        )
+        triangulate = self.database.get_advisory_execution(execution["id"])
+        self.assertEqual(
+            (triangulate["stage"], triangulate["version"]), ("triangulate", 3)
+        )
+        self.assertFalse(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        coordinated = self.database.get_advisory_execution(execution["id"])
+        coordinator = self.database.get_run(
+            coordinated["runs"]["triangulate"]["coordinator"]["run_id"]
+        )
+        coordinator_assignment = self.database.get_run_execution(coordinator["id"])
+        self.assertEqual(
+            set(coordinator_assignment["advisory_assignment"]["challenge_reviews"]),
+            set(reviewer_roles),
+        )
+        self.run_attempt(
+            coordinator,
+            lambda _attempt: self.database.submit_advisory_report(
+                coordinator["id"],
+                report=AdvisoryReport.from_mapping(report_value()),
+                idempotency_key="directed-advisory-report",
+            ),
+        )
+
+        self.assertTrue(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        completion = self.database.get_advisory_execution(execution["id"])
+        self.assertEqual(
+            (completion["stage"], completion["version"]), ("completion", 4)
+        )
+        self.assertTrue(
+            AdvisoryDirector(ControlPlane(self.database)).advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        finished = self.database.get_advisory_execution(execution["id"])
+        self.assertEqual((finished["state"], finished["version"]), ("completed", 5))
+        all_runs = (*blind_runs.values(), *challenge_runs.values(), coordinator)
+        all_run_ids = {run["id"] for run in all_runs}
+        self.assertEqual(len(all_run_ids), 7)
+
+    def test_director_fails_closed_for_failed_or_missing_role_evidence(self) -> None:
+        reviewer_roles = ("reviewer_one", "reviewer_two", "reviewer_three")
+        execution = self.start()
+        director = AdvisoryDirector(ControlPlane(self.database))
+        self.assertFalse(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        directed = self.database.get_advisory_execution(execution["id"])
+        for role in reviewer_roles:
+            run = self.database.get_run(
+                directed["runs"]["blind_review"][role]["run_id"]
+            )
+            submission: Callable[[dict[str, object]], object] | None = None
+            if role != "reviewer_one":
+
+                def submit(
+                    _attempt: dict[str, object],
+                    role: str = role,
+                    run: dict[str, object] = run,
+                ) -> object:
+                    return self.database.submit_advisory_blind_review(
+                        run["id"],
+                        review=AdvisoryBlindReview.from_mapping(blind_value(role)),
+                        idempotency_key=f"missing-directed-{role}",
+                    )
+
+                submission = submit
+            self.run_attempt(run, submission)
+
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"])
+        )
+        missing = self.database.get_advisory_execution(execution["id"])
+        self.assertEqual(missing["state"], "failed")
+        self.assertIn(
+            "succeeded without an advisory blind review", missing["failure_reason"]
+        )
+
+        failed_execution = self.start(idempotency_key="directed-failed-run")
+        self.assertFalse(
+            director.advance(
+                failed_execution["id"], expected_version=failed_execution["version"]
+            )
+        )
+        failed_directed = self.database.get_advisory_execution(failed_execution["id"])
+        for role in reviewer_roles:
+            run = self.database.get_run(
+                failed_directed["runs"]["blind_review"][role]["run_id"]
+            )
+            self.run_attempt(run, exit_code=17 if role == "reviewer_two" else 0)
+        self.assertTrue(
+            director.advance(
+                failed_execution["id"], expected_version=failed_execution["version"]
+            )
+        )
+        failed = self.database.get_advisory_execution(failed_execution["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("reviewer_two run", failed["failure_reason"])
+        self.assertIn("failed", failed["failure_reason"])
+
+        challenge_execution = self.start(idempotency_key="directed-missing-challenge")
+        challenge, _blind_runs = self.complete_blind_phase(challenge_execution)
+        self.assertFalse(
+            director.advance(challenge["id"], expected_version=challenge["version"])
+        )
+        challenge_directed = self.database.get_advisory_execution(
+            challenge_execution["id"]
+        )
+        targets = {
+            "reviewer_one": ("reviewer_two", "reviewer-two-0"),
+            "reviewer_two": ("reviewer_three", "reviewer-three-0"),
+            "reviewer_three": ("reviewer_one", "reviewer-one-0"),
+        }
+        for role in reviewer_roles:
+            run = self.database.get_run(
+                challenge_directed["runs"]["challenge"][role]["run_id"]
+            )
+            submission = None
+            if role != "reviewer_one":
+                target_role, target_key = targets[role]
+                submission = self.challenge_submission(
+                    run, role, target_role, target_key
+                )
+            self.run_attempt(run, submission)
+        self.assertTrue(
+            director.advance(challenge["id"], expected_version=challenge["version"])
+        )
+        challenge_missing = self.database.get_advisory_execution(
+            challenge_execution["id"]
+        )
+        self.assertEqual(challenge_missing["state"], "failed")
+        self.assertIn(
+            "succeeded without an advisory challenge review",
+            challenge_missing["failure_reason"],
+        )
+
+    def test_director_bounds_stale_actions_and_coordinator_failures(self) -> None:
+        director = AdvisoryDirector(ControlPlane(self.database))
+        execution = self.start()
+        self.assertTrue(
+            director.advance(execution["id"], expected_version=execution["version"] + 1)
+        )
+        self.assertEqual(
+            self.database.get_advisory_execution(execution["id"])["runs"], {}
+        )
+
+        challenge, _blind_runs = self.complete_blind_phase(execution)
+        triangulate, _challenge_runs = self.complete_challenge_phase(challenge)
+        self.assertFalse(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        self.assertFalse(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        coordinated = self.database.get_advisory_execution(execution["id"])
+        coordinator = self.database.get_run(
+            coordinated["runs"]["triangulate"]["coordinator"]["run_id"]
+        )
+        self.run_attempt(coordinator, exit_code=19)
+        self.assertTrue(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        failed = self.database.get_advisory_execution(execution["id"])
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("coordinator run", failed["failure_reason"])
+        self.assertTrue(
+            director.advance(failed["id"], expected_version=failed["version"])
+        )
+
+        missing_execution = self.start(idempotency_key="missing-directed-report")
+        challenge, _blind_runs = self.complete_blind_phase(missing_execution)
+        triangulate, _challenge_runs = self.complete_challenge_phase(challenge)
+        self.assertFalse(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        coordinated = self.database.get_advisory_execution(missing_execution["id"])
+        coordinator = self.database.get_run(
+            coordinated["runs"]["triangulate"]["coordinator"]["run_id"]
+        )
+        self.run_attempt(coordinator)
+        self.assertTrue(
+            director.advance(triangulate["id"], expected_version=triangulate["version"])
+        )
+        missing = self.database.get_advisory_execution(missing_execution["id"])
+        self.assertEqual(missing["state"], "failed")
+        self.assertIn("succeeded without an advisory report", missing["failure_reason"])
+
+    def test_supervisor_keeps_one_version_bound_advisory_action(self) -> None:
+        class Coordinator:
+            @staticmethod
+            def execute(_run_id: str) -> dict[str, object]:
+                return {}
+
+            @staticmethod
+            def reconcile(_run_id: str | None = None) -> list[dict[str, object]]:
+                return []
+
+        class Director:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, int]] = []
+
+            def advance(self, execution_id: str, *, expected_version: int) -> bool:
+                self.calls.append((execution_id, expected_version))
+                return False
+
+        class Transport:
+            @staticmethod
+            def remind_interaction(*_args: object, **_kwargs: object) -> int:
+                return 1
+
+        execution = self.start()
+        created = self.database.enqueue_supervisor_actions()
+        self.assertEqual(len(created), 1)
+        self.assertEqual(self.database.enqueue_supervisor_actions(), [])
+        self.assertEqual(created[0]["kind"], "advisory.advance")
+        self.assertIsNone(created[0]["run_id"])
+        self.assertIsNone(created[0]["workflow_execution_id"])
+        self.assertIsNone(created[0]["discovery_execution_id"])
+        self.assertEqual(created[0]["advisory_execution_id"], execution["id"])
+
+        director = Director()
+        Supervisor(
+            self.database,
+            Coordinator(),
+            Transport(),
+            advisory_director=director,
+            poll_interval=0.05,
+            action_lease_seconds=10,
+            action_timeout=1,
+        ).tick(wait=True)
+
+        action = self.database.get_supervisor_action(created[0]["id"])
+        self.assertEqual(action["state"], "pending")
+        self.assertEqual(action["attempt_count"], 0)
+        self.assertEqual(director.calls, [(execution["id"], execution["version"])])
+        self.assertEqual(len(self.database.list_supervisor_actions()), 1)
+
+    def test_supervisor_settles_an_advisory_action_made_obsolete_mid_call(self) -> None:
+        class Coordinator:
+            @staticmethod
+            def execute(_run_id: str) -> dict[str, object]:
+                return {}
+
+            @staticmethod
+            def reconcile(_run_id: str | None = None) -> list[dict[str, object]]:
+                return []
+
+        class Director:
+            def advance(
+                nested_self, execution_id: str, *, expected_version: int
+            ) -> bool:
+                self.database.fail_advisory_execution(
+                    execution_id,
+                    expected_version=expected_version,
+                    reason="The director observed a terminal reviewer failure.",
+                )
+                raise RuntimeError("process lost the post-commit response")
+
+        class Transport:
+            @staticmethod
+            def remind_interaction(*_args: object, **_kwargs: object) -> int:
+                return 1
+
+        execution = self.start()
+        created = self.database.enqueue_supervisor_actions()
+        supervisor = Supervisor(
+            self.database,
+            Coordinator(),
+            Transport(),
+            advisory_director=Director(),
+            poll_interval=0.05,
+            action_lease_seconds=10,
+            action_timeout=1,
+        )
+        self.addCleanup(supervisor.close)
+
+        supervisor.tick(wait=True)
+
+        action = self.database.get_supervisor_action(created[0]["id"])
+        self.assertEqual(action["state"], "succeeded")
+        self.assertEqual(
+            self.database.get_advisory_execution(execution["id"])["state"], "failed"
+        )
+
     def test_schema_thirty_seven_adds_advisory_ledger_once(self) -> None:
         with self.database.connect() as connection:
             connection.executescript(
@@ -1425,7 +1812,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 37)
+        self.assertEqual(SCHEMA_VERSION, 38)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:
@@ -1447,6 +1834,34 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
                 "advisory_run_bindings",
             },
         )
+
+    def test_schema_thirty_eight_adds_advisory_supervisor_binding_once(self) -> None:
+        legacy_path = self.root / "schema-v37.db"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(SCHEMA_V37)
+            connection.execute("PRAGMA user_version = 37")
+        legacy_path.chmod(0o600)
+
+        migrated = Database(legacy_path)
+        first = migrated.initialize()
+        second = migrated.initialize()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema_version"], 38)
+        with migrated.connect() as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(supervisor_actions)")
+            }
+            indexes = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'index' "
+                    "AND tbl_name = 'supervisor_actions'"
+                )
+            }
+        self.assertIn("advisory_execution_id", columns)
+        self.assertIn("supervisor_action_advisory", indexes)
 
     def test_active_advisory_keeps_its_work_thread_open(self) -> None:
         self.start()

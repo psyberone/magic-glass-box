@@ -1639,7 +1639,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 37)
+        self.assertEqual(SCHEMA_VERSION, 38)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

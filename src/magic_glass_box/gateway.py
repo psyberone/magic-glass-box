@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from .advisory import AdvisoryBlindReview, AdvisoryChallengeReview, AdvisoryReport
 from .db import ConcurrentUpdateError, ConflictError, NotFoundError, StorageError
 from .discovery import DiscoveryRuling, DiscoveryTrace
 from .domain import (
@@ -105,6 +106,30 @@ class GatewayControlPlane(Protocol):
         run_id: str,
         *,
         ruling: DiscoveryRuling,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def submit_advisory_blind_review(
+        self,
+        run_id: str,
+        *,
+        review: AdvisoryBlindReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def submit_advisory_challenge_review(
+        self,
+        run_id: str,
+        *,
+        review: AdvisoryChallengeReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def submit_advisory_report(
+        self,
+        run_id: str,
+        *,
+        report: AdvisoryReport,
         idempotency_key: str,
     ) -> dict[str, Any]: ...
 
@@ -342,6 +367,12 @@ class RunGateway:
                 result = self._submit_discovery_trace(value["payload"])
             elif operation is GatewayCapability.DISCOVERY_RULING_SUBMIT:
                 result = self._submit_discovery_ruling(value["payload"])
+            elif operation is GatewayCapability.ADVISORY_BLIND_SUBMIT:
+                result = self._submit_advisory_blind_review(value["payload"])
+            elif operation is GatewayCapability.ADVISORY_CHALLENGE_SUBMIT:
+                result = self._submit_advisory_challenge_review(value["payload"])
+            elif operation is GatewayCapability.ADVISORY_REPORT_SUBMIT:
+                result = self._submit_advisory_report(value["payload"])
             elif operation is GatewayCapability.INTERACTION_OPEN:
                 result = self._open_interaction(value["payload"])
             elif operation is GatewayCapability.INTERACTION_READ:
@@ -456,6 +487,7 @@ class RunGateway:
             "review_assignment": execution["review_assignment"],
             "changes_requested": execution["changes_requested"],
             "discovery_assignment": execution.get("discovery_assignment"),
+            "advisory_assignment": execution.get("advisory_assignment"),
             "work_memory": execution["work_memory"],
             "authority": {
                 "workspace_mode": profile["workspace_mode"],
@@ -583,6 +615,57 @@ class RunGateway:
                 if ruling.disposition.value == "ASK_HUMAN"
                 else "exit"
             ),
+        }
+
+    def _submit_advisory_blind_review(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"review", "idempotency_key"})
+        review_value = item["review"]
+        if not isinstance(review_value, Mapping):
+            raise _RequestFailure("invalid_request", "review must be an object")
+        review = AdvisoryBlindReview.from_mapping(review_value)
+        stored = self.control.submit_advisory_blind_review(
+            self.run_id,
+            review=review,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "blind_review_id": stored["id"],
+            "content_sha256": stored.get("content_sha256", review.digest),
+            "agent_action": "exit",
+        }
+
+    def _submit_advisory_challenge_review(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"review", "idempotency_key"})
+        review_value = item["review"]
+        if not isinstance(review_value, Mapping):
+            raise _RequestFailure("invalid_request", "review must be an object")
+        review = AdvisoryChallengeReview.from_mapping(review_value)
+        stored = self.control.submit_advisory_challenge_review(
+            self.run_id,
+            review=review,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "challenge_review_id": stored["id"],
+            "content_sha256": stored.get("content_sha256", review.digest),
+            "agent_action": "exit",
+        }
+
+    def _submit_advisory_report(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"report", "idempotency_key"})
+        report_value = item["report"]
+        if not isinstance(report_value, Mapping):
+            raise _RequestFailure("invalid_request", "report must be an object")
+        report = AdvisoryReport.from_mapping(report_value)
+        stored = self.control.submit_advisory_report(
+            self.run_id,
+            report=report,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "report_id": stored["id"],
+            "content_sha256": stored.get("content_sha256", report.digest),
+            "agent_action": "exit",
         }
 
     def _invoke_provider(self, payload: object) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C, M13A, and M13B complete; M13C contract/configuration and
-execution-ledger checkpoints complete**
+**Status: M12A-M12C, M13A, and M13B complete; M13C contract, execution-ledger,
+worker-gateway, and durable-director checkpoints complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -84,9 +84,19 @@ runs and artifacts, and preserve their IDs and digests. Blind assignments
 contain no peer evidence, challenge assignments contain all blind reviews but
 no peer challenges, and only the coordinator sees both complete sets.
 Advisory assignment data remains separate from candidate-gate assignment data,
-and exact-candidate reconstruction does not create gate authority. A worker
-gateway, durable director, and operator surface must still be implemented and
-proven before MGB may claim that the sequence advances autonomously.
+and exact-candidate reconstruction does not create gate authority. At this
+checkpoint the worker gateway, durable director, and operator surface were
+still deliberately absent.
+
+Schema v38 connects that ledger to the worker gateway and durable supervisor.
+Three typed submission operations retain exact run and active-attempt
+provenance without accepting run identity from the worker. One version-bound
+`advisory.advance` action drives three blind runs, three fresh challenge runs,
+one triangulation run, and completion. Failed runs and successful runs missing
+their required artifacts fail explicitly; active runs defer without spending
+retry budget; stale actions settle harmlessly. This makes the seven-run
+sequence autonomous and restart-safe. Its dedicated operator CLI and
+control-room projection remain the final M13C surface checkpoint.
 
 The dedicated `discovery` CLI keeps this prescription distinct from the
 implementation workflow while reusing the generic immutable ledger. It can
@@ -280,10 +290,10 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 - treating a three-agent advisory review as landing authority; and
 - release-management or multi-repository workflows in the first pass.
 
-The advisory contract, configuration, execution ledger, and structural
-blindness rules are now fixed; its worker gateway and durable director are the
-next M13 checkpoint. Heterogeneous work providers and controlled remote
-execution remain later milestones. The completed `implementation-v1` proof,
-schema-v32 named-role ledger, schema-v34 Discovery evidence ledger, schema-v35
-bounded director, and bounded Discovery operator surface establish the
-immutable prescription seam they reuse.
+The advisory contract, configuration, execution ledger, structural blindness,
+worker gateway, and bounded director are now fixed; its dedicated operator
+surface is the next M13 checkpoint. Heterogeneous work providers and
+controlled remote execution remain later milestones. The completed
+`implementation-v1` proof, schema-v32 named-role ledger, schema-v34 Discovery
+evidence ledger, schema-v35 bounded director, and bounded Discovery operator
+surface establish the immutable prescription seam they reuse.

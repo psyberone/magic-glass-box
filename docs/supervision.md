@@ -143,6 +143,17 @@ the prescription explicitly. `ASK_HUMAN` remains on the ordinary durable
 interaction path, so a replacement supervisor can continue after the answer
 without an in-memory wake-up.
 
+Active `advisory-review-v1` executions use a distinct version-bound
+`advisory.advance` action. The bounded director creates three blind reviewer
+runs, three fresh challenge runs using the same pinned profile revisions, and
+one separate coordinator run. It defers without consuming retry budget while
+any required run remains active. A phase advances only after every required
+run succeeds with its exact typed artifact; a failed run or a successful run
+without evidence fails the advisory execution explicitly. Completion requires
+the coordinator's `advisory_only` report. A stale action is harmless, and a
+replacement supervisor reconstructs every decision from the execution ledger
+rather than process memory.
+
 ## Provider recovery
 
 An explicit provider quota, rate-limit, or overload refusal creates one active
