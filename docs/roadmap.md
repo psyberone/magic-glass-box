@@ -1500,6 +1500,12 @@ No M13C work remains. M13D is the scope-discipline and live-proof checkpoint.
   explicit path allowlist, mechanical diff classification, and its own proof;
   it is not required to complete M13.
 
+The first M13D checkpoint publishes the bounded workflow scope-review
+contract. Reviewers supply `MUST` outcomes and base/head `PROBE` observations;
+they cannot supply classifications, gate outcomes, or verdict authority. MGB
+derives the blocking result mechanically. Durable Discovery-to-implementation
+binding, gateway submission, director enforcement, and the live proof remain.
+
 
 ## Milestone 14: heterogeneous work provider
 

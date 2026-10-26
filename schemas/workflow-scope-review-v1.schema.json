@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://magic-glass-box.local/schemas/workflow-scope-review-v1.schema.json",
+  "title": "Magic Glass Box workflow scope review v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "must_results", "probes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "must_results": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/mustResult"}
+    },
+    "probes": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/probe"}
+    }
+  },
+  "$defs": {
+    "key": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
+    "text2048": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "text4096": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/text2048"}
+    },
+    "mustResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "outcome", "summary", "evidence"],
+      "properties": {
+        "key": {"$ref": "#/$defs/key"},
+        "outcome": {"enum": ["passed", "failed"]},
+        "summary": {"$ref": "#/$defs/text4096"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "summary",
+        "base_finding",
+        "head_finding",
+        "evidence"
+      ],
+      "properties": {
+        "key": {"$ref": "#/$defs/key"},
+        "summary": {"$ref": "#/$defs/text4096"},
+        "base_finding": {"enum": ["absent", "present"]},
+        "head_finding": {"enum": ["absent", "present"]},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    }
+  }
+}

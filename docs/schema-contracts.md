@@ -199,6 +199,18 @@ The migration preserves existing action rows with a null advisory subject;
 the new subject is private control-plane state, not a portable document or a
 new source of review authority.
 
+`workflow-scope-review-v1.schema.json` defines the bounded reviewer-authored
+input for M13D scope discipline. It carries one result for every immutable
+Discovery `MUST` plus optional base/head `PROBE` observations. It deliberately
+does not accept a probe classification, gate result, or verdict. MGB derives
+the four-state probe matrix mechanically: head-only findings are regressions,
+base-and-head findings are follow-up proposals, base-only findings are
+resolved, and absent-on-both probes are clean. A failed `MUST` or regression
+requires changes; no other row can block. The portable artifact alone grants
+no review authority. The relational acceptance path must still bind it to the
+exact implementation execution, candidate, policy, reviewer run and attempt,
+and verify its `MUST` keys against the pinned work-ready brief.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

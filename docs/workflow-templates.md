@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C and M13A-M13C complete**
+**Status: M12A-M12C and M13A-M13C complete; M13D in progress**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -119,6 +119,13 @@ progress, final-report provenance, and advisory attention while excluding all
 finding, challenge, and report prose. Both the command surface and browser
 label the result as advisory-only; neither can satisfy a candidate gate or
 authorize landing.
+
+M13D begins with a separate bounded scope-review contract. The reviewer
+reports pass/fail evidence for immutable Discovery `MUST` keys and only the
+base/head presence of its own `PROBE` findings. It cannot submit a probe
+classification or choose the gate result: MGB derives both. This keeps
+Discovery scope, reviewer extrapolation, and gate authority distinct while the
+durable execution binding is added in the next checkpoint.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
