@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .advisory import AdvisoryConfigurationSpec
 from .candidate_recovery import ensure_candidate_revision
 from .candidates import (
     CANDIDATE_SCHEMA_VERSION,
@@ -1981,6 +1982,54 @@ class ControlPlane:
             created_by=creator["id"],
         )
 
+    def create_advisory_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: AdvisoryConfigurationSpec,
+        reviewer_one_profile_name: str,
+        reviewer_two_profile_name: str,
+        reviewer_three_profile_name: str,
+        coordinator_profile_name: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.create_advisory_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            reviewer_one_profile_name=reviewer_one_profile_name,
+            reviewer_two_profile_name=reviewer_two_profile_name,
+            reviewer_three_profile_name=reviewer_three_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
+            created_by=creator["id"],
+        )
+
+    def revise_advisory_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: AdvisoryConfigurationSpec,
+        reviewer_one_profile_name: str,
+        reviewer_two_profile_name: str,
+        reviewer_three_profile_name: str,
+        coordinator_profile_name: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.revise_advisory_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            reviewer_one_profile_name=reviewer_one_profile_name,
+            reviewer_two_profile_name=reviewer_two_profile_name,
+            reviewer_three_profile_name=reviewer_three_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
+            created_by=creator["id"],
+        )
+
     def get_workflow_configuration(
         self, *, project_key: str, name: str, version: int | None = None
     ) -> dict[str, Any]:
@@ -2004,6 +2053,18 @@ class ControlPlane:
         self, *, project_key: str | None = None
     ) -> list[dict[str, Any]]:
         return self.database.list_discovery_configurations(project_key=project_key)
+
+    def get_advisory_configuration(
+        self, *, project_key: str, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        return self.database.get_advisory_configuration(
+            project_key, name, version=version
+        )
+
+    def list_advisory_configurations(
+        self, *, project_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.database.list_advisory_configurations(project_key=project_key)
 
     def start_discovery_execution(
         self,

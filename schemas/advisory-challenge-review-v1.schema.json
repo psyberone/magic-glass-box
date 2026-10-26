@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://magic-glass-box.local/schemas/advisory-challenge-review-v1.schema.json",
+  "title": "Magic Glass Box advisory challenge review v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "summary", "challenges"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "summary": {"$ref": "#/$defs/text4096"},
+    "challenges": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/challenge"}
+    }
+  },
+  "$defs": {
+    "key": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
+    "text2048": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "text4096": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line_start", "line_end", "summary"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "line_start": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "line_end": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "summary": {"$ref": "#/$defs/text2048"}
+      }
+    },
+    "challenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "target_role",
+        "target_finding_key",
+        "stance",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "key": {"$ref": "#/$defs/key"},
+        "target_role": {
+          "enum": ["reviewer_one", "reviewer_two", "reviewer_three"]
+        },
+        "target_finding_key": {"$ref": "#/$defs/key"},
+        "stance": {"enum": ["support", "refine", "dispute"]},
+        "summary": {"$ref": "#/$defs/text4096"},
+        "evidence": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      }
+    }
+  }
+}

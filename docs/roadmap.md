@@ -1260,7 +1260,8 @@ The completed proof above is the milestone's external golden test.
 
 ## Milestone 13: discovery and review prescriptions
 
-**Status: in progress; M13A and M13B complete in honest checkpoints after M12**
+**Status: in progress; M13A and M13B complete, with the M13C
+contract/configuration checkpoint complete after M12**
 
 M13 does not turn workflows into an arbitrary DAG engine. Each prescription is
 a versioned, immutable built-in with fixed roles, stages, workspace authority,
@@ -1377,14 +1378,53 @@ or crashes.
 
 ### M13C: advisory review v1
 
-- Add a fixed, blind-then-challenge multi-reviewer prescription (the personal
-  three-reviewer configuration may be named **The Furies**).
-- Its triangulated report is decision support only. It cannot emit gate
-  evidence, approve landing, satisfy maintainer authority, or mutate the
-  reviewed candidate.
-- Preserve the distinction between an exact-candidate gate reviewer and an
-  advisory reviewer in storage, service responses, the control room, and
-  audit language.
+**Status: in progress; contract and configuration checkpoint complete in
+schema v36.**
+
+Schema v36 registers one fixed `advisory-review-v1` prescription with three
+read-only reviewers and a separate read-only coordinator. All four bindings
+must use distinct profile revisions and distinct Krab identities. The reviewer
+role requires run description plus blind and challenge submission; the
+coordinator's advisory-specific submission surface contains only the final
+report. Any model-provider authority remains an independently pinned property
+of the selected profile. The immutable configuration also bounds findings,
+challenges, and report items. Unknown or altered topology, workspace authority,
+stages, definition digests, or required role capabilities fail closed.
+
+Four published v1 schemas and matching immutable runtime types define the
+configuration, blind review, challenge review, and triangulated report. Paths,
+keys, list sizes, text sizes, and total canonical artifacts are bounded. A
+clean review remains an explicit empty advisory result. The final report must
+literally carry `authority: advisory_only`; its contract has no gate, approval,
+landing, candidate-mutation, or maintainer-disposition field.
+
+This checkpoint does not yet make the prescription executable. The capability
+names are registered so configurations can be validated, but no advisory
+execution can be started and no worker gateway handler, execution ledger,
+director, CLI, or control-room projection claims to enforce the blind or
+challenge stages. Those are the next bounded checkpoints.
+
+Checkpoint evidence: 1,157 tests pass at 86% aggregate branch-aware coverage;
+the new advisory contract module is at 89%, and the generic template parser is
+at 100%. The contract mutation wave initially killed 47/67 covered mutants.
+Survivor-driven tests pinned exact numeric and collection limits, JSON-array
+typing, invalid keys, unsafe paths, and the exact 64 KiB artifact boundary,
+killing 16 more for an effective 63/67 (94.03%). The four reviewed survivors
+are three diagnostic field-label substitutions and one redundant dot-part
+check already implied by path normalization. A separate configuration seam
+wave initially killed 121/133; direct regressions killed both behavior-changing
+writer-guard survivors for an effective 123/133 (92.48%). Neither wave produced
+uncovered mutants, timeouts, suspicious outcomes, or crashes.
+
+Remaining M13C work:
+
+- Add an immutable advisory execution/evidence ledger that pins the reviewed
+  target and the exact four role attempts without conflating advisory evidence
+  with candidate gate evidence.
+- Add the bounded director and gateway handlers that actually enforce the
+  blind, challenge, triangulation, and completion sequence restart-safely.
+- Preserve the distinction between exact-candidate gate reviewers and advisory
+  reviewers in service responses, the CLI, control room, and audit language.
 
 ### M13D: scope discipline and live proof
 

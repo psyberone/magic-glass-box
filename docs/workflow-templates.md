@@ -1,6 +1,7 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C, M13A, and M13B complete**
+**Status: M12A-M12C, M13A, and M13B complete; M13C contract/configuration
+checkpoint complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -63,6 +64,17 @@ The investigator receives no Krab routing, while the coordinator receives only
 the already-pinned session and optional claim needed for durable human
 questions. An active Discovery execution also excludes implementation on the
 same work thread and prevents that thread from being closed.
+
+Schema v36 registers `advisory-review-v1` without making it executable. Its
+fixed topology has three mutually independent read-only reviewers and one
+independent read-only coordinator, with required role capabilities and bounded
+configuration. Published contracts describe blind findings, cross-reviewer
+challenges, and a triangulated report whose authority is literally
+`advisory_only`. The prescription has no correction loop and none of its
+artifacts can satisfy a candidate gate, approve landing, authorize source
+mutation, or stand in for maintainer judgment. An execution ledger, gateway
+handlers, director, and operator surface must be implemented and proven before
+MGB may claim that the blind/challenge sequence is enforced.
 
 The dedicated `discovery` CLI keeps this prescription distinct from the
 implementation workflow while reusing the generic immutable ledger. It can
@@ -256,8 +268,9 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 - treating a three-agent advisory review as landing authority; and
 - release-management or multi-repository workflows in the first pass.
 
-Advisory review is the next M13 checkpoint; heterogeneous work providers and
-controlled remote execution remain later milestones. The completed
-`implementation-v1` proof, schema-v32 named-role ledger, schema-v34 Discovery
-evidence ledger, schema-v35 bounded director, and bounded Discovery operator
-surface establish the immutable prescription seam they reuse.
+The advisory contract and configuration are now fixed; its execution ledger is
+the next M13 checkpoint. Heterogeneous work providers and controlled remote
+execution remain later milestones. The completed `implementation-v1` proof,
+schema-v32 named-role ledger, schema-v34 Discovery evidence ledger, schema-v35
+bounded director, and bounded Discovery operator surface establish the
+immutable prescription seam they reuse.

@@ -14,6 +14,7 @@ WORKFLOW_TEMPLATE_SCHEMA_VERSION = 1
 MAX_CORRECTION_ROUNDS = 8
 IMPLEMENTATION_TEMPLATE_KEY = "implementation-v1"
 DISCOVERY_TEMPLATE_KEY = "discovery-v1"
+ADVISORY_REVIEW_TEMPLATE_KEY = "advisory-review-v1"
 WORKFLOW_TEMPLATE_KEY_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 WORKFLOW_TEMPLATE_MEMBER_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 MAX_WORKFLOW_TEMPLATE_ROLES = 8
@@ -297,7 +298,27 @@ DISCOVERY_TEMPLATE_DEFINITION = WorkflowTemplateDefinition.from_mapping(
 DISCOVERY_TEMPLATE_CANONICAL = DISCOVERY_TEMPLATE_DEFINITION.canonical
 DISCOVERY_TEMPLATE_REVISION = DISCOVERY_TEMPLATE_DEFINITION.digest
 DISCOVERY_TEMPLATE_ID = f"wtd_{DISCOVERY_TEMPLATE_REVISION[:32]}"
+ADVISORY_REVIEW_TEMPLATE = {
+    "schema_version": WORKFLOW_TEMPLATE_SCHEMA_VERSION,
+    "key": ADVISORY_REVIEW_TEMPLATE_KEY,
+    "version": 1,
+    "roles": [
+        {"name": "reviewer_one", "workspace_mode": "read_only"},
+        {"name": "reviewer_two", "workspace_mode": "read_only"},
+        {"name": "reviewer_three", "workspace_mode": "read_only"},
+        {"name": "coordinator", "workspace_mode": "read_only"},
+    ],
+    "stages": ["blind_review", "challenge", "triangulate", "completion"],
+    "correction_loop": False,
+}
+ADVISORY_REVIEW_TEMPLATE_DEFINITION = WorkflowTemplateDefinition.from_mapping(
+    ADVISORY_REVIEW_TEMPLATE
+)
+ADVISORY_REVIEW_TEMPLATE_CANONICAL = ADVISORY_REVIEW_TEMPLATE_DEFINITION.canonical
+ADVISORY_REVIEW_TEMPLATE_REVISION = ADVISORY_REVIEW_TEMPLATE_DEFINITION.digest
+ADVISORY_REVIEW_TEMPLATE_ID = f"wtd_{ADVISORY_REVIEW_TEMPLATE_REVISION[:32]}"
 BUILT_IN_WORKFLOW_TEMPLATE_DEFINITIONS = {
     IMPLEMENTATION_TEMPLATE_ID: IMPLEMENTATION_TEMPLATE_DEFINITION,
     DISCOVERY_TEMPLATE_ID: DISCOVERY_TEMPLATE_DEFINITION,
+    ADVISORY_REVIEW_TEMPLATE_ID: ADVISORY_REVIEW_TEMPLATE_DEFINITION,
 }

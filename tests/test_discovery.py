@@ -22,6 +22,7 @@ from magic_glass_box.domain import (
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.workflows import (
+    ADVISORY_REVIEW_TEMPLATE_ID,
     DISCOVERY_TEMPLATE_ID,
     DISCOVERY_TEMPLATE_REVISION,
 )
@@ -676,8 +677,8 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
                 "DROP TRIGGER workflow_template_definition_immutable_delete"
             )
             connection.execute(
-                "DELETE FROM workflow_template_definitions WHERE id = ?",
-                (DISCOVERY_TEMPLATE_ID,),
+                "DELETE FROM workflow_template_definitions WHERE id IN (?, ?)",
+                (ADVISORY_REVIEW_TEMPLATE_ID, DISCOVERY_TEMPLATE_ID),
             )
             connection.execute("PRAGMA user_version = 32")
 
@@ -685,13 +686,13 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 35)
+        self.assertEqual(SCHEMA_VERSION, 36)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         definitions = migrated.list_workflow_template_definitions()
         self.assertEqual(
             {definition["key"] for definition in definitions},
-            {"discovery-v1", "implementation-v1"},
+            {"advisory-review-v1", "discovery-v1", "implementation-v1"},
         )
 
 

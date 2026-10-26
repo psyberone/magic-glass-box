@@ -242,6 +242,9 @@ class AgentProfileTests(unittest.TestCase):
         role_specific = {
             GatewayCapability.DISCOVERY_TRACE_SUBMIT,
             GatewayCapability.DISCOVERY_RULING_SUBMIT,
+            GatewayCapability.ADVISORY_BLIND_SUBMIT,
+            GatewayCapability.ADVISORY_CHALLENGE_SUBMIT,
+            GatewayCapability.ADVISORY_REPORT_SUBMIT,
         }
         self.assertEqual(
             profile.gateway_capabilities,

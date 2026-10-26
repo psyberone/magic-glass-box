@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -4719,6 +4719,22 @@ INSERT INTO workflow_template_definitions (
 );
 """
 
+ADVISORY_REVIEW_PRESCRIPTION_SCHEMA = """
+INSERT INTO workflow_template_definitions (
+    id, template_key, version, schema_version, definition_json,
+    content_sha256, built_in, created_at
+) VALUES (
+    'wtd_fceab7475e9212aaa90fbc3055f09307',
+    'advisory-review-v1',
+    1,
+    1,
+    '{"correction_loop":false,"key":"advisory-review-v1","roles":[{"name":"reviewer_one","workspace_mode":"read_only"},{"name":"reviewer_two","workspace_mode":"read_only"},{"name":"reviewer_three","workspace_mode":"read_only"},{"name":"coordinator","workspace_mode":"read_only"}],"schema_version":1,"stages":["blind_review","challenge","triangulate","completion"],"version":1}',
+    'fceab7475e9212aaa90fbc3055f093071c18c5c0b880a219b513bea62c035382',
+    1,
+    '2026-10-25T00:00:00.000000+00:00'
+);
+"""
+
 DISCOVERY_EXECUTION_SCHEMA = """
 CREATE TABLE discovery_executions (
     id TEXT PRIMARY KEY,
@@ -5097,6 +5113,7 @@ SCHEMA = (
     + WORKFLOW_LANDING_CHAIN_SCHEMA
     + WORKFLOW_PRESCRIPTION_SCHEMA
     + DISCOVERY_PRESCRIPTION_SCHEMA
+    + ADVISORY_REVIEW_PRESCRIPTION_SCHEMA
     + DISCOVERY_EXECUTION_SCHEMA
     + DISCOVERY_DIRECTOR_SCHEMA
 )
@@ -5135,4 +5152,5 @@ MIGRATIONS = {
     32: DISCOVERY_PRESCRIPTION_SCHEMA,
     33: DISCOVERY_EXECUTION_SCHEMA,
     34: DISCOVERY_DIRECTOR_SCHEMA,
+    35: ADVISORY_REVIEW_PRESCRIPTION_SCHEMA,
 }

@@ -32,6 +32,9 @@ from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.workflows import (
+    ADVISORY_REVIEW_TEMPLATE,
+    ADVISORY_REVIEW_TEMPLATE_ID,
+    ADVISORY_REVIEW_TEMPLATE_REVISION,
     DISCOVERY_TEMPLATE,
     DISCOVERY_TEMPLATE_ID,
     DISCOVERY_TEMPLATE_REVISION,
@@ -357,7 +360,7 @@ class WorkflowStorageTests(unittest.TestCase):
             DROP TABLE discovery_executions;
             DROP TRIGGER workflow_template_definition_immutable_delete;
             DELETE FROM workflow_template_definitions
-            WHERE template_key = 'discovery-v1';
+            WHERE template_key IN ('advisory-review-v1', 'discovery-v1');
             CREATE TRIGGER workflow_template_definition_immutable_delete
             BEFORE DELETE ON workflow_template_definitions
             BEGIN
@@ -487,6 +490,15 @@ class WorkflowStorageTests(unittest.TestCase):
             definitions,
             [
                 {
+                    "id": ADVISORY_REVIEW_TEMPLATE_ID,
+                    "key": "advisory-review-v1",
+                    "version": 1,
+                    "revision": ADVISORY_REVIEW_TEMPLATE_REVISION,
+                    "built_in": True,
+                    "definition": ADVISORY_REVIEW_TEMPLATE,
+                    "created_at": "2026-10-25T00:00:00.000000+00:00",
+                },
+                {
                     "id": DISCOVERY_TEMPLATE_ID,
                     "key": "discovery-v1",
                     "version": 1,
@@ -508,7 +520,7 @@ class WorkflowStorageTests(unittest.TestCase):
         )
         self.assertNotIn("credential_ref", repr(configuration))
         counts = self.database.status()["counts"]
-        self.assertEqual(counts["workflow_template_definitions"], 2)
+        self.assertEqual(counts["workflow_template_definitions"], 3)
         self.assertEqual(counts["workflow_configurations"], 1)
         self.assertEqual(counts["workflow_configuration_versions"], 1)
         self.assertEqual(counts["workflow_configuration_role_bindings"], 2)
@@ -1515,7 +1527,7 @@ class WorkflowStorageTests(unittest.TestCase):
         definitions = migrated.list_workflow_template_definitions()
         self.assertEqual(
             {definition["key"] for definition in definitions},
-            {"discovery-v1", "implementation-v1"},
+            {"advisory-review-v1", "discovery-v1", "implementation-v1"},
         )
 
     def test_schema_thirty_one_adds_correction_chain_authority_once(self) -> None:

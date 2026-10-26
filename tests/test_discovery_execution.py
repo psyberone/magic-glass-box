@@ -1616,6 +1616,16 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 DROP TABLE discovery_run_bindings;
                 DROP TABLE discovery_execution_events;
                 DROP TABLE discovery_executions;
+                DROP TRIGGER workflow_template_definition_immutable_delete;
+                DELETE FROM workflow_template_definitions
+                WHERE template_key = 'advisory-review-v1';
+                CREATE TRIGGER workflow_template_definition_immutable_delete
+                BEFORE DELETE ON workflow_template_definitions
+                BEGIN
+                    SELECT RAISE(
+                        ABORT, 'workflow template definitions cannot be deleted'
+                    );
+                END;
                 PRAGMA user_version = 33;
                 """
             )
@@ -1623,7 +1633,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 35)
+        self.assertEqual(SCHEMA_VERSION, 36)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

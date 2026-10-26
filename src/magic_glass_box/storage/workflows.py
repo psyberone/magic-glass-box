@@ -5,6 +5,7 @@ import re
 import sqlite3
 from typing import Any
 
+from ..advisory import AdvisoryConfigurationSpec
 from ..discovery import DiscoveryConfigurationSpec
 from ..domain import (
     AgentProfileSpec,
@@ -22,6 +23,8 @@ from ..domain import (
 from ..gates import ReviewSeparation
 from ..krab import IDEMPOTENCY_KEY_RE
 from ..workflows import (
+    ADVISORY_REVIEW_TEMPLATE_ID,
+    ADVISORY_REVIEW_TEMPLATE_REVISION,
     BUILT_IN_WORKFLOW_TEMPLATE_DEFINITIONS,
     DISCOVERY_TEMPLATE_ID,
     DISCOVERY_TEMPLATE_REVISION,
@@ -64,7 +67,11 @@ class WorkflowStorage:
 
     @staticmethod
     def _configuration_manifest(
-        spec: WorkflowConfigurationSpec | DiscoveryConfigurationSpec,
+        spec: (
+            WorkflowConfigurationSpec
+            | DiscoveryConfigurationSpec
+            | AdvisoryConfigurationSpec
+        ),
         *,
         role_profile_version_ids: dict[str, str],
         template_definition_id: str = IMPLEMENTATION_TEMPLATE_ID,
@@ -204,6 +211,42 @@ class WorkflowStorage:
         if "krab" not in coordinator["spec"].credential_names:
             raise ConflictError("discovery coordinator requires the krab authority")
 
+    @staticmethod
+    def _validate_advisory_roles(
+        _spec: AdvisoryConfigurationSpec,
+        role_pins: dict[str, dict[str, Any]],
+    ) -> None:
+        if len({pin["profile_id"] for pin in role_pins.values()}) != len(role_pins):
+            raise ConflictError("advisory roles require distinct profiles")
+        if len({pin["krab_identity_id"] for pin in role_pins.values()}) != len(
+            role_pins
+        ):
+            raise ConflictError("advisory roles require distinct Krab identities")
+        reviewer_capabilities = {
+            GatewayCapability.RUN_DESCRIBE,
+            GatewayCapability.ADVISORY_BLIND_SUBMIT,
+            GatewayCapability.ADVISORY_CHALLENGE_SUBMIT,
+        }
+        coordinator_capabilities = {
+            GatewayCapability.RUN_DESCRIBE,
+            GatewayCapability.ADVISORY_REPORT_SUBMIT,
+        }
+        for role, pin in role_pins.items():
+            profile_spec = pin["spec"]
+            if profile_spec.workspace_mode is not WorkspaceMode.READ_ONLY:
+                raise ConflictError(f"advisory {role} must use a read-only workspace")
+            required = (
+                coordinator_capabilities
+                if role == "coordinator"
+                else reviewer_capabilities
+            )
+            missing = required.difference(profile_spec.gateway_capabilities)
+            if missing:
+                raise ConflictError(
+                    f"advisory {role} lacks gateway capability: "
+                    + ", ".join(sorted(capability.value for capability in missing))
+                )
+
     def list_workflow_template_definitions(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
@@ -274,11 +317,15 @@ class WorkflowStorage:
         try:
             raw_spec = json.loads(row["spec_json"])
             if row["template_id"] == IMPLEMENTATION_TEMPLATE_ID:
-                spec: WorkflowConfigurationSpec | DiscoveryConfigurationSpec = (
-                    WorkflowConfigurationSpec.from_mapping(raw_spec)
-                )
+                spec: (
+                    WorkflowConfigurationSpec
+                    | DiscoveryConfigurationSpec
+                    | AdvisoryConfigurationSpec
+                ) = WorkflowConfigurationSpec.from_mapping(raw_spec)
             elif row["template_id"] == DISCOVERY_TEMPLATE_ID:
                 spec = DiscoveryConfigurationSpec.from_mapping(raw_spec)
+            elif row["template_id"] == ADVISORY_REVIEW_TEMPLATE_ID:
+                spec = AdvisoryConfigurationSpec.from_mapping(raw_spec)
             else:
                 raise ValidationError("workflow configuration template is unsupported")
         except (json.JSONDecodeError, TypeError, ValidationError) as exc:
@@ -340,6 +387,9 @@ class WorkflowStorage:
                 role_pins["investigator"],
                 role_pins["coordinator"],
             )
+        elif row["template_id"] == ADVISORY_REVIEW_TEMPLATE_ID:
+            assert isinstance(spec, AdvisoryConfigurationSpec)
+            self._validate_advisory_roles(spec, role_pins)
         manifest = self._configuration_manifest(
             spec,
             role_profile_version_ids=role_profile_version_ids,
@@ -498,12 +548,95 @@ class WorkflowStorage:
             create=create,
         )
 
+    def create_advisory_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: AdvisoryConfigurationSpec,
+        reviewer_one_profile_name: str,
+        reviewer_two_profile_name: str,
+        reviewer_three_profile_name: str,
+        coordinator_profile_name: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        return self._write_advisory_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            reviewer_one_profile_name=reviewer_one_profile_name,
+            reviewer_two_profile_name=reviewer_two_profile_name,
+            reviewer_three_profile_name=reviewer_three_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
+            created_by=created_by,
+            create=True,
+        )
+
+    def revise_advisory_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: AdvisoryConfigurationSpec,
+        reviewer_one_profile_name: str,
+        reviewer_two_profile_name: str,
+        reviewer_three_profile_name: str,
+        coordinator_profile_name: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        return self._write_advisory_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            reviewer_one_profile_name=reviewer_one_profile_name,
+            reviewer_two_profile_name=reviewer_two_profile_name,
+            reviewer_three_profile_name=reviewer_three_profile_name,
+            coordinator_profile_name=coordinator_profile_name,
+            created_by=created_by,
+            create=False,
+        )
+
+    def _write_advisory_configuration(
+        self,
+        *,
+        project_key: str,
+        name: str,
+        spec: AdvisoryConfigurationSpec,
+        reviewer_one_profile_name: str,
+        reviewer_two_profile_name: str,
+        reviewer_three_profile_name: str,
+        coordinator_profile_name: str,
+        created_by: str,
+        create: bool,
+    ) -> dict[str, Any]:
+        if not isinstance(spec, AdvisoryConfigurationSpec):
+            raise ValidationError("spec must be an AdvisoryConfigurationSpec")
+        return self._write_prescription_configuration(
+            project_key=project_key,
+            name=name,
+            spec=spec,
+            role_profile_names={
+                "reviewer_one": reviewer_one_profile_name,
+                "reviewer_two": reviewer_two_profile_name,
+                "reviewer_three": reviewer_three_profile_name,
+                "coordinator": coordinator_profile_name,
+            },
+            template_definition_id=ADVISORY_REVIEW_TEMPLATE_ID,
+            template_revision=ADVISORY_REVIEW_TEMPLATE_REVISION,
+            created_by=created_by,
+            create=create,
+        )
+
     def _write_prescription_configuration(
         self,
         *,
         project_key: str,
         name: str,
-        spec: WorkflowConfigurationSpec | DiscoveryConfigurationSpec,
+        spec: (
+            WorkflowConfigurationSpec
+            | DiscoveryConfigurationSpec
+            | AdvisoryConfigurationSpec
+        ),
         role_profile_names: dict[str, str],
         template_definition_id: str,
         template_revision: str,
@@ -564,6 +697,9 @@ class WorkflowStorage:
                         role_pins["investigator"],
                         role_pins["coordinator"],
                     )
+                elif template_definition_id == ADVISORY_REVIEW_TEMPLATE_ID:
+                    assert isinstance(spec, AdvisoryConfigurationSpec)
+                    self._validate_advisory_roles(spec, role_pins)
                 if create:
                     version = 1
                     connection.execute(
@@ -715,6 +851,29 @@ class WorkflowStorage:
                 project_key=project_key
             )
             if configuration["template"]["id"] == DISCOVERY_TEMPLATE_ID
+        ]
+
+    def get_advisory_configuration(
+        self, project_key: str, name: str, *, version: int | None = None
+    ) -> dict[str, Any]:
+        configuration = self.get_workflow_configuration(
+            project_key, name, version=version
+        )
+        if configuration["template"]["id"] != ADVISORY_REVIEW_TEMPLATE_ID:
+            raise NotFoundError(
+                f"advisory configuration not found: {project_key}/{name}"
+            )
+        return configuration
+
+    def list_advisory_configurations(
+        self, *, project_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        return [
+            configuration
+            for configuration in self.list_workflow_configurations(
+                project_key=project_key
+            )
+            if configuration["template"]["id"] == ADVISORY_REVIEW_TEMPLATE_ID
         ]
 
     @staticmethod
