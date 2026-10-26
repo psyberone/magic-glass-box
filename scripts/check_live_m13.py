@@ -1012,6 +1012,21 @@ def _artifact_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _scope_binding_metadata(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        key: value[key]
+        for key in (
+            "discovery_execution_id",
+            "discovery_ruling_id",
+            "discovery_ruling_sha256",
+        )
+    }
+
+
 def _write_m13_report(
     *,
     report_path: Path,
@@ -1173,11 +1188,7 @@ def _write_m13_report(
                 "execution_id": workflow["id"],
                 "state": workflow["state"],
                 "stage": workflow["stage"],
-                "scope_binding_id": (
-                    None
-                    if workflow["scope_binding"] is None
-                    else workflow["scope_binding"]["id"]
-                ),
+                "scope_binding": _scope_binding_metadata(workflow["scope_binding"]),
                 "candidate": candidate_report,
                 "maintainer_authority": "pending",
                 "landing_attempted": False,

@@ -1,6 +1,6 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C and M13A-M13C complete; M13D in progress**
+**Status: M12A-M12C and M13A-M13D complete**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -152,12 +152,17 @@ deliberately requires two OS-process invocations. Workers receive the public
 artifact and interaction shapes in the bootstrap prompt and the exact
 configured limits in `run.describe`.
 
-The quota-backed first invocation passed on 2026-10-25: it stopped on a real
-Krab interaction plus the matching `ASK_HUMAN` ruling and durable handoff, with
-networkless workers, host-only credentials, and an unchanged target checkout.
-The second invocation must accept one strict bounded answer, replace the
-Discovery coordinator attempt, then drive the scoped implementation and
-seven-run advisory review. Until that report passes, M13 remains in progress.
+The quota-backed proof passed on 2026-10-25 against exact Imitation Krab base
+`19caff352322f020e0c7d6328854d990b063c833`. Its first process stopped on a
+real Krab interaction plus the matching `ASK_HUMAN` ruling and durable handoff.
+A later process accepted the strict `copy_only` answer, replaced the Discovery
+coordinator, produced a two-path candidate, passed an independent exact-head
+scope review, and stopped the implementation at pending maintainer approval.
+It then completed three blind reviews, three fresh challenge reviews, and one
+triangulated `advisory_only` report. All eleven runs succeeded; no worker had
+network or credential access, no landing was attempted, and the target checkout
+remained unchanged. The final metadata-only report contains evidence IDs and
+digests without the private answer, work-ready brief, or agent transcripts.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:

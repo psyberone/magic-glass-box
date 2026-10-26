@@ -1260,7 +1260,7 @@ The completed proof above is the milestone's external golden test.
 
 ## Milestone 13: discovery and review prescriptions
 
-**Status: in progress; M13A, M13B, and M13C complete after M12; M13D remains**
+**Status: complete; M13A-M13D landed and passed the live exit proof**
 
 M13 does not turn workflows into an arbitrary DAG engine. Each prescription is
 a versioned, immutable built-in with fixed roles, stages, workspace authority,
@@ -1517,7 +1517,11 @@ derives the outcome, and refuses a review-v2 work-log verdict that is missing
 the artifact or contradicts that outcome. The workflow director records gate
 evidence from the derived result and carries the scope-review ID into approval
 or correction events. Unscoped workflows retain their prior behavior. The
-real-repository replacement and advisory proof remains before M13 closes.
+real-repository replacement and advisory proof below closes M13.
+
+Enforcement-checkpoint evidence: the full branch-aware suite passed at 87%.
+The focused scope-authority mutation wave killed 44/54 mutants (81.48%), above
+the 80% floor; survivors were reviewed before the live proof proceeded.
 
 The live-proof harness now exists as `scripts/check_live_m13.py`. Its offline
 contract tests prove strict scope-answer parsing, role-minimal gateway
@@ -1533,8 +1537,34 @@ After the bounded bootstrap fix, a fresh networkless investigator submitted the
 trace and a separate coordinator opened a real Krab choice, recorded its
 `ASK_HUMAN` ruling, submitted a durable handoff, and exited. The target checkout
 remained clean and no Krab or ChatGPT credential entered a worker. The second
-process invocation, replacement-coordinator completion, scoped implementation,
-exact-head review, and advisory run remain before M13D completes.
+live attempt then exposed a real worker-transport mismatch: the published
+`workflow.scope-review.submit` capability contains a hyphen that the worker
+mailbox client rejected before dispatch. The reviewer left a durable blocker,
+and MGB correctly opened `review_verdict_missing` instead of approving. A
+RED-first test now exercises the real CLI seam; the bounded name grammar accepts
+the published capability while the host gateway still authorizes the exact
+enum. The focused current-source mutation wave killed 5/5 mailbox-exchange
+mutants.
+
+The fresh final proof passed against the same exact base. Process one stopped
+with the real Krab choice and durable handoff. A later process accepted the
+owner's `copy_only` answer, produced a second coordinator attempt and final
+`GO`, built candidate `10db601d7ae60952729bb59f3abd1d1fd5e5b3bd` changing only
+`src/imitation_krab/cli.py` and `tests/test_health_cli.py`, and reached pending
+maintainer approval after both the typed scope review and independent verdict
+derived `approved`. No landing was attempted. The advisory execution completed
+three blind reviews, three fresh challenge reviews, and one triangulated report
+whose authority is `advisory_only`. All eleven runs succeeded; workers stayed
+networkless and credential-free; the target checkout stayed clean. The final
+report digest is
+`d1aa7ae4fb82d0bcd16600651f71548d9f36cde12f9dcee85b8d1dce301fadd3`.
+A final report-only restart exposed a harness assumption that the composite
+scope binding had a synthetic row ID. A RED-first projection test now retains
+the actual Discovery execution ID, ruling ID, and ruling digest instead; no
+agent work or provider call was repeated.
+The successful proof accounted for $0.556763; all investigative M13 live
+attempts together accounted for $1.072038, below the authorized $5 ceiling.
+The final suite remains at 87% aggregate statement-plus-branch coverage.
 
 ## Milestone 13.5: self-describing worker gateway contracts
 

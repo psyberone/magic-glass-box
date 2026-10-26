@@ -21,6 +21,7 @@ from scripts.check_live_m13 import (
     _load_scope_answer,
     _prepare_control_plane,
     _profile,
+    _scope_binding_metadata,
     _work_item,
     _workflow_requires_stop,
     _workflow_spec,
@@ -213,6 +214,27 @@ class LiveM13ContractTests(unittest.TestCase):
             "rulings": [],
         }
         self.assertFalse(_workflow_requires_stop(ledger, "wfx_1"))
+
+    def test_report_projects_scope_binding_provenance_without_an_invented_id(
+        self,
+    ) -> None:
+        binding = {
+            "discovery_execution_id": "dxe_" + "1" * 32,
+            "discovery_ruling_id": "drl_" + "2" * 32,
+            "discovery_ruling_sha256": "3" * 64,
+            "work_ready_brief": {"private": "body"},
+            "created_at": "2026-10-25T00:00:00+00:00",
+        }
+
+        self.assertEqual(
+            _scope_binding_metadata(binding),
+            {
+                "discovery_execution_id": "dxe_" + "1" * 32,
+                "discovery_ruling_id": "drl_" + "2" * 32,
+                "discovery_ruling_sha256": "3" * 64,
+            },
+        )
+        self.assertIsNone(_scope_binding_metadata(None))
 
     def test_cli_requires_explicit_paths_and_caps_the_budget(self) -> None:
         arguments = [
