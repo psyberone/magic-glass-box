@@ -89,6 +89,10 @@ class RunResultStore(Protocol):
 class CandidateReviewWorkspaceProvider(Protocol):
     def prepare(self, run_id: str, policy_id: str) -> PreparedWorkspace: ...
 
+    def prepare_candidate(
+        self, run_id: str, candidate_id: str
+    ) -> PreparedWorkspace: ...
+
 
 class CandidateReviewWorkspaces:
     """Recover and materialize an exact private candidate bound to a run."""
@@ -113,12 +117,36 @@ class CandidateReviewWorkspaces:
             raise RunOrchestrationError(
                 "candidate-backed run has invalid durable identity"
             ) from exc
+        return self._prepare_manifest(
+            run_id, manifest, repository_path=revision["repository_path"]
+        )
+
+    def prepare_candidate(self, run_id: str, candidate_id: str) -> PreparedWorkspace:
+        candidate = self.database.get_candidate(candidate_id)
         try:
-            repository_path = revision["repository_path"]
-            if repository_path is None:
-                raise RunOrchestrationError(
-                    "candidate-backed run has no recovery repository"
-                )
+            manifest = CandidateManifest.from_mapping(candidate["manifest"])
+        except (CandidateError, TypeError) as exc:
+            raise RunOrchestrationError(
+                "candidate-backed run has invalid durable identity"
+            ) from exc
+        return self._prepare_manifest(
+            run_id,
+            manifest,
+            repository_path=self.database.get_candidate_repository_path(candidate_id),
+        )
+
+    def _prepare_manifest(
+        self,
+        run_id: str,
+        manifest: CandidateManifest,
+        *,
+        repository_path: str | None,
+    ) -> PreparedWorkspace:
+        if repository_path is None:
+            raise RunOrchestrationError(
+                "candidate-backed run has no recovery repository"
+            )
+        try:
             ensure_candidate_revision(
                 self.database,
                 self.result_store,
@@ -337,11 +365,24 @@ class RunCoordinator:
                 profile = AgentProfileSpec.from_mapping(inputs["profile"])
                 review_candidate_id = inputs["review_candidate_id"]
                 change_candidate_id = inputs["change_candidate_id"]
-                if review_candidate_id is not None and change_candidate_id is not None:
+                advisory_assignment = inputs["advisory_assignment"]
+                advisory_candidate_id = (
+                    None
+                    if advisory_assignment is None
+                    else advisory_assignment["candidate"]["id"]
+                )
+                candidate_ids = (
+                    review_candidate_id,
+                    change_candidate_id,
+                    advisory_candidate_id,
+                )
+                if sum(value is not None for value in candidate_ids) > 1:
                     raise RunOrchestrationError(
                         "run has conflicting candidate-backed bindings"
                     )
-                candidate_id = review_candidate_id or change_candidate_id
+                candidate_id = next(
+                    (value for value in candidate_ids if value is not None), None
+                )
                 candidate_policy_id = (
                     inputs["gate_policy_id"]
                     if review_candidate_id is not None
@@ -352,9 +393,14 @@ class RunCoordinator:
                         raise RunOrchestrationError(
                             "candidate-backed run has no workspace provider"
                         )
-                    prepared = self.candidate_workspaces.prepare(
-                        run_id, candidate_policy_id
-                    )
+                    if advisory_candidate_id is not None:
+                        prepared = self.candidate_workspaces.prepare_candidate(
+                            run_id, advisory_candidate_id
+                        )
+                    else:
+                        prepared = self.candidate_workspaces.prepare(
+                            run_id, candidate_policy_id
+                        )
                 else:
                     if context.repository_path is None:
                         raise RunOrchestrationError(

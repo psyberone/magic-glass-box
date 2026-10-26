@@ -105,7 +105,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         )
 
     def test_schema_twenty_four_registers_immutable_redacted_authority(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 36)
+        self.assertEqual(SCHEMA_VERSION, 37)
         self.assertIn("CREATE TABLE service_sidecars", SERVICE_SIDECAR_SCHEMA)
         self.assertIn(
             "CREATE TABLE project_capability_bindings", CAPABILITY_BINDING_SCHEMA
@@ -142,6 +142,12 @@ class ServiceSidecarStorageTests(unittest.TestCase):
 
     def test_schema_twenty_four_migrates_schema_twenty_two_once(self) -> None:
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE advisory_reports")
+            connection.execute("DROP TABLE advisory_challenge_reviews")
+            connection.execute("DROP TABLE advisory_blind_reviews")
+            connection.execute("DROP TABLE advisory_run_bindings")
+            connection.execute("DROP TABLE advisory_execution_events")
+            connection.execute("DROP TABLE advisory_executions")
             connection.execute("DROP TABLE discovery_rulings")
             connection.execute("DROP TABLE discovery_traces")
             connection.execute("DROP TABLE discovery_run_bindings")

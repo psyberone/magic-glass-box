@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5077,6 +5077,279 @@ BEGIN
 END;
 """
 
+ADVISORY_EXECUTION_SCHEMA = """
+CREATE TABLE advisory_executions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    template_definition_id TEXT NOT NULL,
+    configuration_version_id TEXT NOT NULL,
+    context_version_id TEXT NOT NULL,
+    work_item_id TEXT NOT NULL,
+    work_item_version_id TEXT NOT NULL,
+    work_thread_id TEXT NOT NULL,
+    work_thread_generation INTEGER NOT NULL CHECK (work_thread_generation >= 1),
+    candidate_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('active', 'cancelled', 'completed', 'failed')
+    ),
+    stage TEXT NOT NULL CHECK (
+        stage IN ('blind_review', 'challenge', 'triangulate', 'completion')
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    request_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    cancel_reason TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (requested_by, idempotency_key),
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (template_definition_id)
+        REFERENCES workflow_template_definitions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (configuration_version_id)
+        REFERENCES workflow_configuration_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (context_version_id)
+        REFERENCES project_context_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_version_id)
+        REFERENCES work_item_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_thread_id) REFERENCES work_threads(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND finished_at IS NULL
+            AND cancel_reason IS NULL AND failure_reason IS NULL)
+        OR (state = 'cancelled' AND finished_at IS NOT NULL
+            AND cancel_reason IS NOT NULL AND failure_reason IS NULL)
+        OR (state = 'failed' AND finished_at IS NOT NULL
+            AND cancel_reason IS NULL AND failure_reason IS NOT NULL)
+        OR (state = 'completed' AND finished_at IS NOT NULL
+            AND cancel_reason IS NULL AND failure_reason IS NULL
+            AND stage = 'completion')
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX advisory_execution_one_active_configuration_candidate
+    ON advisory_executions(candidate_id, configuration_version_id)
+    WHERE state = 'active';
+CREATE INDEX advisory_execution_project_created
+    ON advisory_executions(project_id, created_at DESC, id DESC);
+CREATE INDEX advisory_execution_state_created
+    ON advisory_executions(state, created_at, id);
+
+CREATE TABLE advisory_execution_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'advisory.started',
+            'advisory.blind_completed',
+            'advisory.challenge_completed',
+            'advisory.triangulation_completed',
+            'advisory.completed',
+            'advisory.cancelled',
+            'advisory.failed'
+        )
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL CHECK (
+        to_state IN ('active', 'cancelled', 'completed', 'failed')
+    ),
+    actor TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, sequence),
+    FOREIGN KEY (execution_id)
+        REFERENCES advisory_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX advisory_execution_event_stream
+    ON advisory_execution_events(execution_id, sequence);
+
+CREATE TABLE advisory_run_bindings (
+    run_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (
+        stage IN ('blind_review', 'challenge', 'triangulate')
+    ),
+    role TEXT NOT NULL CHECK (
+        role IN ('reviewer_one', 'reviewer_two', 'reviewer_three', 'coordinator')
+    ),
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, stage, role),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_id)
+        REFERENCES advisory_executions(id) ON DELETE RESTRICT,
+    CHECK (
+        (stage IN ('blind_review', 'challenge')
+            AND role IN ('reviewer_one', 'reviewer_two', 'reviewer_three'))
+        OR (stage = 'triangulate' AND role = 'coordinator')
+    )
+) STRICT;
+
+CREATE TABLE advisory_blind_reviews (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    reviewer_role TEXT NOT NULL CHECK (
+        reviewer_role IN ('reviewer_one', 'reviewer_two', 'reviewer_three')
+    ),
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    review_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, reviewer_role),
+    UNIQUE (run_id, idempotency_key),
+    FOREIGN KEY (execution_id)
+        REFERENCES advisory_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE advisory_challenge_reviews (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    reviewer_role TEXT NOT NULL CHECK (
+        reviewer_role IN ('reviewer_one', 'reviewer_two', 'reviewer_three')
+    ),
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    review_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, reviewer_role),
+    UNIQUE (run_id, idempotency_key),
+    FOREIGN KEY (execution_id)
+        REFERENCES advisory_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE advisory_reports (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    authority TEXT NOT NULL CHECK (authority = 'advisory_only'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    report_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, idempotency_key),
+    FOREIGN KEY (execution_id)
+        REFERENCES advisory_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (attempt_id) REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TRIGGER advisory_execution_identity_immutable
+BEFORE UPDATE OF
+    id, project_id, template_definition_id, configuration_version_id,
+    context_version_id, work_item_id, work_item_version_id, work_thread_id,
+    work_thread_generation, candidate_id, request_json, content_sha256,
+    idempotency_key, requested_by, created_at
+ON advisory_executions
+BEGIN
+    SELECT RAISE(ABORT, 'advisory execution identity is immutable');
+END;
+
+CREATE TRIGGER advisory_execution_transition
+BEFORE UPDATE ON advisory_executions
+WHEN
+    OLD.state != 'active'
+    OR NEW.version != OLD.version + 1
+    OR NEW.state NOT IN ('active', 'cancelled', 'completed', 'failed')
+    OR (OLD.stage = 'blind_review'
+        AND NEW.stage NOT IN ('blind_review', 'challenge'))
+    OR (OLD.stage = 'challenge'
+        AND NEW.stage NOT IN ('challenge', 'triangulate'))
+    OR (OLD.stage = 'triangulate'
+        AND NEW.stage NOT IN ('triangulate', 'completion'))
+    OR (OLD.stage = 'completion' AND NEW.stage != 'completion')
+    OR (NEW.state = 'active'
+        AND (NEW.finished_at IS NOT NULL OR NEW.cancel_reason IS NOT NULL
+            OR NEW.failure_reason IS NOT NULL))
+    OR (NEW.state = 'cancelled'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NULL
+            OR NEW.failure_reason IS NOT NULL))
+    OR (NEW.state = 'failed'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NOT NULL
+            OR NEW.failure_reason IS NULL))
+    OR (NEW.state = 'completed'
+        AND (NEW.finished_at IS NULL OR NEW.cancel_reason IS NOT NULL
+            OR NEW.failure_reason IS NOT NULL OR NEW.stage != 'completion'))
+BEGIN
+    SELECT RAISE(ABORT, 'advisory execution transition is invalid');
+END;
+
+CREATE TRIGGER advisory_execution_immutable_delete
+BEFORE DELETE ON advisory_executions
+BEGIN
+    SELECT RAISE(ABORT, 'advisory executions cannot be deleted');
+END;
+CREATE TRIGGER advisory_execution_event_immutable_update
+BEFORE UPDATE ON advisory_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'advisory execution events are immutable');
+END;
+CREATE TRIGGER advisory_execution_event_immutable_delete
+BEFORE DELETE ON advisory_execution_events
+BEGIN
+    SELECT RAISE(ABORT, 'advisory execution events cannot be deleted');
+END;
+CREATE TRIGGER advisory_run_binding_immutable_update
+BEFORE UPDATE ON advisory_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'advisory run bindings are immutable');
+END;
+CREATE TRIGGER advisory_run_binding_immutable_delete
+BEFORE DELETE ON advisory_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'advisory run bindings cannot be deleted');
+END;
+CREATE TRIGGER advisory_blind_review_immutable_update
+BEFORE UPDATE ON advisory_blind_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'advisory blind reviews are immutable');
+END;
+CREATE TRIGGER advisory_blind_review_immutable_delete
+BEFORE DELETE ON advisory_blind_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'advisory blind reviews cannot be deleted');
+END;
+CREATE TRIGGER advisory_challenge_review_immutable_update
+BEFORE UPDATE ON advisory_challenge_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'advisory challenge reviews are immutable');
+END;
+CREATE TRIGGER advisory_challenge_review_immutable_delete
+BEFORE DELETE ON advisory_challenge_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'advisory challenge reviews cannot be deleted');
+END;
+CREATE TRIGGER advisory_report_immutable_update
+BEFORE UPDATE ON advisory_reports
+BEGIN
+    SELECT RAISE(ABORT, 'advisory reports are immutable');
+END;
+CREATE TRIGGER advisory_report_immutable_delete
+BEFORE DELETE ON advisory_reports
+BEGIN
+    SELECT RAISE(ABORT, 'advisory reports cannot be deleted');
+END;
+"""
+
 SCHEMA = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -5116,6 +5389,7 @@ SCHEMA = (
     + ADVISORY_REVIEW_PRESCRIPTION_SCHEMA
     + DISCOVERY_EXECUTION_SCHEMA
     + DISCOVERY_DIRECTOR_SCHEMA
+    + ADVISORY_EXECUTION_SCHEMA
 )
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
@@ -5153,4 +5427,5 @@ MIGRATIONS = {
     33: DISCOVERY_EXECUTION_SCHEMA,
     34: DISCOVERY_DIRECTOR_SCHEMA,
     35: ADVISORY_REVIEW_PRESCRIPTION_SCHEMA,
+    36: ADVISORY_EXECUTION_SCHEMA,
 }

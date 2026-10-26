@@ -655,6 +655,12 @@ class AdvisoryConfigurationStorageTests(unittest.TestCase):
         self,
     ) -> None:
         with self.database.connect() as connection:
+            connection.execute("DROP TABLE advisory_reports")
+            connection.execute("DROP TABLE advisory_challenge_reviews")
+            connection.execute("DROP TABLE advisory_blind_reviews")
+            connection.execute("DROP TABLE advisory_run_bindings")
+            connection.execute("DROP TABLE advisory_execution_events")
+            connection.execute("DROP TABLE advisory_executions")
             connection.execute(
                 "DROP TRIGGER workflow_template_definition_immutable_delete"
             )
@@ -668,7 +674,7 @@ class AdvisoryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 36)
+        self.assertEqual(SCHEMA_VERSION, 37)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(

@@ -435,6 +435,51 @@ class RunCoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(self.results.discard_calls, [attempt["id"]])
 
+    def test_advisory_run_materializes_its_candidate_without_gate_policy(self) -> None:
+        run = self.create_run(COMMIT)
+        candidate_id = "cnd_" + "7" * 32
+        original_get_execution = self.database.get_run_execution
+
+        def advisory_inputs(run_id: str) -> dict[str, object]:
+            inputs = original_get_execution(run_id)
+            inputs["advisory_assignment"] = {
+                "execution_id": "arx_" + "8" * 32,
+                "stage": "blind_review",
+                "role": "reviewer_one",
+                "candidate": {"id": candidate_id},
+                "blind_reviews": {},
+                "challenge_reviews": {},
+            }
+            return inputs
+
+        candidate_workspaces = mock.Mock()
+        candidate_workspaces.prepare_candidate.side_effect = (
+            lambda run_id, _candidate_id: self.workspaces.prepare(
+                run_id, self.repository, COMMIT
+            )
+        )
+        coordinator = RunCoordinator(
+            self.database,
+            self.executor,
+            self.workspaces,
+            self.gateways,
+            self.results,
+            candidate_workspaces=candidate_workspaces,
+            orchestrator_id="orchestrator-advisory-test",
+            heartbeat_interval=30,
+        )
+
+        with mock.patch.object(
+            self.database, "get_run_execution", side_effect=advisory_inputs
+        ):
+            finished = coordinator.execute(run["id"])
+
+        self.assertEqual(finished["state"], "succeeded")
+        candidate_workspaces.prepare_candidate.assert_called_once_with(
+            run["id"], candidate_id
+        )
+        candidate_workspaces.prepare.assert_not_called()
+
     def test_gateway_interaction_suspends_instead_of_completing_the_run(self) -> None:
         run = self.create_run(session_id="ses_" + "4" * 32)
 

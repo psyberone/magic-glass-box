@@ -1600,6 +1600,12 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         with self.database.connect() as connection:
             connection.executescript(
                 """
+                DROP TABLE advisory_reports;
+                DROP TABLE advisory_challenge_reviews;
+                DROP TABLE advisory_blind_reviews;
+                DROP TABLE advisory_run_bindings;
+                DROP TABLE advisory_execution_events;
+                DROP TABLE advisory_executions;
                 DROP TRIGGER discovery_ruling_immutable_delete;
                 DROP TRIGGER discovery_ruling_immutable_update;
                 DROP TRIGGER discovery_trace_immutable_delete;
@@ -1633,7 +1639,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 36)
+        self.assertEqual(SCHEMA_VERSION, 37)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

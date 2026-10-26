@@ -57,7 +57,16 @@ class QueryStorage:
                 "drb.execution_id AS discovery_execution_id, "
                 "drb.role AS discovery_role, "
                 "discovery.stage AS discovery_stage, "
-                "decision_owner.handle AS discovery_decision_owner_handle "
+                "decision_owner.handle AS discovery_decision_owner_handle, "
+                "arb.execution_id AS advisory_execution_id, "
+                "arb.stage AS advisory_stage, arb.role AS advisory_role, "
+                "advisory_candidate.id AS advisory_candidate_id, "
+                "advisory_candidate.base_revision AS advisory_base_revision, "
+                "advisory_candidate.head_revision AS advisory_head_revision, "
+                "advisory_candidate.tree_revision AS advisory_tree_revision, "
+                "advisory_candidate.object_format AS advisory_object_format, "
+                "advisory_candidate.content_sha256 "
+                "AS advisory_candidate_content_sha256 "
                 "FROM runs r JOIN projects p ON p.id = r.project_id "
                 "JOIN project_context_versions c ON c.id = r.context_version_id "
                 "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
@@ -77,6 +86,11 @@ class QueryStorage:
                 "LEFT JOIN krab_identities decision_owner "
                 "ON decision_owner.id = "
                 "discovery.decision_owner_krab_identity_id "
+                "LEFT JOIN advisory_run_bindings arb ON arb.run_id = r.id "
+                "LEFT JOIN advisory_executions advisory "
+                "ON advisory.id = arb.execution_id "
+                "LEFT JOIN integration_candidates advisory_candidate "
+                "ON advisory_candidate.id = advisory.candidate_id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()
@@ -112,6 +126,8 @@ class QueryStorage:
             ).fetchone()
             discovery_trace_row = None
             discovery_ruling_rows: list[sqlite3.Row] = []
+            advisory_blind_rows: list[sqlite3.Row] = []
+            advisory_challenge_rows: list[sqlite3.Row] = []
             if row is not None and row["discovery_execution_id"] is not None:
                 discovery_trace_row = connection.execute(
                     "SELECT * FROM discovery_traces WHERE execution_id = ?",
@@ -122,6 +138,19 @@ class QueryStorage:
                     "ORDER BY sequence",
                     (row["discovery_execution_id"],),
                 ).fetchall()
+            if row is not None and row["advisory_execution_id"] is not None:
+                if row["advisory_stage"] in {"challenge", "triangulate"}:
+                    advisory_blind_rows = connection.execute(
+                        "SELECT * FROM advisory_blind_reviews "
+                        "WHERE execution_id = ? ORDER BY reviewer_role",
+                        (row["advisory_execution_id"],),
+                    ).fetchall()
+                if row["advisory_stage"] == "triangulate":
+                    advisory_challenge_rows = connection.execute(
+                        "SELECT * FROM advisory_challenge_reviews "
+                        "WHERE execution_id = ? ORDER BY reviewer_role",
+                        (row["advisory_execution_id"],),
+                    ).fetchall()
         if row is None:
             raise NotFoundError(f"run not found: {run_id}")
         result = dict(row)
@@ -195,6 +224,34 @@ class QueryStorage:
                 "decision_owner_handle": discovery_decision_owner_handle,
                 "trace": trace,
                 "rulings": rulings,
+            }
+        advisory_execution_id = result.pop("advisory_execution_id")
+        advisory_stage = result.pop("advisory_stage")
+        advisory_role = result.pop("advisory_role")
+        advisory_candidate = {
+            "id": result.pop("advisory_candidate_id"),
+            "base_revision": result.pop("advisory_base_revision"),
+            "head_revision": result.pop("advisory_head_revision"),
+            "tree_revision": result.pop("advisory_tree_revision"),
+            "object_format": result.pop("advisory_object_format"),
+            "content_sha256": result.pop("advisory_candidate_content_sha256"),
+        }
+        if advisory_execution_id is None:
+            result["advisory_assignment"] = None
+        else:
+            result["advisory_assignment"] = {
+                "execution_id": advisory_execution_id,
+                "stage": advisory_stage,
+                "role": advisory_role,
+                "candidate": advisory_candidate,
+                "blind_reviews": {
+                    item["reviewer_role"]: self._advisory_blind_record(item)
+                    for item in advisory_blind_rows
+                },
+                "challenge_reviews": {
+                    item["reviewer_role"]: self._advisory_challenge_record(item)
+                    for item in advisory_challenge_rows
+                },
             }
         result["work_memory"] = self._get_work_memory_for_run(
             connection,
@@ -297,6 +354,8 @@ class QueryStorage:
                 "wrb.role AS workflow_role, "
                 "drb.execution_id AS discovery_execution_id, "
                 "drb.role AS discovery_role, "
+                "arb.execution_id AS advisory_execution_id, "
+                "arb.stage AS advisory_stage, arb.role AS advisory_role, "
                 "c.id AS context_version_id, c.version AS context_version, "
                 "ap.name AS profile_name, av.id AS profile_version_id, "
                 "av.version AS profile_version, u.handle AS requested_by, "
@@ -317,6 +376,7 @@ class QueryStorage:
                 "ON gmcr.run_id = r.id "
                 "LEFT JOIN workflow_run_bindings wrb ON wrb.run_id = r.id "
                 "LEFT JOIN discovery_run_bindings drb ON drb.run_id = r.id "
+                "LEFT JOIN advisory_run_bindings arb ON arb.run_id = r.id "
                 "WHERE r.id = ?",
                 (run_id,),
             ).fetchone()

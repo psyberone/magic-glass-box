@@ -564,6 +564,27 @@ class DatabaseCore:
                 ),
                 ("discovery_traces", "SELECT COUNT(*) FROM discovery_traces"),
                 ("discovery_rulings", "SELECT COUNT(*) FROM discovery_rulings"),
+                (
+                    "advisory_executions",
+                    "SELECT COUNT(*) FROM advisory_executions",
+                ),
+                (
+                    "advisory_execution_events",
+                    "SELECT COUNT(*) FROM advisory_execution_events",
+                ),
+                (
+                    "advisory_run_bindings",
+                    "SELECT COUNT(*) FROM advisory_run_bindings",
+                ),
+                (
+                    "advisory_blind_reviews",
+                    "SELECT COUNT(*) FROM advisory_blind_reviews",
+                ),
+                (
+                    "advisory_challenge_reviews",
+                    "SELECT COUNT(*) FROM advisory_challenge_reviews",
+                ),
+                ("advisory_reports", "SELECT COUNT(*) FROM advisory_reports"),
             )
             counts = {
                 name: connection.execute(query).fetchone()[0]

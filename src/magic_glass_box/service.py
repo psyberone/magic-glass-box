@@ -14,7 +14,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .advisory import AdvisoryConfigurationSpec
+from .advisory import (
+    AdvisoryBlindReview,
+    AdvisoryChallengeReview,
+    AdvisoryConfigurationSpec,
+    AdvisoryReport,
+)
 from .candidate_recovery import ensure_candidate_revision
 from .candidates import (
     CANDIDATE_SCHEMA_VERSION,
@@ -2130,6 +2135,64 @@ class ControlPlane:
             reason=reason,
         )
 
+    def start_advisory_execution(
+        self,
+        *,
+        project_key: str,
+        configuration_name: str,
+        candidate_id: str,
+        expected_configuration_version: int,
+        expected_context_version_id: str,
+        expected_work_item_version_id: str,
+        expected_thread_generation: int,
+        expected_thread_version: int,
+        idempotency_key: str,
+        requested_by_handle: str,
+    ) -> dict[str, Any]:
+        requester = self.database.get_user(requested_by_handle)
+        return self.database.start_advisory_execution(
+            project_key=project_key,
+            configuration_name=configuration_name,
+            candidate_id=candidate_id,
+            expected_configuration_version=expected_configuration_version,
+            expected_context_version_id=expected_context_version_id,
+            expected_work_item_version_id=expected_work_item_version_id,
+            expected_thread_generation=expected_thread_generation,
+            expected_thread_version=expected_thread_version,
+            idempotency_key=idempotency_key,
+            requested_by=requester["id"],
+        )
+
+    def get_advisory_execution(self, execution_id: str) -> dict[str, Any]:
+        return self.database.get_advisory_execution(execution_id)
+
+    def list_advisory_executions(
+        self,
+        *,
+        project_key: str | None = None,
+        state: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.database.list_advisory_executions(
+            project_key=project_key, state=state, limit=limit
+        )
+
+    def cancel_advisory_execution(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        cancelled_by_handle: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        operator = self.database.get_user(cancelled_by_handle)
+        return self.database.cancel_advisory_execution(
+            execution_id,
+            expected_version=expected_version,
+            cancelled_by=operator["id"],
+            reason=reason,
+        )
+
     def start_workflow_execution(
         self,
         *,
@@ -2432,6 +2495,39 @@ class ControlPlane:
     ) -> dict[str, Any]:
         return self.database.submit_discovery_ruling(
             run_id, ruling=ruling, idempotency_key=idempotency_key
+        )
+
+    def submit_advisory_blind_review(
+        self,
+        run_id: str,
+        *,
+        review: AdvisoryBlindReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.submit_advisory_blind_review(
+            run_id, review=review, idempotency_key=idempotency_key
+        )
+
+    def submit_advisory_challenge_review(
+        self,
+        run_id: str,
+        *,
+        review: AdvisoryChallengeReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.submit_advisory_challenge_review(
+            run_id, review=review, idempotency_key=idempotency_key
+        )
+
+    def submit_advisory_report(
+        self,
+        run_id: str,
+        *,
+        report: AdvisoryReport,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.submit_advisory_report(
+            run_id, report=report, idempotency_key=idempotency_key
         )
 
     def read_work_memory(

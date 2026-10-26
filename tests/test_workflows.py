@@ -342,6 +342,12 @@ class WorkflowStorageTests(unittest.TestCase):
     def downgrade_discovery_to_v32(connection: sqlite3.Connection) -> None:
         connection.executescript(
             """
+            DROP TABLE advisory_reports;
+            DROP TABLE advisory_challenge_reviews;
+            DROP TABLE advisory_blind_reviews;
+            DROP TABLE advisory_run_bindings;
+            DROP TABLE advisory_execution_events;
+            DROP TABLE advisory_executions;
             DROP TRIGGER discovery_ruling_immutable_delete;
             DROP TRIGGER discovery_ruling_immutable_update;
             DROP TRIGGER discovery_trace_immutable_delete;

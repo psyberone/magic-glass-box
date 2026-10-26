@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .storage.advisory import AdvisoryStorage
 from .storage.artifacts import ArtifactStorage
 from .storage.attempts import AttemptStorage
 from .storage.candidates import CandidateStorage
@@ -25,6 +26,7 @@ from .storage.queries import QueryStorage
 from .storage.recovery import RecoveryStorage
 from .storage.runs import RunStorage
 from .storage.schema import (
+    ADVISORY_EXECUTION_SCHEMA,
     ADVISORY_REVIEW_PRESCRIPTION_SCHEMA,
     ATTEMPT_SCHEMA,
     CANDIDATE_SCHEMA,
@@ -80,6 +82,7 @@ from .storage.work_items import WorkItemStorage
 from .storage.workflows import WorkflowStorage
 
 __all__ = [
+    "ADVISORY_EXECUTION_SCHEMA",
     "ADVISORY_REVIEW_PRESCRIPTION_SCHEMA",
     "ATTEMPT_SCHEMA",
     "CAPABILITY_BINDING_SCHEMA",
@@ -140,6 +143,7 @@ __all__ = [
 
 
 class Database(
+    AdvisoryStorage,
     DiscoveryStorage,
     WorkflowStorage,
     SupervisionStorage,

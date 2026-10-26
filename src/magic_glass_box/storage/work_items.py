@@ -175,6 +175,13 @@ class WorkItemStorage:
                     raise ConflictError(
                         "work item has an active Discovery prescription"
                     )
+                active_advisory = connection.execute(
+                    "SELECT id FROM advisory_executions "
+                    "WHERE work_thread_id = ? AND state = 'active' LIMIT 1",
+                    (thread["id"],),
+                ).fetchone()
+                if active_advisory is not None:
+                    raise ConflictError("work item has an active advisory prescription")
                 unfinished = connection.execute(
                     "SELECT id FROM work_assignments WHERE work_thread_id = ? "
                     "AND state IN ('open', 'claimed') LIMIT 1",

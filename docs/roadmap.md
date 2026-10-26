@@ -1260,8 +1260,8 @@ The completed proof above is the milestone's external golden test.
 
 ## Milestone 13: discovery and review prescriptions
 
-**Status: in progress; M13A and M13B complete, with the M13C
-contract/configuration checkpoint complete after M12**
+**Status: in progress; M13A and M13B complete, with the M13C contract,
+configuration, and execution-ledger checkpoints complete after M12**
 
 M13 does not turn workflows into an arbitrary DAG engine. Each prescription is
 a versioned, immutable built-in with fixed roles, stages, workspace authority,
@@ -1379,7 +1379,7 @@ or crashes.
 ### M13C: advisory review v1
 
 **Status: in progress; contract and configuration checkpoint complete in
-schema v36.**
+schema v36 and execution-ledger checkpoint complete in schema v37.**
 
 Schema v36 registers one fixed `advisory-review-v1` prescription with three
 read-only reviewers and a separate read-only coordinator. All four bindings
@@ -1398,11 +1398,32 @@ clean review remains an explicit empty advisory result. The final report must
 literally carry `authority: advisory_only`; its contract has no gate, approval,
 landing, candidate-mutation, or maintainer-disposition field.
 
-This checkpoint does not yet make the prescription executable. The capability
-names are registered so configurations can be validated, but no advisory
-execution can be started and no worker gateway handler, execution ledger,
-director, CLI, or control-room projection claims to enforce the blind or
-challenge stages. Those are the next bounded checkpoints.
+Schema v37 adds the immutable advisory execution and evidence ledger. One
+execution pins the exact candidate and its Git identity, prescription and
+configuration revision, project context, work-item version, work thread and
+generation, requester, and all four role/profile revisions. Those four role
+identities produce seven distinct phase-bound runs: three structurally blind
+review runs, three fresh challenge runs using the same reviewer profile pins,
+and one coordinator run. A role cannot reuse a run across phases. Candidate
+reconstruction uses the exact pinned candidate without inventing gate
+authority.
+
+Blind reviews, challenge reviews, and the final report are typed, immutable,
+bounded records tied to the exact running attempt that submitted them. Stage
+advancement requires every prescribed run to have succeeded and every exact
+artifact to exist, then records run, attempt, artifact, and digest provenance
+in the transition event. Blind workers receive no peer evidence; challenge
+workers receive all completed blind reviews but no challenge peers; only the
+coordinator receives both complete sets. Advisory assignment data remains
+separate from exact-candidate gate assignment data, and the final report
+retains only `advisory_only` authority. An active advisory execution also
+prevents premature work-thread completion.
+
+This checkpoint makes the state machine directly executable through storage
+and service APIs, but does not yet make it autonomous or worker-facing. No
+advisory worker-gateway handler, durable supervisor action, bounded director,
+CLI, or control-room projection exists yet. Those are the next bounded
+checkpoints.
 
 Checkpoint evidence: 1,157 tests pass at 86% aggregate branch-aware coverage;
 the new advisory contract module is at 89%, and the generic template parser is
@@ -1416,11 +1437,19 @@ wave initially killed 121/133; direct regressions killed both behavior-changing
 writer-guard survivors for an effective 123/133 (92.48%). Neither wave produced
 uncovered mutants, timeouts, suspicious outcomes, or crashes.
 
+Execution-ledger evidence: 1,170 tests pass at 87% aggregate statement-plus-
+branch coverage; the new advisory storage module is at 88%. Its clean full
+1,304-mutant wave killed 1,124 (86.20%), with no timeouts, uncovered mutants,
+suspicious outcomes, or crashes. RED-first happy- and sad-path tests cover
+stale and cross-project pins, role/profile/stage mismatches, structurally blind
+assignments, fresh challenge runs, active-attempt and exact-head requirements,
+configured artifact bounds, unknown and self-references, idempotent retries,
+failed or incomplete phases, optimistic terminal transitions, requester-only
+cancellation, exact candidate recovery, work-thread closeout exclusion, and
+schema-v37 migration.
+
 Remaining M13C work:
 
-- Add an immutable advisory execution/evidence ledger that pins the reviewed
-  target and the exact four role attempts without conflating advisory evidence
-  with candidate gate evidence.
 - Add the bounded director and gateway handlers that actually enforce the
   blind, challenge, triangulation, and completion sequence restart-safely.
 - Preserve the distinction between exact-candidate gate reviewers and advisory

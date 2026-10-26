@@ -50,6 +50,9 @@ class RunStorage:
         workflow_role: str | None = None,
         discovery_execution_id: str | None = None,
         discovery_role: str | None = None,
+        advisory_execution_id: str | None = None,
+        advisory_stage: str | None = None,
+        advisory_role: str | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         profile_name = validate_name(profile_name, field="profile name")
@@ -145,6 +148,35 @@ class RunStorage:
             )
             if discovery_role not in {"investigator", "coordinator"}:
                 raise ValidationError("discovery_role is invalid")
+        advisory_values = (
+            advisory_execution_id,
+            advisory_stage,
+            advisory_role,
+        )
+        if any(value is not None for value in advisory_values):
+            if any(value is None for value in advisory_values):
+                raise ValidationError("advisory run binding is incomplete")
+            if any(value is not None for value in workflow_values + discovery_values):
+                raise ValidationError(
+                    "a run cannot bind advisory and another directed execution"
+                )
+            if gate_policy_id is not None or change_policy_id is not None:
+                raise ValidationError(
+                    "an advisory run cannot bind an integration gate policy"
+                )
+            if krab_session_id is not None or krab_claim_id is not None:
+                raise ValidationError("an advisory run cannot receive Krab routing")
+            advisory_execution_id = require_string(
+                advisory_execution_id,
+                field="advisory_execution_id",
+                max_bytes=64,
+            )
+            valid_advisory_binding = (
+                advisory_stage in {"blind_review", "challenge"}
+                and advisory_role in {"reviewer_one", "reviewer_two", "reviewer_three"}
+            ) or (advisory_stage == "triangulate" and advisory_role == "coordinator")
+            if not valid_advisory_binding:
+                raise ValidationError("advisory stage and role are incompatible")
         if supervision_policy is None:
             supervision_policy = SupervisionPolicy.disabled()
         elif not isinstance(supervision_policy, SupervisionPolicy):
@@ -267,6 +299,53 @@ class RunStorage:
                         raise ConflictError(
                             "Discovery coordinator Krab routing changed"
                         )
+                advisory = None
+                if advisory_execution_id is not None:
+                    advisory = connection.execute(
+                        "SELECT execution.project_id, "
+                        "execution.context_version_id, execution.work_item_id, "
+                        "execution.work_item_version_id, execution.work_thread_id, "
+                        "execution.state, execution.stage, execution.requested_by, "
+                        "candidate.head_revision, "
+                        "binding.profile_version_id "
+                        "AS advisory_profile_version_id, "
+                        "profile.name AS advisory_profile_name "
+                        "FROM advisory_executions execution "
+                        "JOIN integration_candidates candidate "
+                        "ON candidate.id = execution.candidate_id "
+                        "JOIN workflow_configuration_role_bindings binding "
+                        "ON binding.configuration_version_id = "
+                        "execution.configuration_version_id "
+                        "AND binding.role = ? "
+                        "JOIN agent_profile_versions profile_version "
+                        "ON profile_version.id = binding.profile_version_id "
+                        "JOIN agent_profiles profile "
+                        "ON profile.id = profile_version.profile_id "
+                        "WHERE execution.id = ?",
+                        (advisory_role, advisory_execution_id),
+                    ).fetchone()
+                    if advisory is None:
+                        raise NotFoundError(
+                            "advisory execution not found: " + advisory_execution_id
+                        )
+                    if advisory["state"] != "active":
+                        raise ConflictError("advisory execution is not active")
+                    if advisory["stage"] != advisory_stage:
+                        raise ConflictError("advisory execution stage changed")
+                    if advisory["project_id"] != project["id"]:
+                        raise ConflictError(
+                            "advisory execution belongs to another project"
+                        )
+                    if advisory["work_item_id"] != work_item_id:
+                        raise ConflictError(
+                            "advisory execution belongs to another work item"
+                        )
+                    if advisory["requested_by"] != requested_by:
+                        raise ConflictError("advisory execution requester changed")
+                    if source_revision != advisory["head_revision"]:
+                        raise ConflictError("advisory run source revision changed")
+                    if profile_name != advisory["advisory_profile_name"]:
+                        raise ConflictError("advisory run profile changed")
                 gate_policy = None
                 change_target = None
                 maintainer_change_target = None
@@ -449,11 +528,16 @@ class RunStorage:
                         else (
                             {"id": discovery["context_version_id"]}
                             if discovery is not None
-                            else connection.execute(
-                                "SELECT id FROM project_context_versions "
-                                "WHERE project_id = ? ORDER BY version DESC LIMIT 1",
-                                (project["id"],),
-                            ).fetchone()
+                            else (
+                                {"id": advisory["context_version_id"]}
+                                if advisory is not None
+                                else connection.execute(
+                                    "SELECT id FROM project_context_versions "
+                                    "WHERE project_id = ? "
+                                    "ORDER BY version DESC LIMIT 1",
+                                    (project["id"],),
+                                ).fetchone()
+                            )
                         )
                     )
                 if (
@@ -463,7 +547,7 @@ class RunStorage:
                     raise ConflictError(
                         "workflow gate policy belongs to another project context"
                     )
-                if workflow is None and discovery is None:
+                if workflow is None and discovery is None and advisory is None:
                     work_item_version = connection.execute(
                         "SELECT wiv.id, wt.id AS work_thread_id FROM work_items wi "
                         "JOIN work_item_versions wiv ON wiv.work_item_id = wi.id "
@@ -474,7 +558,13 @@ class RunStorage:
                         (work_item_id, project["id"]),
                     ).fetchone()
                 else:
-                    pinned = workflow if workflow is not None else discovery
+                    pinned = (
+                        workflow
+                        if workflow is not None
+                        else discovery
+                        if discovery is not None
+                        else advisory
+                    )
                     assert pinned is not None
                     work_item_version = connection.execute(
                         "SELECT wiv.id, wt.id AS work_thread_id "
@@ -518,6 +608,10 @@ class RunStorage:
                 elif discovery is not None:
                     expected_profile_version_id = discovery[
                         "discovery_profile_version_id"
+                    ]
+                elif advisory is not None:
+                    expected_profile_version_id = advisory[
+                        "advisory_profile_version_id"
                     ]
                 if expected_profile_version_id is not None:
                     profile = connection.execute(
@@ -649,6 +743,19 @@ class RunStorage:
                             now,
                         ),
                     )
+                if advisory_execution_id is not None:
+                    connection.execute(
+                        "INSERT INTO advisory_run_bindings "
+                        "(run_id, execution_id, stage, role, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            advisory_execution_id,
+                            advisory_stage,
+                            advisory_role,
+                            now,
+                        ),
+                    )
                 if gate_policy is not None:
                     if gate_policy_id is not None:
                         connection.execute(
@@ -701,6 +808,10 @@ class RunStorage:
                 if gate_policy is not None:
                     event_metadata["gate_policy_id"] = gate_policy["id"]
                     event_metadata["candidate_id"] = gate_policy["candidate_id"]
+                if advisory is not None:
+                    event_metadata["advisory_execution_id"] = advisory_execution_id
+                    event_metadata["advisory_stage"] = advisory_stage
+                    event_metadata["advisory_role"] = advisory_role
                 if change_target is not None:
                     event_metadata["changes_requested"] = True
                     event_metadata["feedback_source"] = "independent_review"
