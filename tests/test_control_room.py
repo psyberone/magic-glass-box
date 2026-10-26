@@ -2706,6 +2706,16 @@ class ControlRoomTests(unittest.TestCase):
                 "open_ruling_kind",
                 "open_ruling_version",
                 "open_ruling_created_at",
+                "scope_discovery_execution_id",
+                "scope_discovery_ruling_id",
+                "latest_scope_review_id",
+                "latest_scope_review_round",
+                "latest_scope_review_candidate_id",
+                "latest_scope_review_policy_id",
+                "latest_scope_review_run_id",
+                "latest_scope_review_attempt_id",
+                "latest_scope_review_outcome",
+                "latest_scope_review_sha256",
                 "landing_mode",
                 "landing_candidate_id",
                 "landing_policy_id",
@@ -2734,6 +2744,19 @@ class ControlRoomTests(unittest.TestCase):
             (action["id"], "pending"),
         )
         self.assertIsNone(projected["open_ruling_id"])
+        for field in (
+            "scope_discovery_execution_id",
+            "scope_discovery_ruling_id",
+            "latest_scope_review_id",
+            "latest_scope_review_round",
+            "latest_scope_review_candidate_id",
+            "latest_scope_review_policy_id",
+            "latest_scope_review_run_id",
+            "latest_scope_review_attempt_id",
+            "latest_scope_review_outcome",
+            "latest_scope_review_sha256",
+        ):
+            self.assertIsNone(projected[field])
         self.assertEqual(projected["landing_mode"], "manual")
         for field in (
             "landing_candidate_id",

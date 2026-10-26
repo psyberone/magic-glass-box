@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5497,6 +5497,57 @@ BEGIN
 END;
 """
 
+WORKFLOW_SCOPE_REVIEW_SCHEMA = """
+CREATE TABLE workflow_scope_reviews (
+    id TEXT PRIMARY KEY,
+    workflow_execution_id TEXT NOT NULL,
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    candidate_id TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    reviewer_run_id TEXT NOT NULL,
+    reviewer_attempt_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    review_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    expected_review_outcome TEXT NOT NULL CHECK (
+        expected_review_outcome IN ('approved', 'changes_requested')
+    ),
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_scope_bindings(workflow_execution_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id, correction_round)
+        REFERENCES workflow_gate_bindings(execution_id, correction_round)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_attempt_id)
+        REFERENCES run_attempts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_scope_review_execution
+    ON workflow_scope_reviews(
+        workflow_execution_id, correction_round, created_at, id
+    );
+CREATE INDEX workflow_scope_review_policy_run
+    ON workflow_scope_reviews(policy_id, reviewer_run_id, reviewer_attempt_id);
+
+CREATE TRIGGER workflow_scope_review_immutable_update
+BEFORE UPDATE ON workflow_scope_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'workflow scope reviews are immutable');
+END;
+CREATE TRIGGER workflow_scope_review_immutable_delete
+BEFORE DELETE ON workflow_scope_reviews
+BEGIN
+    SELECT RAISE(ABORT, 'workflow scope reviews cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -5539,7 +5590,8 @@ SCHEMA_V37 = (
     + ADVISORY_EXECUTION_SCHEMA
 )
 SCHEMA_V38 = SCHEMA_V37 + ADVISORY_DIRECTOR_SCHEMA
-SCHEMA = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
+SCHEMA_V39 = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
+SCHEMA = SCHEMA_V39 + WORKFLOW_SCOPE_REVIEW_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -5579,4 +5631,5 @@ MIGRATIONS = {
     36: ADVISORY_EXECUTION_SCHEMA,
     37: ADVISORY_DIRECTOR_SCHEMA,
     38: WORKFLOW_SCOPE_BINDING_SCHEMA,
+    39: WORKFLOW_SCOPE_REVIEW_SCHEMA,
 }

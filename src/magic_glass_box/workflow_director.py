@@ -156,21 +156,42 @@ class WorkflowDirector:
                 policy_id=gate["policy_id"],
                 run_id=reviewer["id"],
             )
+        scope_review = None
+        effective_outcome = verdict["outcome"]
+        if execution["scope_binding"] is not None:
+            scope_review = self.database.get_workflow_scope_review(
+                gate["policy_id"],
+                reviewer["id"],
+                verdict["reviewer_attempt_id"],
+            )
+            if scope_review is None:
+                return self._ruling(
+                    execution,
+                    "review_verdict_missing",
+                    policy_id=gate["policy_id"],
+                    run_id=reviewer["id"],
+                )
+            effective_outcome = scope_review["expected_review_outcome"]
+            if verdict["outcome"] != effective_outcome:
+                raise RuntimeError(
+                    "typed review verdict contradicts its derived scope outcome"
+                )
         evidence = self.control.record_review_evidence(
             gate["policy_id"],
             reviewer_attempt_id=verdict["reviewer_attempt_id"],
-            outcome=("passed" if verdict["outcome"] == "approved" else "failed"),
+            outcome=("passed" if effective_outcome == "approved" else "failed"),
             recorded_by_handle=execution["requested_by"],
             expected_policy_revision=self.database.get_gate_policy(gate["policy_id"])[
                 "policy_revision"
             ],
         )
-        if verdict["outcome"] == "changes_requested":
+        if effective_outcome == "changes_requested":
             return self._request_correction(
                 execution,
                 policy_id=gate["policy_id"],
                 evidence_id=evidence["id"],
                 review_entry_id=verdict["work_log_entry_id"],
+                scope_review_id=(None if scope_review is None else scope_review["id"]),
                 source="independent_review",
             )
 
@@ -213,6 +234,14 @@ class WorkflowDirector:
         readiness = self.database.gate_readiness(gate["policy_id"])
         if target_stage == "landing" and not readiness["ready"]:
             raise RuntimeError("workflow gate readiness contradicts recorded evidence")
+        metadata = {
+            "candidate_id": gate["candidate_id"],
+            "policy_id": gate["policy_id"],
+            "review_evidence_id": evidence["id"],
+            "head_revision": readiness["head_revision"],
+        }
+        if scope_review is not None:
+            metadata["scope_review_id"] = scope_review["id"]
         self.database.advance_workflow_execution(
             execution["id"],
             expected_version=execution["version"],
@@ -225,12 +254,7 @@ class WorkflowDirector:
                 if target_stage == "maintainer"
                 else "workflow.landing_ready"
             ),
-            metadata={
-                "candidate_id": gate["candidate_id"],
-                "policy_id": gate["policy_id"],
-                "review_evidence_id": evidence["id"],
-                "head_revision": readiness["head_revision"],
-            },
+            metadata=metadata,
         )
         return True
 
@@ -616,6 +640,7 @@ class WorkflowDirector:
         source: str,
         evidence_id: str | None = None,
         review_entry_id: str | None = None,
+        scope_review_id: str | None = None,
         maintainer_review_id: str | None = None,
     ) -> bool:
         correction_round = execution["correction_round"]
@@ -625,6 +650,8 @@ class WorkflowDirector:
         if evidence_id is not None:
             metadata["review_evidence_id"] = evidence_id
             metadata["review_entry_id"] = review_entry_id
+        if scope_review_id is not None:
+            metadata["scope_review_id"] = scope_review_id
         if maintainer_review_id is not None:
             metadata["maintainer_review_id"] = maintainer_review_id
         self.database.advance_workflow_execution(

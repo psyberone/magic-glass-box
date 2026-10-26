@@ -172,14 +172,33 @@ and reused keys with different content are rejected. Advisory evidence cannot
 satisfy an integration gate, approve a candidate, mutate source, or authorize
 landing.
 
+### Workflow scope-review operation
+
+`workflow.scope-review.submit` accepts exactly one published
+`workflow-scope-review-v1` object plus a stable `idempotency_key`. It is
+available only to the reviewer of a Discovery-scoped implementation during the
+review stage, from the live attempt at the exact candidate HEAD. The reviewer
+supplies one pass/fail result for every pinned `MUST` and may add bounded
+base/head `PROBE` observations. It cannot submit classifications or a verdict.
+
+Storage verifies the `MUST` key set against the immutable work-ready brief and
+returns `expected_review_outcome` plus derived failed-MUST, regression, and
+follow-up keys. The reviewer must then use that exact outcome in its ordinary
+review-v2 `work.append` entry. The append is refused when the scope artifact is
+missing or the outcomes differ. Retries within the same attempt are idempotent;
+a replacement attempt may submit its own exact artifact, preserving both
+attempts in the audit trail without inheriting authority from abandoned work.
+
 ### Work-memory operations
 
 `work.read` pages the bound work item's log from an optional sequence with a
 limit of 1 through 16. `work.append` accepts one general v1 work-log entry or
 one typed review-v2 entry, an optional assignment ID, and a stable idempotency
 key. Review v2 is accepted only from a policy-bound reviewer attempt against
-its exact candidate head. The gateway supplies run identity and storage
-supplies attempt/profile/runtime provenance.
+its exact candidate head. For a Discovery-scoped workflow, the same attempt
+must first submit the scope-review artifact and the review-v2 outcome must match
+MGB's derived result. The gateway supplies run identity and storage supplies
+attempt/profile/runtime provenance.
 
 `work.checkpoint` accepts one v1 checkpoint, the exact log sequence it covers,
 the observed thread version, and an idempotency key. Both the version and log

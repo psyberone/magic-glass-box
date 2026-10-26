@@ -655,6 +655,7 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
         with self.database.connect() as connection:
             connection.executescript(
                 """
+                DROP TABLE workflow_scope_reviews;
                 DROP TABLE workflow_scope_bindings;
                 DROP TABLE advisory_reports;
                 DROP TABLE advisory_challenge_reviews;
@@ -693,7 +694,7 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 39)
+        self.assertEqual(SCHEMA_VERSION, 40)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         definitions = migrated.list_workflow_template_definitions()

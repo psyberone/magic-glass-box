@@ -26,6 +26,7 @@ from ..domain import (
 )
 from ..gates import ReviewSeparation
 from ..krab import IDEMPOTENCY_KEY_RE
+from ..workflow_scope import WorkflowScopeReview
 from ..workflows import (
     ADVISORY_REVIEW_TEMPLATE_ID,
     ADVISORY_REVIEW_TEMPLATE_REVISION,
@@ -170,6 +171,40 @@ class WorkflowStorage:
             raise ConflictError(
                 "workflow producer and reviewer require distinct Krab identities"
             )
+
+    @staticmethod
+    def _validate_scoped_workflow_profiles(
+        connection: sqlite3.Connection, configuration_version_id: str
+    ) -> None:
+        rows = connection.execute(
+            "SELECT binding.role, version.spec_json "
+            "FROM workflow_configuration_role_bindings binding "
+            "JOIN agent_profile_versions version "
+            "ON version.id = binding.profile_version_id "
+            "WHERE binding.configuration_version_id = ?",
+            (configuration_version_id,),
+        ).fetchall()
+        required = {
+            "producer": {GatewayCapability.RUN_DESCRIBE},
+            "reviewer": {
+                GatewayCapability.RUN_DESCRIBE,
+                GatewayCapability.WORK_APPEND,
+                GatewayCapability.WORKFLOW_SCOPE_REVIEW_SUBMIT,
+            },
+        }
+        if {row["role"] for row in rows} != set(required):
+            raise StorageError("stored workflow configuration roles do not match")
+        for row in rows:
+            try:
+                profile = AgentProfileSpec.from_mapping(json.loads(row["spec_json"]))
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError("stored workflow profile is invalid") from exc
+            missing = required[row["role"]].difference(profile.gateway_capabilities)
+            if missing:
+                raise ConflictError(
+                    f"scoped workflow {row['role']} lacks gateway capability: "
+                    + ", ".join(sorted(capability.value for capability in missing))
+                )
 
     @staticmethod
     def _validate_discovery_roles(
@@ -1087,6 +1122,9 @@ class WorkflowStorage:
                         )
                     scope_ruling = None
                     if discovery_execution_id is not None:
+                        self._validate_scoped_workflow_profiles(
+                            connection, configuration["version_id"]
+                        )
                         scope_ruling = self._workflow_scope_source(
                             connection,
                             discovery_execution_id=discovery_execution_id,
@@ -1333,6 +1371,204 @@ class WorkflowStorage:
             "work_ready_brief": ruling.work_ready_brief.to_dict(),
             "created_at": row["created_at"],
         }
+
+    @staticmethod
+    def _workflow_scope_review_record(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            review = WorkflowScopeReview.from_mapping(json.loads(row["review_json"]))
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow scope review is invalid") from exc
+        if (
+            review.digest != row["content_sha256"]
+            or review.expected_review_outcome.value != row["expected_review_outcome"]
+        ):
+            raise StorageError("stored workflow scope review does not match")
+        return {
+            "id": row["id"],
+            "workflow_execution_id": row["workflow_execution_id"],
+            "correction_round": row["correction_round"],
+            "candidate_id": row["candidate_id"],
+            "policy_id": row["policy_id"],
+            "reviewer_run_id": row["reviewer_run_id"],
+            "reviewer_attempt_id": row["reviewer_attempt_id"],
+            "review": review.to_dict(),
+            "content_sha256": row["content_sha256"],
+            "expected_review_outcome": row["expected_review_outcome"],
+            "failed_must_keys": list(review.failed_must_keys),
+            "regression_probe_keys": list(review.regression_probe_keys),
+            "follow_up_probe_keys": list(review.follow_up_probe_keys),
+            "probe_classifications": [
+                {
+                    "key": probe.key,
+                    "classification": probe.classification.value,
+                }
+                for probe in review.probes
+            ],
+            "idempotency_key": row["idempotency_key"],
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _workflow_scope_review_context(
+        connection: sqlite3.Connection, run_id: str
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT binding.execution_id, binding.correction_round, binding.role, "
+            "execution.state, execution.stage, "
+            "execution.correction_round AS execution_round, "
+            "gate.candidate_id, gate.policy_id, policy.head_revision, "
+            "review_target.candidate_id AS review_candidate_id, "
+            "review_target.policy_id AS review_policy_id, "
+            "run.state AS run_state, run.source_revision AS run_source_revision, "
+            "attempt.id AS attempt_id, "
+            "attempt.source_revision AS attempt_source_revision, "
+            "ruling.ruling_json "
+            "FROM workflow_run_bindings binding "
+            "JOIN workflow_executions execution "
+            "ON execution.id = binding.execution_id "
+            "JOIN workflow_scope_bindings scope "
+            "ON scope.workflow_execution_id = execution.id "
+            "JOIN discovery_rulings ruling ON ruling.id = scope.discovery_ruling_id "
+            "JOIN workflow_gate_bindings gate "
+            "ON gate.execution_id = binding.execution_id "
+            "AND gate.correction_round = binding.correction_round "
+            "JOIN integration_gate_policies policy ON policy.id = gate.policy_id "
+            "JOIN integration_gate_review_runs review_target "
+            "ON review_target.run_id = binding.run_id "
+            "JOIN runs run ON run.id = binding.run_id "
+            "LEFT JOIN run_attempts attempt ON attempt.run_id = run.id "
+            "AND attempt.state = 'running' WHERE binding.run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"scoped workflow reviewer run not found: {run_id}")
+        if row["role"] != "reviewer":
+            raise ConflictError("workflow scope review requires the reviewer role")
+        if (
+            row["state"] != "active"
+            or row["stage"] != "review"
+            or row["execution_round"] != row["correction_round"]
+        ):
+            raise ConflictError("workflow is not accepting a scope review")
+        if row["run_state"] != "running" or row["attempt_id"] is None:
+            raise ConflictError("workflow reviewer has no active worker attempt")
+        if (
+            row["policy_id"] != row["review_policy_id"]
+            or row["candidate_id"] != row["review_candidate_id"]
+        ):
+            raise ConflictError("workflow reviewer gate authority changed")
+        if (
+            row["run_source_revision"] != row["head_revision"]
+            or row["attempt_source_revision"] != row["head_revision"]
+        ):
+            raise ConflictError("workflow reviewer candidate revision changed")
+        return row
+
+    def submit_workflow_scope_review(
+        self,
+        run_id: str,
+        *,
+        review: WorkflowScopeReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        run_id = require_string(run_id, field="run_id", max_bytes=64)
+        if not isinstance(review, WorkflowScopeReview):
+            raise ValidationError("review must be a WorkflowScopeReview")
+        idempotency_key = self._workflow_idempotency_key(idempotency_key)
+        review_id = self.new_id("wsr")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                context = self._workflow_scope_review_context(connection, run_id)
+                existing = connection.execute(
+                    "SELECT * FROM workflow_scope_reviews "
+                    "WHERE reviewer_attempt_id = ?",
+                    (context["attempt_id"],),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["idempotency_key"] != idempotency_key
+                        or existing["content_sha256"] != review.digest
+                    ):
+                        raise ConflictError(
+                            "reviewer attempt already submitted another scope review"
+                        )
+                    connection.commit()
+                    return self._workflow_scope_review_record(existing)
+                try:
+                    ruling = DiscoveryRuling.from_mapping(
+                        json.loads(context["ruling_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored workflow scope ruling is invalid"
+                    ) from exc
+                if ruling.work_ready_brief is None:
+                    raise StorageError("stored workflow scope ruling has no brief")
+                expected_keys = {
+                    item.key for item in ruling.work_ready_brief.must_items
+                }
+                submitted_keys = {item.key for item in review.must_results}
+                if submitted_keys != expected_keys:
+                    raise ConflictError(
+                        "workflow scope review MUST keys do not match the pinned brief"
+                    )
+                connection.execute(
+                    "INSERT INTO workflow_scope_reviews "
+                    "(id, workflow_execution_id, correction_round, candidate_id, "
+                    "policy_id, reviewer_run_id, reviewer_attempt_id, "
+                    "schema_version, review_json, content_sha256, "
+                    "expected_review_outcome, idempotency_key, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        review_id,
+                        context["execution_id"],
+                        context["correction_round"],
+                        context["candidate_id"],
+                        context["policy_id"],
+                        run_id,
+                        context["attempt_id"],
+                        review.schema_version,
+                        review.canonical,
+                        review.digest,
+                        review.expected_review_outcome.value,
+                        idempotency_key,
+                        now,
+                    ),
+                )
+                stored = connection.execute(
+                    "SELECT * FROM workflow_scope_reviews WHERE id = ?",
+                    (review_id,),
+                ).fetchone()
+                connection.commit()
+            except (ConflictError, NotFoundError, StorageError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow scope review could not be recorded"
+                ) from exc
+        return self._workflow_scope_review_record(stored)
+
+    def get_workflow_scope_review(
+        self, policy_id: str, reviewer_run_id: str, reviewer_attempt_id: str
+    ) -> dict[str, Any] | None:
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        reviewer_run_id = require_string(
+            reviewer_run_id, field="reviewer_run_id", max_bytes=64
+        )
+        reviewer_attempt_id = require_string(
+            reviewer_attempt_id, field="reviewer_attempt_id", max_bytes=64
+        )
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_scope_reviews WHERE policy_id = ? "
+                "AND reviewer_run_id = ? AND reviewer_attempt_id = ?",
+                (policy_id, reviewer_run_id, reviewer_attempt_id),
+            ).fetchone()
+        return None if row is None else self._workflow_scope_review_record(row)
 
     def _workflow_landing_record(
         self,

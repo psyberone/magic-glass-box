@@ -245,6 +245,7 @@ class AgentProfileTests(unittest.TestCase):
             GatewayCapability.ADVISORY_BLIND_SUBMIT,
             GatewayCapability.ADVISORY_CHALLENGE_SUBMIT,
             GatewayCapability.ADVISORY_REPORT_SUBMIT,
+            GatewayCapability.WORKFLOW_SCOPE_REVIEW_SUBMIT,
         }
         self.assertEqual(
             profile.gateway_capabilities,

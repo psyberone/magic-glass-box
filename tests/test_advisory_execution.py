@@ -1798,6 +1798,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         with self.database.connect() as connection:
             connection.executescript(
                 """
+                DROP TABLE workflow_scope_reviews;
                 DROP TABLE workflow_scope_bindings;
                 DROP TABLE advisory_reports;
                 DROP TABLE advisory_challenge_reviews;
@@ -1813,7 +1814,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 39)
+        self.assertEqual(SCHEMA_VERSION, 40)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:
@@ -1848,7 +1849,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         second = migrated.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 39)
+        self.assertEqual(first["schema_version"], 40)
         with migrated.connect() as connection:
             columns = {
                 row[1]

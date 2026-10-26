@@ -134,6 +134,18 @@ carry that exact work-ready brief and its ruling provenance. The binding does
 not merge the prescriptions, auto-start implementation, or let Discovery
 evidence satisfy an implementation gate.
 
+Schema v40 makes that scope binding operational without merging the two
+prescriptions. Scoped producer and reviewer profiles must expose the bounded
+gateway surfaces needed to read the assignment; reviewers additionally need
+`workflow.scope-review.submit` and `work.append`. Each accepted scope review is
+immutable and bound to the workflow round, exact candidate and policy,
+reviewer run, and active attempt. Its `MUST` keys must exactly match the pinned
+brief. MGB derives failed-MUST, regression, follow-up, and gate outcome facts;
+the later review-v2 work-log entry must repeat that outcome exactly. The
+director uses the derived result for gate evidence and durable correction or
+approval provenance. Legacy unscoped implementations continue through the
+existing review-v2 path.
+
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:
 

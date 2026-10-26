@@ -50,7 +50,10 @@ contains:
   including current stage, correction round, current version-bound supervisor
   action state, landing mode, queue/policy/candidate identity, provider target
   and availability, latest manual/provider authority, landed receipt,
-  completion outcome, and any open ruling ID/kind/version;
+  completion outcome, and any open ruling ID/kind/version. Discovery-scoped
+  workflows additionally expose only their source execution/ruling IDs and the
+  latest scope-review ID, round, candidate, policy, run/attempt provenance,
+  derived outcome, and digest—never the MUST evidence or PROBE prose;
 - all active Discovery executions plus a bounded number of recent terminal
   executions, including their immutable project, configuration, role/profile,
   source, work-thread, Krab-route, and decision-owner pins; current stage and
@@ -173,6 +176,10 @@ Advisory reviews likewise have their own table, explicitly labeled as having
 no gate authority. It shows exact-candidate identity, pinned roles, phase
 progress, coordinator state, and bounded report metadata without rendering any
 review, challenge, or report prose.
+
+The workflow table shows the latest derived scope-review outcome and artifact
+ID when present. The complete typed artifact remains in the private append-only
+ledger and is not rendered in the browser.
 
 The process is a local administrative surface, not a multi-user authentication
 server. Anyone who can read the printed private URL and reach the loopback

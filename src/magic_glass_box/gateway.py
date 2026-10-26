@@ -44,6 +44,7 @@ from .provider import (
     ProviderUpstreamError,
 )
 from .service import AcceptedInteractionResponse, AcceptedProviderResponse
+from .workflow_scope import WorkflowScopeReview
 
 GATEWAY_PROTOCOL_VERSION = 1
 MAX_GATEWAY_REQUEST_BYTES = 3 * 1024 * 1024
@@ -130,6 +131,14 @@ class GatewayControlPlane(Protocol):
         run_id: str,
         *,
         report: AdvisoryReport,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def submit_workflow_scope_review(
+        self,
+        run_id: str,
+        *,
+        review: WorkflowScopeReview,
         idempotency_key: str,
     ) -> dict[str, Any]: ...
 
@@ -373,6 +382,8 @@ class RunGateway:
                 result = self._submit_advisory_challenge_review(value["payload"])
             elif operation is GatewayCapability.ADVISORY_REPORT_SUBMIT:
                 result = self._submit_advisory_report(value["payload"])
+            elif operation is GatewayCapability.WORKFLOW_SCOPE_REVIEW_SUBMIT:
+                result = self._submit_workflow_scope_review(value["payload"])
             elif operation is GatewayCapability.INTERACTION_OPEN:
                 result = self._open_interaction(value["payload"])
             elif operation is GatewayCapability.INTERACTION_READ:
@@ -667,6 +678,26 @@ class RunGateway:
             "report_id": stored["id"],
             "content_sha256": stored.get("content_sha256", report.digest),
             "agent_action": "exit",
+        }
+
+    def _submit_workflow_scope_review(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"review", "idempotency_key"})
+        review_value = item["review"]
+        if not isinstance(review_value, Mapping):
+            raise _RequestFailure("invalid_request", "review must be an object")
+        review = WorkflowScopeReview.from_mapping(review_value)
+        stored = self.control.submit_workflow_scope_review(
+            self.run_id,
+            review=review,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "scope_review_id": stored["id"],
+            "content_sha256": stored.get("content_sha256", review.digest),
+            "expected_review_outcome": stored["expected_review_outcome"],
+            "failed_must_keys": stored["failed_must_keys"],
+            "regression_probe_keys": stored["regression_probe_keys"],
+            "follow_up_probe_keys": stored["follow_up_probe_keys"],
         }
 
     def _invoke_provider(self, payload: object) -> dict[str, Any]:

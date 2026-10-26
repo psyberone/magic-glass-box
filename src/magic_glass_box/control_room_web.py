@@ -545,6 +545,15 @@ def _render_control_room(
                 f"{row.get('configuration_name')}@{row.get('configuration_version')}",
                 f"{row.get('producer_profile_name')}@{row.get('producer_profile_version')}",
                 f"{row.get('reviewer_profile_name')}@{row.get('reviewer_profile_version')}",
+                " · ".join(
+                    str(value)
+                    for value in (
+                        row.get("latest_scope_review_outcome"),
+                        row.get("latest_scope_review_id"),
+                    )
+                    if value is not None
+                )
+                or None,
                 row.get("landing_mode"),
                 queue_summary,
                 row.get("open_ruling_kind"),
@@ -986,6 +995,7 @@ def _render_control_room(
                     "Configuration",
                     "Producer",
                     "Reviewer",
+                    "Scope review",
                     "Landing mode",
                     "Landing queue / authority",
                     "Open ruling",

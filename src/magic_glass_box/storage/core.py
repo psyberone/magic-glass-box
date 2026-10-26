@@ -533,6 +533,14 @@ class DatabaseCore:
                     "workflow_gate_bindings",
                     "SELECT COUNT(*) FROM workflow_gate_bindings",
                 ),
+                (
+                    "workflow_scope_bindings",
+                    "SELECT COUNT(*) FROM workflow_scope_bindings",
+                ),
+                (
+                    "workflow_scope_reviews",
+                    "SELECT COUNT(*) FROM workflow_scope_reviews",
+                ),
                 ("workflow_rulings", "SELECT COUNT(*) FROM workflow_rulings"),
                 (
                     "workflow_landing_bindings",

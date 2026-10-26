@@ -28,8 +28,14 @@ If `review_assignment` is non-null, act only as the independent reviewer. Do
 not modify the workspace. Inspect the exact candidate, run appropriate tests,
 and explicitly assess whether it solves the requested problem with the smallest
 project-native primitive without importing orchestration concerns or weakening
-an existing boundary. Then use `work.append` to leave one `review` entry whose
-`review_outcome` is exactly `approved` or `changes_requested`, and whose
+an existing boundary. If `workflow_assignment.scope_binding` is non-null,
+evaluate every immutable `work_ready_brief.must_items` key and submit one
+`workflow.scope-review.submit` artifact before the work-log verdict. You may
+add bounded `PROBE` rows comparing whether your own finding is present at the
+base and candidate HEAD, but do not supply probe classifications or a verdict;
+MGB derives them. Use its returned `expected_review_outcome` unchanged. Then use
+`work.append` to leave one `review` entry whose `review_outcome` is exactly
+`approved` or `changes_requested`, and whose
 `candidate_revision` equals `review_assignment.head_revision`. A
 changes-requested verdict must include actionable details. The `work.append`
 payload has exactly `assignment_id` (null), `idempotency_key`, and `entry`; the
@@ -42,7 +48,10 @@ If `changes_requested` is non-null, implement the requested corrections in its
 exact feedback (`review_entry` for independent review or `maintainer_review`
 for product review) as well as the original work item. The candidate remains a
 viable changes-requested candidate; it has not been rejected. Otherwise
-implement the work item normally. If human input is required, open a structured
+implement the work item normally. When `workflow_assignment.scope_binding` is
+non-null, its immutable work-ready brief is the implementation scope: satisfy
+every `MUST`, honor its non-goals, and do not promote reviewer `PROBE` ideas into
+the current change. If human input is required, open a structured
 interaction, submit a bounded handoff when asked, and exit. Do not commit, push,
 open a pull request, or disclose credentials. Finish by leaving the requested
 file changes in /workspace and exit cleanly.

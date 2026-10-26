@@ -53,6 +53,7 @@ from magic_glass_box.service import (
     AcceptedInteractionResponse,
     AcceptedProviderResponse,
 )
+from magic_glass_box.workflow_scope import WorkflowScopeReview
 
 RUN_ID = "run_" + "1" * 32
 OTHER_RUN_ID = "run_" + "2" * 32
@@ -202,6 +203,7 @@ class FakeGatewayControl:
         self.work_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.discovery_calls: list[tuple[str, str, object, str]] = []
         self.advisory_calls: list[tuple[str, str, object, str]] = []
+        self.workflow_scope_calls: list[tuple[str, WorkflowScopeReview, str]] = []
         self.provider_failure: Exception | None = None
 
     def open_interaction(self, run_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -452,6 +454,25 @@ class FakeGatewayControl:
             "run_id": run_id,
             "report": report.to_dict(),
             "content_sha256": report.digest,
+        }
+
+    def submit_workflow_scope_review(
+        self,
+        run_id: str,
+        *,
+        review: WorkflowScopeReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.workflow_scope_calls.append((run_id, review, idempotency_key))
+        return {
+            "id": "wsr_" + "d" * 32,
+            "run_id": run_id,
+            "review": review.to_dict(),
+            "content_sha256": review.digest,
+            "expected_review_outcome": review.expected_review_outcome.value,
+            "failed_must_keys": list(review.failed_must_keys),
+            "regression_probe_keys": list(review.regression_probe_keys),
+            "follow_up_probe_keys": list(review.follow_up_probe_keys),
         }
 
 
@@ -726,6 +747,79 @@ class RunGatewayTests(unittest.TestCase):
                 self.assertFalse(response["ok"])
                 self.assertEqual(response["error"]["code"], "invalid_request")
         self.assertEqual(len(self.control.advisory_calls), 3)
+
+    def test_workflow_scope_review_is_typed_and_outcome_is_derived(self) -> None:
+        review = {
+            "schema_version": 1,
+            "must_results": [
+                {
+                    "key": "preserve-authority",
+                    "outcome": "passed",
+                    "summary": "The immutable authority boundary is preserved.",
+                    "evidence": ["Focused authority test passed."],
+                }
+            ],
+            "probes": [
+                {
+                    "key": "new-regression",
+                    "summary": "The candidate introduces a new failure.",
+                    "base_finding": "absent",
+                    "head_finding": "present",
+                    "evidence": ["The reproducer fails only at candidate HEAD."],
+                }
+            ],
+        }
+
+        response = self.gateway.handle(
+            request(
+                "workflow.scope-review.submit",
+                {"review": review, "idempotency_key": "scope-review-1"},
+            )
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["scope_review_id"], "wsr_" + "d" * 32)
+        self.assertEqual(
+            response["result"]["expected_review_outcome"], "changes_requested"
+        )
+        self.assertEqual(response["result"]["failed_must_keys"], [])
+        self.assertEqual(
+            response["result"]["regression_probe_keys"], ["new-regression"]
+        )
+        self.assertEqual(response["result"]["follow_up_probe_keys"], [])
+        self.assertEqual(
+            [(call[0], call[2]) for call in self.control.workflow_scope_calls],
+            [(RUN_ID, "scope-review-1")],
+        )
+        self.assertIsInstance(
+            self.control.workflow_scope_calls[0][1], WorkflowScopeReview
+        )
+
+        for payload in (
+            {
+                "review": review,
+                "idempotency_key": "scope-review-2",
+                "outcome": "approved",
+            },
+            {
+                "review": {
+                    **review,
+                    "probes": [
+                        {
+                            **review["probes"][0],
+                            "classification": "follow_up",
+                        }
+                    ],
+                },
+                "idempotency_key": "scope-review-3",
+            },
+        ):
+            rejected = self.gateway.handle(
+                request("workflow.scope-review.submit", payload)
+            )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["error"]["code"], "invalid_request")
+        self.assertEqual(len(self.control.workflow_scope_calls), 1)
 
     def test_work_memory_operations_are_typed_and_bound_to_the_run(self) -> None:
         entry = {

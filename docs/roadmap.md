@@ -1509,8 +1509,15 @@ Schema v39 completes the durable Discovery-to-implementation lineage seam. An
 optional implementation start pins one completed `GO` ruling only when every
 project, context, work-item, thread, and source identity matches; its producer
 and reviewer assignments receive the original immutable work-ready brief.
-Scope-review gateway submission, gate/director enforcement, and the live proof
-remain.
+
+Schema v40 completes the enforcement seam. A scoped reviewer must submit the
+bounded artifact through `workflow.scope-review.submit` from its active exact-
+candidate attempt. Storage requires exactly the pinned Discovery `MUST` keys,
+derives the outcome, and refuses a review-v2 work-log verdict that is missing
+the artifact or contradicts that outcome. The workflow director records gate
+evidence from the derived result and carries the scope-review ID into approval
+or correction events. Unscoped workflows retain their prior behavior. The
+real-repository replacement and advisory proof remains before M13 closes.
 
 
 ## Milestone 14: heterogeneous work provider

@@ -75,6 +75,7 @@ from .storage.schema import (
     WORKFLOW_LANDING_SCHEMA,
     WORKFLOW_PRESCRIPTION_SCHEMA,
     WORKFLOW_SCOPE_BINDING_SCHEMA,
+    WORKFLOW_SCOPE_REVIEW_SCHEMA,
     WORKFLOW_TEMPLATE_SCHEMA,
 )
 from .storage.service_sidecars import ServiceSidecarStorage
@@ -141,6 +142,7 @@ __all__ = [
     "WORKFLOW_LANDING_SCHEMA",
     "WORKFLOW_PRESCRIPTION_SCHEMA",
     "WORKFLOW_SCOPE_BINDING_SCHEMA",
+    "WORKFLOW_SCOPE_REVIEW_SCHEMA",
     "WORKFLOW_TEMPLATE_SCHEMA",
     "default_db_path",
 ]

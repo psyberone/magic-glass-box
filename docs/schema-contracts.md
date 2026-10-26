@@ -215,9 +215,18 @@ the four-state probe matrix mechanically: head-only findings are regressions,
 base-and-head findings are follow-up proposals, base-only findings are
 resolved, and absent-on-both probes are clean. A failed `MUST` or regression
 requires changes; no other row can block. The portable artifact alone grants
-no review authority. The relational acceptance path must still bind it to the
-exact scoped implementation execution, candidate, policy, reviewer run and
-attempt, and verify its `MUST` keys against the pinned work-ready brief.
+no review authority.
+
+Control-plane schema v40 supplies the relational acceptance path. It accepts
+the artifact only from the scoped implementation's current reviewer, review
+stage, correction round, exact gate policy and candidate HEAD, live run, and
+active attempt. The submitted `MUST` key set must equal the immutable brief's
+set. The retained row stores the canonical input, digest, attempt provenance,
+and mechanically derived expected review outcome; it is append-only. A scoped
+review-v2 work-log verdict is rejected unless the same attempt has first
+recorded this artifact and repeats its derived outcome. The director uses that
+derived value—not reviewer-authored prose or a free-form label—when recording
+independent-review gate evidence.
 
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and

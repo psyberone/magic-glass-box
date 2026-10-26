@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 from magic_glass_box.candidates import GitCandidateStore
 from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import Database
+from magic_glass_box.discovery import (
+    DiscoveryConfigurationSpec,
+    DiscoveryRuling,
+    DiscoveryTrace,
+)
+from magic_glass_box.discovery_director import DiscoveryDirector
 from magic_glass_box.domain import (
     AgentProfileSpec,
     ProjectContext,
@@ -31,6 +39,7 @@ from magic_glass_box.service_sidecar import (
 from magic_glass_box.storage.errors import ConcurrentUpdateError, ConflictError
 from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION, WorkflowDirector
+from magic_glass_box.workflow_scope import WorkflowScopeReview
 from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 
@@ -77,6 +86,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.database.initialize()
         self.user = self.database.create_user("operator", "Operator")
         instance = self.database.create_krab_instance("Local", "http://127.0.0.1:8765")
+        self.instance = instance
         producer_identity = self.database.store_krab_identity(
             instance["id"],
             KrabIdentity("usr_" + "1" * 32, "producer", 1),
@@ -121,8 +131,9 @@ class WorkflowDirectorTests(unittest.TestCase):
             spec=AgentProfileSpec.create(
                 image="producer@sha256:abc",
                 command=["producer", "run"],
-                network_mode="none",
+                network_mode="gateway_only",
                 workspace_mode="copy_on_write",
+                gateway_capabilities=["run.describe"],
             ),
             krab_identity_id=producer_identity["id"],
             created_by=self.user["id"],
@@ -132,8 +143,13 @@ class WorkflowDirectorTests(unittest.TestCase):
             spec=AgentProfileSpec.create(
                 image="reviewer@sha256:def",
                 command=["reviewer", "run"],
-                network_mode="none",
+                network_mode="gateway_only",
                 workspace_mode="read_only",
+                gateway_capabilities=[
+                    "run.describe",
+                    "work.append",
+                    "workflow.scope-review.submit",
+                ],
             ),
             krab_identity_id=reviewer_identity["id"],
             created_by=self.user["id"],
@@ -259,6 +275,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         after: str,
         review_outcome: str | None = None,
         exit_code: int = 0,
+        while_running: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
         self.workspace_sequence += 1
         owner = f"workflow-test-{self.workspace_sequence}"
@@ -285,6 +302,8 @@ class WorkflowDirectorTests(unittest.TestCase):
         (workspace / "feature.txt").write_text(after, encoding="utf-8")
         captured = self.results.capture(attempt["id"], workspace)
         self.database.record_attempt_result(attempt["id"], captured.manifest)
+        if while_running is not None:
+            while_running(attempt)
         if review_outcome is not None:
             self.control.append_work_log(
                 run["id"],
@@ -312,6 +331,212 @@ class WorkflowDirectorTests(unittest.TestCase):
             expected_attempt_version=attempt["version"],
             exit_code=exit_code,
             image_id=attempt["image_id"],
+        )
+
+    def start_scoped_execution(self) -> dict[str, object]:
+        item = self.database.import_work_item(
+            project_key="workflow-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "workflow-scoped-review",
+                    "source_updated_at": "2026-10-25T15:00:00Z",
+                    "title": "Enforce mechanically derived scope review",
+                    "brief": "Discover and implement one bounded change.",
+                    "acceptance_criteria": ["Preserve the exact authority boundary."],
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        investigator_identity = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "8" * 32, "scope-investigator", 1),
+            "file:/private/scope-investigator",
+        )
+        coordinator_identity = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "9" * 32, "scope-coordinator", 1),
+            "file:/private/scope-coordinator",
+        )
+        self.database.create_agent_profile(
+            name="Scope Investigator",
+            spec=AgentProfileSpec.create(
+                image="investigator@sha256:scope",
+                command=["investigator", "run"],
+                workspace_mode="read_only",
+                network_mode="gateway_only",
+                gateway_capabilities=[
+                    "run.describe",
+                    "discovery.trace.submit",
+                ],
+            ),
+            krab_identity_id=investigator_identity["id"],
+            created_by=self.user["id"],
+        )
+        self.database.create_agent_profile(
+            name="Scope Coordinator",
+            spec=AgentProfileSpec.create(
+                image="coordinator@sha256:scope",
+                command=["coordinator", "run"],
+                workspace_mode="read_only",
+                network_mode="gateway_only",
+                credential_names=["krab"],
+                gateway_capabilities=[
+                    "run.describe",
+                    "interaction.open",
+                    "interaction.read",
+                    "handoff.submit",
+                    "discovery.ruling.submit",
+                ],
+            ),
+            krab_identity_id=coordinator_identity["id"],
+            created_by=self.user["id"],
+        )
+        self.database.create_discovery_configuration(
+            project_key="workflow-project",
+            name="scope-discovery",
+            spec=DiscoveryConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "max_findings": 2,
+                    "max_must_items": 2,
+                    "max_follow_up_proposals": 2,
+                }
+            ),
+            investigator_profile_name="Scope Investigator",
+            coordinator_profile_name="Scope Coordinator",
+            created_by=self.user["id"],
+        )
+        discovery = self.database.start_discovery_execution(
+            project_key="workflow-project",
+            configuration_name="scope-discovery",
+            work_item_id=item["id"],
+            source_revision=self.base,
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            krab_session_id="ses_" + "a" * 32,
+            krab_claim_id="clm_" + "b" * 32,
+            idempotency_key="scope-discovery-start",
+            requested_by=self.user["id"],
+        )
+        discovery_director = DiscoveryDirector(self.control)
+        self.assertFalse(
+            discovery_director.advance(
+                discovery["id"], expected_version=discovery["version"]
+            )
+        )
+        current = self.database.get_discovery_execution(discovery["id"])
+        investigator = self.database.get_run(current["runs"]["investigator"]["run_id"])
+        trace = DiscoveryTrace.from_mapping(
+            {
+                "schema_version": 1,
+                "summary": "The authority boundary is the only required scope.",
+                "findings": [
+                    {
+                        "key": "authority-boundary",
+                        "classification": "constraint",
+                        "summary": "The existing boundary must remain exact.",
+                        "source_refs": [{"kind": "acceptance_criterion", "index": 0}],
+                        "evidence": [],
+                    }
+                ],
+                "recommended_checks": ["Run the focused authority test."],
+                "open_questions": [],
+            }
+        )
+        self.finish_run(
+            investigator,
+            source_revision=self.base,
+            before="base\n",
+            after="base\n",
+            while_running=lambda _attempt: self.control.submit_discovery_trace(
+                investigator["id"],
+                trace=trace,
+                idempotency_key="scope-discovery-trace",
+            ),
+        )
+        self.assertTrue(
+            discovery_director.advance(
+                current["id"], expected_version=current["version"]
+            )
+        )
+        coordinate = self.database.get_discovery_execution(discovery["id"])
+        self.assertFalse(
+            discovery_director.advance(
+                coordinate["id"], expected_version=coordinate["version"]
+            )
+        )
+        with_coordinator = self.database.get_discovery_execution(discovery["id"])
+        coordinator = self.database.get_run(
+            with_coordinator["runs"]["coordinator"]["run_id"]
+        )
+        ruling = DiscoveryRuling.from_mapping(
+            {
+                "schema_version": 1,
+                "disposition": "GO",
+                "summary": "The exact bounded change is ready.",
+                "trace_finding_keys": ["authority-boundary"],
+                "interaction_id": None,
+                "work_ready_brief": {
+                    "objective": "Preserve the exact authority boundary.",
+                    "must_items": [
+                        {
+                            "key": "preserve-authority",
+                            "requirement": "Keep the authority boundary exact.",
+                            "source_refs": [
+                                {"kind": "acceptance_criterion", "index": 0}
+                            ],
+                            "finding_keys": ["authority-boundary"],
+                        }
+                    ],
+                    "scope_paths": ["feature.txt"],
+                    "verification_checks": ["Run the focused authority test."],
+                    "non_goals": ["Do not widen provider authority."],
+                    "follow_up_proposals": [],
+                },
+            }
+        )
+        self.finish_run(
+            coordinator,
+            source_revision=self.base,
+            before="base\n",
+            after="base\n",
+            while_running=lambda _attempt: self.control.submit_discovery_ruling(
+                coordinator["id"],
+                ruling=ruling,
+                idempotency_key="scope-discovery-ruling",
+            ),
+        )
+        self.assertTrue(
+            discovery_director.advance(
+                with_coordinator["id"],
+                expected_version=with_coordinator["version"],
+            )
+        )
+        completion = self.database.get_discovery_execution(discovery["id"])
+        self.assertTrue(
+            discovery_director.advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        completed = self.database.get_discovery_execution(discovery["id"])
+        return self.database.start_workflow_execution(
+            project_key="workflow-project",
+            configuration_name="default",
+            work_item_id=item["id"],
+            source_revision=self.base,
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            discovery_execution_id=completed["id"],
+            idempotency_key="scope-implementation-start",
+            requested_by=self.user["id"],
         )
 
     def drive_build_to_review(
@@ -478,6 +703,235 @@ class WorkflowDirectorTests(unittest.TestCase):
             mapping_name="primary",
             bound_by=self.user["id"],
         )
+
+    @staticmethod
+    def scope_review(
+        *,
+        must_outcome: str = "passed",
+        probe_key: str = "compatibility-probe",
+        base_finding: str = "absent",
+        head_finding: str = "absent",
+    ) -> WorkflowScopeReview:
+        return WorkflowScopeReview.from_mapping(
+            {
+                "schema_version": 1,
+                "must_results": [
+                    {
+                        "key": "preserve-authority",
+                        "outcome": must_outcome,
+                        "summary": "The exact authority boundary was exercised.",
+                        "evidence": ["Focused authority test result."],
+                    }
+                ],
+                "probes": [
+                    {
+                        "key": probe_key,
+                        "summary": "Compare compatibility behavior at base and HEAD.",
+                        "base_finding": base_finding,
+                        "head_finding": head_finding,
+                        "evidence": ["Base and HEAD were tested independently."],
+                    }
+                ],
+            }
+        )
+
+    def test_scoped_review_derives_regression_and_drives_correction(self) -> None:
+        execution = self.start_scoped_execution()
+        review_stage, gate, reviewer = self.drive_build_to_review(
+            execution, before="base\n", after="candidate\n"
+        )
+        policy = self.database.get_gate_policy(gate["policy_id"])
+        regression = self.scope_review(head_finding="present")
+        accepted: dict[str, object] = {}
+
+        def submit_scope(_attempt: dict[str, object]) -> None:
+            wrong_keys = WorkflowScopeReview.from_mapping(
+                {
+                    **regression.to_dict(),
+                    "must_results": [
+                        {
+                            **regression.to_dict()["must_results"][0],
+                            "key": "invented-must",
+                        }
+                    ],
+                }
+            )
+            with self.assertRaisesRegex(ConflictError, "MUST keys"):
+                self.control.submit_workflow_scope_review(
+                    reviewer["id"],
+                    review=wrong_keys,
+                    idempotency_key="wrong-scope-keys",
+                )
+            accepted.update(
+                self.control.submit_workflow_scope_review(
+                    reviewer["id"],
+                    review=regression,
+                    idempotency_key="round-zero-scope-review",
+                )
+            )
+            repeated = self.control.submit_workflow_scope_review(
+                reviewer["id"],
+                review=regression,
+                idempotency_key="round-zero-scope-review",
+            )
+            self.assertEqual(repeated, accepted)
+            with self.assertRaisesRegex(ConflictError, "another scope review"):
+                self.control.submit_workflow_scope_review(
+                    reviewer["id"],
+                    review=self.scope_review(),
+                    idempotency_key="round-zero-scope-review",
+                )
+            with self.assertRaisesRegex(ConflictError, "derived scope outcome"):
+                self.control.append_work_log(
+                    reviewer["id"],
+                    WorkLogEntry.from_mapping(
+                        {
+                            "schema_version": 2,
+                            "kind": "review",
+                            "summary": "Attempt to override the derived result.",
+                            "details": [],
+                            "artifacts": [],
+                            "related_interaction_ids": [],
+                            "candidate_revision": policy["head_revision"],
+                            "review_outcome": "approved",
+                        }
+                    ),
+                    idempotency_key="mismatched-derived-verdict",
+                )
+
+        completed_attempt = self.finish_run(
+            reviewer,
+            source_revision=policy["head_revision"],
+            before="candidate\n",
+            after="candidate\n",
+            review_outcome="changes_requested",
+            while_running=submit_scope,
+        )
+
+        self.assertEqual(accepted["expected_review_outcome"], "changes_requested")
+        self.assertEqual(accepted["regression_probe_keys"], ["compatibility-probe"])
+        stored = self.database.get_workflow_scope_review(
+            gate["policy_id"], reviewer["id"], completed_attempt["id"]
+        )
+        self.assertEqual(stored, accepted)
+        for statement in (
+            "UPDATE workflow_scope_reviews SET created_at = created_at WHERE id = ?",
+            "DELETE FROM workflow_scope_reviews WHERE id = ?",
+        ):
+            with (
+                self.subTest(statement=statement),
+                self.database.connect() as connection,
+                self.assertRaises(sqlite3.IntegrityError),
+            ):
+                connection.execute(statement, (accepted["id"],))
+        projected = next(
+            row
+            for row in ControlRoom(self.database).snapshot()["workflows"]
+            if row["id"] == execution["id"]
+        )
+        self.assertEqual(
+            (
+                projected["scope_discovery_execution_id"],
+                projected["scope_discovery_ruling_id"],
+                projected["latest_scope_review_id"],
+                projected["latest_scope_review_outcome"],
+                projected["latest_scope_review_run_id"],
+                projected["latest_scope_review_attempt_id"],
+            ),
+            (
+                execution["scope_binding"]["discovery_execution_id"],
+                execution["scope_binding"]["discovery_ruling_id"],
+                accepted["id"],
+                "changes_requested",
+                reviewer["id"],
+                completed_attempt["id"],
+            ),
+        )
+        projected_json = canonical_json(projected)
+        self.assertNotIn(regression.must_results[0].summary, projected_json)
+        self.assertNotIn(regression.probes[0].summary, projected_json)
+        self.assertTrue(
+            self.director().advance(
+                review_stage["id"], expected_version=review_stage["version"]
+            )
+        )
+        correction = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            (correction["stage"], correction["correction_round"]), ("build", 1)
+        )
+        self.assertEqual(
+            correction["events"][-1]["metadata"]["scope_review_id"],
+            accepted["id"],
+        )
+        evidence = next(
+            item
+            for item in self.database.list_gate_evidence(gate["policy_id"])
+            if item["gate_name"] == "independent-review"
+        )
+        self.assertEqual(evidence["outcome"], "failed")
+
+    def test_scoped_review_follow_up_is_nonblocking(self) -> None:
+        execution = self.start_scoped_execution()
+        review_stage, gate, reviewer = self.drive_build_to_review(
+            execution, before="base\n", after="candidate\n"
+        )
+        policy = self.database.get_gate_policy(gate["policy_id"])
+        follow_up = self.scope_review(
+            base_finding="present",
+            head_finding="present",
+        )
+        accepted: dict[str, object] = {}
+
+        self.finish_run(
+            reviewer,
+            source_revision=policy["head_revision"],
+            before="candidate\n",
+            after="candidate\n",
+            review_outcome="approved",
+            while_running=lambda _attempt: accepted.update(
+                self.control.submit_workflow_scope_review(
+                    reviewer["id"],
+                    review=follow_up,
+                    idempotency_key="nonblocking-follow-up",
+                )
+            ),
+        )
+
+        self.assertEqual(accepted["expected_review_outcome"], "approved")
+        self.assertEqual(accepted["follow_up_probe_keys"], ["compatibility-probe"])
+        self.assertTrue(
+            self.director().advance(
+                review_stage["id"], expected_version=review_stage["version"]
+            )
+        )
+        maintainer = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(maintainer["stage"], "maintainer")
+        self.assertEqual(
+            maintainer["events"][-1]["metadata"]["scope_review_id"],
+            accepted["id"],
+        )
+        evidence = next(
+            item
+            for item in self.database.list_gate_evidence(gate["policy_id"])
+            if item["gate_name"] == "independent-review"
+        )
+        self.assertEqual(evidence["outcome"], "passed")
+
+    def test_scoped_typed_verdict_requires_scope_artifact_first(self) -> None:
+        execution = self.start_scoped_execution()
+        _review_stage, gate, reviewer = self.drive_build_to_review(
+            execution, before="base\n", after="candidate\n"
+        )
+        policy = self.database.get_gate_policy(gate["policy_id"])
+
+        with self.assertRaisesRegex(ConflictError, "requires a scope review"):
+            self.finish_run(
+                reviewer,
+                source_revision=policy["head_revision"],
+                before="candidate\n",
+                after="candidate\n",
+                review_outcome="approved",
+            )
 
     def issue_provider_workflow_landing(
         self, *, configuration_name: str, external_id: str

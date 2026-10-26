@@ -349,7 +349,8 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 image="agent@sha256:producer",
                 command=["agent", "run"],
                 workspace_mode="copy_on_write",
-                network_mode="none",
+                network_mode="gateway_only",
+                gateway_capabilities=["run.describe"],
             ),
             krab_identity_id=producer_identity["id"],
             created_by=self.user["id"],
@@ -360,7 +361,12 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 image="agent@sha256:reviewer",
                 command=["agent", "run"],
                 workspace_mode="read_only",
-                network_mode="none",
+                network_mode="gateway_only",
+                gateway_capabilities=[
+                    "run.describe",
+                    "work.append",
+                    "workflow.scope-review.submit",
+                ],
             ),
             krab_identity_id=reviewer_identity["id"],
             created_by=self.user["id"],
@@ -622,6 +628,82 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 source_revision="b" * 40,
                 idempotency_key="mismatched-discovery-source",
             )
+
+    def test_scoped_implementation_requires_live_role_gateway_surfaces(self) -> None:
+        discovery = self.complete_discovery()
+        self.create_implementation_configuration()
+        blind_producer_identity = self.identity("blind-producer", "8")
+        blind_reviewer_identity = self.identity("blind-reviewer", "9")
+        self.database.create_agent_profile(
+            name="Blind Producer",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:blind-producer",
+                command=["agent", "run"],
+                workspace_mode="copy_on_write",
+                network_mode="none",
+            ),
+            krab_identity_id=blind_producer_identity["id"],
+            created_by=self.user["id"],
+        )
+        self.database.create_agent_profile(
+            name="Blind Reviewer",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:blind-reviewer",
+                command=["agent", "run"],
+                workspace_mode="read_only",
+                network_mode="gateway_only",
+                gateway_capabilities=["run.describe", "work.append"],
+            ),
+            krab_identity_id=blind_reviewer_identity["id"],
+            created_by=self.user["id"],
+        )
+        spec = WorkflowConfigurationSpec.from_mapping(
+            {
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": True,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "manual",
+            }
+        )
+        for name, producer, reviewer, missing in (
+            ("blind-producer", "Blind Producer", "Reviewer", "run.describe"),
+            (
+                "blind-reviewer",
+                "Producer",
+                "Blind Reviewer",
+                "workflow.scope-review.submit",
+            ),
+        ):
+            self.database.create_workflow_configuration(
+                project_key="discovery-project",
+                name=name,
+                spec=spec,
+                producer_profile_name=producer,
+                reviewer_profile_name=reviewer,
+                created_by=self.user["id"],
+            )
+            with (
+                self.subTest(role=name),
+                self.assertRaisesRegex(ConflictError, missing.replace(".", r"\.")),
+            ):
+                ControlPlane(self.database).start_workflow_execution(
+                    project_key="discovery-project",
+                    configuration_name=name,
+                    work_item_id=self.work_item["id"],
+                    source_revision=SOURCE_REVISION,
+                    expected_configuration_version=1,
+                    expected_context_version_id=self.project["context_version_id"],
+                    expected_work_item_version_id=self.work_item[
+                        "work_item_version_id"
+                    ],
+                    expected_thread_generation=1,
+                    expected_thread_version=1,
+                    discovery_execution_id=discovery["id"],
+                    idempotency_key=f"missing-scope-surface-{name}",
+                    requested_by_handle="operator",
+                )
 
     def test_start_validates_bounds_and_pinned_versions(self) -> None:
         invalid_values = (
@@ -1773,6 +1855,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         with self.database.connect() as connection:
             connection.executescript(
                 """
+                DROP TABLE workflow_scope_reviews;
                 DROP TABLE workflow_scope_bindings;
                 DROP TABLE advisory_reports;
                 DROP TABLE advisory_challenge_reviews;
@@ -1813,7 +1896,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 39)
+        self.assertEqual(SCHEMA_VERSION, 40)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

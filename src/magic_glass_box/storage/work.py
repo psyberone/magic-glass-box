@@ -287,8 +287,15 @@ class WorkStorage:
             return None
         target = connection.execute(
             "SELECT grr.policy_id, grr.candidate_id, gp.head_revision, "
-            "gp.work_thread_id FROM integration_gate_review_runs grr "
+            "gp.work_thread_id, binding.execution_id AS workflow_execution_id, "
+            "binding.correction_round AS workflow_correction_round, "
+            "scope.workflow_execution_id AS scoped_workflow_execution_id "
+            "FROM integration_gate_review_runs grr "
             "JOIN integration_gate_policies gp ON gp.id = grr.policy_id "
+            "LEFT JOIN workflow_run_bindings binding "
+            "ON binding.run_id = grr.run_id AND binding.role = 'reviewer' "
+            "LEFT JOIN workflow_scope_bindings scope "
+            "ON scope.workflow_execution_id = binding.execution_id "
             "WHERE grr.run_id = ?",
             (run_id,),
         ).fetchone()
@@ -302,6 +309,30 @@ class WorkStorage:
             raise ConflictError(
                 "typed review verdict is not pinned to the exact candidate"
             )
+        if target["scoped_workflow_execution_id"] is not None:
+            scope_review = connection.execute(
+                "SELECT id, expected_review_outcome "
+                "FROM workflow_scope_reviews WHERE workflow_execution_id = ? "
+                "AND correction_round = ? AND policy_id = ? "
+                "AND candidate_id = ? AND reviewer_run_id = ? "
+                "AND reviewer_attempt_id = ?",
+                (
+                    target["workflow_execution_id"],
+                    target["workflow_correction_round"],
+                    target["policy_id"],
+                    target["candidate_id"],
+                    run_id,
+                    attempt_id,
+                ),
+            ).fetchone()
+            if scope_review is None:
+                raise ConflictError(
+                    "scoped typed review verdict requires a scope review first"
+                )
+            if scope_review["expected_review_outcome"] != entry.review_outcome.value:
+                raise ConflictError(
+                    "typed review verdict does not match the derived scope outcome"
+                )
         existing = connection.execute(
             "SELECT work_log_entry_id FROM integration_review_verdicts "
             "WHERE reviewer_attempt_id = ?",

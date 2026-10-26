@@ -104,6 +104,7 @@ from .service_sidecar import (
     ServiceSidecarUnavailableError,
     UnixServiceSidecarClient,
 )
+from .workflow_scope import WorkflowScopeReview
 from .workflows import WorkflowConfigurationSpec
 
 if TYPE_CHECKING:
@@ -2530,6 +2531,17 @@ class ControlPlane:
     ) -> dict[str, Any]:
         return self.database.submit_advisory_report(
             run_id, report=report, idempotency_key=idempotency_key
+        )
+
+    def submit_workflow_scope_review(
+        self,
+        run_id: str,
+        *,
+        review: WorkflowScopeReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.submit_workflow_scope_review(
+            run_id, review=review, idempotency_key=idempotency_key
         )
 
     def read_work_memory(
