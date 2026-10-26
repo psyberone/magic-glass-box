@@ -486,6 +486,7 @@ class RunGateway:
             "recovery_checkpoint": execution["recovery_checkpoint"],
             "review_assignment": execution["review_assignment"],
             "changes_requested": execution["changes_requested"],
+            "workflow_assignment": execution.get("workflow_assignment"),
             "discovery_assignment": execution.get("discovery_assignment"),
             "advisory_assignment": execution.get("advisory_assignment"),
             "work_memory": execution["work_memory"],

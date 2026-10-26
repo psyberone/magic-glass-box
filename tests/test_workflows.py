@@ -31,6 +31,7 @@ from magic_glass_box.gates import ReviewSeparation
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import ControlPlane
+from magic_glass_box.storage.schema import SCHEMA_V38
 from magic_glass_box.workflows import (
     ADVISORY_REVIEW_TEMPLATE,
     ADVISORY_REVIEW_TEMPLATE_ID,
@@ -342,6 +343,7 @@ class WorkflowStorageTests(unittest.TestCase):
     def downgrade_discovery_to_v32(connection: sqlite3.Connection) -> None:
         connection.executescript(
             """
+            DROP TABLE workflow_scope_bindings;
             DROP TABLE advisory_reports;
             DROP TABLE advisory_challenge_reviews;
             DROP TABLE advisory_blind_reviews;
@@ -857,10 +859,12 @@ class WorkflowStorageTests(unittest.TestCase):
                 "rulings",
                 "landing",
                 "completion",
+                "scope_binding",
             },
         )
         self.assertIsNone(execution["landing"])
         self.assertIsNone(execution["completion"])
+        self.assertIsNone(execution["scope_binding"])
         expected_request = {
             "schema_version": 1,
             "project_key": "workflow-project",
@@ -1516,6 +1520,42 @@ class WorkflowStorageTests(unittest.TestCase):
         migrated_execution = migrated.get_workflow_execution(execution["id"])
         self.assertEqual(migrated_execution["id"], execution["id"])
         self.assertEqual(migrated_execution["roles"], execution["roles"])
+
+    def test_schema_thirty_nine_adds_workflow_scope_binding_once(self) -> None:
+        legacy_path = Path(self.temporary.name) / "schema-v38.db"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(SCHEMA_V38)
+            connection.execute("PRAGMA user_version = 38")
+        legacy_path.chmod(0o600)
+
+        migrated = Database(legacy_path)
+        first = migrated.initialize()
+        second = migrated.initialize()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema_version"], 39)
+        with migrated.connect() as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                )
+            }
+            triggers = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'trigger' "
+                    "AND tbl_name = 'workflow_scope_bindings'"
+                )
+            }
+        self.assertIn("workflow_scope_bindings", tables)
+        self.assertEqual(
+            triggers,
+            {
+                "workflow_scope_binding_immutable_update",
+                "workflow_scope_binding_immutable_delete",
+            },
+        )
 
     def test_schema_thirty_migrates_schema_twenty_seven_once(self) -> None:
         path = Path(self.temporary.name) / "schema-27.db"

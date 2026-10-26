@@ -54,6 +54,10 @@ class QueryStorage:
                 "gmcr.policy_id AS maintainer_change_policy_id, "
                 "gmcr.candidate_id AS maintainer_change_candidate_id, "
                 "gmcr.maintainer_review_id AS change_maintainer_review_id, "
+                "wrb.execution_id AS workflow_execution_id, "
+                "wrb.correction_round AS workflow_round, "
+                "wrb.role AS workflow_role, "
+                "workflow.stage AS workflow_stage, "
                 "drb.execution_id AS discovery_execution_id, "
                 "drb.role AS discovery_role, "
                 "discovery.stage AS discovery_stage, "
@@ -80,6 +84,9 @@ class QueryStorage:
                 "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
                 "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
                 "ON gmcr.run_id = r.id "
+                "LEFT JOIN workflow_run_bindings wrb ON wrb.run_id = r.id "
+                "LEFT JOIN workflow_executions workflow "
+                "ON workflow.id = wrb.execution_id "
                 "LEFT JOIN discovery_run_bindings drb ON drb.run_id = r.id "
                 "LEFT JOIN discovery_executions discovery "
                 "ON discovery.id = drb.execution_id "
@@ -204,6 +211,22 @@ class QueryStorage:
             if checkpoint_row is None
             else self._recovery_checkpoint_record(checkpoint_row)
         )
+        workflow_execution_id = result.pop("workflow_execution_id")
+        workflow_round = result.pop("workflow_round")
+        workflow_role = result.pop("workflow_role")
+        workflow_stage = result.pop("workflow_stage")
+        if workflow_execution_id is None:
+            result["workflow_assignment"] = None
+        else:
+            result["workflow_assignment"] = {
+                "execution_id": workflow_execution_id,
+                "correction_round": workflow_round,
+                "role": workflow_role,
+                "stage": workflow_stage,
+                "scope_binding": self._workflow_scope_binding_record(
+                    connection, workflow_execution_id
+                ),
+            }
         discovery_execution_id = result.pop("discovery_execution_id")
         discovery_role = result.pop("discovery_role")
         discovery_stage = result.pop("discovery_stage")

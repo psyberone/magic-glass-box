@@ -118,6 +118,13 @@ fixed role and stage, pinned human decision-owner handle, accepted trace when
 present, and prior typed rulings. This is bounded prescription state, not an
 agent transcript or a grant of authority beyond the run's capability list.
 
+An implementation-bound run receives `workflow_assignment`: its execution,
+correction round, role, and stage. When the implementation was explicitly
+started from Discovery, the assignment also carries the immutable work-ready
+brief plus the source Discovery execution, ruling, and digest. An unscoped
+legacy workflow reports a null scope binding. Neither form expands the run's
+capabilities or lets Discovery evidence satisfy an implementation gate.
+
 An advisory-bound run receives a separate `advisory_assignment`. It names the
 execution, phase-specific role, and exact candidate. A blind reviewer receives
 no peer evidence. A fresh challenge run receives all three completed blind

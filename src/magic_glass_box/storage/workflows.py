@@ -6,7 +6,11 @@ import sqlite3
 from typing import Any
 
 from ..advisory import AdvisoryConfigurationSpec
-from ..discovery import DiscoveryConfigurationSpec
+from ..discovery import (
+    DiscoveryConfigurationSpec,
+    DiscoveryDisposition,
+    DiscoveryRuling,
+)
 from ..domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -888,8 +892,9 @@ class WorkflowStorage:
         expected_work_item_version_id: str,
         expected_thread_generation: int,
         expected_thread_version: int,
+        discovery_execution_id: str | None,
     ) -> dict[str, Any]:
-        return {
+        request = {
             "schema_version": 1,
             "project_key": project_key,
             "configuration_name": configuration_name,
@@ -901,6 +906,9 @@ class WorkflowStorage:
             "expected_thread_generation": expected_thread_generation,
             "expected_thread_version": expected_thread_version,
         }
+        if discovery_execution_id is not None:
+            request["discovery_execution_id"] = discovery_execution_id
+        return request
 
     def start_workflow_execution(
         self,
@@ -916,6 +924,7 @@ class WorkflowStorage:
         expected_thread_version: int,
         idempotency_key: str,
         requested_by: str,
+        discovery_execution_id: str | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         configuration_name = validate_name(
@@ -940,6 +949,12 @@ class WorkflowStorage:
             expected_thread_generation, field="expected_thread_generation"
         )
         self._positive_integer(expected_thread_version, field="expected_thread_version")
+        if discovery_execution_id is not None:
+            discovery_execution_id = require_string(
+                discovery_execution_id,
+                field="discovery_execution_id",
+                max_bytes=64,
+            )
         idempotency_key = self._workflow_idempotency_key(idempotency_key)
         request = self._start_request(
             project_key=project_key,
@@ -951,6 +966,7 @@ class WorkflowStorage:
             expected_work_item_version_id=expected_work_item_version_id,
             expected_thread_generation=expected_thread_generation,
             expected_thread_version=expected_thread_version,
+            discovery_execution_id=discovery_execution_id,
         )
         request_json = canonical_json(request)
         request_sha256 = content_sha256(request_json)
@@ -1069,6 +1085,19 @@ class WorkflowStorage:
                             "work thread already has an active workflow or active "
                             "prescription"
                         )
+                    scope_ruling = None
+                    if discovery_execution_id is not None:
+                        scope_ruling = self._workflow_scope_source(
+                            connection,
+                            discovery_execution_id=discovery_execution_id,
+                            project_id=project["id"],
+                            context_version_id=project["context_version_id"],
+                            work_item_id=work_item_id,
+                            work_item_version_id=work_item["work_item_version_id"],
+                            work_thread_id=work_item["work_thread_id"],
+                            work_thread_generation=work_item["generation"],
+                            source_revision=source_revision,
+                        )
                     connection.execute(
                         "INSERT INTO workflow_executions "
                         "(id, project_id, template_definition_id, "
@@ -1104,6 +1133,18 @@ class WorkflowStorage:
                         "'workflow.started', NULL, 'active', ?, '{}', ?)",
                         (execution_id, requested_by, now),
                     )
+                    if scope_ruling is not None:
+                        connection.execute(
+                            "INSERT INTO workflow_scope_bindings "
+                            "(workflow_execution_id, discovery_execution_id, "
+                            "discovery_ruling_id, created_at) VALUES (?, ?, ?, ?)",
+                            (
+                                execution_id,
+                                discovery_execution_id,
+                                scope_ruling["id"],
+                                now,
+                            ),
+                        )
                     stored_id = execution_id
                     connection.commit()
             except (
@@ -1118,6 +1159,72 @@ class WorkflowStorage:
                 connection.rollback()
                 raise ConflictError("workflow execution could not be started") from exc
         return self.get_workflow_execution(stored_id)
+
+    @staticmethod
+    def _workflow_scope_source(
+        connection: sqlite3.Connection,
+        *,
+        discovery_execution_id: str,
+        project_id: str,
+        context_version_id: str,
+        work_item_id: str,
+        work_item_version_id: str,
+        work_thread_id: str,
+        work_thread_generation: int,
+        source_revision: str,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT execution.project_id, execution.context_version_id, "
+            "execution.work_item_id, execution.work_item_version_id, "
+            "execution.work_thread_id, execution.work_thread_generation, "
+            "execution.source_revision, execution.state, execution.stage, "
+            "ruling.id, ruling.ruling_json, ruling.content_sha256 "
+            "FROM discovery_executions execution "
+            "LEFT JOIN discovery_rulings ruling "
+            "ON ruling.execution_id = execution.id "
+            "AND ruling.disposition = 'GO' WHERE execution.id = ?",
+            (discovery_execution_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(
+                f"Discovery execution not found: {discovery_execution_id}"
+            )
+        if (
+            row["state"] != "completed"
+            or row["stage"] != "completion"
+            or row["id"] is None
+        ):
+            raise ConflictError(
+                "workflow scope requires a completed GO ruling from Discovery"
+            )
+        expected = {
+            "project_id": project_id,
+            "context_version_id": context_version_id,
+            "work_item_id": work_item_id,
+            "work_item_version_id": work_item_version_id,
+            "work_thread_id": work_thread_id,
+            "work_thread_generation": work_thread_generation,
+            "source_revision": source_revision,
+        }
+        for field, value in expected.items():
+            if row[field] != value:
+                raise ConflictError(
+                    "Discovery scope " + field.replace("_", " ") + " changed"
+                )
+        try:
+            ruling = DiscoveryRuling.from_mapping(json.loads(row["ruling_json"]))
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored Discovery GO ruling is invalid") from exc
+        if (
+            ruling.disposition is not DiscoveryDisposition.GO
+            or ruling.work_ready_brief is None
+        ):
+            raise StorageError("stored Discovery GO ruling has no work-ready brief")
+        return {
+            "id": row["id"],
+            "content_sha256": row["content_sha256"],
+            "work_ready_brief": ruling.work_ready_brief.to_dict(),
+        }
 
     def _execution_record(
         self, connection: sqlite3.Connection, execution_id: str
@@ -1183,6 +1290,7 @@ class WorkflowStorage:
             mode=configuration["spec"]["landing_mode"],
         )
         completion = self._workflow_completion_record(connection, execution_id)
+        scope_binding = self._workflow_scope_binding_record(connection, execution_id)
         return {
             **dict(row),
             "template": configuration["template"],
@@ -1193,6 +1301,37 @@ class WorkflowStorage:
             "rulings": [dict(ruling) for ruling in rulings],
             "landing": landing,
             "completion": completion,
+            "scope_binding": scope_binding,
+        }
+
+    @staticmethod
+    def _workflow_scope_binding_record(
+        connection: sqlite3.Connection, execution_id: str
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT binding.discovery_execution_id, "
+            "binding.discovery_ruling_id, ruling.content_sha256, "
+            "ruling.ruling_json, binding.created_at "
+            "FROM workflow_scope_bindings binding "
+            "JOIN discovery_rulings ruling "
+            "ON ruling.id = binding.discovery_ruling_id "
+            "WHERE binding.workflow_execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            ruling = DiscoveryRuling.from_mapping(json.loads(row["ruling_json"]))
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow scope ruling is invalid") from exc
+        if ruling.work_ready_brief is None:
+            raise StorageError("stored workflow scope ruling has no work-ready brief")
+        return {
+            "discovery_execution_id": row["discovery_execution_id"],
+            "discovery_ruling_id": row["discovery_ruling_id"],
+            "discovery_ruling_sha256": row["content_sha256"],
+            "work_ready_brief": ruling.work_ready_brief.to_dict(),
+            "created_at": row["created_at"],
         }
 
     def _workflow_landing_record(

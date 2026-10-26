@@ -199,6 +199,14 @@ The migration preserves existing action rows with a null advisory subject;
 the new subject is private control-plane state, not a portable document or a
 new source of review authority.
 
+Control-plane schema v39 adds one immutable optional scope binding from an
+implementation execution to a completed Discovery `GO` ruling. Starting the
+implementation through this path requires an exact match on project, context,
+work item and version, work thread and generation, and source revision. The
+binding references the original immutable ruling instead of copying its brief
+into a second authority store. Unscoped implementation executions remain
+compatible while M13D is introduced and proven.
+
 `workflow-scope-review-v1.schema.json` defines the bounded reviewer-authored
 input for M13D scope discipline. It carries one result for every immutable
 Discovery `MUST` plus optional base/head `PROBE` observations. It deliberately
@@ -208,8 +216,8 @@ base-and-head findings are follow-up proposals, base-only findings are
 resolved, and absent-on-both probes are clean. A failed `MUST` or regression
 requires changes; no other row can block. The portable artifact alone grants
 no review authority. The relational acceptance path must still bind it to the
-exact implementation execution, candidate, policy, reviewer run and attempt,
-and verify its `MUST` keys against the pinned work-ready brief.
+exact scoped implementation execution, candidate, policy, reviewer run and
+attempt, and verify its `MUST` keys against the pinned work-ready brief.
 
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and

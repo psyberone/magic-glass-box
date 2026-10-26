@@ -2207,6 +2207,7 @@ class ControlPlane:
         expected_thread_version: int,
         idempotency_key: str,
         requested_by_handle: str,
+        discovery_execution_id: str | None = None,
     ) -> dict[str, Any]:
         requester = self.database.get_user(requested_by_handle)
         return self.database.start_workflow_execution(
@@ -2221,6 +2222,7 @@ class ControlPlane:
             expected_thread_version=expected_thread_version,
             idempotency_key=idempotency_key,
             requested_by=requester["id"],
+            discovery_execution_id=discovery_execution_id,
         )
 
     def get_workflow_execution(self, execution_id: str) -> dict[str, Any]:

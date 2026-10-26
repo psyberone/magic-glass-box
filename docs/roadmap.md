@@ -1503,8 +1503,14 @@ No M13C work remains. M13D is the scope-discipline and live-proof checkpoint.
 The first M13D checkpoint publishes the bounded workflow scope-review
 contract. Reviewers supply `MUST` outcomes and base/head `PROBE` observations;
 they cannot supply classifications, gate outcomes, or verdict authority. MGB
-derives the blocking result mechanically. Durable Discovery-to-implementation
-binding, gateway submission, director enforcement, and the live proof remain.
+derives the blocking result mechanically.
+
+Schema v39 completes the durable Discovery-to-implementation lineage seam. An
+optional implementation start pins one completed `GO` ruling only when every
+project, context, work-item, thread, and source identity matches; its producer
+and reviewer assignments receive the original immutable work-ready brief.
+Scope-review gateway submission, gate/director enforcement, and the live proof
+remain.
 
 
 ## Milestone 14: heterogeneous work provider

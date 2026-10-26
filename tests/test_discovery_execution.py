@@ -37,6 +37,7 @@ from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.storage.schema import SCHEMA_VERSION
 from magic_glass_box.supervision import Supervisor
+from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION
 from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 OWNER_ID = "discovery-ledger-test"
@@ -314,6 +315,96 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         )
         return advanced, investigator
 
+    def complete_discovery(self, **ruling_overrides: object) -> dict[str, object]:
+        execution, _investigator = self.prepare_coordinate()
+        coordinator = self.create_role_run(execution, "coordinator")
+        ruling = DiscoveryRuling.from_mapping(ruling_value(**ruling_overrides))
+        self.run_attempt(
+            coordinator,
+            lambda _attempt: self.database.submit_discovery_ruling(
+                coordinator["id"],
+                ruling=ruling,
+                idempotency_key="final-ruling-1",
+            ),
+        )
+        current = self.database.get_discovery_execution(execution["id"])
+        completion = self.database.advance_discovery_execution(
+            execution["id"],
+            expected_version=current["version"],
+            expected_stage="coordinate",
+            target_stage="completion",
+            event_kind="discovery.coordination_completed",
+            metadata={"coordinator_run_id": coordinator["id"]},
+        )
+        return self.database.complete_discovery_execution(
+            execution["id"], expected_version=completion["version"]
+        )
+
+    def create_implementation_configuration(self) -> dict[str, object]:
+        producer_identity = self.identity("producer", "6")
+        reviewer_identity = self.identity("reviewer", "7")
+        producer = self.database.create_agent_profile(
+            name="Producer",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:producer",
+                command=["agent", "run"],
+                workspace_mode="copy_on_write",
+                network_mode="none",
+            ),
+            krab_identity_id=producer_identity["id"],
+            created_by=self.user["id"],
+        )
+        reviewer = self.database.create_agent_profile(
+            name="Reviewer",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:reviewer",
+                command=["agent", "run"],
+                workspace_mode="read_only",
+                network_mode="none",
+            ),
+            krab_identity_id=reviewer_identity["id"],
+            created_by=self.user["id"],
+        )
+        return self.database.create_workflow_configuration(
+            project_key="discovery-project",
+            name="implementation",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [],
+                    "max_correction_rounds": 2,
+                    "landing_mode": "manual",
+                }
+            ),
+            producer_profile_name=producer["name"],
+            reviewer_profile_name=reviewer["name"],
+            created_by=self.user["id"],
+        )
+
+    def start_implementation(
+        self,
+        discovery_execution_id: str,
+        *,
+        source_revision: str = SOURCE_REVISION,
+        idempotency_key: str = "implementation-from-discovery",
+    ) -> dict[str, object]:
+        return ControlPlane(self.database).start_workflow_execution(
+            project_key="discovery-project",
+            configuration_name="implementation",
+            work_item_id=self.work_item["id"],
+            source_revision=source_revision,
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=self.work_item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            discovery_execution_id=discovery_execution_id,
+            idempotency_key=idempotency_key,
+            requested_by_handle="operator",
+        )
+
     def test_start_pins_exact_inputs_decision_owner_and_idempotency(self) -> None:
         execution = self.start()
         repeated = self.start()
@@ -448,6 +539,88 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
             self.start(
                 idempotency_key="stale-context",
                 expected_context_version_id="pcv_" + "0" * 32,
+            )
+
+    def test_completed_go_ruling_can_pin_one_implementation_scope(self) -> None:
+        discovery = self.complete_discovery()
+        self.create_implementation_configuration()
+
+        execution = self.start_implementation(discovery["id"])
+        repeated = self.start_implementation(discovery["id"])
+
+        self.assertEqual(repeated, execution)
+        self.assertEqual(
+            execution["scope_binding"],
+            {
+                "discovery_execution_id": discovery["id"],
+                "discovery_ruling_id": discovery["final_ruling"]["id"],
+                "discovery_ruling_sha256": discovery["final_ruling"]["content_sha256"],
+                "work_ready_brief": ruling_value()["work_ready_brief"],
+                "created_at": execution["created_at"],
+            },
+        )
+        with self.database.connect() as connection:
+            request = json.loads(
+                connection.execute(
+                    "SELECT request_json FROM workflow_executions WHERE id = ?",
+                    (execution["id"],),
+                ).fetchone()["request_json"]
+            )
+        self.assertEqual(request["discovery_execution_id"], discovery["id"])
+        producer = self.database.create_run(
+            project_key="discovery-project",
+            profile_name="Producer",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+            source_revision=SOURCE_REVISION,
+            supervision_policy=WORKFLOW_RUN_SUPERVISION,
+            workflow_execution_id=execution["id"],
+            workflow_round=0,
+            workflow_role="producer",
+        )
+        assignment = self.database.get_run_execution(producer["id"])
+        self.assertEqual(
+            assignment["workflow_assignment"],
+            {
+                "execution_id": execution["id"],
+                "correction_round": 0,
+                "role": "producer",
+                "stage": "build",
+                "scope_binding": execution["scope_binding"],
+            },
+        )
+        for statement in (
+            "UPDATE workflow_scope_bindings SET created_at = created_at "
+            "WHERE workflow_execution_id = ?",
+            "DELETE FROM workflow_scope_bindings WHERE workflow_execution_id = ?",
+        ):
+            with (
+                self.subTest(statement=statement),
+                self.database.connect() as connection,
+                self.assertRaises(sqlite3.IntegrityError),
+            ):
+                connection.execute(statement, (execution["id"],))
+
+    def test_implementation_scope_requires_a_completed_go_ruling(self) -> None:
+        discovery = self.complete_discovery(
+            disposition="NO_GO",
+            summary="The issue must not proceed.",
+            work_ready_brief=None,
+        )
+        self.create_implementation_configuration()
+
+        with self.assertRaisesRegex(ConflictError, "completed GO ruling"):
+            self.start_implementation(discovery["id"])
+
+    def test_implementation_scope_rejects_a_different_source_revision(self) -> None:
+        discovery = self.complete_discovery()
+        self.create_implementation_configuration()
+
+        with self.assertRaisesRegex(ConflictError, "source revision"):
+            self.start_implementation(
+                discovery["id"],
+                source_revision="b" * 40,
+                idempotency_key="mismatched-discovery-source",
             )
 
     def test_start_validates_bounds_and_pinned_versions(self) -> None:
@@ -1600,6 +1773,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         with self.database.connect() as connection:
             connection.executescript(
                 """
+                DROP TABLE workflow_scope_bindings;
                 DROP TABLE advisory_reports;
                 DROP TABLE advisory_challenge_reviews;
                 DROP TABLE advisory_blind_reviews;
@@ -1639,7 +1813,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 38)
+        self.assertEqual(SCHEMA_VERSION, 39)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

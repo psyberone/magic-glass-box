@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5468,6 +5468,35 @@ BEGIN
 END;
 """
 
+WORKFLOW_SCOPE_BINDING_SCHEMA = """
+CREATE TABLE workflow_scope_bindings (
+    workflow_execution_id TEXT PRIMARY KEY,
+    discovery_execution_id TEXT NOT NULL,
+    discovery_ruling_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (discovery_execution_id)
+        REFERENCES discovery_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (discovery_ruling_id)
+        REFERENCES discovery_rulings(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_scope_binding_discovery
+    ON workflow_scope_bindings(discovery_execution_id, workflow_execution_id);
+
+CREATE TRIGGER workflow_scope_binding_immutable_update
+BEFORE UPDATE ON workflow_scope_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow scope bindings are immutable');
+END;
+CREATE TRIGGER workflow_scope_binding_immutable_delete
+BEFORE DELETE ON workflow_scope_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow scope bindings cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -5509,7 +5538,8 @@ SCHEMA_V37 = (
     + DISCOVERY_DIRECTOR_SCHEMA
     + ADVISORY_EXECUTION_SCHEMA
 )
-SCHEMA = SCHEMA_V37 + ADVISORY_DIRECTOR_SCHEMA
+SCHEMA_V38 = SCHEMA_V37 + ADVISORY_DIRECTOR_SCHEMA
+SCHEMA = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -5548,4 +5578,5 @@ MIGRATIONS = {
     35: ADVISORY_REVIEW_PRESCRIPTION_SCHEMA,
     36: ADVISORY_EXECUTION_SCHEMA,
     37: ADVISORY_DIRECTOR_SCHEMA,
+    38: WORKFLOW_SCOPE_BINDING_SCHEMA,
 }

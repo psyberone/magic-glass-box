@@ -124,8 +124,15 @@ M13D begins with a separate bounded scope-review contract. The reviewer
 reports pass/fail evidence for immutable Discovery `MUST` keys and only the
 base/head presence of its own `PROBE` findings. It cannot submit a probe
 classification or choose the gate result: MGB derives both. This keeps
-Discovery scope, reviewer extrapolation, and gate authority distinct while the
-durable execution binding is added in the next checkpoint.
+Discovery scope, reviewer extrapolation, and gate authority distinct.
+
+Schema v39 adds the first durable connection between prescriptions. An
+implementation start may name one completed Discovery execution; MGB accepts
+only its final `GO` ruling when every immutable project, context, work-item,
+thread, and source pin matches. The producer and reviewer run assignment then
+carry that exact work-ready brief and its ruling provenance. The binding does
+not merge the prescriptions, auto-start implementation, or let Discovery
+evidence satisfy an implementation gate.
 
 The initial built-in definition is `implementation-v1`. It codifies the loop
 that the live beta exercised:

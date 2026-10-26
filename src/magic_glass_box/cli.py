@@ -387,6 +387,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow_start.add_argument("--expected-thread-generation", required=True, type=int)
     workflow_start.add_argument("--expected-thread-version", required=True, type=int)
+    workflow_start.add_argument("--discovery-execution")
     workflow_start.add_argument("--idempotency-key", required=True)
     workflow_start.add_argument("--requested-by", required=True)
     workflow_show = workflow_commands.add_parser(
@@ -1433,6 +1434,7 @@ def _dispatch(
                 expected_thread_version=args.expected_thread_version,
                 idempotency_key=args.idempotency_key,
                 requested_by_handle=args.requested_by,
+                discovery_execution_id=args.discovery_execution,
             )
         if args.workflow_command == "show":
             return control.get_workflow_execution(args.execution_id)

@@ -141,6 +141,7 @@ class FakeGatewayDatabase:
             "recovery_checkpoint": self.recovery_checkpoint,
             "review_assignment": None,
             "changes_requested": None,
+            "workflow_assignment": None,
             "advisory_assignment": None,
             "work_memory": {
                 "thread_id": "wth_" + "8" * 32,
@@ -487,6 +488,7 @@ class RunGatewayTests(unittest.TestCase):
         self.assertIsNone(result["recovery_checkpoint"])
         self.assertIsNone(result["review_assignment"])
         self.assertIsNone(result["changes_requested"])
+        self.assertIsNone(result["workflow_assignment"])
         self.assertIsNone(result["discovery_assignment"])
         self.assertIsNone(result["advisory_assignment"])
         self.assertEqual(result["work_memory"]["version"], 3)
