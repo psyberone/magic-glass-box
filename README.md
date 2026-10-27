@@ -99,6 +99,10 @@ This repository currently contains the first executable vertical slice:
   candidate, and policy revisions. Discovery-scoped implementation reviews
   must submit typed per-`MUST` evidence whose outcome MGB derives before an
   exact-head verdict can authorize the next transition;
+- a self-describing, authority-scoped worker gateway catalog whose published
+  request/result shapes drive runtime dispatch and whose response provenance
+  distinguishes enforced authority from untrusted project, agent, human, and
+  provider content;
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues,
   where upstream bodies and host-private failure details are reduced to fixed

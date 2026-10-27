@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://magic-glass-box.local/schemas/gateway-catalog-v1.schema.json",
+  "title": "Magic Glass Box worker gateway catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalog_version",
+    "max_catalog_bytes",
+    "meta_operation",
+    "operations",
+    "schema_documents"
+  ],
+  "properties": {
+    "catalog_version": {
+      "const": 1
+    },
+    "max_catalog_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 524288
+    },
+    "meta_operation": {
+      "const": "gateway.catalog"
+    },
+    "operations": {
+      "type": "array",
+      "maxItems": 17,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/operation"
+      }
+    },
+    "schema_documents": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "pattern": "^schemas/[a-z0-9][a-z0-9-]*\\.schema\\.json$"
+      },
+      "additionalProperties": {
+        "type": "object"
+      }
+    }
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "follow_up_actions",
+        "operation",
+        "request_schema",
+        "response_provenance",
+        "result_schema"
+      ],
+      "properties": {
+        "follow_up_actions": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "operation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+        },
+        "request_schema": {
+          "type": "object"
+        },
+        "response_provenance": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/provenance"
+          }
+        },
+        "result_schema": {
+          "type": "object"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "source",
+        "trust_class"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/result(?:/[A-Za-z0-9_-]+)*$",
+          "maxLength": 256
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "trust_class": {
+          "enum": [
+            "authority",
+            "control_metadata",
+            "untrusted_content"
+          ]
+        }
+      }
+    }
+  }
+}

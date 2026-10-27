@@ -104,13 +104,15 @@ Unknown event fields are tolerated; duplicate keys, non-finite JSON,
 non-object envelopes, missing terminal events, and false success reports are
 rejected.
 
-Both vendor adapters tell the worker to start from `run.describe`, use only
-declared gateway operations, leave changes in `/workspace`, and avoid Git
-publication. The prompt contains no work-item body, response body, credential,
-or provider configuration. It does carry the fixed, public artifact shapes and
-role rules for implementation, Discovery, and advisory prescriptions. Exact
-per-execution collection limits remain in the immutable assignment returned by
-`run.describe`; they are not model-selected prompt policy.
+Both vendor adapters tell the worker to start from `run.describe`, fetch the
+advertised `gateway.catalog`, use only catalogued operations, leave changes in
+`/workspace`, and avoid Git publication. The prompt contains no work-item body,
+response body, credential, provider configuration, or operation-specific JSON
+example. It carries behavioral role and authority rules for implementation,
+Discovery, and advisory prescriptions; exact wire shapes come from the
+run-scoped catalog. Exact per-execution collection limits remain in the
+immutable assignment returned by `run.describe`; they are not model-selected
+prompt policy.
 
 ## Worker-side provider transport
 

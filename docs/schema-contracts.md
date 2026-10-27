@@ -6,6 +6,12 @@ the path and identity constraints that standard JSON Schema can express.
 Examples in `examples/` must pass both those schemas and the corresponding
 runtime parser.
 
+Milestone 13.5 publishes `gateway-catalog-v1.schema.json`. The catalog embeds
+only schema documents referenced by the run's granted operations and is capped
+at 512 KiB. Its operation registry also drives exact gateway request fields,
+handler selection, response top-level fields, provenance labels, and follow-up
+actions; the portable schema validates the outer discovery document.
+
 Milestone 7B publishes separate contracts for the operator-authored gate-policy
 request, the resolved immutable policy manifest, and review/validation evidence:
 `gate-policy-request-v1.schema.json`, `gate-policy-v1.schema.json`, and

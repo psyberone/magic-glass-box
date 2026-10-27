@@ -1610,7 +1610,7 @@ contract.
 
 ## Milestone 13.5: self-describing worker gateway contracts
 
-**Status: planned hardening; follows M13D and precedes the first M14 provider**
+**Status: complete**
 
 The first M13 live run proved that naming an authorized operation is not enough
 for a disposable headless worker: it also needs the exact bounded wire contract.
@@ -1644,6 +1644,16 @@ handoff contract from the gateway, completes the durable wait/resume path, and
 cannot discover or invoke an ungranted operation. Instruction-shaped text from
 every replayed content source remains explicitly data-classified through the
 same proof and cannot mint authority.
+
+The completed slice publishes the catalog as a packaged JSON schema, derives
+request dispatch and response provenance from one exhaustive registry, and
+loads referenced schemas successfully from an installed wheel as well as a
+source checkout. The real networkless Docker proof discovered its own
+`run.describe` and `gateway.catalog` contracts before an ungranted provider
+call failed closed. The final full gate passes with 1,217 tests and 87%
+aggregate statement-plus-branch coverage. A focused final-code mutation pass
+killed all 17 generated mutants across catalog construction, nested schema
+discovery, result-shape enforcement, and provenance filtering.
 
 ## Milestone 13.6: bounded autonomous-fleet operability
 

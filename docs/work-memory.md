@@ -136,12 +136,11 @@ content is not copied into the log.
 
 That authority separation does not make the prose safe instructions. A later
 model receives earlier agent-authored summaries and details as structured but
-still untrusted data. Protocol v1 relies on behavioral guidance to preserve
-that distinction; it does not yet carry a machine-readable per-field trust
-label. The self-describing gateway work in Milestone 13.5 will retain explicit
-source/trust classification through replay and test instruction-shaped content
-from every producer. Storage-side authority checks remain the backstop in both
-versions.
+still untrusted data. The self-describing gateway catalog labels replayed
+work-memory, checkpoint, assignment, and handoff subtrees as
+`untrusted_content` with explicit source provenance. Host-side storage and
+capability checks remain authoritative even when instruction-shaped text is
+replayed from an earlier producer.
 
 The contracts reject message histories, private Krab bodies, provider payloads,
 credentials, and transcripts. Nothing is exported to a source issue or pull

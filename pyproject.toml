@@ -36,6 +36,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.data-files]
+"share/magic-glass-box/schemas" = ["schemas/*.json"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 88
@@ -64,7 +67,7 @@ also_copy = ["Makefile", "scripts/", "schemas/", "examples/", "docker/"]
 # behavior without making capitalization or wording a compatibility surface.
 do_not_mutate_patterns = [
     '^\s*"(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA|BEGIN|COMMIT|ROLLBACK)\b',
-    '^\s*raise\s+(?:GitHubProviderError|GitHubProviderCLIError|ValidationError|argparse\.ArgumentTypeError)\b',
+    '^\s*raise\s+(?:GatewayContractError|GitHubProviderError|GitHubProviderCLIError|ValidationError|argparse\.ArgumentTypeError)\b',
     '^\s*(?:field|subject|help|description|prog)\s*=',
 ]
 do_not_mutate = [

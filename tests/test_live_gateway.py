@@ -41,6 +41,23 @@ class LiveGatewayProofContractTests(unittest.TestCase):
         self.assertIsNone(response["result"]["review_assignment"])
         self.assertIsNone(response["result"]["changes_requested"])
         self.assertIsNone(response["result"]["work_memory"])
+        catalog = gateway.handle(
+            {
+                "operation": response["result"]["gateway_catalog"]["operation"],
+                "payload": {
+                    "catalog_version": response["result"]["gateway_catalog"][
+                        "catalog_version"
+                    ]
+                },
+                "request_id": "proof-contract-0002",
+                "version": 1,
+            }
+        )
+        self.assertTrue(catalog["ok"])
+        self.assertEqual(
+            [item["operation"] for item in catalog["result"]["operations"]],
+            ["run.describe"],
+        )
         self.assertEqual(control.database.describe_calls, 1)
 
     def test_proof_verdict_requires_success_and_exactly_one_dispatch(self) -> None:

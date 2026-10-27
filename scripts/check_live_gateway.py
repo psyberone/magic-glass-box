@@ -38,18 +38,6 @@ finally:
     probe.close()
 
 root = Path(os.environ["MAGIC_GLASS_BOX_GATEWAY_DIR"])
-request = {
-    "operation": "run.describe",
-    "payload": {},
-    "request_id": "live-proof-0001",
-    "version": 1,
-}
-raw = (json.dumps(request, separators=(",", ":"), sort_keys=True) + "\n").encode()
-marker = {
-    "sequence": 1,
-    "sha256": hashlib.sha256(raw).hexdigest(),
-    "size": len(raw),
-}
 
 def replace(path, value):
     with path.open("r+b") as stream:
@@ -58,40 +46,88 @@ def replace(path, value):
         stream.flush()
         os.fsync(stream.fileno())
 
-replace(root / "request.json", raw)
-replace(
-    root / "request.ready",
-    (json.dumps(marker, separators=(",", ":"), sort_keys=True) + "\n").encode(),
-)
-
-deadline = time.monotonic() + 10
-while time.monotonic() < deadline:
-    ready_raw = (root / "response.ready").read_bytes()
-    if ready_raw:
-        try:
-            ready = json.loads(ready_raw)
-        except json.JSONDecodeError:
-            time.sleep(0.025)
-            continue
-        if ready.get("sequence") == 1:
-            response_raw = (root / "response.json").read_bytes()
-            if (
-                len(response_raw) == ready["size"]
-                and hashlib.sha256(response_raw).hexdigest() == ready["sha256"]
-            ):
-                response = json.loads(response_raw)
-                result = response.get("result", {})
+def exchange(sequence, operation, payload):
+    request_id = f"live-proof-{sequence:04d}"
+    request = {
+        "operation": operation,
+        "payload": payload,
+        "request_id": request_id,
+        "version": 1,
+    }
+    raw = (
+        json.dumps(request, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode()
+    marker = {
+        "sequence": sequence,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size": len(raw),
+    }
+    replace(root / "request.json", raw)
+    replace(
+        root / "request.ready",
+        (json.dumps(marker, separators=(",", ":"), sort_keys=True) + "\n").encode(),
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        ready_raw = (root / "response.ready").read_bytes()
+        if ready_raw:
+            try:
+                ready = json.loads(ready_raw)
+            except json.JSONDecodeError:
+                time.sleep(0.025)
+                continue
+            if ready.get("sequence") == sequence:
+                response_raw = (root / "response.json").read_bytes()
                 if (
-                    response["ok"]
-                    and result["run_id"] == os.environ["MAGIC_GLASS_BOX_RUN_ID"]
-                    and result["handoff"] is None
-                    and result["recovery_checkpoint"] is None
-                    and result["work_memory"] is None
+                    len(response_raw) == ready["size"]
+                    and hashlib.sha256(response_raw).hexdigest() == ready["sha256"]
                 ):
-                    raise SystemExit(0)
-                raise SystemExit("gateway returned an invalid response")
-    time.sleep(0.025)
-raise SystemExit("gateway response timed out")
+                    response = json.loads(response_raw)
+                    if response.get("request_id") != request_id:
+                        raise SystemExit("gateway response correlation changed")
+                    return response
+        time.sleep(0.025)
+    raise SystemExit("gateway response timed out")
+
+described = exchange(1, "run.describe", {})
+result = described.get("result", {})
+if not (
+    described.get("ok")
+    and result.get("run_id") == os.environ["MAGIC_GLASS_BOX_RUN_ID"]
+    and result.get("handoff") is None
+    and result.get("recovery_checkpoint") is None
+    and result.get("work_memory") is None
+):
+    raise SystemExit("gateway returned an invalid run description")
+catalog_version = result.get("gateway_catalog", {}).get("catalog_version")
+catalog_response = exchange(
+    2,
+    "gateway.catalog",
+    {"catalog_version": catalog_version},
+)
+catalog = catalog_response.get("result", {})
+if not (
+    catalog_response.get("ok")
+    and [item.get("operation") for item in catalog.get("operations", [])]
+    == ["run.describe"]
+    and catalog.get("schema_documents") == {}
+    and catalog_response.get("field_provenance")
+    == [
+        {
+            "path": "/result",
+            "source": "gateway_enforcement",
+            "trust_class": "authority",
+        }
+    ]
+):
+    raise SystemExit("gateway returned an invalid catalog")
+denied = exchange(
+    3,
+    "provider.invoke",
+    {"grant": "ungranted", "request": {"input": "must not dispatch"}},
+)
+if denied.get("ok") or denied.get("error", {}).get("code") != "forbidden":
+    raise SystemExit("ungranted operation did not fail closed")
 """
 
 
@@ -222,10 +258,12 @@ def main() -> int:
         json.dumps(
             {
                 "direct_network": "denied",
-                "gateway_requests": control.database.describe_calls,
+                "catalog_discovered": True,
                 "image_id": result.image_id,
                 "status": "passed",
                 "transport": "committed-file-mailbox",
+                "ungranted_operation": "denied",
+                "worker_gateway_exchanges": 3,
             },
             indent=2,
             sort_keys=True,

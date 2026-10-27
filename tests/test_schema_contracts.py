@@ -12,6 +12,7 @@ from jsonschema.exceptions import ValidationError as SchemaValidationError
 
 from magic_glass_box.candidates import CandidateError, CandidateManifest
 from magic_glass_box.domain import (
+    GatewayCapability,
     HandoffEnvelope,
     SupervisionPolicy,
     ValidationError,
@@ -28,6 +29,7 @@ from magic_glass_box.gates import (
     parse_gate_evidence,
     resolve_gate_policy_request,
 )
+from magic_glass_box.gateway_contracts import build_gateway_catalog
 from magic_glass_box.inference import (
     InferenceConnectorSpec,
     InferenceGrantSpec,
@@ -215,6 +217,25 @@ class PublishedSchemaContractTests(unittest.TestCase):
         validator.validate(descending_schedule)
         with self.assertRaises(ValidationError):
             factory(descending_schedule)
+
+    def test_gateway_catalog_matches_its_published_schema(self) -> None:
+        schema = json.loads(
+            (self.repository / "schemas/gateway-catalog-v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        Draft202012Validator.check_schema(schema)
+        validator = Draft202012Validator(schema)
+        catalog = build_gateway_catalog(
+            tuple(GatewayCapability),
+            requested_version=1,
+        )
+
+        validator.validate(catalog)
+        invalid = copy.deepcopy(catalog)
+        invalid["operations"][0]["unexpected"] = True
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(invalid)
 
 
 class ArtifactSchemaContractTests(unittest.TestCase):

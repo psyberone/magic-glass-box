@@ -13,6 +13,7 @@ groups:
     - src/magic_glass_box/runtime.py
     - src/magic_glass_box/provider.py
     - src/magic_glass_box/gateway.py
+    - src/magic_glass_box/gateway_contracts.py
     - src/magic_glass_box/worker_transport.py
     - examples/provider-policy.json
     - examples/anthropic-provider-policy.json
@@ -25,6 +26,7 @@ groups:
     - tests/test_provider_service.py
     - tests/test_provider_grants.py
     - tests/test_gateway.py
+    - tests/test_gateway_contracts.py
     - tests/test_worker_transport.py
     - tests/test_live_gateway.py
     - tests/test_live_provider_gateway.py

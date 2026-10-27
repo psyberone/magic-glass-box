@@ -27,6 +27,15 @@ from .domain import (
     canonical_json,
     validate_name,
 )
+from .gateway_contracts import (
+    GATEWAY_CATALOG_OPERATION,
+    GATEWAY_CATALOG_VERSION,
+    GatewayContractError,
+    build_gateway_catalog,
+    operation_contract,
+    response_field_provenance,
+    validate_result_shape,
+)
 from .krab import (
     IDEMPOTENCY_KEY_RE,
     KRAB_HANDLE_RE,
@@ -298,12 +307,31 @@ class RunGateway:
         self.credential_names = frozenset(credential_names)
 
     @staticmethod
-    def _success(request_id: str, result: object) -> dict[str, Any]:
+    def _success(
+        request_id: str,
+        result: object,
+        *,
+        operation: GatewayCapability | None,
+    ) -> dict[str, Any]:
+        provenance = (
+            [
+                {
+                    "path": "/result",
+                    "source": "gateway_enforcement",
+                    "trust_class": "authority",
+                }
+            ]
+            if operation is None
+            else response_field_provenance(operation, result)
+        )
+        if operation is not None:
+            validate_result_shape(operation, result)
         return {
             "version": GATEWAY_PROTOCOL_VERSION,
             "request_id": request_id,
             "ok": True,
             "result": result,
+            "field_provenance": provenance,
         }
 
     @staticmethod
@@ -322,7 +350,24 @@ class RunGateway:
             "request_id": request_id,
             "ok": False,
             "error": error,
+            "field_provenance": [
+                {
+                    "path": "/error",
+                    "source": "gateway_enforcement",
+                    "trust_class": "control_metadata",
+                }
+            ],
         }
+
+    def _operation_payload(
+        self,
+        operation: GatewayCapability,
+        payload: object,
+    ) -> Mapping[str, Any]:
+        return _exact_payload(
+            payload,
+            set(operation_contract(operation).request_fields),
+        )
 
     def handle(self, value: object) -> dict[str, Any]:
         request_id: str | None = None
@@ -349,6 +394,9 @@ class RunGateway:
                 request_id = None
                 raise _RequestFailure("invalid_request", "invalid request_id")
             operation_text = _text(value["operation"], field="operation", max_bytes=64)
+            if operation_text == GATEWAY_CATALOG_OPERATION:
+                result = self._catalog(value["payload"])
+                return self._success(request_id, result, operation=None)
             try:
                 operation = GatewayCapability(operation_text)
             except ValueError as exc:
@@ -370,45 +418,10 @@ class RunGateway:
                 raise _RequestFailure(
                     "forbidden", "operation has no authorized credential"
                 )
-            if operation is GatewayCapability.RUN_DESCRIBE:
-                result = self._describe(value["payload"])
-            elif operation is GatewayCapability.DISCOVERY_TRACE_SUBMIT:
-                result = self._submit_discovery_trace(value["payload"])
-            elif operation is GatewayCapability.DISCOVERY_RULING_SUBMIT:
-                result = self._submit_discovery_ruling(value["payload"])
-            elif operation is GatewayCapability.ADVISORY_BLIND_SUBMIT:
-                result = self._submit_advisory_blind_review(value["payload"])
-            elif operation is GatewayCapability.ADVISORY_CHALLENGE_SUBMIT:
-                result = self._submit_advisory_challenge_review(value["payload"])
-            elif operation is GatewayCapability.ADVISORY_REPORT_SUBMIT:
-                result = self._submit_advisory_report(value["payload"])
-            elif operation is GatewayCapability.WORKFLOW_SCOPE_REVIEW_SUBMIT:
-                result = self._submit_workflow_scope_review(value["payload"])
-            elif operation is GatewayCapability.INTERACTION_OPEN:
-                result = self._open_interaction(value["payload"])
-            elif operation is GatewayCapability.INTERACTION_READ:
-                result = self._read_interaction(value["payload"])
-            elif operation is GatewayCapability.HANDOFF_SUBMIT:
-                result = self._submit_handoff(value["payload"])
-            elif operation is GatewayCapability.PROVIDER_INVOKE:
-                result = self._invoke_provider(value["payload"])
-            elif operation is GatewayCapability.WORK_READ:
-                result = self._read_work(value["payload"])
-            elif operation is GatewayCapability.WORK_APPEND:
-                result = self._append_work(value["payload"])
-            elif operation is GatewayCapability.WORK_CHECKPOINT:
-                result = self._checkpoint_work(value["payload"])
-            elif operation is GatewayCapability.WORK_ASSIGN:
-                result = self._assign_work(value["payload"])
-            elif operation is GatewayCapability.WORK_ASSIGNMENT_CLAIM:
-                result = self._claim_assignment(value["payload"])
-            elif operation is GatewayCapability.WORK_ASSIGNMENT_COMPLETE:
-                result = self._complete_assignment(value["payload"])
-            else:
-                raise _RequestFailure(
-                    "invalid_request", "unsupported gateway operation"
-                )
-            return self._success(request_id, result)
+            contract = operation_contract(operation)
+            handler = getattr(self, contract.handler_name)
+            result = handler(value["payload"])
+            return self._success(request_id, result, operation=operation)
         except _RequestFailure as exc:
             return self._failure(request_id, exc.code, str(exc))
         except ValidationError as exc:
@@ -465,7 +478,7 @@ class RunGateway:
             )
 
     def _describe(self, payload: object) -> dict[str, Any]:
-        _exact_payload(payload, set())
+        self._operation_payload(GatewayCapability.RUN_DESCRIBE, payload)
         execution = self.control.database.get_run_execution(self.run_id)
         visible = self.control.database.get_run(self.run_id)
         context = dict(execution["context"])
@@ -512,18 +525,27 @@ class RunGateway:
             "interaction_count": len(all_interactions),
             "interactions": interactions,
             "interactions_truncated": len(all_interactions) > len(interactions),
+            "gateway_catalog": {
+                "catalog_version": GATEWAY_CATALOG_VERSION,
+                "operation": GATEWAY_CATALOG_OPERATION,
+            },
         }
 
+    def _catalog(self, payload: object) -> dict[str, Any]:
+        item = _exact_payload(payload, {"catalog_version"})
+        requested_version = item["catalog_version"]
+        try:
+            return build_gateway_catalog(
+                self.capabilities,
+                requested_version=requested_version,
+            )
+        except GatewayContractError as exc:
+            raise _RequestFailure("invalid_request", str(exc)) from exc
+
     def _open_interaction(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(
+        item = self._operation_payload(
+            GatewayCapability.INTERACTION_OPEN,
             payload,
-            {
-                "kind",
-                "recipient_handle",
-                "title",
-                "body",
-                "idempotency_key",
-            },
         )
         try:
             kind = InteractionKind(item["kind"])
@@ -568,7 +590,7 @@ class RunGateway:
         }
 
     def _read_interaction(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"interaction_id"})
+        item = self._operation_payload(GatewayCapability.INTERACTION_READ, payload)
         interaction_id = _text(
             item["interaction_id"], field="interaction_id", max_bytes=64
         )
@@ -578,9 +600,8 @@ class RunGateway:
         return asdict(delivery)
 
     def _submit_handoff(self, payload: object) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise _RequestFailure("invalid_request", "invalid operation payload")
-        handoff = HandoffEnvelope.from_mapping(payload)
+        item = self._operation_payload(GatewayCapability.HANDOFF_SUBMIT, payload)
+        handoff = HandoffEnvelope.from_mapping(item)
         stored = self.control.submit_handoff(self.run_id, handoff)
         return {
             "handoff_id": stored["id"],
@@ -590,7 +611,10 @@ class RunGateway:
         }
 
     def _submit_discovery_trace(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"trace", "idempotency_key"})
+        item = self._operation_payload(
+            GatewayCapability.DISCOVERY_TRACE_SUBMIT,
+            payload,
+        )
         trace_value = item["trace"]
         if not isinstance(trace_value, Mapping):
             raise _RequestFailure("invalid_request", "trace must be an object")
@@ -607,7 +631,10 @@ class RunGateway:
         }
 
     def _submit_discovery_ruling(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"ruling", "idempotency_key"})
+        item = self._operation_payload(
+            GatewayCapability.DISCOVERY_RULING_SUBMIT,
+            payload,
+        )
         ruling_value = item["ruling"]
         if not isinstance(ruling_value, Mapping):
             raise _RequestFailure("invalid_request", "ruling must be an object")
@@ -630,7 +657,10 @@ class RunGateway:
         }
 
     def _submit_advisory_blind_review(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"review", "idempotency_key"})
+        item = self._operation_payload(
+            GatewayCapability.ADVISORY_BLIND_SUBMIT,
+            payload,
+        )
         review_value = item["review"]
         if not isinstance(review_value, Mapping):
             raise _RequestFailure("invalid_request", "review must be an object")
@@ -647,7 +677,10 @@ class RunGateway:
         }
 
     def _submit_advisory_challenge_review(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"review", "idempotency_key"})
+        item = self._operation_payload(
+            GatewayCapability.ADVISORY_CHALLENGE_SUBMIT,
+            payload,
+        )
         review_value = item["review"]
         if not isinstance(review_value, Mapping):
             raise _RequestFailure("invalid_request", "review must be an object")
@@ -664,7 +697,10 @@ class RunGateway:
         }
 
     def _submit_advisory_report(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"report", "idempotency_key"})
+        item = self._operation_payload(
+            GatewayCapability.ADVISORY_REPORT_SUBMIT,
+            payload,
+        )
         report_value = item["report"]
         if not isinstance(report_value, Mapping):
             raise _RequestFailure("invalid_request", "report must be an object")
@@ -681,7 +717,10 @@ class RunGateway:
         }
 
     def _submit_workflow_scope_review(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"review", "idempotency_key"})
+        item = self._operation_payload(
+            GatewayCapability.WORKFLOW_SCOPE_REVIEW_SUBMIT,
+            payload,
+        )
         review_value = item["review"]
         if not isinstance(review_value, Mapping):
             raise _RequestFailure("invalid_request", "review must be an object")
@@ -701,7 +740,7 @@ class RunGateway:
         }
 
     def _invoke_provider(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"grant", "request"})
+        item = self._operation_payload(GatewayCapability.PROVIDER_INVOKE, payload)
         grant = _text(item["grant"], field="grant", max_bytes=64)
         if PROVIDER_NAME_RE.fullmatch(grant) is None or grant == "krab":
             raise _RequestFailure("invalid_request", "invalid provider grant")
@@ -734,7 +773,7 @@ class RunGateway:
         return result
 
     def _read_work(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(payload, {"after_sequence", "limit"})
+        item = self._operation_payload(GatewayCapability.WORK_READ, payload)
         after_sequence = item["after_sequence"]
         if after_sequence is not None:
             after_sequence = _integer(
@@ -765,9 +804,9 @@ class RunGateway:
         return assignment_id
 
     def _append_work(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(
+        item = self._operation_payload(
+            GatewayCapability.WORK_APPEND,
             payload,
-            {"assignment_id", "idempotency_key", "entry"},
         )
         assignment_id = item["assignment_id"]
         if assignment_id is not None:
@@ -786,14 +825,9 @@ class RunGateway:
         }
 
     def _checkpoint_work(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(
+        item = self._operation_payload(
+            GatewayCapability.WORK_CHECKPOINT,
             payload,
-            {
-                "expected_thread_version",
-                "through_sequence",
-                "idempotency_key",
-                "checkpoint",
-            },
         )
         expected_version = _integer(
             item["expected_thread_version"],
@@ -823,14 +857,9 @@ class RunGateway:
         }
 
     def _assign_work(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(
+        item = self._operation_payload(
+            GatewayCapability.WORK_ASSIGN,
             payload,
-            {
-                "expected_thread_version",
-                "target_profile_name",
-                "idempotency_key",
-                "spec",
-            },
         )
         expected_version = _integer(
             item["expected_thread_version"],
@@ -856,9 +885,9 @@ class RunGateway:
         }
 
     def _claim_assignment(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(
+        item = self._operation_payload(
+            GatewayCapability.WORK_ASSIGNMENT_CLAIM,
             payload,
-            {"assignment_id", "expected_assignment_version", "lease_seconds"},
         )
         stored = self.control.claim_work_assignment(
             self.run_id,
@@ -884,14 +913,9 @@ class RunGateway:
         }
 
     def _complete_assignment(self, payload: object) -> dict[str, Any]:
-        item = _exact_payload(
+        item = self._operation_payload(
+            GatewayCapability.WORK_ASSIGNMENT_COMPLETE,
             payload,
-            {
-                "assignment_id",
-                "expected_assignment_version",
-                "idempotency_key",
-                "result",
-            },
         )
         result = WorkLogEntry.from_mapping(item["result"])
         stored = self.control.complete_work_assignment(

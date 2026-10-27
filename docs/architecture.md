@@ -464,7 +464,13 @@ deployment, route, semantic protocol, model, scope fingerprint, byte limits,
 timeout, and concurrency in administrator-owned authority. Provider authority
 also requires a live running attempt, including during the short
 `waiting_for_input` handoff window; a parked run cannot call upstream. Opening
-an interaction tells a
+The credential-free `gateway.catalog` meta-operation publishes only this
+already-pinned allowlist. Its registry also selects each handler and validates
+exact request/result field sets, while path-based provenance labels keep
+project, prior-agent, human, and provider text explicitly untrusted through the
+worker carrier.
+
+Opening an interaction tells a
 handoff-capable worker to submit bounded replacement state and exit. Cleanup
 removes its resources, and the durable run remains `waiting_for_input`. A
 verified response becomes available to the current attempt, but a replacement

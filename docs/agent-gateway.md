@@ -96,15 +96,38 @@ echoes `version` and `request_id`, sets `ok` to `true`, and contains `result`.
 A failure sets `ok` to `false` and contains a bounded `{code, message}` error.
 Unexpected storage, transport, and implementation errors are redacted.
 
-The JSON envelope separates fields, but protocol v1 does not yet attach a
-machine-readable trust class to each returned field. Project/work-item text,
-repository-derived evidence, prior agent work, human responses, and provider
-responses must therefore all be treated as untrusted data even when they are
-nested inside a valid response. Host-side capability checks remain
-authoritative if a model follows instruction-shaped content, but prompt-level
-guidance is not itself a content-isolation mechanism. Milestone 13.5 adds
-catalog-derived trust labels and hostile-content continuity tests without
-granting the worker any new capability.
+Every final response also carries a bounded `field_provenance` list. Each row
+names a JSON Pointer beneath `result` or `error`, its source, and one of three
+trust classes:
+
+- `authority` describes an MGB-enforced allowlist or contract;
+- `control_metadata` describes IDs, versions, states, and correlation; and
+- `untrusted_content` contains project, repository, agent, human, or provider
+  text that may be instruction-shaped but cannot mint authority.
+
+The value remains in its stable result field; the provenance row is its
+machine-readable content envelope. Broad labels apply to the named subtree.
+More-specific labels override the broad `result` classification. The worker
+transport preserves this list verbatim. The provider bridge additionally
+refuses a successful provider response unless `untrusted_response` carries the
+exact provider-content label.
+
+### `gateway.catalog`
+
+The protocol-level `gateway.catalog` meta-operation carries no credential or
+project authority and therefore is not a profile capability. `run.describe`
+advertises its current version. The catalog request names that version; unknown
+versions and output above 512 KiB fail closed.
+
+The result lists only the run's granted operations. Each entry contains its
+exact top-level request and result shape, field bounds, schema references,
+response provenance, and required follow-up actions. Referenced Draft 2020-12
+documents are embedded in `schema_documents`, so a disposable worker does not
+need MGB's source tree. The same registry supplies handler dispatch, exact
+request field validation, result-shape validation, and the catalog. Adding a
+capability without a contract therefore fails at import rather than silently
+shipping an undocumented operation. The portable outer catalog is published
+as `schemas/gateway-catalog-v1.schema.json`.
 
 ## Operations
 
@@ -122,6 +145,10 @@ memory contains the latest checkpoint, entries after it, and assignment state
 with at most the latest 16 lifecycle events per assignment. It omits the host
 repository path, image and command details, credential references, file bodies,
 and secret values.
+
+The response also advertises `gateway_catalog.operation` and
+`gateway_catalog.catalog_version`; it does not inline contracts into every run
+description.
 
 A Discovery-bound run also receives `discovery_assignment`: its execution ID,
 fixed role and stage, the immutable configured output ceilings, pinned human

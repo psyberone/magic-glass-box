@@ -75,6 +75,28 @@ class GatewayClient(Protocol):
     ) -> dict[str, Any]: ...
 
 
+def _has_field_provenance(
+    response: Mapping[str, Any],
+    *,
+    path: str,
+    source: str,
+    trust_class: str,
+) -> bool:
+    labels = response.get("field_provenance")
+    if not isinstance(labels, list) or not 1 <= len(labels) <= 64:
+        return False
+    expected = {"path": path, "source": source, "trust_class": trust_class}
+    for item in labels:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "source", "trust_class"}
+            or any(not isinstance(value, str) for value in item.values())
+            or any(len(value.encode("utf-8")) > 128 for value in item.values())
+        ):
+            return False
+    return expected in labels
+
+
 def _strict_json(raw: bytes, *, subject: str, limit: int) -> Any:
     if not raw or len(raw) > limit:
         raise WorkerTransportError(f"{subject} exceeds its size limit")
@@ -531,6 +553,15 @@ class ProviderHTTPTransport:
                     retry_after_seconds=retry_after_seconds,
                 )
             raise WorkerTransportError("provider gateway denied the request")
+        if not _has_field_provenance(
+            response,
+            path="/result/untrusted_response",
+            source="provider_response",
+            trust_class="untrusted_content",
+        ):
+            raise ProviderAmbiguousTransportError(
+                "provider gateway returned an invalid response"
+            )
         result = response.get("result")
         if not isinstance(result, dict):
             raise ProviderAmbiguousTransportError(

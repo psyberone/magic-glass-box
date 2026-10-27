@@ -102,6 +102,14 @@ class FileGatewayClientTests(unittest.TestCase):
                 )
 
                 self.assertTrue(first["ok"])
+                self.assertIn(
+                    {
+                        "path": "/result/untrusted_response",
+                        "source": "provider_response",
+                        "trust_class": "untrusted_content",
+                    },
+                    first["field_provenance"],
+                )
                 self.assertFalse(denied["ok"])
                 self.assertEqual(denied["error"]["code"], "forbidden")
                 self.assertEqual(len(control.calls), 1)
@@ -417,6 +425,18 @@ class RecordingGateway:
             "version": 1,
             "request_id": "worker-response",
             "ok": True,
+            "field_provenance": [
+                {
+                    "path": "/result",
+                    "source": "gateway_control_plane",
+                    "trust_class": "control_metadata",
+                },
+                {
+                    "path": "/result/untrusted_response",
+                    "source": "provider_response",
+                    "trust_class": "untrusted_content",
+                },
+            ],
             "result": {
                 "invocation_id": "pvi_" + "3" * 32,
                 "grant_name": "provider-main",
@@ -627,6 +647,19 @@ class ProviderHTTPTransportTests(unittest.TestCase):
         gateway.response = {"ok": True, "result": {"status_code": 200}}
         with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
             transport.invoke("/v1/responses", request)
+
+    def test_provider_response_requires_untrusted_content_provenance(self) -> None:
+        gateway = RecordingGateway("openai-responses")
+        gateway.response.pop("field_provenance")
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+
+        with self.assertRaisesRegex(WorkerTransportError, "invalid response"):
+            transport.invoke(
+                "/v1/responses",
+                b'{"model":"x","stream":true}',
+            )
 
     def test_retryable_gateway_failure_preserves_delay_without_poisoning(self) -> None:
         gateway = RecordingGateway("openai-responses")
@@ -848,7 +881,16 @@ class WorkerTransportCLITests(unittest.TestCase):
                     contextlib.redirect_stdout(output),
                 ):
                     self.assertEqual(main(["call", "provider.invoke", payload]), 0)
-                self.assertTrue(json.loads(output.getvalue())["ok"])
+                accepted = json.loads(output.getvalue())
+                self.assertTrue(accepted["ok"])
+                self.assertIn(
+                    {
+                        "path": "/result/untrusted_response",
+                        "source": "provider_response",
+                        "trust_class": "untrusted_content",
+                    },
+                    accepted["field_provenance"],
+                )
 
                 output = io.StringIO()
                 denied = payload.replace("provider-main", "other-provider")
