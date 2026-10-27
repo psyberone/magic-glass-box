@@ -1,7 +1,7 @@
 # Jira reference provider
 
-**Status: Milestone 14.4 deterministic mixed-provider proof complete; live
-external execution pending explicit configuration.**
+**Status: Milestone 14.4 complete, including an explicitly authorized live
+Jira-to-GitHub mixed-provider proof.**
 
 The separate `magic-glass-box-jira-provider` process is the first reference
 provider for a non-repository resource. It owns one operator-selected Jira
@@ -139,6 +139,8 @@ error body into a result or diagnostic. See Atlassian's
   transition ID, raw body, or socket path is worker-visible.
 - The deterministic M14.4 proof imports Jira work and carries it through the
   complete GitHub-backed producer/reviewer/maintainer and landing path. The
-  remaining live Jira call is intentionally gated on an explicitly selected
-  private credential file, mapped project, and read-safe issue key; MGB does
-  not discover those from the workstation.
+  explicitly authorized live proof then imported one read-safe Jira Cloud
+  issue with immutable service-operation provenance and completed the bounded
+  GitHub publication/open/check/landing sequence. Live targets and credential
+  locations remained operator-selected; MGB did not discover them from the
+  workstation.

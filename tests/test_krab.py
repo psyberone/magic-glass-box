@@ -321,9 +321,9 @@ class KrabClientTests(unittest.TestCase):
     def test_create_session_item_is_typed_idempotent_and_explicitly_untrusted(
         self,
     ) -> None:
-        client, connection = client_for(
-            FakeResponse(201, session_item_response(created=True))
-        )
+        response = session_item_response(created=True)
+        response["trusted_metadata"]["completion_policy"] = "workflow"
+        client, connection = client_for(FakeResponse(201, response))
 
         item = client.create_session_item(
             "box-project",
@@ -352,6 +352,7 @@ class KrabClientTests(unittest.TestCase):
                 untrusted_body="Untrusted private body",
                 content_risk_flags=("instruction_override",),
                 history=(),
+                completion_policy="workflow",
             ),
         )
         method, target, body, headers = connection.requests[0]
@@ -457,6 +458,67 @@ class KrabClientTests(unittest.TestCase):
                 },
             ),
         )
+
+    def test_session_item_accepts_legacy_and_receipt_completion_policies(self) -> None:
+        legacy_client, _ = client_for(
+            FakeResponse(200, session_item_response(created=False))
+        )
+
+        legacy = legacy_client.get_session_item("box-project", SESSION_ID, ITEM_ID)
+
+        self.assertEqual(legacy.completion_policy, "workflow")
+
+        receipt_payload = session_item_response(created=False)
+        receipt_payload["trusted_metadata"].update(
+            {"completion_policy": "receipt", "status": "closed.handled"}
+        )
+        receipt_payload["history"][0]["trusted_metadata"].update(
+            {
+                "kind": "status.changed",
+                "from_status": "open.pending",
+                "to_status": "closed.handled",
+            }
+        )
+        receipt_client, _ = client_for(FakeResponse(200, receipt_payload))
+
+        receipt = receipt_client.get_session_item("box-project", SESSION_ID, ITEM_ID)
+
+        self.assertEqual(receipt.completion_policy, "receipt")
+        self.assertEqual(receipt.status, "closed.handled")
+        self.assertEqual(receipt.history[0].to_status, "closed.handled")
+
+    def test_session_item_rejects_invalid_policy_or_policy_status_pair(self) -> None:
+        cases = (
+            ("invented", "open.pending"),
+            ([], "open.pending"),
+            ("workflow", "closed.handled"),
+            ("receipt", "open.in_progress"),
+        )
+        for policy, status in cases:
+            payload = session_item_response(created=False)
+            payload["trusted_metadata"].update(
+                {"completion_policy": policy, "status": status}
+            )
+            client, _ = client_for(FakeResponse(200, payload))
+            with (
+                self.subTest(policy=policy, status=status),
+                self.assertRaisesRegex(KrabError, "completion policy"),
+            ):
+                client.get_session_item("box-project", SESSION_ID, ITEM_ID)
+
+        for policy, history_status in (
+            ("workflow", "closed.handled"),
+            ("receipt", "open.in_progress"),
+        ):
+            payload = session_item_response(created=False)
+            payload["trusted_metadata"]["completion_policy"] = policy
+            payload["history"][0]["trusted_metadata"]["to_status"] = history_status
+            client, _ = client_for(FakeResponse(200, payload))
+            with (
+                self.subTest(policy=policy, history_status=history_status),
+                self.assertRaisesRegex(KrabError, "completion policy"),
+            ):
+                client.get_session_item("box-project", SESSION_ID, ITEM_ID)
 
     def test_session_item_rejects_scope_shape_and_history_mismatches(self) -> None:
         cases: list[tuple[dict[str, Any], str]] = []
@@ -744,6 +806,7 @@ class KrabClientTests(unittest.TestCase):
                 "from_status": None,
                 "to_status": "open.pending",
                 "current_status": "open.pending",
+                "completion_policy": "workflow",
                 "version": 1,
                 "created_at": "2026-10-08T12:00:00+00:00",
             },
@@ -788,6 +851,7 @@ class KrabClientTests(unittest.TestCase):
                         version=1,
                         created_at="2026-10-08T12:00:00+00:00",
                         untrusted_title="Do not execute me",
+                        completion_policy="workflow",
                     ),
                 ),
             ),
@@ -813,6 +877,66 @@ class KrabClientTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(KrabError, "activity event text"):
             invalid.activity("box-project", limit=1)
+
+    def test_activity_accepts_and_validates_completion_policy(self) -> None:
+        legacy_client, _ = client_for(
+            FakeResponse(200, activity_response([valid_event()]))
+        )
+        self.assertEqual(
+            legacy_client.activity("box-project").events[0].completion_policy,
+            "workflow",
+        )
+
+        receipt_event = valid_event()
+        receipt_event["trusted_metadata"].update(
+            {
+                "completion_policy": "receipt",
+                "from_status": "open.pending",
+                "to_status": "closed.handled",
+                "current_status": "closed.handled",
+            }
+        )
+        receipt_client, _ = client_for(
+            FakeResponse(200, activity_response([receipt_event]))
+        )
+        receipt = receipt_client.activity("box-project").events[0]
+        self.assertEqual(receipt.completion_policy, "receipt")
+        self.assertEqual(receipt.current_status, "closed.handled")
+
+        for policy, status in (
+            ("invented", "open.pending"),
+            ("workflow", "closed.handled"),
+            ("receipt", "open.in_progress"),
+        ):
+            invalid_event = valid_event()
+            invalid_event["trusted_metadata"].update(
+                {"completion_policy": policy, "current_status": status}
+            )
+            invalid_client, _ = client_for(
+                FakeResponse(200, activity_response([invalid_event]))
+            )
+            with (
+                self.subTest(policy=policy, status=status),
+                self.assertRaisesRegex(KrabError, "completion policy"),
+            ):
+                invalid_client.activity("box-project")
+
+        for policy, event_status in (
+            ("workflow", "closed.handled"),
+            ("receipt", "open.in_progress"),
+        ):
+            invalid_event = valid_event()
+            invalid_event["trusted_metadata"].update(
+                {"completion_policy": policy, "from_status": event_status}
+            )
+            invalid_client, _ = client_for(
+                FakeResponse(200, activity_response([invalid_event]))
+            )
+            with (
+                self.subTest(policy=policy, event_status=event_status),
+                self.assertRaisesRegex(KrabError, "completion policy"),
+            ):
+                invalid_client.activity("box-project")
 
     def test_rejects_duplicate_json_keys(self) -> None:
         raw = (

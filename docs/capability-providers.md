@@ -1,7 +1,7 @@
 # Capability providers and project routing
 
-**Status: implemented foundation; M14 deterministic mixed-provider expansion
-complete, live external proof pending.**
+**Status: implemented foundation; M14 mixed-provider expansion and explicitly
+authorized live external proof complete.**
 
 Schema v24 implements the first narrow routing seam: core-owned capability
 modes, explicit single-controller project bindings, audited unbinding, and an
@@ -198,10 +198,10 @@ sequenced behind demonstrated needs, not blocked by the architecture: workflow
 templates consume semantic operations and never name GitHub, Jira, SSH, or a
 model provider.
 
-The next provider pressure tests are intentionally heterogeneous:
+The provider pressure tests are intentionally heterogeneous:
 
-1. the implemented Jira work provider, paired next with GitHub candidates and
-   landing in one M14.4 project;
+1. the implemented and live-proven Jira work provider paired with GitHub
+   candidates and landing in one M14.4 project;
 2. a controlled execution provider for an exact candidate and pinned remote
    test recipe, with no agent-selected SSH target or command; and
 3. a second forge provider, likely GitLab, driven through the same conformance
@@ -211,11 +211,15 @@ Bitbucket, raw Git, additional issue systems, interaction carriers, local and
 hosted agents, and additional inference providers remain candidates selected by
 demonstrated need. See [roadmap.md](roadmap.md) for the milestone boundaries.
 
-M14's deterministic mixed-provider proof now exercises the first item end to
-end: Jira v2 work intake is explicitly imported with immutable operation
+M14's deterministic mixed-provider proof exercises the first item end to end:
+Jira v2 work intake is explicitly imported with immutable operation
 provenance, while exact candidate publication, change creation, checks, and
 landing route through four GitHub v1 bindings. The workflow and workers retain
 only MGB-owned correlation and normalized work data. Removing either provider
-surface fails closed without discovering or falling back to the other. The
-final external run remains opt-in because it needs an operator-selected Jira
-credential/issue and a destructive sacrificial GitHub target.
+surface fails closed without discovering or falling back to the other.
+
+The separately authorized live proof confirmed the same external boundaries:
+one read-only Jira Cloud issue became a provenance-linked MGB work item, while
+an exact disposable GitHub candidate was published, opened, checked,
+squash-landed, and reconciled after an intentionally lost response. Neither
+reusable credential entered MGB state or a worker-visible projection.

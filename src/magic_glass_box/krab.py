@@ -34,7 +34,9 @@ ITEM_STATUS = {
     "open.approved",
     "closed.approved",
     "closed.rejected",
+    "closed.handled",
 }
+COMPLETION_POLICIES = {"workflow", "receipt"}
 EVENT_KINDS = {"item.created", "status.changed", "item.reminded"}
 WORK_CLAIM_KINDS = {"issue", "pull_request"}
 WORK_CLAIM_STATUSES = {
@@ -178,6 +180,7 @@ class ActivityEvent:
     version: int
     created_at: str
     untrusted_title: str
+    completion_policy: str = "workflow"
 
 
 @dataclass(frozen=True)
@@ -217,6 +220,7 @@ class SessionItem:
     untrusted_body: str
     content_risk_flags: tuple[str, ...]
     history: tuple[SessionItemHistoryEvent, ...]
+    completion_policy: str = "workflow"
 
 
 @dataclass(frozen=True)
@@ -381,6 +385,25 @@ def _item_status(value: object, *, nullable: bool = False) -> str | None:
     return value
 
 
+def _completion_policy(
+    value: object,
+    *,
+    statuses: tuple[str | None, ...],
+    label: str,
+) -> str:
+    if not isinstance(value, str) or value not in COMPLETION_POLICIES:
+        raise KrabError(f"invalid {label} completion policy")
+    if value == "workflow":
+        valid = all(status != "closed.handled" for status in statuses)
+    else:
+        valid = all(
+            status in {None, "open.pending", "closed.handled"} for status in statuses
+        )
+    if not valid:
+        raise KrabError(f"invalid {label} completion policy for status")
+    return value
+
+
 def _session_item_history(value: object) -> SessionItemHistoryEvent:
     event = _exact_object(
         value,
@@ -457,8 +480,11 @@ def _session_item(
     }
     if created:
         metadata_fields.add("event_seq")
+    raw_metadata = response["trusted_metadata"]
+    if isinstance(raw_metadata, dict) and "completion_policy" in raw_metadata:
+        metadata_fields.add("completion_policy")
     metadata = _exact_object(
-        response["trusted_metadata"],
+        raw_metadata,
         fields=metadata_fields,
         label="session-item metadata",
     )
@@ -495,6 +521,20 @@ def _session_item(
         ):
             raise KrabError("session-item history is not strictly ordered")
 
+    status = _item_status(metadata["status"]) or ""
+    completion_policy = _completion_policy(
+        metadata.get("completion_policy", "workflow"),
+        statuses=(
+            status,
+            *(
+                event_status
+                for event in history
+                for event_status in (event.from_status, event.to_status)
+            ),
+        ),
+        label="session-item",
+    )
+
     return SessionItem(
         item_id=response_item_id,
         project_key=project_key,
@@ -502,7 +542,7 @@ def _session_item(
         creator=_user_ref(metadata["creator"], "session-item creator"),
         recipient=_user_ref(metadata["recipient"], "session-item recipient"),
         work_claim=_work_claim(metadata["work_claim"]),
-        status=_item_status(metadata["status"]) or "",
+        status=status,
         version=_integer(metadata["version"], minimum=1, label="session-item version"),
         created_at=_timestamp(metadata["created_at"], label="item creation timestamp"),
         updated_at=_timestamp(metadata["updated_at"], label="item update timestamp"),
@@ -521,6 +561,7 @@ def _session_item(
             response["content_risk_flags"], label="session-item"
         ),
         history=history,
+        completion_policy=completion_policy,
     )
 
 
@@ -1072,24 +1113,28 @@ class KrabClient:
             fields={"trusted_metadata", "untrusted_text"},
             label="activity event",
         )
+        metadata_fields = {
+            "event_seq",
+            "kind",
+            "project_key",
+            "session_id",
+            "item_id",
+            "actor",
+            "creator",
+            "recipient",
+            "work_claim",
+            "from_status",
+            "to_status",
+            "current_status",
+            "version",
+            "created_at",
+        }
+        raw_metadata = event["trusted_metadata"]
+        if isinstance(raw_metadata, dict) and "completion_policy" in raw_metadata:
+            metadata_fields.add("completion_policy")
         metadata = _exact_object(
-            event["trusted_metadata"],
-            fields={
-                "event_seq",
-                "kind",
-                "project_key",
-                "session_id",
-                "item_id",
-                "actor",
-                "creator",
-                "recipient",
-                "work_claim",
-                "from_status",
-                "to_status",
-                "current_status",
-                "version",
-                "created_at",
-            },
+            raw_metadata,
+            fields=metadata_fields,
             label="activity event metadata",
         )
         text = _exact_object(
@@ -1105,6 +1150,14 @@ class KrabClient:
             item_id = validate_krab_id(metadata["item_id"], "itm")
         except ValueError as exc:
             raise KrabError("invalid activity object ID") from exc
+        from_status = _item_status(metadata["from_status"], nullable=True)
+        to_status = _item_status(metadata["to_status"], nullable=True)
+        current_status = _item_status(metadata["current_status"]) or ""
+        completion_policy = _completion_policy(
+            metadata.get("completion_policy", "workflow"),
+            statuses=(from_status, to_status, current_status),
+            label="activity event",
+        )
         return ActivityEvent(
             event_seq=_integer(
                 metadata["event_seq"], minimum=1, label="event sequence"
@@ -1117,12 +1170,13 @@ class KrabClient:
             creator=_user_ref(metadata["creator"], "event creator"),
             recipient=_user_ref(metadata["recipient"], "event recipient"),
             work_claim=_work_claim(metadata["work_claim"]),
-            from_status=_item_status(metadata["from_status"], nullable=True),
-            to_status=_item_status(metadata["to_status"], nullable=True),
-            current_status=_item_status(metadata["current_status"]) or "",
+            from_status=from_status,
+            to_status=to_status,
+            current_status=current_status,
             version=_integer(metadata["version"], minimum=1, label="item version"),
             created_at=_timestamp(metadata["created_at"], label="event timestamp"),
             untrusted_title=_text(
                 text["title"], label="work-item title", max_bytes=512
             ),
+            completion_policy=completion_policy,
         )

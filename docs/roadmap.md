@@ -1724,8 +1724,8 @@ authority or failure-path wave fell below the 80% floor.
 
 ## Milestone 14: heterogeneous work provider
 
-**Status: in progress; deterministic mixed-provider proof complete, explicitly
-authorized live proof pending**
+**Status: complete, including the explicitly authorized mixed-provider live
+proof**
 
 M14 is split into honest checkpoints so the generic seam is proven before Jira
 mechanics can distort it:
@@ -1842,7 +1842,7 @@ outcomes.
 
 ### M14.4: mixed-provider exit proof
 
-**Status: deterministic proof complete; live external execution pending**
+**Status: complete, including live external execution**
 
 - Configure one MGB project whose work intake is a v2 Jira `work_project`
   controller while candidate publication, checks, change creation, and landing
@@ -1886,12 +1886,32 @@ A clean final-code GitHub-provider mutation wave killed 2,327/2,776 mutants
 (83.83%). The exact new head/base SHA and ref correlation conditions were all
 killed; remaining survivors do not remove those authority checks.
 
-The remaining M14 exit action is deliberately external rather than simulated:
-run one read-only Jira issue import using an operator-selected private
-credential file and one explicitly destructive GitHub publication/open/check/
-landing sequence against a sacrificial repository. No credential or live
-target has been inferred from the workstation, so that run awaits explicit
-operator configuration and authorization.
+The explicitly authorized live proof completed on 2026-10-27. Jira Cloud
+`PANOPTICON-1` was read through the v2 `work.get` carrier and explicitly
+imported into a fresh MGB project with the exact capability binding, operation,
+attempt, receipt, and work-item version provenance retained. Jira returned HTTP
+200; no Jira effect ran, and a post-run scan found no API token in MGB state.
+
+The separately authorized GitHub controller then targeted
+`psyberone/imitation-krab` at exact base
+`84e7175b45aee5b5d4bb8cedd9f8f02020f6a0d6`. It published candidate
+`5494140a81cc5966698b9c4e8216a987d97a2e03`, opened PR 4, passed the bounded
+check read, and squash-landed revision
+`d83da16f5101ad6e07f1a9ed1f0f59bdede1bb19`. The harness deliberately
+discarded the first landing response and reconciled the already-completed merge
+without issuing it twice. The Jira credential file and GitHub configuration
+directory remained provider-owned; the combined private proof report retains
+only controller fingerprints and MGB/provider correlation evidence.
+
+The post-proof quality gate also exercised MGB against the newly landed
+Imitation Krab schema v7 response shape. It correctly exposed that MGB's exact
+parser did not yet understand receipt-style session items. The RED-first
+compatibility correction now retains and validates `completion_policy`, accepts
+`closed.handled` only for receipt items, preserves legacy workflow responses,
+and rejects policy/status contradictions in both item and activity documents.
+The full gate passed 1,314 tests at 87% branch-aware coverage, including the
+live HTTP transport test against the current sibling Krab checkout. A focused
+final-code mutation wave killed all 21/21 completion-policy mutants (100%).
 
 ## Milestone 15: controlled remote execution provider
 
