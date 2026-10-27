@@ -37,6 +37,7 @@ from magic_glass_box.gateway import (
     FileGatewayManager,
     GatewayError,
     RunGateway,
+    _write_all,
     default_gateway_root,
 )
 from magic_glass_box.krab import KrabError
@@ -1419,6 +1420,41 @@ class FileGatewayManagerTests(unittest.TestCase):
         self.assertTrue(self.manager.cleanup(RUN_ID))
         self.assertFalse(endpoint.directory.exists())
         self.assertFalse(self.manager.cleanup(RUN_ID))
+
+    def test_mailbox_write_rejects_a_zero_progress_os_write(self) -> None:
+        target = Path(self.temporary.name) / "zero-progress"
+        target.write_bytes(b"pending")
+        os.chmod(target, 0o600)
+
+        with (
+            mock.patch(
+                "magic_glass_box.gateway.os.write",
+                side_effect=(0, AssertionError("write retried after zero progress")),
+            ),
+            self.assertRaisesRegex(GatewayError, "made no progress"),
+        ):
+            _write_all(target, b"response")
+
+    def test_mailbox_write_accepts_one_byte_of_progress(self) -> None:
+        target = Path(self.temporary.name) / "partial-progress"
+        target.write_bytes(b"pending")
+        os.chmod(target, 0o600)
+        real_write = os.write
+        writes = 0
+
+        def write_one_byte_first(descriptor: int, value: bytes) -> int:
+            nonlocal writes
+            writes += 1
+            chunk = value[:1] if writes == 1 else value
+            return real_write(descriptor, chunk)
+
+        with mock.patch(
+            "magic_glass_box.gateway.os.write", side_effect=write_one_byte_first
+        ):
+            _write_all(target, b"response")
+
+        self.assertEqual(target.read_bytes(), b"response")
+        self.assertEqual(writes, 2)
 
     def test_cleanup_detaches_from_an_in_flight_gateway_operation(self) -> None:
         endpoint = self.manager.open(

@@ -1277,6 +1277,7 @@ class ControlRoomWebTests(unittest.TestCase):
                             "input",
                             {
                                 "name": "run_id",
+                                "aria-label": "Run ID to reconcile",
                                 "placeholder": "Optional run ID",
                                 "maxlength": "64",
                             },
@@ -1311,7 +1312,14 @@ class ControlRoomWebTests(unittest.TestCase):
                                 "value": "3",
                             },
                         ),
-                        ("select", {"name": "requested_by", "required": None}),
+                        (
+                            "select",
+                            {
+                                "name": "requested_by",
+                                "required": None,
+                                "aria-label": "Requesting operator",
+                            },
+                        ),
                         ("option", {"value": "operator"}),
                         (
                             "input",
@@ -1319,6 +1327,7 @@ class ControlRoomWebTests(unittest.TestCase):
                                 "name": "reason",
                                 "required": None,
                                 "maxlength": "4096",
+                                "aria-label": "Cancellation reason",
                                 "placeholder": "Reason for cancellation",
                             },
                         ),
@@ -1356,7 +1365,14 @@ class ControlRoomWebTests(unittest.TestCase):
                                 "value": "5",
                             },
                         ),
-                        ("select", {"name": "requested_by", "required": None}),
+                        (
+                            "select",
+                            {
+                                "name": "requested_by",
+                                "required": None,
+                                "aria-label": "Requesting operator",
+                            },
+                        ),
                         ("option", {"value": "operator"}),
                         ("button", {"type": "submit"}),
                     ],
@@ -1392,9 +1408,23 @@ class ControlRoomWebTests(unittest.TestCase):
                                 "value": "5",
                             },
                         ),
-                        ("select", {"name": "requested_by", "required": None}),
+                        (
+                            "select",
+                            {
+                                "name": "requested_by",
+                                "required": None,
+                                "aria-label": "Requesting operator",
+                            },
+                        ),
                         ("option", {"value": "operator"}),
-                        ("select", {"name": "profile_name", "required": None}),
+                        (
+                            "select",
+                            {
+                                "name": "profile_name",
+                                "required": None,
+                                "aria-label": "Replacement profile",
+                            },
+                        ),
                         ("option", {"value": "Reviewer"}),
                         ("button", {"type": "submit"}),
                     ],
@@ -1474,7 +1504,14 @@ class ControlRoomWebTests(unittest.TestCase):
                                 "value": "1",
                             },
                         ),
-                        ("select", {"name": "requested_by", "required": None}),
+                        (
+                            "select",
+                            {
+                                "name": "requested_by",
+                                "required": None,
+                                "aria-label": "Requesting operator",
+                            },
+                        ),
                         ("option", {"value": "operator"}),
                         ("button", {"type": "submit"}),
                     ],

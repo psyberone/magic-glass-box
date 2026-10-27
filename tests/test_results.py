@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -67,6 +68,46 @@ class WorkspaceResultStoreTests(unittest.TestCase):
         self.assertEqual(captured.manifest.changed_bytes, len(b"\x00\xffresultafter\n"))
         inspected = self.results.inspect(ATTEMPT_ID)
         self.assertEqual(inspected.digest, captured.manifest.digest)
+
+    def test_copy_blob_closes_the_source_when_target_open_fails(self) -> None:
+        source = self.root / "source.bin"
+        source.write_bytes(b"retained result\n")
+        target = self.root / "target.bin"
+        body = source.read_bytes()
+        expected = FileState(
+            kind="file",
+            mode=0o644,
+            size=len(body),
+            sha256=hashlib.sha256(body).hexdigest(),
+        )
+        real_open = os.open
+        source_descriptors: list[int] = []
+
+        def fail_target_open(
+            path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            flags: int,
+            mode: int = 0o777,
+        ) -> int:
+            if Path(path) == source:
+                descriptor = real_open(path, flags, mode)
+                source_descriptors.append(descriptor)
+                return descriptor
+            raise OSError("target unavailable")
+
+        with (
+            mock.patch.object(results_module.os, "open", side_effect=fail_target_open),
+            self.assertRaisesRegex(ResultError, "cannot retain changed result content"),
+        ):
+            self.results._copy_blob(source, target, expected)
+
+        self.assertEqual(len(source_descriptors), 1)
+        descriptor = source_descriptors[0]
+        try:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        finally:
+            with suppress(OSError):
+                os.close(descriptor)
 
     def test_concurrent_capture_loser_reuses_the_identical_published_bundle(
         self,

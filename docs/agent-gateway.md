@@ -96,6 +96,16 @@ echoes `version` and `request_id`, sets `ok` to `true`, and contains `result`.
 A failure sets `ok` to `false` and contains a bounded `{code, message}` error.
 Unexpected storage, transport, and implementation errors are redacted.
 
+The JSON envelope separates fields, but protocol v1 does not yet attach a
+machine-readable trust class to each returned field. Project/work-item text,
+repository-derived evidence, prior agent work, human responses, and provider
+responses must therefore all be treated as untrusted data even when they are
+nested inside a valid response. Host-side capability checks remain
+authoritative if a model follows instruction-shaped content, but prompt-level
+guidance is not itself a content-isolation mechanism. Milestone 13.5 adds
+catalog-derived trust labels and hostile-content continuity tests without
+granting the worker any new capability.
+
 ## Operations
 
 ### `run.describe`

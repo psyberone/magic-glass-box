@@ -1566,6 +1566,48 @@ The successful proof accounted for $0.556763; all investigative M13 live
 attempts together accounted for $1.072038, below the authorized $5 ceiling.
 The final suite remains at 87% aggregate statement-plus-branch coverage.
 
+## Post-Milestone 13 Panopticon stabilization
+
+**Status: complete**
+
+The whole-repository red-team review at exact M13 commit
+`2fcef44b594d8a9e1ed5583f18b34e9139bedc11` produced a schema-valid artifact
+with clean integrity and write-guard validation, but it did not certify the
+tree: dependency scanning produced no SCA result and Semgrep reported partial
+file coverage. Its `FAIL` gate was driven by three test-absence findings for
+the gateway, provider-gateway, and Krab live proofs. Those findings were
+scope artifacts, not repository facts: all three proof-contract test modules
+already existed and passed, but the committed review matrix did not make them
+visible to the cells that reviewed their scripts. The matrix now includes the
+proof tests plus the cross-module prescription, provider-recovery, candidate,
+and supervisor tests needed to assess whole-system coverage. Quarantined prior
+review artifacts are ignored so a later scanner does not ingest its own old
+SARIF output.
+
+The review also found two concrete error-path defects that reproduced outside
+the panel:
+
+- a zero-progress `os.write` could spin forever while publishing a mailbox
+  response; and
+- result capture leaked its source file descriptor if opening the retained
+  blob target failed.
+
+RED-first regressions now require a bounded mailbox failure and descriptor
+closure. Control-room action inputs also carry programmatic labels, and the
+README/architecture schema history now reaches v40. The broad duplicate-code,
+function-size, localization, and style observations remain design feedback,
+not automatic milestone requirements; they should be addressed when a bounded
+change needs those seams rather than through a speculative rewrite.
+
+The stabilization closes with 1,207 passing tests and 87% aggregate
+statement-plus-branch coverage. A focused final-code mutation wave killed five
+of six generated mutants (83.33%): it killed the descriptor leak, the missing
+zero-progress guard, an incorrect one-byte threshold, and both behavioral
+exception mutations. The survivor only decorated the human diagnostic text
+while preserving the exception type and bounded failure, so it was reviewed as
+non-semantic rather than turning prose punctuation into a compatibility
+contract.
+
 ## Milestone 13.5: self-describing worker gateway contracts
 
 **Status: planned hardening; follows M13D and precedes the first M14 provider**
@@ -1583,6 +1625,14 @@ to make the run-scoped gateway itself the source of truth:
 - let `run.describe` advertise the catalog version and provide a bounded
   discovery operation, while keeping credential values, private bodies, and
   unauthorized operations absent;
+- mark response fields by trust class (`authority`, `control_metadata`, or
+  `untrusted_content`) from the same catalog, and preserve those labels through
+  the worker transport instead of relying on prose to distinguish an earlier
+  agent, human answer, repository text, or provider response from instructions;
+- keep untrusted text in explicit data envelopes with source provenance. Tests
+  inject instruction-shaped text through work memory, handoffs, interactions,
+  project/work-item context, and provider responses and prove it cannot change
+  the operation allowlist, destination, model, role, or lifecycle authority;
 - keep prompts focused on role, authority, and product judgment instead of
   duplicating wire-level payload schemas; and
 - fail closed on unknown catalog versions or oversized descriptions, with
@@ -1591,7 +1641,37 @@ to make the run-scoped gateway itself the source of truth:
 **Exit proof:** a headless worker starts with behavioral guidance but no
 operation-specific payload example, discovers an authorized interaction and
 handoff contract from the gateway, completes the durable wait/resume path, and
-cannot discover or invoke an ungranted operation.
+cannot discover or invoke an ungranted operation. Instruction-shaped text from
+every replayed content source remains explicitly data-classified through the
+same proof and cannot mint authority.
+
+## Milestone 13.6: bounded autonomous-fleet operability
+
+**Status: planned hardening; follows M13.5 and precedes provider expansion**
+
+The Panopticon review found real scaling and observability debt beneath the
+successful single-project proof. Close it before adding another external
+provider:
+
+- give every run-to-inference-grant binding a protocol-neutral invocation
+  ceiling, including legacy protocol-v1 grants that do not carry spend
+  accounting; an alternative implementation may refuse v1 for autonomous
+  profiles, but a looping worker must not have unbounded call authority;
+- page interaction history reads and bound supervisor discovery work per tick;
+  avoid loading every active row or holding one SQLite write transaction while
+  parsing and attempting an unbounded backlog;
+- surface sanitized result-capture failures, lost supervisor leases, and
+  outcome-persistence races through durable/operator-visible metadata or
+  bounded telemetry instead of silently discarding the reason; and
+- add load and race tests for fair backlog progress, restart recovery, lease
+  loss, and bounded memory/lock time, followed by focused mutation checks of
+  the authority and failure paths.
+
+**Exit proof:** a synthetic backlog larger than one tick drains fairly across
+restarts without an unbounded query or write-lock hold; a deliberately looping
+v1 worker is stopped at its exact invocation ceiling; and capture/lease-loss
+failures leave a bounded operator-visible reason without leaking private
+content.
 
 
 ## Milestone 14: heterogeneous work provider

@@ -250,6 +250,12 @@ allowance and do not consume the worker's request-byte authority. Other v2
 connectors must enforce an equivalent output bound for their provider. A
 protocol-v1 request has no MGB budget ceiling to raise; when it supplies its own
 valid `max_output_tokens`, the OpenAI connector forwards that caller cap.
+It also has no protocol-neutral per-run invocation-count ceiling today. Its
+effective bounds are the run lifecycle, connector concurrency/deadline,
+provider quota/rate limits, and any connector-specific output cap. Autonomous
+profiles should therefore use budgeted protocol v2. Milestone 13.6 will either
+add an exact run-to-grant invocation ceiling for v1 or refuse v1 authority to
+autonomous profiles before dispatch.
 
 Immediately before dispatch, one SQLite `BEGIN IMMEDIATE` transaction totals
 existing consumption and active reservations for all three scopes. It either

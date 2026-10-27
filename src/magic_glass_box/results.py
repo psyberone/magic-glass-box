@@ -13,7 +13,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -1091,6 +1091,8 @@ class WorkspaceResultStore:
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        source_descriptor: int | None = None
+        target_descriptor: int | None = None
         try:
             source_descriptor = os.open(source, flags)
             target_descriptor = os.open(
@@ -1098,10 +1100,11 @@ class WorkspaceResultStore:
             )
             digest = hashlib.sha256()
             size = 0
-            with (
-                os.fdopen(source_descriptor, "rb") as input_file,
-                os.fdopen(target_descriptor, "wb") as output_file,
-            ):
+            with ExitStack() as stack:
+                input_file = stack.enter_context(os.fdopen(source_descriptor, "rb"))
+                source_descriptor = None
+                output_file = stack.enter_context(os.fdopen(target_descriptor, "wb"))
+                target_descriptor = None
                 while chunk := input_file.read(READ_CHUNK_BYTES):
                     size += len(chunk)
                     digest.update(chunk)
@@ -1110,6 +1113,11 @@ class WorkspaceResultStore:
                 os.fsync(output_file.fileno())
         except OSError as exc:
             raise ResultError("cannot retain changed result content") from exc
+        finally:
+            if source_descriptor is not None:
+                os.close(source_descriptor)
+            if target_descriptor is not None:
+                os.close(target_descriptor)
         if size != expected.size or digest.hexdigest() != expected.sha256:
             raise ResultError("result file changed before it could be retained")
 

@@ -1030,7 +1030,10 @@ def _write_all(path: Path, value: bytes) -> None:
             raise GatewayError("gateway mailbox file is unsafe")
         offset = 0
         while offset < len(value):
-            offset += os.write(descriptor, value[offset:])
+            written = os.write(descriptor, value[offset:])
+            if written <= 0:
+                raise GatewayError("gateway mailbox write made no progress")
+            offset += written
         os.fsync(descriptor)
     finally:
         os.close(descriptor)

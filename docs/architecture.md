@@ -230,6 +230,19 @@ project-activity projection.
   execution's pinned source only while that source is still the observed
   integration ref; real external drift continues through the ordinary refold
   and fresh-gate path.
+- Schemas v32-v35 generalize immutable role bindings and add the bounded
+  `discovery-v1` configuration, evidence ledger, and restart-safe director.
+  Investigator and coordinator runs remain read-only; a `GO`, `NO_GO`, or
+  `ASK_HUMAN` ruling is accepted only against the execution's exact pinned
+  project, work, source, identities, and trace.
+- Schemas v36-v38 add `advisory-review-v1`: three structurally blind reviews,
+  three fresh challenge runs, and one separate triangulation run. Its final
+  artifact is literally advisory-only and cannot satisfy a gate or landing
+  decision.
+- Schemas v39-v40 bind an implementation execution to one exact completed
+  Discovery `GO` ruling and require its reviewer to submit a bounded
+  scope-review artifact. MGB derives regressions, follow-ups, and the expected
+  verdict before accepting the ordinary exact-head review entry.
 - Schema v14 adds hard work-item landing dependencies, one serialized lane per
   project/ref, immutable derived folds, exact argv-only landing plans, and
   nonce-bound receipts. Landing one item advances the durable ref and marks
@@ -332,7 +345,9 @@ dispatch/reconciliation attempts advance it to schema v23. Explicit capability
 bindings, provider landing, exact gate-change provenance, maintainer review,
 bounded workflow prescriptions, their build/review/correction director, and
 their landing/closeout director and correction-chain authority advance it
-through schemas v24-v31.
+through schemas v24-v31. Generic role bindings, Discovery, advisory review,
+and mechanically enforced Discovery-to-implementation scope lineage advance
+it through schemas v32-v40.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted

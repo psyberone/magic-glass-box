@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 *.egg-info/
 .coverage
 coverage.xml
@@ -17,5 +18,6 @@ docs/internal/
 *.db-wal
 # panopticon run artifacts (--setup #485)
 .panopticon/*
+.panopticon.unverified-*/
 .claude/settings.local.json
 panopticon.yml.draft

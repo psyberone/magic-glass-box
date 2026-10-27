@@ -26,6 +26,8 @@ groups:
     - tests/test_provider_grants.py
     - tests/test_gateway.py
     - tests/test_worker_transport.py
+    - tests/test_live_gateway.py
+    - tests/test_live_provider_gateway.py
     - tests/test_live_runtime_adapters.py
     panels:
     - ARC
@@ -45,6 +47,9 @@ groups:
     - tests/test_workspace.py
     - tests/test_results.py
     - tests/test_attempts.py
+    - tests/test_integration_gates.py
+    - tests/test_integration_queue.py
+    - tests/test_advisory_execution.py
     panels:
     - ARC
     - DAT
@@ -58,6 +63,10 @@ groups:
     tests:
     - tests/test_supervision.py
     - tests/test_live_supervisor.py
+    - tests/test_inference_dispatch_service.py
+    - tests/test_workflow_director.py
+    - tests/test_discovery_execution.py
+    - tests/test_advisory_execution.py
     panels:
     - ARC
     - DAT
@@ -78,6 +87,39 @@ groups:
     - SEC
     - ACC
     - OPS
+  Prescriptions:
+    match:
+    - src/magic_glass_box/workflows.py
+    - src/magic_glass_box/workflow_director.py
+    - src/magic_glass_box/workflow_scope.py
+    - src/magic_glass_box/discovery.py
+    - src/magic_glass_box/discovery_director.py
+    - src/magic_glass_box/advisory.py
+    - src/magic_glass_box/advisory_director.py
+    - src/magic_glass_box/storage/workflows.py
+    - src/magic_glass_box/storage/discovery.py
+    - src/magic_glass_box/storage/advisory.py
+    - schemas/discovery-*.json
+    - schemas/advisory-*.json
+    - schemas/workflow-scope-review-v1.schema.json
+    - scripts/check_live_m13.py
+    tests:
+    - tests/test_workflows.py
+    - tests/test_workflow_director.py
+    - tests/test_workflow_scope.py
+    - tests/test_discovery.py
+    - tests/test_discovery_execution.py
+    - tests/test_advisory.py
+    - tests/test_advisory_execution.py
+    - tests/test_live_m13.py
+    panels:
+    - AGT
+    - ARC
+    - DAT
+    - OPS
+    - QAL
+    - SEC
+    - TST
   Platform:
     match:
     - src/magic_glass_box/__init__.py
@@ -117,6 +159,7 @@ groups:
     - tests/test_work_memory.py
     - tests/test_schema_contracts.py
     - tests/test_quality_gate.py
+    - tests/test_live_krab_transport.py
     panels:
     - OPS
     - SEC

@@ -92,12 +92,13 @@ This repository currently contains the first executable vertical slice:
   coordinator to recover parallel Claude/Codex-style work;
 - operator-controlled work completion that seals audit history and an explicit
   reopen into a blank next-generation memory thread;
-- schema-v31 bounded workflow prescriptions with one immutable built-in
-  `implementation-v1` definition, versioned producer/reviewer configurations,
-  restart-safe executions pinned to exact project, work-item, work-thread,
-  profile, source, and policy revisions, and a durable supervisor-driven
-  build/review/validation/correction loop with typed exact-head verdicts,
-  explicit manual/provider landing authority, and atomic durable closeout;
+- schema-v40 bounded prescriptions: the original `implementation-v1` build,
+  review, correction, and landing loop; read-only `discovery-v1` investigation
+  and human scope rulings; and seven-run `advisory-review-v1` triangulation.
+  Executions pin exact project, work-item, work-thread, profile, source,
+  candidate, and policy revisions. Discovery-scoped implementation reviews
+  must submit typed per-`MUST` evidence whose outcome MGB derives before an
+  exact-head verdict can authorize the next transition;
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues,
   where upstream bodies and host-private failure details are reduced to fixed

@@ -134,6 +134,15 @@ accepted only when they belong to a run on the same work thread. Artifact
 paths are metadata references and must be safe relative POSIX paths; file
 content is not copied into the log.
 
+That authority separation does not make the prose safe instructions. A later
+model receives earlier agent-authored summaries and details as structured but
+still untrusted data. Protocol v1 relies on behavioral guidance to preserve
+that distinction; it does not yet carry a machine-readable per-field trust
+label. The self-describing gateway work in Milestone 13.5 will retain explicit
+source/trust classification through replay and test instruction-shaped content
+from every producer. Storage-side authority checks remain the backstop in both
+versions.
+
 The contracts reject message histories, private Krab bodies, provider payloads,
 credentials, and transcripts. Nothing is exported to a source issue or pull
 request. Entries, checkpoints, sealed threads, and lifecycle events are

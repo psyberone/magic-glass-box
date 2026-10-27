@@ -294,7 +294,10 @@ def _operator_select(handles: list[str]) -> str:
         f'<option value="{_escape(handle)}">{_escape(handle)}</option>'
         for handle in handles
     )
-    return f'<select name="requested_by" required>{options}</select>'
+    return (
+        '<select name="requested_by" required aria-label="Requesting operator">'
+        f"{options}</select>"
+    )
 
 
 def _action_form(
@@ -349,6 +352,7 @@ def _render_control_room(
         if state in ACTIVE_RUN_STATES and handles:
             cancel_controls = (
                 operator + '<input name="reason" required maxlength="4096" '
+                'aria-label="Cancellation reason" '
                 'placeholder="Reason for cancellation">'
             )
             controls.append(
@@ -381,7 +385,8 @@ def _render_control_room(
                     for name in reassign_profiles
                 )
                 profile_select = (
-                    f'<select name="profile_name" required>{profile_options}</select>'
+                    '<select name="profile_name" required '
+                    f'aria-label="Replacement profile">{profile_options}</select>'
                 )
                 controls.append(
                     _action_form(
@@ -896,7 +901,8 @@ def _render_control_room(
         "reconcile",
         csrf_token,
         {},
-        '<input name="run_id" placeholder="Optional run ID" maxlength="64">',
+        '<input name="run_id" aria-label="Run ID to reconcile" '
+        'placeholder="Optional run ID" maxlength="64">',
         "Reconcile",
     )
     receipt_html = ""
