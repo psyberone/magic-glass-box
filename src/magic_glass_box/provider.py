@@ -27,6 +27,10 @@ class ProviderBudgetError(ProviderError):
     """A pinned local budget ceiling denied dispatch before provider access."""
 
 
+class ProviderInvocationLimitError(ProviderError):
+    """A pinned per-run invocation ceiling denied dispatch before provider access."""
+
+
 class ProviderUpstreamError(ProviderError):
     def __init__(
         self,

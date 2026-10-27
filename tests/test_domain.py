@@ -367,6 +367,48 @@ class AgentProfileTests(unittest.TestCase):
                 }
             )
 
+    def test_profile_pins_a_bounded_provider_invocation_ceiling(self) -> None:
+        legacy = AgentProfileSpec.from_mapping(
+            {
+                "image": "agent@sha256:abc",
+                "command": ["agent"],
+                "credential_names": ["openai-main"],
+                "gateway_capabilities": ["provider.invoke"],
+            }
+        )
+        bounded = AgentProfileSpec.from_mapping(
+            {
+                **legacy.to_dict(),
+                "provider_invocation_limit": 2,
+            }
+        )
+
+        self.assertIsNone(legacy.provider_invocation_limit)
+        self.assertNotIn("provider_invocation_limit", legacy.to_dict())
+        self.assertEqual(bounded.provider_invocation_limit, 2)
+        self.assertEqual(bounded.to_dict()["provider_invocation_limit"], 2)
+
+        for value in (True, 0, 10_001, "2"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValidationError, "provider_invocation_limit"),
+            ):
+                AgentProfileSpec.from_mapping(
+                    {
+                        **legacy.to_dict(),
+                        "provider_invocation_limit": value,
+                    }
+                )
+
+        with self.assertRaisesRegex(ValidationError, "provider.invoke"):
+            AgentProfileSpec.from_mapping(
+                {
+                    "image": "agent@sha256:abc",
+                    "command": ["agent"],
+                    "provider_invocation_limit": 2,
+                }
+            )
+
     def test_vendor_runtime_requires_one_explicit_provider_transport(self) -> None:
         valid = {
             "image": "agent@sha256:abc",

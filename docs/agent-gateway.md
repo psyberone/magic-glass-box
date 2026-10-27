@@ -15,6 +15,7 @@ A profile opts into each operation explicitly:
   "command": ["agent", "run"],
   "workspace_mode": "copy_on_write",
   "network_mode": "gateway_only",
+  "provider_invocation_limit": 64,
   "credential_names": ["krab", "openai-main"],
   "gateway_capabilities": [
     "run.describe",
@@ -38,7 +39,11 @@ Krab identity only while performing that operation. Unknown capabilities,
 duplicates, and interaction capabilities without `krab` fail validation.
 `provider.invoke` requires at least one non-Krab grant name. Grant existence,
 state, and expiry are checked when a profile revision is created, when a run
-pins it, and again for every invocation.
+pins it, and again for every invocation. `provider_invocation_limit` is an
+optional profile ceiling from 1 through 10,000. Existing profiles omit it and
+receive the conservative default of 64 when a run binds its provider grants.
+The selected value is pinned per run and grant; retry successors receive a
+fresh allowance under the same ceiling.
 
 ## Carrier contract
 
@@ -145,6 +150,11 @@ memory contains the latest checkpoint, entries after it, and assignment state
 with at most the latest 16 lifecycle events per assignment. It omits the host
 repository path, image and command details, credential references, file bodies,
 and secret values.
+
+Interaction history is read through a keyset-paged storage API. The gateway
+returns only the newest 128 metadata records together with the total count and
+`interactions_truncated`; it never materializes an unbounded history and then
+slices it.
 
 The response also advertises `gateway_catalog.operation` and
 `gateway_catalog.catalog_version`; it does not inline contracts into every run
@@ -316,6 +326,14 @@ route, semantic protocol, model, scope fingerprint, byte ceilings, and absolute
 deadline. Only the separately launched connector owns the upstream credential
 and network transport. The reservation is released after dispatch and expires
 if its owning process dies.
+
+Immediately before connector dispatch, the same SQLite transaction atomically
+consumes one unit from the run/grant invocation allowance. Exhaustion returns
+`invocation_limit_exhausted` without contacting the connector. This local
+ceiling is protocol-neutral: it applies to connector protocol v1 even though
+v1 has no spend accounting, and independently backs up protocol-v2 budgets.
+Rejected validation, concurrency, and budget preflight attempts do not consume
+the allowance; a dispatch with an ambiguous outcome does.
 
 The JSON object response is transient and explicitly untrusted. Only status,
 byte counts, outcome, error category, timestamps, and the exact connector/grant

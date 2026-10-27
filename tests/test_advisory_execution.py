@@ -1815,7 +1815,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 40)
+        self.assertEqual(SCHEMA_VERSION, 41)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:
@@ -1850,7 +1850,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         second = migrated.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 40)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:
             columns = {
                 row[1]

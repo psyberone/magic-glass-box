@@ -179,6 +179,24 @@ class ProofDatabase:
             "interactions": [],
         }
 
+    def get_run_interaction_page(
+        self,
+        run_id: str,
+        *,
+        limit: int,
+        before_interaction_id: str | None = None,
+    ) -> dict[str, Any]:
+        if run_id != RUN_ID:
+            raise AssertionError("gateway escaped the proof run")
+        if limit != 128 or before_interaction_id is not None:
+            raise AssertionError("gateway requested an invalid interaction page")
+        return {
+            "interaction_count": 0,
+            "interactions": [],
+            "interactions_truncated": False,
+            "next_before_interaction_id": None,
+        }
+
 
 class ProofControl:
     def __init__(self) -> None:

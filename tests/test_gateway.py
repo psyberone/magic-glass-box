@@ -48,6 +48,7 @@ from magic_glass_box.provider import (
     ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
+    ProviderInvocationLimitError,
     ProviderQuotaError,
     ProviderRateLimitError,
     ProviderUpstreamError,
@@ -92,8 +93,8 @@ class FakeGatewayDatabase:
             raise AssertionError("gateway escaped its bound run")
         return {
             "id": RUN_ID,
-            "state": "running",
-            "version": 3,
+            "state": "waiting_for_input",
+            "version": 4,
             "source_revision": "a" * 40,
             "project_key": "box-project",
             "context": {
@@ -196,15 +197,29 @@ class FakeGatewayDatabase:
             "checkpoint": None,
         }
 
-    def get_run(self, run_id: str) -> dict[str, Any]:
+    def get_run_interaction_page(
+        self,
+        run_id: str,
+        *,
+        limit: int,
+        before_interaction_id: str | None = None,
+    ) -> dict[str, Any]:
         if run_id != RUN_ID:
             raise AssertionError("gateway escaped its bound run")
+        if limit != 128 or before_interaction_id is not None:
+            raise AssertionError("gateway requested an invalid interaction page")
+        visible = self.interactions[-limit:]
         return {
-            "id": RUN_ID,
-            "state": "waiting_for_input",
-            "version": 4,
-            "interactions": self.interactions,
+            "interaction_count": len(self.interactions),
+            "interactions": visible,
+            "interactions_truncated": len(self.interactions) > len(visible),
+            "next_before_interaction_id": (
+                visible[0]["id"] if len(self.interactions) > len(visible) else None
+            ),
         }
+
+    def get_run(self, _run_id: str) -> dict[str, Any]:
+        raise AssertionError("run.describe attempted an unbounded aggregate read")
 
     def get_run_transport(self, run_id: str) -> dict[str, Any]:
         if run_id != RUN_ID:
@@ -1385,6 +1400,11 @@ class RunGatewayTests(unittest.TestCase):
         failures = (
             (ProviderBusyError("SECRET busy"), "busy", None),
             (ProviderBudgetError("SECRET budget"), "budget_exhausted", None),
+            (
+                ProviderInvocationLimitError("SECRET invocation ceiling"),
+                "invocation_limit_exhausted",
+                None,
+            ),
             (
                 ProviderQuotaError(
                     "SECRET quota", retry_after_seconds=900, status_code=429

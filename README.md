@@ -103,6 +103,10 @@ This repository currently contains the first executable vertical slice:
   request/result shapes drive runtime dispatch and whose response provenance
   distinguishes enforced authority from untrusted project, agent, human, and
   provider content;
+- schema-v41 autonomous-fleet bounds: protocol-neutral per-run/provider
+  invocation allowances, keyset-paged interaction history, fairly budgeted
+  supervisor discovery with restart-durable cursors, and sanitized diagnostics
+  for result-capture, lost-lease, and outcome-persistence failures;
 - a transactionally consistent, redacted control-room projection with an
   optional live overlay of configured Krab identities' roles and claim queues,
   where upstream bodies and host-private failure details are reduced to fixed
@@ -266,6 +270,10 @@ Agent execution has a six-hour wall-clock ceiling by default. Pass
 attempt. The supervisor additionally bounds the complete coordinator call;
 `--action-timeout SECONDS` must exceed the run timeout and otherwise defaults
 to the run timeout plus five minutes for setup, capture, and cleanup.
+`--max-discoveries-per-tick N` bounds candidate inspection across action and
+escalation discovery (default 240; range 12 through 1,024), with fixed shares
+and durable cursors so a large category cannot starve the others across
+restarts.
 
 The supervision policy is optional. Omitting it keeps the run manual even when
 the supervisor service is running. Opted-in queued work, answered replacement

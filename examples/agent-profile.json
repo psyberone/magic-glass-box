@@ -21,6 +21,7 @@
   ],
   "image": "magic-glass-box/codex-agent@sha256:replace-with-a-pinned-digest",
   "network_mode": "gateway_only",
+  "provider_invocation_limit": 64,
   "runtime_adapter": "codex",
   "runtime_provider_grant": "openai-main",
   "workspace_mode": "copy_on_write"

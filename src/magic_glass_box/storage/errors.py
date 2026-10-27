@@ -19,3 +19,7 @@ class ConcurrentUpdateError(ConflictError):
 
 class BudgetExceededError(ConflictError):
     """A durable reservation would exceed pinned provider budget authority."""
+
+
+class InvocationLimitExceededError(ConflictError):
+    """A run consumed its pinned provider invocation allowance."""

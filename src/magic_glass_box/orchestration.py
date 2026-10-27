@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 import secrets
 import threading
 import time
@@ -22,6 +24,8 @@ from .gateway import GatewayEndpoint
 from .results import CapturedResult, WorkspaceResultStore
 from .runtime import RuntimeAdapterRegistry, default_runtime_adapters
 from .workspace import PreparedWorkspace, WorkspaceManager
+
+logger = logging.getLogger(__name__)
 
 
 class RunOrchestrationError(RuntimeError):
@@ -517,6 +521,7 @@ class RunCoordinator:
                     attempt["id"],
                     interrupted=False,
                     include_executor=True,
+                    capture_error_code=self._exception_code(exc),
                 )
                 error = RunOrchestrationError(
                     "result capture incomplete; attempt failed without a result and "
@@ -690,7 +695,14 @@ class RunCoordinator:
         *,
         interrupted: bool,
         include_executor: bool,
+        capture_error_code: str,
     ) -> dict[str, Any]:
+        logger.warning(
+            "result capture failed run_id=%s attempt_id=%s error_code=%s",
+            run_id,
+            attempt_id,
+            capture_error_code,
+        )
         cleanup_failures = self._cleanup(
             run_id,
             include_executor=include_executor,
@@ -711,7 +723,10 @@ class RunCoordinator:
             attempt_id,
             owner_id=self.orchestrator_id,
             expected_attempt_version=attempt["version"],
-            reason="result capture failed; workspace retained for manual recovery",
+            reason=(
+                f"result capture failed ({capture_error_code}); "
+                "workspace retained for manual recovery"
+            ),
             interrupted=interrupted,
         )
 
@@ -738,6 +753,7 @@ class RunCoordinator:
                     attempt_id,
                     interrupted=False,
                     include_executor=True,
+                    capture_error_code=self._exception_code(exc),
                 )
                 error = RunOrchestrationError(
                     "result capture incomplete; attempt failed without a result and "
@@ -808,12 +824,13 @@ class RunCoordinator:
                 ):
                     try:
                         self._capture_result(active_attempt["id"], workspace)
-                    except Exception:
+                    except Exception as exc:
                         self._fail_uncaptured_attempt(
                             run_id,
                             active_attempt["id"],
                             interrupted=True,
                             include_executor=False,
+                            capture_error_code=self._exception_code(exc),
                         )
                         current = self.database.get_run(run_id)
                         if current["state"] in {
@@ -882,3 +899,10 @@ class RunCoordinator:
                 error.add_note(f"{run_id}: {type(failure).__name__}: {failure}")
             raise error
         return reconciled
+
+    @staticmethod
+    def _exception_code(exc: BaseException) -> str:
+        name = re.sub(r"[^A-Za-z0-9_.-]", "", type(exc).__name__)
+        if not name or not name[0].isalpha():
+            return "RunOperationError"
+        return name[:128]

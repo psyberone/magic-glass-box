@@ -507,6 +507,107 @@ class InteractionDatabaseTests(unittest.TestCase):
         self.open_interaction(self.running_run())
         self.assertEqual(self.database.status()["counts"]["interactions"], 1)
 
+    def test_interaction_history_is_keyset_paged_and_run_views_are_bounded(
+        self,
+    ) -> None:
+        run = self.running_run()
+        with self.database.connect() as connection:
+            for index in range(300):
+                interaction_id = "int_" + f"{index:032x}"
+                request_item_id = "itm_" + f"{index:032x}"
+                created_at = (
+                    f"2026-10-20T12:{index // 60:02d}:{index % 60:02d}.000000+00:00"
+                )
+                connection.execute(
+                    "INSERT INTO interactions "
+                    "(id, run_id, kind, state, version, "
+                    "recipient_krab_identity_id, request_item_id, response_item_id, "
+                    "created_at, updated_at, resolved_at, attempt_id) "
+                    "VALUES (?, ?, 'question', 'cancelled', 1, ?, ?, NULL, "
+                    "?, ?, ?, NULL)",
+                    (
+                        interaction_id,
+                        run["id"],
+                        self.reviewer_identity["id"],
+                        request_item_id,
+                        created_at,
+                        created_at,
+                        created_at,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO interaction_events "
+                    "(interaction_id, sequence, kind, from_state, to_state, "
+                    "krab_item_id, created_at) VALUES "
+                    "(?, 1, 'interaction.opened', NULL, 'open', ?, ?)",
+                    (interaction_id, request_item_id, created_at),
+                )
+
+        latest = self.database.get_run_interaction_page(run["id"], limit=64)
+        self.assertEqual(latest["interaction_count"], 300)
+        self.assertTrue(latest["interactions_truncated"])
+        self.assertEqual(len(latest["interactions"]), 64)
+        self.assertEqual(latest["interactions"][0]["id"], "int_" + f"{236:032x}")
+        self.assertEqual(latest["interactions"][-1]["id"], "int_" + f"{299:032x}")
+        self.assertEqual(
+            latest["next_before_interaction_id"],
+            latest["interactions"][0]["id"],
+        )
+
+        previous = self.database.get_run_interaction_page(
+            run["id"],
+            limit=64,
+            before_interaction_id=latest["next_before_interaction_id"],
+        )
+        self.assertEqual(previous["interactions"][0]["id"], "int_" + f"{172:032x}")
+        self.assertEqual(previous["interactions"][-1]["id"], "int_" + f"{235:032x}")
+        self.assertTrue(
+            {item["id"] for item in latest["interactions"]}.isdisjoint(
+                item["id"] for item in previous["interactions"]
+            )
+        )
+
+        visible = self.database.get_run(run["id"])
+        self.assertEqual(visible["interaction_count"], 300)
+        self.assertTrue(visible["interactions_truncated"])
+        self.assertEqual(len(visible["interactions"]), 128)
+
+        single = self.database.get_run_interaction_page(run["id"], limit=1)
+        self.assertEqual(len(single["interactions"]), 1)
+        self.assertEqual(single["interactions"][0]["id"], "int_" + f"{299:032x}")
+        self.assertTrue(single["interactions_truncated"])
+
+        maximum = self.database.get_run_interaction_page(run["id"], limit=256)
+        self.assertEqual(len(maximum["interactions"]), 256)
+        self.assertTrue(maximum["interactions_truncated"])
+
+        terminal = self.database.get_run_interaction_page(
+            run["id"],
+            limit=64,
+            before_interaction_id="int_" + f"{64:032x}",
+        )
+        self.assertEqual(len(terminal["interactions"]), 64)
+        self.assertFalse(terminal["interactions_truncated"])
+        self.assertIsNone(terminal["next_before_interaction_id"])
+
+        for invalid in (True, 0, 257):
+            with (
+                self.subTest(limit=invalid),
+                self.assertRaisesRegex(ValidationError, "limit"),
+            ):
+                self.database.get_run_interaction_page(
+                    run["id"],
+                    limit=invalid,  # type: ignore[arg-type]
+                )
+        with self.assertRaisesRegex(ValidationError, "before_interaction_id"):
+            self.database.get_run_interaction_page(
+                run["id"], before_interaction_id="x" * 65
+            )
+        with self.assertRaisesRegex(NotFoundError, "cursor"):
+            self.database.get_run_interaction_page(
+                run["id"], before_interaction_id="int_" + "f" * 32
+            )
+
 
 class InteractionMigrationTests(unittest.TestCase):
     def setUp(self) -> None:

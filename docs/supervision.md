@@ -9,7 +9,8 @@ Start it with:
 
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
-  supervisor run --poll-interval 2 --max-workers 4
+  supervisor run --poll-interval 2 --max-workers 4 \
+  --max-discoveries-per-tick 240
 ```
 
 The process initializes or migrates the database, prints its bounded service
@@ -22,6 +23,9 @@ controls only claims on durable dispatcher work. `--action-timeout` bounds the
 entire coordinator call and must exceed the agent limit. When omitted, it is
 the run timeout plus five minutes for setup, result capture, and cleanup.
 `--log-level` selects stderr diagnostic verbosity and defaults to `WARNING`.
+`--max-discoveries-per-tick` bounds the total source rows inspected in one
+pass from 12 through 1,024. The supervisor splits that budget across every
+action and escalation class, so one large queue cannot starve another.
 
 Transient discovery failures use exponential backoff capped at 60 seconds.
 The supervisor does not shorten that delay into another discovery pass merely
@@ -29,6 +33,8 @@ to maintain ownership; it renews live action and escalation claims separately
 at the lease-heartbeat cadence. Operational diagnostics contain generated
 object IDs and sanitized exception class names, never exception messages,
 private interaction content, provider output, or credentials.
+Lost action/escalation leases and outcome-persistence races emit that same
+sanitized metadata instead of disappearing silently.
 
 ## Explicit run policy
 
@@ -77,6 +83,14 @@ Discovery first inserts a version-bound `supervisor_action`; execution never
 runs directly from a query result. The unique action identity is its operation,
 subject ID, and subject version. A process then atomically claims that row under
 a short lease before calling the coordinator.
+
+Every action query has a per-class SQL `LIMIT` and skips versions already in
+the durable ledger. Escalation discovery uses per-class keyset pages and stores
+its cursor in SQLite. Cursors wrap after reaching the end, so later age
+thresholds are revisited, but a replacement process resumes the prior scan
+position instead of repeatedly starting at the oldest row. The combined
+candidate count stays below the configured tick budget while each class makes
+progress across restarts.
 
 This gives two independent safety layers:
 

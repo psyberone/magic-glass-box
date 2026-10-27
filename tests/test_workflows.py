@@ -1534,7 +1534,7 @@ class WorkflowStorageTests(unittest.TestCase):
         second = migrated.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 40)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:
             tables = {
                 row[0]
@@ -1570,7 +1570,7 @@ class WorkflowStorageTests(unittest.TestCase):
         second = migrated.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 40)
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:
             tables = {
                 row[0]

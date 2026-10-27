@@ -972,6 +972,9 @@ class ControlRoomTests(unittest.TestCase):
                 "unavailable_since",
                 "expired",
                 "available",
+                "max_invocations",
+                "invocation_count",
+                "remaining_invocations",
             },
         )
         self.assertEqual(

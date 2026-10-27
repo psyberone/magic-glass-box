@@ -204,6 +204,9 @@ class ProviderGrantDatabaseTests(unittest.TestCase):
                     "grant_kind": "connector",
                     "state": "active",
                     "expires_at": None,
+                    "max_invocations": 64,
+                    "invocation_count": 0,
+                    "remaining_invocations": 64,
                 }
             ],
         )

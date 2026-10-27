@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5548,6 +5548,65 @@ BEGIN
 END;
 """
 
+PROVIDER_INVOCATION_LIMIT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_provider_invocation_allowances (
+    run_id TEXT NOT NULL,
+    provider_grant_id TEXT NOT NULL,
+    max_invocations INTEGER NOT NULL CHECK (max_invocations BETWEEN 1 AND 10000),
+    invocation_count INTEGER NOT NULL DEFAULT 0 CHECK (
+        invocation_count BETWEEN 0 AND max_invocations
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, provider_grant_id),
+    FOREIGN KEY (run_id, provider_grant_id)
+        REFERENCES run_provider_grants(run_id, provider_grant_id)
+        ON DELETE RESTRICT
+) STRICT;
+
+INSERT OR IGNORE INTO run_provider_invocation_allowances (
+    run_id, provider_grant_id, max_invocations, invocation_count,
+    created_at, updated_at
+)
+SELECT rpg.run_id, rpg.provider_grant_id,
+       CASE WHEN COUNT(pi.id) > 64 THEN COUNT(pi.id) ELSE 64 END,
+       COUNT(pi.id), rpg.created_at, rpg.created_at
+FROM run_provider_grants rpg
+LEFT JOIN provider_invocations pi
+    ON pi.run_id = rpg.run_id
+    AND pi.provider_grant_id = rpg.provider_grant_id
+    AND pi.outcome IN ('dispatching', 'succeeded', 'failed', 'ambiguous')
+GROUP BY rpg.run_id, rpg.provider_grant_id, rpg.created_at;
+
+CREATE TRIGGER IF NOT EXISTS run_provider_grant_allowance_default
+AFTER INSERT ON run_provider_grants
+BEGIN
+    INSERT INTO run_provider_invocation_allowances (
+        run_id, provider_grant_id, max_invocations, invocation_count,
+        created_at, updated_at
+    ) VALUES (NEW.run_id, NEW.provider_grant_id, 64, 0, NEW.created_at, NEW.created_at);
+END;
+"""
+
+SUPERVISOR_DISCOVERY_CURSOR_SCHEMA = """
+CREATE TABLE IF NOT EXISTS supervisor_discovery_cursors (
+    stream TEXT PRIMARY KEY CHECK (
+        stream IN (
+            'interaction.pending', 'attempt.attention',
+            'run.missing_active_attempt', 'run.waiting_without_interaction',
+            'authority.unavailable'
+        )
+    ),
+    cursor_timestamp TEXT NOT NULL,
+    cursor_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+"""
+
+OPERABILITY_SCHEMA = (
+    PROVIDER_INVOCATION_LIMIT_SCHEMA + SUPERVISOR_DISCOVERY_CURSOR_SCHEMA
+)
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -5591,7 +5650,8 @@ SCHEMA_V37 = (
 )
 SCHEMA_V38 = SCHEMA_V37 + ADVISORY_DIRECTOR_SCHEMA
 SCHEMA_V39 = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
-SCHEMA = SCHEMA_V39 + WORKFLOW_SCOPE_REVIEW_SCHEMA
+SCHEMA_V40 = SCHEMA_V39 + WORKFLOW_SCOPE_REVIEW_SCHEMA
+SCHEMA = SCHEMA_V40 + OPERABILITY_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -5632,4 +5692,5 @@ MIGRATIONS = {
     37: ADVISORY_DIRECTOR_SCHEMA,
     38: WORKFLOW_SCOPE_BINDING_SCHEMA,
     39: WORKFLOW_SCOPE_REVIEW_SCHEMA,
+    40: OPERABILITY_SCHEMA,
 }

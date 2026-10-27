@@ -1657,7 +1657,7 @@ discovery, result-shape enforcement, and provenance filtering.
 
 ## Milestone 13.6: bounded autonomous-fleet operability
 
-**Status: planned hardening; follows M13.5 and precedes provider expansion**
+**Status: complete**
 
 The Panopticon review found real scaling and observability debt beneath the
 successful single-project proof. Close it before adding another external
@@ -1682,6 +1682,44 @@ restarts without an unbounded query or write-lock hold; a deliberately looping
 v1 worker is stopped at its exact invocation ceiling; and capture/lease-loss
 failures leave a bounded operator-visible reason without leaking private
 content.
+
+Schema v41 implements this boundary without changing the worker-facing
+provider protocol. Every run/provider-grant binding now carries an invocation
+allowance. The profile pins an optional limit from 1 through 10,000, with a
+backward-compatible default of 64; dispatch claims the count in the same
+SQLite transaction that records the attempt, concurrent callers cannot
+oversubscribe it, and a retry starts at zero with the same pinned maximum.
+Pre-connector denials do not spend a count, while dispatched ambiguous outcomes
+do.
+
+Run interaction history is now read through newest-first keyset pages and the
+aggregate run projection includes only its bounded latest page plus count and
+cursor metadata. Each supervisor tick has one explicit discovery budget split
+across action and escalation categories. SQL limits bound source inspection,
+fixed category shares prevent a dominant backlog from starving another, and
+restart-durable wraparound cursors retain escalation progress without making a
+long-lived transaction parse the entire fleet. Result-capture exceptions are
+reduced to safe classes in retained failure reasons, and lost leases or
+outcome-persistence races produce structured, content-free diagnostics rather
+than silent suppression.
+
+Final checkpoint evidence: 1,230 tests pass with Ruff format/lint clean and
+87% aggregate statement-plus-branch coverage. RED-first happy, sad, load, and
+race tests prove an exact protocol-v1 ceiling, concurrent dispatch without
+oversubscription, fresh retry allowance, schema-v40 migration, 300-record
+interaction paging, fair action and escalation backlog progress across process
+restarts, fixed per-query bounds, minimum and maximum discovery budgets, and
+sanitized capture, lease-loss, and outcome-race diagnostics.
+
+The broad focused final-code mutation wave killed 216/233 selected mutants
+(92.70%). Survivor analysis added exact assertions for the 256-item page
+boundary, 64-byte cursor boundary, exact-page termination, bounded wraparound
+query, and zero-work supervisor result; all four behavior-changing survivors
+were killed on rerun, for an effective 220/233 (94.42%). A separate atomic
+invocation-authority wave killed 16/19 mutants (84.21%). Its three survivors
+only alter the private storage exception text, which the service intentionally
+translates to the same stable `invocation_limit_exhausted` public result. No
+authority or failure-path wave fell below the 80% floor.
 
 
 ## Milestone 14: heterogeneous work provider

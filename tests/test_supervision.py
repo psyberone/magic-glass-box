@@ -23,7 +23,9 @@ from magic_glass_box.domain import (
     AgentProfileSpec,
     InteractionKind,
     ProjectContext,
+    RunState,
     SupervisionPolicy,
+    ValidationError,
     WorkItemEnvelope,
 )
 from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
@@ -112,6 +114,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
             "file:/private/krab-token",
             user_id=self.user["id"],
         )
+        self.identity = identity
         self.database.create_project(
             instance_id=instance["id"],
             krab_project_id="prj_" + "2" * 32,
@@ -315,6 +318,143 @@ class SupervisionDatabaseTests(unittest.TestCase):
         self.assertEqual(final_claim["attempt_count"], 3)
         self.assertEqual(exhausted["state"], "exhausted")
         self.assertEqual(exhausted["last_error_code"], "StorageError")
+
+    def test_action_discovery_is_bounded_fair_and_progresses_across_restarts(
+        self,
+    ) -> None:
+        queued_ids = [self.create_run(self.automatic_policy())["id"] for _ in range(6)]
+        orphaned_ids: list[str] = []
+        for _ in range(6):
+            run = self.create_run(self.automatic_policy())
+            preparing = self.database.transition_run(
+                run["id"],
+                target=RunState.PREPARING,
+                expected_version=run["version"],
+            )
+            orphaned_ids.append(preparing["id"])
+
+        first = self.database.enqueue_supervisor_actions(max_candidates=7)
+        self.assertEqual(
+            {item["kind"] for item in first},
+            {"run.execute", "run.reconcile"},
+        )
+
+        path = self.database.path
+        created = list(first)
+        for _ in range(5):
+            restarted = Database(path)
+            batch = restarted.enqueue_supervisor_actions(max_candidates=7)
+            self.assertLessEqual(len(batch), 2)
+            created.extend(batch)
+
+        self.assertEqual(
+            {item["run_id"] for item in created if item["kind"] == "run.execute"},
+            set(queued_ids),
+        )
+        self.assertEqual(
+            {item["run_id"] for item in created if item["kind"] == "run.reconcile"},
+            set(orphaned_ids),
+        )
+        self.assertEqual(
+            self.database.enqueue_supervisor_actions(max_candidates=1024), []
+        )
+
+        for invalid in (True, 6, 1025):
+            with (
+                self.subTest(max_candidates=invalid),
+                self.assertRaisesRegex(ValidationError, "max_candidates"),
+            ):
+                self.database.enqueue_supervisor_actions(
+                    max_candidates=invalid  # type: ignore[arg-type]
+                )
+
+    def test_escalation_discovery_cursor_drains_backlog_across_restarts(self) -> None:
+        runs = [
+            self.create_run(self.automatic_policy(), with_session=True)
+            for _ in range(8)
+        ]
+        interaction_ids: list[str] = []
+        with self.database.connect() as connection:
+            for index, run in enumerate(runs):
+                interaction_id = "int_" + f"{index + 100:032x}"
+                interaction_ids.append(interaction_id)
+                connection.execute(
+                    "INSERT INTO interactions "
+                    "(id, run_id, kind, state, version, "
+                    "recipient_krab_identity_id, request_item_id, response_item_id, "
+                    "created_at, updated_at, resolved_at, attempt_id) "
+                    "VALUES (?, ?, 'question', 'open', 1, ?, ?, NULL, ?, ?, "
+                    "NULL, NULL)",
+                    (
+                        interaction_id,
+                        run["id"],
+                        self.identity["id"],
+                        "itm_" + f"{index + 100:032x}",
+                        "2026-01-01T00:00:00.000000+00:00",
+                        "2026-01-01T00:00:00.000000+00:00",
+                    ),
+                )
+
+            connection.execute(
+                "INSERT INTO supervisor_discovery_cursors "
+                "(stream, cursor_timestamp, cursor_id, updated_at) "
+                "VALUES ('interaction.pending', ?, ?, ?)",
+                (
+                    "2026-01-01T00:00:00.000000+00:00",
+                    interaction_ids[-2],
+                    "2027-01-01T00:00:00.000000+00:00",
+                ),
+            )
+            bounded = self.database._scan_supervisor_candidates(
+                connection,
+                stream="interaction.pending",
+                select_sql=(
+                    "SELECT id, created_at AS scan_at, id AS scan_id "
+                    "FROM interactions WHERE state = 'open'"
+                ),
+                parameters=(),
+                limit=2,
+                now="2027-01-01T00:00:00.000000+00:00",
+            )
+            self.assertEqual(len(bounded), 2)
+            self.assertEqual(
+                [row["id"] for row in bounded],
+                [interaction_ids[-1], interaction_ids[0]],
+            )
+            connection.execute(
+                "DELETE FROM supervisor_discovery_cursors "
+                "WHERE stream = 'interaction.pending'"
+            )
+
+        created: list[dict[str, object]] = []
+        path = self.database.path
+        current = datetime(2027, 1, 1, tzinfo=UTC).isoformat(timespec="microseconds")
+        for _ in range(8):
+            restarted = Database(path)
+            with mock.patch.object(restarted, "now", return_value=current):
+                batch = restarted.create_due_supervisor_escalations(max_candidates=5)
+            self.assertLessEqual(len(batch), 2)
+            created.extend(batch)
+
+        self.assertEqual(
+            {item["subject_id"] for item in created},
+            set(interaction_ids),
+        )
+        self.assertEqual(len(created), 16)
+        with mock.patch.object(self.database, "now", return_value=current):
+            self.assertEqual(
+                self.database.create_due_supervisor_escalations(max_candidates=5),
+                [],
+            )
+
+        for invalid in (True, 4, 1025):
+            with (
+                self.subTest(max_candidates=invalid),
+                self.assertRaisesRegex(ValidationError, "max_candidates"),
+            ):
+                self.database.create_due_supervisor_escalations(
+                    max_candidates=invalid  # type: ignore[arg-type]
+                )
 
     def test_recovery_actions_only_target_expired_or_orphaned_ownership(self) -> None:
         live_run = self.create_run()
@@ -906,6 +1046,9 @@ class SupervisionDatabaseTests(unittest.TestCase):
             ({"max_escalations_per_tick": 0}, "max_escalations_per_tick"),
             ({"max_escalations_per_tick": 257}, "max_escalations_per_tick"),
             ({"max_escalations_per_tick": True}, "max_escalations_per_tick"),
+            ({"max_discoveries_per_tick": 11}, "max_discoveries_per_tick"),
+            ({"max_discoveries_per_tick": 1025}, "max_discoveries_per_tick"),
+            ({"max_discoveries_per_tick": True}, "max_discoveries_per_tick"),
             ({"escalation_timeout": 0.049}, "escalation_timeout"),
             ({"escalation_timeout": 60.01}, "escalation_timeout"),
             ({"escalation_timeout": float("nan")}, "escalation_timeout"),
@@ -948,6 +1091,8 @@ class SupervisionDatabaseTests(unittest.TestCase):
             {"action_lease_seconds": 3600},
             {"max_escalations_per_tick": 1},
             {"max_escalations_per_tick": 256},
+            {"max_discoveries_per_tick": 12},
+            {"max_discoveries_per_tick": 1024},
             {"action_lease_seconds": 10, "escalation_timeout": 0.05},
             {"action_lease_seconds": 3600, "escalation_timeout": 60.0},
             {"shutdown_timeout": 0.05},
@@ -978,6 +1123,119 @@ class SupervisionDatabaseTests(unittest.TestCase):
                 self.assertRaisesRegex(SupervisorError, "timeout"),
             ):
                 supervisor.drain(timeout=timeout)
+
+    def test_supervisor_splits_one_tick_discovery_budget_fairly(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            FakeEscalationTransport(),
+            max_discoveries_per_tick=24,
+        )
+        self.addCleanup(supervisor.close)
+        with (
+            mock.patch.object(
+                self.database,
+                "enqueue_supervisor_actions",
+                return_value=[],
+            ) as actions,
+            mock.patch.object(
+                self.database,
+                "create_due_supervisor_escalations",
+                return_value=[],
+            ) as escalations,
+        ):
+            result = supervisor.tick(wait=True)
+
+        actions.assert_called_once_with(max_candidates=14)
+        escalations.assert_called_once_with(max_candidates=10)
+        self.assertEqual(
+            result,
+            {
+                "actions_created": 0,
+                "actions_started": 0,
+                "actions_completed": 0,
+                "escalations_created": 0,
+                "escalations_processed": 0,
+            },
+        )
+
+    def test_supervisor_tick_enforces_minimum_split_and_reports_exact_work(
+        self,
+    ) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            FakeEscalationTransport(),
+            max_workers=1,
+            action_lease_seconds=10,
+            max_discoveries_per_tick=12,
+        )
+        self.addCleanup(supervisor.close)
+        first_action = {"id": "act_" + "1" * 32}
+        second_action = {"id": "act_" + "2" * 32}
+        with (
+            mock.patch.object(supervisor, "_reap", side_effect=[2, 3]),
+            mock.patch.object(supervisor, "_renew_active_leases"),
+            mock.patch.object(
+                self.database,
+                "enqueue_supervisor_actions",
+                return_value=[first_action, second_action],
+            ) as discover_actions,
+            mock.patch.object(
+                self.database,
+                "create_due_supervisor_escalations",
+                return_value=[{"id": "esc_" + "3" * 32}],
+            ) as discover_escalations,
+            mock.patch.object(supervisor, "_start_escalations", return_value=4),
+            mock.patch.object(supervisor, "_worker_count", side_effect=[0, 0, 1]),
+            mock.patch.object(
+                self.database,
+                "claim_supervisor_action",
+                side_effect=[first_action, second_action],
+            ) as claim,
+            mock.patch.object(supervisor, "_start_action") as start_action,
+            mock.patch.object(supervisor, "drain") as drain,
+        ):
+            result = supervisor.tick(wait=True)
+
+        discover_actions.assert_called_once_with(max_candidates=7)
+        discover_escalations.assert_called_once_with(max_candidates=5)
+        self.assertEqual(claim.call_count, 2)
+        for call in claim.call_args_list:
+            self.assertEqual(call.kwargs["lease_seconds"], 10)
+        self.assertEqual(
+            [call.args[0] for call in start_action.call_args_list],
+            [first_action, second_action],
+        )
+        drain.assert_called_once_with()
+        self.assertEqual(
+            result,
+            {
+                "actions_created": 2,
+                "actions_started": 2,
+                "actions_completed": 5,
+                "escalations_created": 1,
+                "escalations_processed": 4,
+            },
+        )
+
+    def test_supervisor_exception_codes_are_sanitized_and_bounded(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        cases = (
+            ("Private Detail!", "PrivateDetail"),
+            ("!!!", "SupervisorOperationError"),
+            ("A1", "A1"),
+            ("A" * 129, "A" * 128),
+        )
+        for class_name, expected in cases:
+            with self.subTest(class_name=class_name):
+                error_type = type(class_name, (Exception,), {})
+                self.assertEqual(Supervisor._exception_code(error_type()), expected)
 
     def test_close_drains_running_workers_by_default_with_a_bounded_wait(self) -> None:
         from magic_glass_box.supervision import Supervisor
@@ -1269,6 +1527,87 @@ class SupervisionDatabaseTests(unittest.TestCase):
         self.assertIn("RuntimeError", rendered_logs)
         self.assertNotIn("PRIVATE STORAGE DETAIL", rendered_logs)
         self.assertNotIn("PRIVATE ESCALATION DETAIL", rendered_logs)
+
+    def test_lease_loss_and_outcome_races_emit_sanitized_diagnostics(self) -> None:
+        from magic_glass_box.db import ConcurrentUpdateError
+        from magic_glass_box.supervision import Supervisor
+
+        self.create_run(self.automatic_policy())
+        coordinator = FakeCoordinator()
+        coordinator.started = threading.Event()
+        coordinator.release = threading.Event()
+        supervisor = Supervisor(
+            self.database,
+            coordinator,
+            FakeEscalationTransport(),
+            max_workers=1,
+        )
+        self.addCleanup(coordinator.release.set)
+        self.addCleanup(supervisor.close, wait=False)
+        supervisor.tick()
+        self.assertTrue(coordinator.started.wait(timeout=1))
+        action_id = self.database.list_supervisor_actions()[0]["id"]
+
+        with (
+            mock.patch.object(
+                self.database,
+                "renew_supervisor_action_lease",
+                side_effect=ConcurrentUpdateError("PRIVATE LEASE DETAIL"),
+            ),
+            self.assertLogs("magic_glass_box.supervision", level="WARNING") as logs,
+        ):
+            supervisor._renew_active_leases()
+
+        rendered = "\n".join(logs.output)
+        self.assertIn(action_id, rendered)
+        self.assertIn("ConcurrentUpdateError", rendered)
+        self.assertNotIn("PRIVATE LEASE DETAIL", rendered)
+
+        action = {
+            "id": "act_" + "a" * 32,
+            "kind": "run.execute",
+            "run_id": "run_" + "b" * 32,
+            "version": 1,
+        }
+        escalation = {
+            "id": "esc_" + "c" * 32,
+            "kind": "interaction.pending",
+            "subject_id": "int_" + "d" * 32,
+            "idempotency_key": "mgb.supervisor:race",
+            "version": 1,
+        }
+        with (
+            mock.patch.object(
+                supervisor,
+                "_complete_action",
+                side_effect=ConflictError("PRIVATE ACTION RACE"),
+            ),
+            mock.patch.object(
+                self.database,
+                "get_interaction",
+                side_effect=ConflictError("PRIVATE ESCALATION RACE"),
+            ),
+            mock.patch.object(
+                self.database,
+                "dismiss_supervisor_escalation",
+                side_effect=ConcurrentUpdateError("PRIVATE DISMISS RACE"),
+            ),
+            self.assertLogs("magic_glass_box.supervision", level="WARNING") as logs,
+        ):
+            supervisor._run_action(action)
+            supervisor._run_escalation(escalation)
+
+        rendered = "\n".join(logs.output)
+        self.assertIn(action["id"], rendered)
+        self.assertIn(escalation["id"], rendered)
+        self.assertIn("ConflictError", rendered)
+        self.assertIn("ConcurrentUpdateError", rendered)
+        self.assertNotIn("PRIVATE ACTION RACE", rendered)
+        self.assertNotIn("PRIVATE ESCALATION RACE", rendered)
+        self.assertNotIn("PRIVATE DISMISS RACE", rendered)
+
+        coordinator.release.set()
+        self.assertTrue(supervisor.drain(timeout=1))
 
     def test_answered_work_and_expired_ownership_advance_automatically(self) -> None:
         from magic_glass_box.supervision import Supervisor

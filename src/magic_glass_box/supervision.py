@@ -7,7 +7,6 @@ import secrets
 import threading
 import time
 from collections.abc import Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -84,6 +83,7 @@ class Supervisor:
         max_workers: int = 4,
         action_lease_seconds: int = 60,
         max_escalations_per_tick: int = 32,
+        max_discoveries_per_tick: int = 240,
         escalation_timeout: float | None = None,
         shutdown_timeout: float = 30.0,
         action_timeout: float = 21_900.0,
@@ -113,6 +113,14 @@ class Supervisor:
             or not 1 <= max_escalations_per_tick <= 256
         ):
             raise SupervisorError("max_escalations_per_tick must be between 1 and 256")
+        if (
+            isinstance(max_discoveries_per_tick, bool)
+            or not isinstance(max_discoveries_per_tick, int)
+            or not 12 <= max_discoveries_per_tick <= 1024
+        ):
+            raise SupervisorError(
+                "max_discoveries_per_tick must be between 12 and 1024"
+            )
         if escalation_timeout is None:
             escalation_timeout = min(30.0, action_lease_seconds / 2)
         if (
@@ -164,6 +172,7 @@ class Supervisor:
         self.max_workers = max_workers
         self.action_lease_seconds = action_lease_seconds
         self.max_escalations_per_tick = max_escalations_per_tick
+        self.max_discoveries_per_tick = max_discoveries_per_tick
         self.escalation_timeout = float(escalation_timeout)
         self.shutdown_timeout = float(shutdown_timeout)
         self.action_timeout = float(action_timeout)
@@ -182,8 +191,16 @@ class Supervisor:
         completed = self._reap()
         self._raise_if_action_overdue()
         self._renew_active_leases()
-        actions_created = len(self.database.enqueue_supervisor_actions())
-        escalations_created = len(self.database.create_due_supervisor_escalations())
+        action_candidates = max(7, self.max_discoveries_per_tick * 7 // 12)
+        escalation_candidates = self.max_discoveries_per_tick - action_candidates
+        actions_created = len(
+            self.database.enqueue_supervisor_actions(max_candidates=action_candidates)
+        )
+        escalations_created = len(
+            self.database.create_due_supervisor_escalations(
+                max_candidates=escalation_candidates
+            )
+        )
         escalations_processed = self._start_escalations()
         actions_started = 0
         while self._worker_count() < self.max_workers:
@@ -404,22 +421,36 @@ class Supervisor:
                 and now >= worker.deadline
             ):
                 continue
-            with suppress(ConcurrentUpdateError, ConflictError, NotFoundError):
+            try:
                 self.database.renew_supervisor_action_lease(
                     worker.claim_id,
                     owner_id=self.supervisor_id,
                     expected_version=worker.version,
                     lease_seconds=self.action_lease_seconds,
                 )
+            except (ConcurrentUpdateError, ConflictError, NotFoundError) as exc:
+                logger.warning(
+                    "supervisor claim lease was lost claim_type=action "
+                    "claim_id=%s error_code=%s",
+                    worker.claim_id,
+                    self._exception_code(exc),
+                )
         for worker in escalation_workers:
             if not worker.thread.is_alive():
                 continue
-            with suppress(ConcurrentUpdateError, ConflictError, NotFoundError):
+            try:
                 self.database.renew_supervisor_escalation_lease(
                     worker.claim_id,
                     owner_id=self.supervisor_id,
                     expected_version=worker.version,
                     lease_seconds=self.action_lease_seconds,
+                )
+            except (ConcurrentUpdateError, ConflictError, NotFoundError) as exc:
+                logger.warning(
+                    "supervisor claim lease was lost claim_type=escalation "
+                    "claim_id=%s error_code=%s",
+                    worker.claim_id,
+                    self._exception_code(exc),
                 )
 
     def _run_action(self, action: dict[str, Any]) -> None:
@@ -482,8 +513,14 @@ class Supervisor:
                         expected_version=action["version"],
                         error_code=error_code,
                     )
-            except (ConcurrentUpdateError, ConflictError, NotFoundError):
-                pass
+            except (ConcurrentUpdateError, ConflictError, NotFoundError) as exc:
+                logger.warning(
+                    "supervisor action outcome ownership was lost "
+                    "action_id=%s kind=%s phase=failure error_code=%s",
+                    action["id"],
+                    action["kind"],
+                    self._exception_code(exc),
+                )
             except StorageError as persistence_error:
                 logger.error(
                     "supervisor action outcome was not persisted action_id=%s "
@@ -494,8 +531,14 @@ class Supervisor:
         else:
             try:
                 self._complete_action(action)
-            except (ConcurrentUpdateError, ConflictError, NotFoundError):
-                pass
+            except (ConcurrentUpdateError, ConflictError, NotFoundError) as exc:
+                logger.warning(
+                    "supervisor action outcome ownership was lost "
+                    "action_id=%s kind=%s phase=completion error_code=%s",
+                    action["id"],
+                    action["kind"],
+                    self._exception_code(exc),
+                )
             except StorageError as persistence_error:
                 logger.error(
                     "supervisor action completion was not persisted action_id=%s "
@@ -647,8 +690,14 @@ class Supervisor:
                     owner_id=self.supervisor_id,
                     expected_version=escalation["version"],
                 )
-            except (ConcurrentUpdateError, ConflictError, NotFoundError):
-                pass
+            except (ConcurrentUpdateError, ConflictError, NotFoundError) as exc:
+                logger.warning(
+                    "supervisor escalation outcome ownership was lost "
+                    "escalation_id=%s kind=%s phase=dismissal error_code=%s",
+                    escalation["id"],
+                    escalation["kind"],
+                    self._exception_code(exc),
+                )
             except StorageError as persistence_error:
                 logger.error(
                     "supervisor escalation dismissal was not persisted "
@@ -671,8 +720,14 @@ class Supervisor:
                     expected_version=escalation["version"],
                     error_code=error_code,
                 )
-            except (ConcurrentUpdateError, ConflictError, NotFoundError):
-                pass
+            except (ConcurrentUpdateError, ConflictError, NotFoundError) as exc:
+                logger.warning(
+                    "supervisor escalation outcome ownership was lost "
+                    "escalation_id=%s kind=%s phase=failure error_code=%s",
+                    escalation["id"],
+                    escalation["kind"],
+                    self._exception_code(exc),
+                )
             except StorageError as persistence_error:
                 logger.error(
                     "supervisor escalation outcome was not persisted "

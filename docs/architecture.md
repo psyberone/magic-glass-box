@@ -347,7 +347,7 @@ bounded workflow prescriptions, their build/review/correction director, and
 their landing/closeout director and correction-chain authority advance it
 through schemas v24-v31. Generic role bindings, Discovery, advisory review,
 and mechanically enforced Discovery-to-implementation scope lineage advance
-it through schemas v32-v40.
+it through schemas v32-v41.
 
 The filesystem trust boundary ends when untrusted worker output is captured.
 Private control-plane database, result, and candidate files are then trusted
@@ -376,6 +376,15 @@ coordinator-action deadline stops renewal and terminates an unhealthy
 supervisor, allowing a replacement process to recover the durable action
 without attempting unsafe in-process thread termination. See
 [supervision.md](supervision.md).
+
+Schema v41 bounds this loop at fleet scale. One per-tick candidate budget is
+split across all action and escalation classes; SQL limits bound every source
+read, and durable keyset cursors carry escalation fairness across process
+restarts. Interaction history uses the same bounded keyset pattern. The schema
+also pins a finite run/grant invocation allowance that is consumed atomically
+before either protocol-v1 or protocol-v2 connector dispatch. Result-capture
+failures persist a sanitized exception class on the attempt, while lease loss
+and outcome-persistence races emit ID-only structured diagnostics.
 
 For an execution request, Magic Glass Box:
 
@@ -409,7 +418,8 @@ Operational failures become audited `failed` runs only after cleanup succeeds.
 If a started worker fails, its recoverable changes are captured before cleanup.
 If result capture fails, the container and gateway are cleaned, the workspace
 is retained for manual recovery, and the attempt becomes terminal without a
-result; an invalid or unbounded workspace is not retried forever. If cleanup
+result while retaining only the sanitized failure class; an invalid or
+unbounded workspace is not retried forever. If cleanup
 cannot be proven, the run remains active so `run reconcile` can retry after the
 owner lease expires. Reconciliation finds containers by product and run-ID
 labels rather than trusting an in-memory container handle. It also recognizes

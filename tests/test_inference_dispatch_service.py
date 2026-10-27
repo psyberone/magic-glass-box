@@ -38,6 +38,7 @@ from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.provider import (
     ProviderBudgetError,
     ProviderError,
+    ProviderInvocationLimitError,
     ProviderQuotaError,
     ProviderRateLimitError,
     ProviderUpstreamError,
@@ -267,6 +268,175 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             image_id="sha256:" + "a" * 64,
         )
         return self.database.get_run(run["id"])
+
+    def create_limited_run(self, *, limit: int = 2) -> dict[str, Any]:
+        self.database.create_agent_profile(
+            name="Limited Provider Worker",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:abc",
+                command=["agent"],
+                provider_invocation_limit=limit,
+                credential_names=["example-main"],
+                gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
+            ),
+            krab_identity_id=self.identity["id"],
+            created_by=self.user["id"],
+        )
+        return self._start_run_for_profile("Limited Provider Worker", marker="f")
+
+    def test_protocol_v1_dispatch_stops_at_exact_run_invocation_ceiling(self) -> None:
+        run = self.create_limited_run(limit=2)
+
+        for prompt in ("first", "second"):
+            self.control.invoke_provider(
+                run["id"],
+                grant_name="example-main",
+                request={"input": prompt},
+            )
+        with self.assertRaises(ProviderInvocationLimitError):
+            self.control.invoke_provider(
+                run["id"],
+                grant_name="example-main",
+                request={"input": "must not reach connector"},
+            )
+
+        self.assertEqual(len(self.client.calls), 2)
+        allowance = self.database.get_run_provider_invocation_allowance(
+            run["id"], "example-main"
+        )
+        self.assertEqual(allowance["max_invocations"], 2)
+        self.assertEqual(allowance["invocation_count"], 2)
+        self.assertEqual(allowance["remaining_invocations"], 0)
+        denied = self.database.list_provider_invocations(run["id"])[-1]
+        self.assertEqual(denied["outcome"], "denied")
+        self.assertEqual(denied["error_code"], "invocation_limit_exhausted")
+
+    def test_retry_starts_with_fresh_copy_of_pinned_invocation_ceiling(self) -> None:
+        run = self.create_limited_run(limit=2)
+        self.control.invoke_provider(
+            run["id"], grant_name="example-main", request={"input": "spent once"}
+        )
+        attempt = run["attempts"][0]
+        interrupted = self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-budget-test",
+            expected_attempt_version=attempt["version"],
+            reason="exercise replacement allowance",
+            interrupted=True,
+        )
+
+        successor = self.database.retry_run(
+            run["id"],
+            requested_by=self.user["id"],
+            expected_run_version=interrupted["run_version"],
+        )
+
+        source_allowance = self.database.get_run_provider_invocation_allowance(
+            run["id"], "example-main"
+        )
+        successor_allowance = self.database.get_run_provider_invocation_allowance(
+            successor["id"], "example-main"
+        )
+        self.assertEqual(source_allowance["invocation_count"], 1)
+        self.assertEqual(successor_allowance["max_invocations"], 2)
+        self.assertEqual(successor_allowance["invocation_count"], 0)
+        self.assertEqual(successor_allowance["remaining_invocations"], 2)
+
+    def test_concurrent_protocol_v1_dispatch_cannot_oversubscribe_ceiling(self) -> None:
+        parallel_connector = connector_spec(self.root / "parallel.sock").to_dict()
+        parallel_connector["max_concurrency"] = 2
+        self.database.register_inference_connector(
+            name="parallel-sidecar",
+            spec=InferenceConnectorSpec.from_mapping(parallel_connector),
+            created_by=self.user["id"],
+        )
+        parallel_grant = grant_spec().to_dict()
+        parallel_grant["connector_name"] = "parallel-sidecar"
+        parallel_grant["max_concurrency"] = 2
+        self.database.create_connector_provider_grant(
+            name="parallel-main",
+            spec=InferenceGrantSpec.from_mapping(parallel_grant),
+            expires_at=None,
+            created_by=self.user["id"],
+        )
+        self.database.create_agent_profile(
+            name="One Invocation Worker",
+            spec=AgentProfileSpec.create(
+                image="agent@sha256:abc",
+                command=["agent"],
+                provider_invocation_limit=1,
+                credential_names=["parallel-main"],
+                gateway_capabilities=[GatewayCapability.PROVIDER_INVOKE],
+            ),
+            krab_identity_id=self.identity["id"],
+            created_by=self.user["id"],
+        )
+        run = self._start_run_for_profile("One Invocation Worker", marker="1")
+        self.client.release = threading.Event()
+        outcomes: list[object] = []
+
+        def invoke_first() -> None:
+            try:
+                outcomes.append(
+                    self.control.invoke_provider(
+                        run["id"],
+                        grant_name="parallel-main",
+                        request={"input": "first"},
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - diagnostic capture
+                outcomes.append(exc)
+
+        thread = threading.Thread(target=invoke_first)
+        thread.start()
+        self.assertTrue(self.client.started.wait(timeout=2))
+        with self.assertRaises(ProviderInvocationLimitError):
+            self.control.invoke_provider(
+                run["id"],
+                grant_name="parallel-main",
+                request={"input": "concurrent second"},
+            )
+
+        self.client.release.set()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(outcomes), 1)
+        self.assertIsInstance(outcomes[0], AcceptedProviderResponse)
+        self.assertEqual(len(self.client.calls), 1)
+        allowance = self.database.get_run_provider_invocation_allowance(
+            run["id"], "parallel-main"
+        )
+        self.assertEqual(allowance["invocation_count"], 1)
+        self.assertEqual(allowance["remaining_invocations"], 0)
+
+    def test_schema_forty_backfills_invocation_allowance_once(self) -> None:
+        run = self.create_run()
+        self.control.invoke_provider(
+            run["id"], grant_name="example-main", request={"input": "count me"}
+        )
+        with sqlite3.connect(self.database.path) as connection:
+            connection.executescript(
+                """
+                PRAGMA foreign_keys = OFF;
+                DROP TRIGGER run_provider_grant_allowance_default;
+                DROP TABLE run_provider_invocation_allowances;
+                DROP TABLE supervisor_discovery_cursors;
+                PRAGMA user_version = 40;
+                PRAGMA foreign_keys = ON;
+                """
+            )
+
+        first = self.database.initialize()
+        second = self.database.initialize()
+        allowance = self.database.get_run_provider_invocation_allowance(
+            run["id"], "example-main"
+        )
+
+        self.assertEqual(first["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(second, first)
+        self.assertEqual(allowance["max_invocations"], 64)
+        self.assertEqual(allowance["invocation_count"], 1)
+        self.assertEqual(allowance["remaining_invocations"], 63)
 
     def _budgeted_grant_spec(
         self,
@@ -1474,6 +1644,9 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TRIGGER run_provider_grant_allowance_default;
+                DROP TABLE run_provider_invocation_allowances;
+                DROP TABLE supervisor_discovery_cursors;
                 DROP TABLE workflow_scope_reviews;
                 DROP TABLE workflow_scope_bindings;
                 DROP TABLE advisory_reports;

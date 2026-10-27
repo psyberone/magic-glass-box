@@ -36,6 +36,7 @@ from .db import (
     ConcurrentUpdateError,
     ConflictError,
     Database,
+    InvocationLimitExceededError,
     NotFoundError,
 )
 from .discovery import DiscoveryConfigurationSpec, DiscoveryRuling, DiscoveryTrace
@@ -87,6 +88,7 @@ from .provider import (
     ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
+    ProviderInvocationLimitError,
     ProviderUpstreamError,
     provider_recovery_error,
 )
@@ -1595,6 +1597,27 @@ class ControlPlane:
                 deadline=deadline,
             )
             raise ProviderBudgetError("provider budget is exhausted") from exc
+        except InvocationLimitExceededError as exc:
+            try:
+                self.database.release_provider_dispatch(reservation["id"])
+            except Exception as release_error:
+                exc.add_note(
+                    "provider dispatch reservation release also failed: "
+                    f"{type(release_error).__name__}: {release_error}"
+                )
+            self._record_provider_failure(
+                run_id=run_id,
+                grant_id=grant["id"],
+                invocation_id=invocation_id,
+                outcome="denied",
+                error_code="invocation_limit_exhausted",
+                started_at=started_at,
+                authority=authority,
+                deadline=deadline,
+            )
+            raise ProviderInvocationLimitError(
+                "provider invocation limit is exhausted"
+            ) from exc
         except Exception as exc:
             try:
                 self.database.release_provider_dispatch(reservation["id"])

@@ -17,12 +17,22 @@ from .schema import MAX_ATTEMPT_LEASE_SECONDS, MIN_ATTEMPT_LEASE_SECONDS
 
 ERROR_CODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 ACTIVE_ACTION_STATES = ("pending", "claimed")
+MAX_SUPERVISOR_DISCOVERY_CANDIDATES = 1024
+ACTION_DISCOVERY_STREAMS = 7
+ESCALATION_DISCOVERY_STREAMS = 5
 
 
 class SupervisionStorage:
-    def enqueue_supervisor_actions(self) -> list[dict[str, Any]]:
+    def enqueue_supervisor_actions(
+        self, *, max_candidates: int = 140
+    ) -> list[dict[str, Any]]:
         """Materialize version-bound execution and recovery work idempotently."""
 
+        max_candidates = self._supervisor_candidate_limit(
+            max_candidates,
+            minimum=ACTION_DISCOVERY_STREAMS,
+        )
+        stream_limit = max_candidates // ACTION_DISCOVERY_STREAMS
         now = self.now()
         inserted: list[str] = []
         with self._connection() as connection:
@@ -38,8 +48,8 @@ class SupervisionStorage:
                     "AND ra.state IN ('preparing', 'running')) AND NOT EXISTS ("
                     "SELECT 1 FROM interactions i WHERE i.run_id = pr.run_id "
                     "AND i.state = 'open') "
-                    "ORDER BY pr.eligible_at, pr.created_at, pr.id",
-                    (now,),
+                    "ORDER BY pr.eligible_at, pr.created_at, pr.id LIMIT ?",
+                    (now, stream_limit),
                 ).fetchall()
                 for recovery in due_recoveries:
                     resolved = connection.execute(
@@ -85,7 +95,14 @@ class SupervisionStorage:
                     )
                 queued = connection.execute(
                     "SELECT id, version, supervision_policy_json FROM runs "
-                    "WHERE state = 'queued' ORDER BY created_at, id"
+                    "WHERE state = 'queued' "
+                    "AND instr(supervision_policy_json, "
+                    "'\"auto_execute\":true') > 0 "
+                    "AND NOT EXISTS (SELECT 1 FROM supervisor_actions sa "
+                    "WHERE sa.kind = 'run.execute' AND sa.subject_id = runs.id "
+                    "AND sa.subject_version = runs.version) "
+                    "ORDER BY created_at, id LIMIT ?",
+                    (stream_limit,),
                 ).fetchall()
                 for run in queued:
                     policy = self._stored_supervision_policy(
@@ -110,8 +127,12 @@ class SupervisionStorage:
                     "JOIN runs r ON r.id = ra.run_id "
                     "WHERE ra.state IN ('preparing', 'running') "
                     "AND (ra.lease_expires_at IS NULL OR ra.lease_expires_at <= ?) "
-                    "ORDER BY ra.created_at, ra.id",
-                    (now,),
+                    "AND NOT EXISTS (SELECT 1 FROM supervisor_actions sa "
+                    "WHERE sa.kind = 'attempt.reconcile' "
+                    "AND sa.subject_id = ra.id "
+                    "AND sa.subject_version = ra.version) "
+                    "ORDER BY ra.created_at, ra.id LIMIT ?",
+                    (now, stream_limit),
                 ).fetchall()
                 for attempt in expired:
                     policy = self._stored_supervision_policy(
@@ -134,7 +155,11 @@ class SupervisionStorage:
                     "WHERE r.state IN ('preparing', 'running') AND NOT EXISTS ("
                     "SELECT 1 FROM run_attempts ra WHERE ra.run_id = r.id "
                     "AND ra.state IN ('preparing', 'running')) "
-                    "ORDER BY r.created_at, r.id"
+                    "AND NOT EXISTS (SELECT 1 FROM supervisor_actions sa "
+                    "WHERE sa.kind = 'run.reconcile' AND sa.subject_id = r.id "
+                    "AND sa.subject_version = r.version) "
+                    "ORDER BY r.created_at, r.id LIMIT ?",
+                    (stream_limit,),
                 ).fetchall()
                 for run in orphaned:
                     policy = self._stored_supervision_policy(
@@ -159,7 +184,12 @@ class SupervisionStorage:
                     "'build', 'review', 'maintainer', 'landing', 'completion') "
                     "AND NOT EXISTS (SELECT 1 FROM workflow_rulings wr "
                     "WHERE wr.execution_id = e.id AND wr.state = 'open') "
-                    "ORDER BY e.created_at, e.id"
+                    "AND NOT EXISTS (SELECT 1 FROM supervisor_actions sa "
+                    "WHERE sa.kind = 'workflow.advance' "
+                    "AND sa.subject_id = e.id "
+                    "AND sa.subject_version = e.version) "
+                    "ORDER BY e.created_at, e.id LIMIT ?",
+                    (stream_limit,),
                 ).fetchall()
                 workflow_policy = SupervisionPolicy.disabled()
                 for workflow in workflows:
@@ -180,7 +210,12 @@ class SupervisionStorage:
                     "SELECT id, version FROM discovery_executions "
                     "WHERE state = 'active' "
                     "AND stage IN ('investigate', 'coordinate', 'completion') "
-                    "ORDER BY created_at, id"
+                    "AND NOT EXISTS (SELECT 1 FROM supervisor_actions sa "
+                    "WHERE sa.kind = 'discovery.advance' "
+                    "AND sa.subject_id = discovery_executions.id "
+                    "AND sa.subject_version = discovery_executions.version) "
+                    "ORDER BY created_at, id LIMIT ?",
+                    (stream_limit,),
                 ).fetchall()
                 for discovery in discoveries:
                     action_id = self._insert_supervisor_action(
@@ -201,7 +236,12 @@ class SupervisionStorage:
                     "WHERE state = 'active' "
                     "AND stage IN ("
                     "'blind_review', 'challenge', 'triangulate', 'completion') "
-                    "ORDER BY created_at, id"
+                    "AND NOT EXISTS (SELECT 1 FROM supervisor_actions sa "
+                    "WHERE sa.kind = 'advisory.advance' "
+                    "AND sa.subject_id = advisory_executions.id "
+                    "AND sa.subject_version = advisory_executions.version) "
+                    "ORDER BY created_at, id LIMIT ?",
+                    (stream_limit,),
                 ).fetchall()
                 for advisory in advisories:
                     action_id = self._insert_supervisor_action(
@@ -575,21 +615,35 @@ class SupervisionStorage:
             ).fetchall()
         return [self._supervisor_action_record(row) for row in rows]
 
-    def create_due_supervisor_escalations(self) -> list[dict[str, Any]]:
+    def create_due_supervisor_escalations(
+        self, *, max_candidates: int = 100
+    ) -> list[dict[str, Any]]:
         """Record each configured age threshold once without message content."""
 
+        max_candidates = self._supervisor_candidate_limit(
+            max_candidates,
+            minimum=ESCALATION_DISCOVERY_STREAMS,
+        )
+        stream_limit = max_candidates // ESCALATION_DISCOVERY_STREAMS
         now = self.now()
         now_value = self._aware_timestamp(now, field="database clock")
         inserted: list[str] = []
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                interactions = connection.execute(
-                    "SELECT i.id, i.run_id, i.created_at, "
-                    "r.supervision_policy_json FROM interactions i "
-                    "JOIN runs r ON r.id = i.run_id WHERE i.state = 'open' "
-                    "ORDER BY i.created_at, i.id"
-                ).fetchall()
+                interactions = self._scan_supervisor_candidates(
+                    connection,
+                    stream="interaction.pending",
+                    select_sql=(
+                        "SELECT i.id, i.run_id, i.created_at, "
+                        "r.supervision_policy_json, i.created_at AS scan_at, "
+                        "i.id AS scan_id FROM interactions i "
+                        "JOIN runs r ON r.id = i.run_id WHERE i.state = 'open'"
+                    ),
+                    parameters=(),
+                    limit=stream_limit,
+                    now=now,
+                )
                 for row in interactions:
                     policy = self._stored_supervision_policy(
                         row["supervision_policy_json"]
@@ -610,14 +664,21 @@ class SupervisionStorage:
                         )
                     )
 
-                attempts = connection.execute(
-                    "SELECT ra.id, ra.run_id, ra.created_at, ra.started_at, "
-                    "ra.heartbeat_at, ra.lease_expires_at, "
-                    "r.supervision_policy_json "
-                    "FROM run_attempts ra JOIN runs r ON r.id = ra.run_id "
-                    "WHERE ra.state IN ('preparing', 'running') "
-                    "ORDER BY ra.created_at, ra.id"
-                ).fetchall()
+                attempts = self._scan_supervisor_candidates(
+                    connection,
+                    stream="attempt.attention",
+                    select_sql=(
+                        "SELECT ra.id, ra.run_id, ra.created_at, ra.started_at, "
+                        "ra.heartbeat_at, ra.lease_expires_at, "
+                        "r.supervision_policy_json, ra.created_at AS scan_at, "
+                        "ra.id AS scan_id "
+                        "FROM run_attempts ra JOIN runs r ON r.id = ra.run_id "
+                        "WHERE ra.state IN ('preparing', 'running')"
+                    ),
+                    parameters=(),
+                    limit=stream_limit,
+                    now=now,
+                )
                 for row in attempts:
                     policy = self._stored_supervision_policy(
                         row["supervision_policy_json"]
@@ -660,13 +721,20 @@ class SupervisionStorage:
                             )
                         )
 
-                missing_attempts = connection.execute(
-                    "SELECT r.id, r.updated_at, r.supervision_policy_json FROM runs r "
-                    "WHERE r.state IN ('preparing', 'running') AND NOT EXISTS ("
-                    "SELECT 1 FROM run_attempts ra WHERE ra.run_id = r.id "
-                    "AND ra.state IN ('preparing', 'running')) "
-                    "ORDER BY r.updated_at, r.id"
-                ).fetchall()
+                missing_attempts = self._scan_supervisor_candidates(
+                    connection,
+                    stream="run.missing_active_attempt",
+                    select_sql=(
+                        "SELECT r.id, r.updated_at, r.supervision_policy_json, "
+                        "r.updated_at AS scan_at, r.id AS scan_id FROM runs r "
+                        "WHERE r.state IN ('preparing', 'running') AND NOT EXISTS ("
+                        "SELECT 1 FROM run_attempts ra WHERE ra.run_id = r.id "
+                        "AND ra.state IN ('preparing', 'running'))"
+                    ),
+                    parameters=(),
+                    limit=stream_limit,
+                    now=now,
+                )
                 for row in missing_attempts:
                     policy = self._stored_supervision_policy(
                         row["supervision_policy_json"]
@@ -687,15 +755,22 @@ class SupervisionStorage:
                         )
                     )
 
-                waiting = connection.execute(
-                    "SELECT r.id, r.updated_at, r.supervision_policy_json FROM runs r "
-                    "WHERE r.state = 'waiting_for_input' AND NOT EXISTS ("
-                    "SELECT 1 FROM interactions i WHERE i.run_id = r.id "
-                    "AND i.state = 'open') AND NOT EXISTS ("
-                    "SELECT 1 FROM run_attempts ra WHERE ra.run_id = r.id "
-                    "AND ra.state IN ('preparing', 'running')) "
-                    "ORDER BY r.updated_at, r.id"
-                ).fetchall()
+                waiting = self._scan_supervisor_candidates(
+                    connection,
+                    stream="run.waiting_without_interaction",
+                    select_sql=(
+                        "SELECT r.id, r.updated_at, r.supervision_policy_json, "
+                        "r.updated_at AS scan_at, r.id AS scan_id FROM runs r "
+                        "WHERE r.state = 'waiting_for_input' AND NOT EXISTS ("
+                        "SELECT 1 FROM interactions i WHERE i.run_id = r.id "
+                        "AND i.state = 'open') AND NOT EXISTS ("
+                        "SELECT 1 FROM run_attempts ra WHERE ra.run_id = r.id "
+                        "AND ra.state IN ('preparing', 'running'))"
+                    ),
+                    parameters=(),
+                    limit=stream_limit,
+                    now=now,
+                )
                 for row in waiting:
                     policy = self._stored_supervision_policy(
                         row["supervision_policy_json"]
@@ -716,29 +791,37 @@ class SupervisionStorage:
                         )
                     )
 
-                unavailable = connection.execute(
-                    "SELECT r.id AS run_id, r.updated_at, r.supervision_policy_json, "
-                    "rpg.authority_name, pg.id AS grant_id, pg.state, "
-                    "pg.grant_kind, pg.expires_at, pg.revoked_at, "
-                    "rpg.created_at AS authority_created_at, "
-                    "pcb.inference_connector_id, c.state AS connector_state, "
-                    "c.revoked_at AS connector_revoked_at "
-                    "FROM runs r JOIN run_provider_grants rpg "
-                    "ON rpg.run_id = r.id JOIN provider_grants pg "
-                    "ON pg.id = rpg.provider_grant_id "
-                    "LEFT JOIN provider_connector_bindings pcb "
-                    "ON pcb.provider_grant_id = pg.id "
-                    "LEFT JOIN inference_connectors c "
-                    "ON c.id = pcb.inference_connector_id WHERE r.state IN "
-                    "('queued', 'preparing', 'running', 'waiting_for_input', "
-                    "'paused') "
-                    "AND (pg.grant_kind != 'connector' OR pg.state != 'active' OR "
-                    "pcb.inference_connector_id IS NULL OR c.state IS NULL OR "
-                    "c.state != 'active' OR "
-                    "(pg.expires_at IS NOT NULL AND pg.expires_at <= ?)) "
-                    "ORDER BY r.updated_at, r.id, rpg.authority_name",
-                    (now,),
-                ).fetchall()
+                unavailable = self._scan_supervisor_candidates(
+                    connection,
+                    stream="authority.unavailable",
+                    select_sql=(
+                        "SELECT r.id AS run_id, r.updated_at, "
+                        "r.supervision_policy_json, "
+                        "rpg.authority_name, pg.id AS grant_id, pg.state, "
+                        "pg.grant_kind, pg.expires_at, pg.revoked_at, "
+                        "rpg.created_at AS authority_created_at, "
+                        "pcb.inference_connector_id, c.state AS connector_state, "
+                        "c.revoked_at AS connector_revoked_at, "
+                        "r.updated_at AS scan_at, "
+                        "r.id || ':' || pg.id || ':' || rpg.authority_name AS scan_id "
+                        "FROM runs r JOIN run_provider_grants rpg "
+                        "ON rpg.run_id = r.id JOIN provider_grants pg "
+                        "ON pg.id = rpg.provider_grant_id "
+                        "LEFT JOIN provider_connector_bindings pcb "
+                        "ON pcb.provider_grant_id = pg.id "
+                        "LEFT JOIN inference_connectors c "
+                        "ON c.id = pcb.inference_connector_id WHERE r.state IN "
+                        "('queued', 'preparing', 'running', 'waiting_for_input', "
+                        "'paused') "
+                        "AND (pg.grant_kind != 'connector' OR pg.state != 'active' OR "
+                        "pcb.inference_connector_id IS NULL OR c.state IS NULL OR "
+                        "c.state != 'active' OR "
+                        "(pg.expires_at IS NOT NULL AND pg.expires_at <= ?))"
+                    ),
+                    parameters=(now,),
+                    limit=stream_limit,
+                    now=now,
+                )
                 for row in unavailable:
                     policy = self._stored_supervision_policy(
                         row["supervision_policy_json"]
@@ -790,6 +873,69 @@ class SupervisionStorage:
                     "supervisor escalations could not be recorded"
                 ) from exc
         return [self.get_supervisor_escalation(item_id) for item_id in inserted]
+
+    @staticmethod
+    def _scan_supervisor_candidates(
+        connection: sqlite3.Connection,
+        *,
+        stream: str,
+        select_sql: str,
+        parameters: tuple[Any, ...],
+        limit: int,
+        now: str,
+    ) -> list[sqlite3.Row]:
+        """Advance one durable keyset cursor through a bounded candidate stream."""
+
+        cursor = connection.execute(
+            "SELECT cursor_timestamp, cursor_id "
+            "FROM supervisor_discovery_cursors WHERE stream = ?",
+            (stream,),
+        ).fetchone()
+        wrapped = f"SELECT * FROM ({select_sql}) AS candidates "  # noqa: S608
+        if cursor is None:
+            rows = connection.execute(
+                wrapped + "ORDER BY scan_at, scan_id LIMIT ?",
+                (*parameters, limit),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                wrapped + "WHERE scan_at > ? OR (scan_at = ? AND scan_id > ?) "
+                "ORDER BY scan_at, scan_id LIMIT ?",
+                (
+                    *parameters,
+                    cursor["cursor_timestamp"],
+                    cursor["cursor_timestamp"],
+                    cursor["cursor_id"],
+                    limit,
+                ),
+            ).fetchall()
+            if len(rows) < limit:
+                remaining = limit - len(rows)
+                rows.extend(
+                    connection.execute(
+                        wrapped + "WHERE scan_at < ? OR "
+                        "(scan_at = ? AND scan_id <= ?) "
+                        "ORDER BY scan_at, scan_id LIMIT ?",
+                        (
+                            *parameters,
+                            cursor["cursor_timestamp"],
+                            cursor["cursor_timestamp"],
+                            cursor["cursor_id"],
+                            remaining,
+                        ),
+                    ).fetchall()
+                )
+        if rows:
+            last = rows[-1]
+            connection.execute(
+                "INSERT INTO supervisor_discovery_cursors "
+                "(stream, cursor_timestamp, cursor_id, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(stream) DO UPDATE SET "
+                "cursor_timestamp = excluded.cursor_timestamp, "
+                "cursor_id = excluded.cursor_id, updated_at = excluded.updated_at",
+                (stream, last["scan_at"], last["scan_id"], now),
+            )
+        return rows
 
     def _insert_due_escalations(
         self,
@@ -1212,6 +1358,19 @@ class SupervisionStorage:
     @staticmethod
     def _supervisor_owner(value: object) -> str:
         return require_string(value, field="owner_id", max_bytes=128)
+
+    @staticmethod
+    def _supervisor_candidate_limit(value: object, *, minimum: int) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not minimum <= value <= MAX_SUPERVISOR_DISCOVERY_CANDIDATES
+        ):
+            raise ValidationError(
+                f"max_candidates must be between {minimum} and "
+                f"{MAX_SUPERVISOR_DISCOVERY_CANDIDATES}"
+            )
+        return value
 
     @staticmethod
     def _supervisor_lease_seconds(value: object) -> int:

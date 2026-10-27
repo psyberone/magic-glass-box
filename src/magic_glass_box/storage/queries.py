@@ -459,7 +459,13 @@ class QueryStorage:
         ]
         for event in result["events"]:
             event.pop("metadata_json")
-        result["interactions"] = self._list_run_interactions(connection, run_id)
+        interaction_page = self._get_run_interaction_page(
+            connection,
+            run_id,
+            limit=128,
+            before_interaction_id=None,
+        )
+        result.update(interaction_page)
         result["attempts"] = self._list_run_attempts(connection, run_id)
         result["provider_grants"] = self._list_run_provider_grants(connection, run_id)
         result["provider_invocations"] = self._list_provider_invocations(

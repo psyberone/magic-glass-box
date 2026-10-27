@@ -48,6 +48,7 @@ from .provider import (
     ProviderBudgetError,
     ProviderBusyError,
     ProviderError,
+    ProviderInvocationLimitError,
     ProviderQuotaError,
     ProviderRateLimitError,
     ProviderUpstreamError,
@@ -442,6 +443,12 @@ class RunGateway:
             return self._failure(
                 request_id, "budget_exhausted", "provider budget is exhausted"
             )
+        except ProviderInvocationLimitError:
+            return self._failure(
+                request_id,
+                "invocation_limit_exhausted",
+                "provider invocation limit is exhausted",
+            )
         except ProviderQuotaError as exc:
             return self._failure(
                 request_id,
@@ -480,13 +487,15 @@ class RunGateway:
     def _describe(self, payload: object) -> dict[str, Any]:
         self._operation_payload(GatewayCapability.RUN_DESCRIBE, payload)
         execution = self.control.database.get_run_execution(self.run_id)
-        visible = self.control.database.get_run(self.run_id)
+        interaction_page = self.control.database.get_run_interaction_page(
+            self.run_id,
+            limit=MAX_GATEWAY_INTERACTIONS,
+        )
         context = dict(execution["context"])
         context.pop("repository_path", None)
         profile = execution["profile"]
-        all_interactions = visible["interactions"]
         interactions = []
-        for interaction in all_interactions[-MAX_GATEWAY_INTERACTIONS:]:
+        for interaction in interaction_page["interactions"]:
             interactions.append(
                 {
                     "id": interaction["id"],
@@ -500,8 +509,8 @@ class RunGateway:
             )
         return {
             "run_id": self.run_id,
-            "state": visible["state"],
-            "version": visible["version"],
+            "state": execution["state"],
+            "version": execution["version"],
             "project_key": execution["project_key"],
             "source_revision": execution["source_revision"],
             "context": context,
@@ -522,9 +531,9 @@ class RunGateway:
                     capability.value for capability in self.capabilities
                 ),
             },
-            "interaction_count": len(all_interactions),
+            "interaction_count": interaction_page["interaction_count"],
             "interactions": interactions,
-            "interactions_truncated": len(all_interactions) > len(interactions),
+            "interactions_truncated": interaction_page["interactions_truncated"],
             "gateway_catalog": {
                 "catalog_version": GATEWAY_CATALOG_VERSION,
                 "operation": GATEWAY_CATALOG_OPERATION,

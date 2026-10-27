@@ -234,6 +234,16 @@ recorded this artifact and repeats its derived outcome. The director uses that
 derived value—not reviewer-authored prose or a free-form label—when recording
 independent-review gate evidence.
 
+Control-plane schema v41 adds internal operability authority rather than a new
+portable interchange document. Every run/provider-grant binding receives a
+finite invocation allowance with an atomic dispatch count, including migrated
+protocol-v1 bindings. Existing successful, failed, ambiguous, or in-flight
+dispatches are conservatively counted during migration; preflight denials are
+not. The same migration adds durable keyset cursors for bounded, fair
+supervisor escalation discovery across restarts. Agent-profile JSON may opt
+into `provider_invocation_limit` from 1 through 10,000; omission preserves old
+profile digests and pins the default of 64 only when a new run is created.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

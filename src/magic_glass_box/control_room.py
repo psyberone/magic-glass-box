@@ -1419,9 +1419,13 @@ class ControlRoom:
             "SELECT rpg.run_id, rpg.authority_name, pg.id AS grant_id, "
             "pg.name, pg.state, pg.grant_kind, pg.expires_at, pg.revoked_at, "
             "rpg.created_at AS authority_created_at, "
+            "rpia.max_invocations, rpia.invocation_count, "
             "c.state AS connector_state, c.revoked_at AS connector_revoked_at "
             "FROM run_provider_grants rpg JOIN provider_grants pg "
             "ON pg.id = rpg.provider_grant_id "
+            "JOIN run_provider_invocation_allowances rpia "
+            "ON rpia.run_id = rpg.run_id "
+            "AND rpia.provider_grant_id = rpg.provider_grant_id "
             "LEFT JOIN provider_connector_bindings pcb "
             "ON pcb.provider_grant_id = pg.id "
             "LEFT JOIN inference_connectors c "
@@ -1464,6 +1468,9 @@ class ControlRoom:
                     ),
                     "unavailable_since": (
                         min(unavailable_times) if unavailable_times else None
+                    ),
+                    "remaining_invocations": (
+                        row["max_invocations"] - row["invocation_count"]
                     ),
                 }
             )

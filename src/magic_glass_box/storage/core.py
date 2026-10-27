@@ -398,6 +398,10 @@ class DatabaseCore:
                 ),
                 ("provider_grants", "SELECT COUNT(*) FROM provider_grants"),
                 (
+                    "run_provider_invocation_allowances",
+                    "SELECT COUNT(*) FROM run_provider_invocation_allowances",
+                ),
+                (
                     "provider_connector_bindings",
                     "SELECT COUNT(*) FROM provider_connector_bindings",
                 ),
@@ -497,6 +501,10 @@ class DatabaseCore:
                 ),
                 ("work_assignments", "SELECT COUNT(*) FROM work_assignments"),
                 ("supervisor_actions", "SELECT COUNT(*) FROM supervisor_actions"),
+                (
+                    "supervisor_discovery_cursors",
+                    "SELECT COUNT(*) FROM supervisor_discovery_cursors",
+                ),
                 (
                     "supervisor_escalations",
                     "SELECT COUNT(*) FROM supervisor_escalations",

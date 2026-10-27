@@ -3208,6 +3208,7 @@ class CLITests(unittest.TestCase):
         args = argparse.Namespace(
             poll_interval=1.5,
             max_workers=3,
+            max_discoveries_per_tick=48,
             action_lease_seconds=45,
             run_timeout=90.0,
             action_timeout=None,
@@ -3243,6 +3244,7 @@ class CLITests(unittest.TestCase):
                 "action_timeout_seconds": 390.0,
                 "authority": "explicit_run_policy",
                 "max_workers": 3,
+                "max_discoveries_per_tick": 48,
                 "log_level": "INFO",
                 "poll_interval_seconds": 1.5,
                 "supervisor_id": "supervisor-test",
@@ -3261,6 +3263,7 @@ class CLITests(unittest.TestCase):
             advisory_director=advisory_director_type.return_value,
             poll_interval=1.5,
             max_workers=3,
+            max_discoveries_per_tick=48,
             action_lease_seconds=45,
             action_timeout=390.0,
         )

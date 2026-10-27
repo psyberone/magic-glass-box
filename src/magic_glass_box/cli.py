@@ -163,6 +163,10 @@ def _worker_count(value: str) -> int:
     return _bounded_integer(value, minimum=1, maximum=32)
 
 
+def _supervisor_discovery_count(value: str) -> int:
+    return _bounded_integer(value, minimum=12, maximum=1024)
+
+
 def _action_lease_seconds(value: str) -> int:
     return _bounded_integer(value, minimum=10, maximum=3600)
 
@@ -847,6 +851,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum concurrent run actions (default: %(default)s)",
     )
     supervisor_run.add_argument(
+        "--max-discoveries-per-tick",
+        type=_supervisor_discovery_count,
+        default=240,
+        help="maximum source rows inspected per tick (default: %(default)s)",
+    )
+    supervisor_run.add_argument(
         "--action-lease-seconds",
         type=_action_lease_seconds,
         default=60,
@@ -1304,6 +1314,7 @@ def _serve_supervisor(
         advisory_director=advisory_director,
         poll_interval=args.poll_interval,
         max_workers=args.max_workers,
+        max_discoveries_per_tick=getattr(args, "max_discoveries_per_tick", 240),
         action_lease_seconds=args.action_lease_seconds,
         action_timeout=action_timeout,
     )
@@ -1312,6 +1323,7 @@ def _serve_supervisor(
             "supervisor_id": supervisor.supervisor_id,
             "poll_interval_seconds": args.poll_interval,
             "max_workers": args.max_workers,
+            "max_discoveries_per_tick": getattr(args, "max_discoveries_per_tick", 240),
             "log_level": args.log_level,
             "action_lease_seconds": args.action_lease_seconds,
             "action_timeout_seconds": action_timeout,

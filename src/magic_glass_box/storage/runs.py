@@ -840,6 +840,17 @@ class RunStorage:
                         "VALUES (?, ?, ?, ?)",
                         (run_id, grant["name"], grant["id"], now),
                     )
+                    connection.execute(
+                        "UPDATE run_provider_invocation_allowances "
+                        "SET max_invocations = ?, updated_at = ? "
+                        "WHERE run_id = ? AND provider_grant_id = ?",
+                        (
+                            profile_spec.effective_provider_invocation_limit,
+                            now,
+                            run_id,
+                            grant["id"],
+                        ),
+                    )
                 connection.commit()
             except (NotFoundError, ConflictError, StorageError):
                 connection.rollback()
@@ -1019,9 +1030,13 @@ class RunStorage:
                         "SELECT rpg.authority_name, pg.id, pg.state, "
                         "pg.grant_kind, pg.expires_at, "
                         "pcb.inference_connector_id, "
-                        "ic.state AS connector_state "
+                        "ic.state AS connector_state, "
+                        "rpia.max_invocations "
                         "FROM run_provider_grants rpg JOIN provider_grants pg "
                         "ON pg.id = rpg.provider_grant_id "
+                        "JOIN run_provider_invocation_allowances rpia "
+                        "ON rpia.run_id = rpg.run_id "
+                        "AND rpia.provider_grant_id = rpg.provider_grant_id "
                         "LEFT JOIN provider_connector_bindings pcb "
                         "ON pcb.provider_grant_id = pg.id "
                         "LEFT JOIN inference_connectors ic "
@@ -1050,7 +1065,12 @@ class RunStorage:
                             f"pinned provider grant is unavailable: {unavailable}"
                         )
                     authorities = [
-                        (row["authority_name"], row["id"]) for row in authority_rows
+                        (
+                            row["authority_name"],
+                            row["id"],
+                            row["max_invocations"],
+                        )
+                        for row in authority_rows
                     ]
                     profile_id = source["profile_id"]
                     profile_identity_id = source["profile_identity_id"]
@@ -1094,7 +1114,14 @@ class RunStorage:
                     authority_rows = self._available_provider_grants(
                         connection, target_spec
                     )
-                    authorities = [(row["name"], row["id"]) for row in authority_rows]
+                    authorities = [
+                        (
+                            row["name"],
+                            row["id"],
+                            selected_profile_spec.effective_provider_invocation_limit,
+                        )
+                        for row in authority_rows
+                    ]
 
                 if review_target is not None:
                     if (
@@ -1238,7 +1265,7 @@ class RunStorage:
                     "VALUES (?, 1, 'run.created', NULL, 'queued', ?, ?)",
                     (replacement_run_id, created_metadata, now),
                 )
-                for authority_name, grant_id in authorities:
+                for authority_name, grant_id, invocation_limit in authorities:
                     connection.execute(
                         "INSERT INTO run_provider_grants "
                         "(run_id, authority_name, provider_grant_id, created_at) "
@@ -1248,6 +1275,17 @@ class RunStorage:
                             authority_name,
                             grant_id,
                             now,
+                        ),
+                    )
+                    connection.execute(
+                        "UPDATE run_provider_invocation_allowances "
+                        "SET max_invocations = ?, updated_at = ? "
+                        "WHERE run_id = ? AND provider_grant_id = ?",
+                        (
+                            invocation_limit,
+                            now,
+                            replacement_run_id,
+                            grant_id,
                         ),
                     )
 

@@ -824,18 +824,39 @@ class RunCoordinatorTests(unittest.TestCase):
         run = self.create_run()
         self.results.capture_error = RuntimeError("disk full")
 
-        with self.assertRaisesRegex(RunOrchestrationError, "result capture incomplete"):
+        with (
+            self.assertLogs("magic_glass_box.orchestration", level="WARNING") as logs,
+            self.assertRaisesRegex(RunOrchestrationError, "result capture incomplete"),
+        ):
             self.coordinator.execute(run["id"])
 
         active = self.database.get_run(run["id"])
         self.assertEqual(active["state"], "failed")
         self.assertEqual(active["attempts"][0]["state"], "failed")
         self.assertIn("result capture failed", active["attempts"][0]["reason"])
+        self.assertIn("RuntimeError", active["attempts"][0]["reason"])
+        self.assertNotIn("disk full", active["attempts"][0]["reason"])
+        rendered_logs = "\n".join(logs.output)
+        self.assertIn(active["attempts"][0]["id"], rendered_logs)
+        self.assertIn("RuntimeError", rendered_logs)
+        self.assertNotIn("disk full", rendered_logs)
         self.assertIsNone(active["attempts"][0]["result"])
         self.assertTrue((self.workspaces.root / run["id"]).exists())
         self.assertEqual(self.executor.cleanup_calls, [run["id"]])
         self.assertEqual(self.gateways.cleanup_calls, [run["id"]])
         self.assertEqual(self.workspaces.cleanup_calls, [])
+
+    def test_capture_error_codes_are_sanitized_and_bounded(self) -> None:
+        cases = (
+            ("Private Detail!", "PrivateDetail"),
+            ("!!!", "RunOperationError"),
+            ("A1", "A1"),
+            ("A" * 129, "A" * 128),
+        )
+        for class_name, expected in cases:
+            with self.subTest(class_name=class_name):
+                error_type = type(class_name, (Exception,), {})
+                self.assertEqual(RunCoordinator._exception_code(error_type()), expected)
 
     def test_executor_and_capture_failure_terminalize_with_recoverable_workspace(
         self,
@@ -895,6 +916,8 @@ class RunCoordinatorTests(unittest.TestCase):
         failed = self.database.get_run(run["id"])
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(failed["attempts"][0]["state"], "interrupted")
+        self.assertIn("RuntimeError", failed["attempts"][0]["reason"])
+        self.assertNotIn("too many paths", failed["attempts"][0]["reason"])
         self.assertIsNone(failed["attempts"][0]["result"])
         self.assertTrue(workspace.exists())
 

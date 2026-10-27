@@ -1331,6 +1331,7 @@ class AgentProfileSpec:
     command: tuple[str, ...]
     runtime_adapter: str = "command"
     runtime_provider_grant: str | None = None
+    provider_invocation_limit: int | None = None
     workspace_mode: WorkspaceMode = WorkspaceMode.COPY_ON_WRITE
     network_mode: NetworkMode = NetworkMode.GATEWAY_ONLY
     credential_names: tuple[str, ...] = ()
@@ -1345,6 +1346,7 @@ class AgentProfileSpec:
             "command",
             "runtime_adapter",
             "runtime_provider_grant",
+            "provider_invocation_limit",
             "workspace_mode",
             "network_mode",
             "credential_names",
@@ -1363,6 +1365,7 @@ class AgentProfileSpec:
             command=value["command"],
             runtime_adapter=value.get("runtime_adapter", "command"),
             runtime_provider_grant=value.get("runtime_provider_grant"),
+            provider_invocation_limit=value.get("provider_invocation_limit"),
             workspace_mode=value.get(
                 "workspace_mode", WorkspaceMode.COPY_ON_WRITE.value
             ),
@@ -1379,6 +1382,7 @@ class AgentProfileSpec:
         command: Sequence[object],
         runtime_adapter: object = "command",
         runtime_provider_grant: object = None,
+        provider_invocation_limit: object = None,
         workspace_mode: str = WorkspaceMode.COPY_ON_WRITE,
         network_mode: str = NetworkMode.GATEWAY_ONLY,
         credential_names: Sequence[object] = (),
@@ -1399,6 +1403,17 @@ class AgentProfileSpec:
             )
             if provider_grant == "krab":
                 raise ValidationError("runtime provider grant cannot be krab")
+        invocation_limit = None
+        if provider_invocation_limit is not None:
+            if (
+                isinstance(provider_invocation_limit, bool)
+                or not isinstance(provider_invocation_limit, int)
+                or not 1 <= provider_invocation_limit <= 10_000
+            ):
+                raise ValidationError(
+                    "provider_invocation_limit must be between 1 and 10000"
+                )
+            invocation_limit = provider_invocation_limit
         credential_tuple = tuple(
             require_string(value, field="credential name", max_bytes=128)
             for value in credential_names
@@ -1463,6 +1478,11 @@ class AgentProfileSpec:
             raise ValidationError(
                 "provider.invoke requires at least one named provider grant"
             )
+        if (
+            invocation_limit is not None
+            and GatewayCapability.PROVIDER_INVOKE not in capability_tuple
+        ):
+            raise ValidationError("provider_invocation_limit requires provider.invoke")
         if provider_grant is not None:
             if provider_grant not in credential_tuple:
                 raise ValidationError(
@@ -1483,6 +1503,7 @@ class AgentProfileSpec:
             command=command_tuple,
             runtime_adapter=adapter,
             runtime_provider_grant=provider_grant,
+            provider_invocation_limit=invocation_limit,
             workspace_mode=workspace,
             network_mode=network,
             credential_names=credential_tuple,
@@ -1501,11 +1522,21 @@ class AgentProfileSpec:
             result["runtime_adapter"] = self.runtime_adapter
         if self.runtime_provider_grant is not None:
             result["runtime_provider_grant"] = self.runtime_provider_grant
+        if self.provider_invocation_limit is not None:
+            result["provider_invocation_limit"] = self.provider_invocation_limit
         if self.gateway_capabilities:
             result["gateway_capabilities"] = [
                 capability.value for capability in self.gateway_capabilities
             ]
         return result
+
+    @property
+    def effective_provider_invocation_limit(self) -> int:
+        return (
+            64
+            if self.provider_invocation_limit is None
+            else self.provider_invocation_limit
+        )
 
     @property
     def canonical(self) -> str:

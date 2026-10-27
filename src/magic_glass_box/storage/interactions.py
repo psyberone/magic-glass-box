@@ -31,6 +31,7 @@ from .errors import (
     BudgetExceededError,
     ConcurrentUpdateError,
     ConflictError,
+    InvocationLimitExceededError,
     NotFoundError,
     StorageError,
 )
@@ -39,6 +40,8 @@ RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 PROVIDER_GRANT_ID_RE = re.compile(r"^pgr_[0-9a-f]{32}$")
 PROVIDER_DISPATCH_ID_RE = re.compile(r"^pdr_[0-9a-f]{32}$")
 MAX_PROVIDER_INVOCATION_HISTORY = 1000
+DEFAULT_RUN_INTERACTION_PAGE_SIZE = 128
+MAX_RUN_INTERACTION_PAGE_SIZE = 256
 
 
 class InteractionStorage:
@@ -350,24 +353,122 @@ class InteractionStorage:
         result["events"] = [dict(event) for event in events]
         return result
 
-    def list_run_interactions(self, run_id: str) -> list[dict[str, Any]]:
+    def get_run_interaction_page(
+        self,
+        run_id: str,
+        *,
+        limit: int = DEFAULT_RUN_INTERACTION_PAGE_SIZE,
+        before_interaction_id: str | None = None,
+    ) -> dict[str, Any]:
         with self._read_snapshot() as connection:
-            return self._list_run_interactions(connection, run_id)
+            return self._get_run_interaction_page(
+                connection,
+                run_id,
+                limit=limit,
+                before_interaction_id=before_interaction_id,
+            )
+
+    def list_run_interactions(
+        self,
+        run_id: str,
+        *,
+        limit: int = DEFAULT_RUN_INTERACTION_PAGE_SIZE,
+        before_interaction_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.get_run_interaction_page(
+            run_id,
+            limit=limit,
+            before_interaction_id=before_interaction_id,
+        )["interactions"]
 
     def _list_run_interactions(
-        self, connection: sqlite3.Connection, run_id: str
+        self,
+        connection: sqlite3.Connection,
+        run_id: str,
+        *,
+        limit: int = DEFAULT_RUN_INTERACTION_PAGE_SIZE,
+        before_interaction_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        return self._get_run_interaction_page(
+            connection,
+            run_id,
+            limit=limit,
+            before_interaction_id=before_interaction_id,
+        )["interactions"]
+
+    def _get_run_interaction_page(
+        self,
+        connection: sqlite3.Connection,
+        run_id: str,
+        *,
+        limit: int,
+        before_interaction_id: str | None,
+    ) -> dict[str, Any]:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_RUN_INTERACTION_PAGE_SIZE
+        ):
+            raise ValidationError(
+                f"interaction page limit must be between 1 and "
+                f"{MAX_RUN_INTERACTION_PAGE_SIZE}"
+            )
+        if before_interaction_id is not None:
+            before_interaction_id = require_string(
+                before_interaction_id,
+                field="before_interaction_id",
+                max_bytes=64,
+            )
         with self._connection(connection) as connection:
             exists = connection.execute(
                 "SELECT 1 FROM runs WHERE id = ?", (run_id,)
             ).fetchone()
             if exists is None:
                 raise NotFoundError(f"run not found: {run_id}")
-            rows = connection.execute(
-                "SELECT id FROM interactions WHERE run_id = ? ORDER BY created_at, id",
-                (run_id,),
-            ).fetchall()
-        return [self._get_interaction(connection, row["id"]) for row in rows]
+            total = connection.execute(
+                "SELECT COUNT(*) FROM interactions WHERE run_id = ?", (run_id,)
+            ).fetchone()[0]
+            cursor: sqlite3.Row | None = None
+            if before_interaction_id is not None:
+                cursor = connection.execute(
+                    "SELECT created_at, id FROM interactions "
+                    "WHERE run_id = ? AND id = ?",
+                    (run_id, before_interaction_id),
+                ).fetchone()
+                if cursor is None:
+                    raise NotFoundError(
+                        "interaction page cursor not found for requested run"
+                    )
+            if cursor is None:
+                rows = connection.execute(
+                    "SELECT id FROM interactions WHERE run_id = ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (run_id, limit + 1),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id FROM interactions WHERE run_id = ? "
+                    "AND (created_at < ? OR (created_at = ? AND id < ?)) "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (
+                        run_id,
+                        cursor["created_at"],
+                        cursor["created_at"],
+                        cursor["id"],
+                        limit + 1,
+                    ),
+                ).fetchall()
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        interactions = [
+            self._get_interaction(connection, row["id"]) for row in reversed(page_rows)
+        ]
+        return {
+            "interaction_count": total,
+            "interactions": interactions,
+            "interactions_truncated": has_more,
+            "next_before_interaction_id": (interactions[0]["id"] if has_more else None),
+        }
 
     def get_run_provider_grant(
         self, run_id: str, authority_name: str
@@ -400,6 +501,34 @@ class InteractionStorage:
         ):
             raise ConflictError(f"provider grant is unavailable: {authority_name}")
         result["authority_name"] = authority_name
+        return result
+
+    def get_run_provider_invocation_allowance(
+        self, run_id: str, authority_name: str
+    ) -> dict[str, Any]:
+        authority_name = validate_provider_name(
+            authority_name, field="provider authority name"
+        )
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT rpia.run_id, rpg.authority_name, "
+                "rpia.provider_grant_id, rpia.max_invocations, "
+                "rpia.invocation_count, rpia.created_at, rpia.updated_at "
+                "FROM run_provider_grants rpg "
+                "JOIN run_provider_invocation_allowances rpia "
+                "ON rpia.run_id = rpg.run_id "
+                "AND rpia.provider_grant_id = rpg.provider_grant_id "
+                "WHERE rpg.run_id = ? AND rpg.authority_name = ?",
+                (run_id, authority_name),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(
+                f"provider grant is not authorized for run: {authority_name}"
+            )
+        result = dict(row)
+        result["remaining_invocations"] = (
+            result["max_invocations"] - result["invocation_count"]
+        )
         return result
 
     def reserve_provider_dispatch(
@@ -690,9 +819,13 @@ class InteractionStorage:
             rows = connection.execute(
                 "SELECT rpg.authority_name, pg.id AS grant_id, pg.name, "
                 "pg.state, pg.grant_kind, pg.expires_at, pg.policy_json, "
-                "pg.content_sha256, ic.state AS connector_state "
+                "pg.content_sha256, ic.state AS connector_state, "
+                "rpia.max_invocations, rpia.invocation_count "
                 "FROM run_provider_grants rpg JOIN provider_grants pg "
                 "ON pg.id = rpg.provider_grant_id "
+                "JOIN run_provider_invocation_allowances rpia "
+                "ON rpia.run_id = rpg.run_id "
+                "AND rpia.provider_grant_id = rpg.provider_grant_id "
                 "LEFT JOIN provider_connector_bindings pcb "
                 "ON pcb.provider_grant_id = pg.id "
                 "LEFT JOIN inference_connectors ic "
@@ -738,6 +871,11 @@ class InteractionStorage:
                     "grant_kind": row["grant_kind"],
                     "state": state,
                     "expires_at": row["expires_at"],
+                    "max_invocations": row["max_invocations"],
+                    "invocation_count": row["invocation_count"],
+                    "remaining_invocations": (
+                        row["max_invocations"] - row["invocation_count"]
+                    ),
                 }
             )
         return result
@@ -924,6 +1062,28 @@ class InteractionStorage:
                     raise ConflictError(
                         "provider invocation authority does not match its grant"
                     )
+                if outcome == "dispatching":
+                    consumed = connection.execute(
+                        "UPDATE run_provider_invocation_allowances "
+                        "SET invocation_count = invocation_count + 1, "
+                        "updated_at = ? WHERE run_id = ? "
+                        "AND provider_grant_id = ? "
+                        "AND invocation_count < max_invocations",
+                        (self.now(), run_id, provider_grant_id),
+                    ).rowcount
+                    if consumed != 1:
+                        allowance = connection.execute(
+                            "SELECT 1 FROM run_provider_invocation_allowances "
+                            "WHERE run_id = ? AND provider_grant_id = ?",
+                            (run_id, provider_grant_id),
+                        ).fetchone()
+                        if allowance is None:
+                            raise StorageError(
+                                "provider invocation allowance is unavailable"
+                            )
+                        raise InvocationLimitExceededError(
+                            "run provider invocation limit is exhausted"
+                        )
                 budget_values: tuple[Any, ...] = (None,) * 9
                 if budget is not None:
                     try:
@@ -1042,7 +1202,11 @@ class InteractionStorage:
                     ),
                 )
                 connection.commit()
-            except (ConflictError, BudgetExceededError):
+            except (
+                ConflictError,
+                BudgetExceededError,
+                InvocationLimitExceededError,
+            ):
                 connection.rollback()
                 raise
             except sqlite3.IntegrityError as exc:
