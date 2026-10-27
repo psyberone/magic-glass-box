@@ -2378,6 +2378,20 @@ class ControlPlane:
             imported_by=importer["id"],
         )
 
+    def import_work_item_from_service_operation(
+        self,
+        *,
+        project_key: str,
+        operation_id: str,
+        imported_by_handle: str,
+    ) -> dict[str, Any]:
+        importer = self.database.get_user(imported_by_handle)
+        return self.database.import_work_item_from_service_operation(
+            project_key=project_key,
+            operation_id=operation_id,
+            imported_by=importer["id"],
+        )
+
     def get_work_item(self, work_item_id: str) -> dict[str, Any]:
         return self.database.get_work_item(work_item_id)
 

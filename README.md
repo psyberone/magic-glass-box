@@ -10,8 +10,9 @@ This repository currently contains the first executable vertical slice:
 - private SQLite control-plane state with immutable schema migrations;
 - local users linked to stable Krab user IDs rather than bearer tokens;
 - versioned project context and versioned agent profiles;
-- a strict, forge-neutral work-item import contract with atomic create, update,
-  unchanged, and stale-revision behavior;
+- a strict, provider-neutral work-item import contract with atomic create,
+  update, unchanged, and stale-revision behavior plus explicit imports from
+  project-bound work reads;
 - run records that pin context, profile, and immutable work-item versions while
   enforcing a state machine;
 - a durable, metadata-only interaction ledger for typed questions, approvals,
@@ -246,6 +247,10 @@ recover its lifecycle with:
 ```console
 PYTHONPATH=src python3.11 -m magic_glass_box \
   work-item import examples/work-item.json \
+  --project box-project --imported-by operator
+# Or, after an explicitly bound work.get operation succeeds:
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  work-item import-operation sop_<id> \
   --project box-project --imported-by operator
 PYTHONPATH=src python3.11 -m magic_glass_box \
   run create --project box-project --profile Worker \
@@ -494,8 +499,9 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
 ```
 
 Work-item import is an idempotent upsert keyed by project, source, and external
-ID. Magic Glass Box does not connect to, synchronize with, or mutate a source
-forge. See [docs/work-items.md](docs/work-items.md) for the adapter contract and
+ID. Provider reads never synchronize or mutate local work implicitly; an
+explicit operation import retains its exact receipt provenance. See
+[docs/work-items.md](docs/work-items.md) for the adapter contract and
 [`schemas/work-item-v1.schema.json`](schemas/work-item-v1.schema.json) for the
 published structural input schema. Runtime semantic validation remains the
 acceptance authority; the boundary is documented in

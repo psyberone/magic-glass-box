@@ -366,6 +366,7 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
 
     def test_schema_twenty_four_migrates_schema_twenty_three_once(self) -> None:
         with closing(self.database.connect()) as connection, connection:
+            connection.execute("DROP TABLE work_item_service_imports")
             connection.execute("DROP TABLE workflow_scope_reviews")
             connection.execute("DROP TABLE workflow_scope_bindings")
             connection.execute("DROP TABLE advisory_reports")

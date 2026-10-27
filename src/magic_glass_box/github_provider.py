@@ -664,10 +664,20 @@ class GitHubProvider:
             summary, _envelope = self._normalize_issue(
                 document, request, include_brief=False
             )
-            items.append(summary)
+            items.append(
+                {
+                    "assignees": summary["assignees"],
+                    "external_id": summary["external_id"],
+                    "labels": summary["labels"],
+                    "object_id": str(summary["number"]),
+                    "source_updated_at": summary["updated_at"],
+                    "title": summary["title"],
+                }
+            )
         result = {
+            "schema_version": 1,
             "items": items,
-            "next_cursor": self._next_cursor(parameters, len(raw_items)),
+            "truncated": self._next_cursor(parameters, len(raw_items)) is not None,
         }
         identity = f"github:{request.mapping.host}/{request.mapping.repository}/issues"
         return self._success(

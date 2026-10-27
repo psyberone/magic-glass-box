@@ -332,6 +332,29 @@ class ControlPlaneTests(unittest.TestCase):
             expected_thread_version=5,
         )
 
+    def test_service_operation_import_resolves_the_local_importer(self) -> None:
+        database = mock.Mock()
+        database.get_user.return_value = {"id": "boxu_operator"}
+        database.import_work_item_from_service_operation.return_value = {
+            "id": "wki_one",
+            "import_status": "created",
+        }
+        control = ControlPlane(database)
+
+        imported = control.import_work_item_from_service_operation(
+            project_key="box-project",
+            operation_id="sop_" + "1" * 32,
+            imported_by_handle="operator",
+        )
+
+        self.assertEqual(imported["id"], "wki_one")
+        database.get_user.assert_called_once_with("operator")
+        database.import_work_item_from_service_operation.assert_called_once_with(
+            project_key="box-project",
+            operation_id="sop_" + "1" * 32,
+            imported_by="boxu_operator",
+        )
+
     def test_authentication_rejects_credential_reassigned_to_another_user(self) -> None:
         self.control.add_krab_identity(
             instance_name="Local Krab", credential_path=self.token_path

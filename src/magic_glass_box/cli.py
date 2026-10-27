@@ -739,6 +739,12 @@ def build_parser() -> argparse.ArgumentParser:
     work_item_import.add_argument("document", type=Path)
     work_item_import.add_argument("--project", required=True)
     work_item_import.add_argument("--imported-by", required=True)
+    work_item_import_operation = work_item_commands.add_parser(
+        "import-operation", help="import one completed provider work read"
+    )
+    work_item_import_operation.add_argument("operation_id")
+    work_item_import_operation.add_argument("--project", required=True)
+    work_item_import_operation.add_argument("--imported-by", required=True)
     work_item_show = work_item_commands.add_parser(
         "show", help="show work-item lifecycle metadata"
     )
@@ -1696,6 +1702,12 @@ def _dispatch(
             return control.import_work_item(
                 project_key=args.project,
                 envelope=WorkItemEnvelope.from_mapping(_json_file(args.document)),
+                imported_by_handle=args.imported_by,
+            )
+        if args.work_item_command == "import-operation":
+            return control.import_work_item_from_service_operation(
+                project_key=args.project,
+                operation_id=args.operation_id,
                 imported_by_handle=args.imported_by,
             )
         if args.work_item_command == "show":

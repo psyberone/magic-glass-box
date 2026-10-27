@@ -655,6 +655,7 @@ class AdvisoryConfigurationStorageTests(unittest.TestCase):
         self,
     ) -> None:
         with self.database.connect() as connection:
+            connection.execute("DROP TABLE work_item_service_imports")
             connection.execute("DROP TABLE workflow_scope_reviews")
             connection.execute("DROP TABLE workflow_scope_bindings")
             connection.execute("DROP TABLE advisory_reports")
@@ -676,7 +677,7 @@ class AdvisoryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 42)
+        self.assertEqual(SCHEMA_VERSION, 43)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(

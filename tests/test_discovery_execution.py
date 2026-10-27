@@ -1856,6 +1856,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         with self.database.connect() as connection:
             connection.executescript(
                 """
+                DROP TABLE work_item_service_imports;
                 DROP TABLE workflow_scope_reviews;
                 DROP TABLE workflow_scope_bindings;
                 DROP TABLE advisory_reports;
@@ -1897,7 +1898,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 42)
+        self.assertEqual(SCHEMA_VERSION, 43)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

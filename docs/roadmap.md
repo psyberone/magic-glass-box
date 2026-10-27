@@ -1759,6 +1759,8 @@ type.
 
 ### M14.2: normalized work intake seam
 
+**Status: complete**
+
 - Define one bounded controller result for list/get plus an explicit import
   command that upserts through the existing work-item contract; reads never
   become implicit synchronization.
@@ -1767,6 +1769,32 @@ type.
   operation/receipt provenance needed for the import.
 - Prove idempotent update-or-insert behavior, disabled-capability failure, and
   malformed/oversized provider-result rejection.
+
+The completed checkpoint publishes the provider-neutral `work.list` v1 result
+and applies capability-specific result validation at the controller ingress.
+`work.get` returns the existing canonical work-item envelope; list windows hold
+at most 100 independently identified references and exclude provider cursors,
+status names, queries, URLs, and descriptions. The GitHub reference provider
+now emits that contract while retaining its legacy page and state inputs on
+the provider side.
+
+Schema v43 adds one immutable provenance link from an explicit work-item import
+to the exact successful service-operation attempt. `work-item
+import-operation` accepts only a project-bound `work.get` v1 read, performs the
+ordinary atomic upsert, retains operation and receipt digests through the
+existing immutable ledgers, and is idempotent per attempt. A disabled binding
+prevents new reads without invalidating evidence already captured under valid
+authority; listing never imports implicitly.
+
+Checkpoint evidence: 1,255 tests pass with Ruff format/lint clean and 87%
+aggregate statement-plus-branch coverage; the new normalized intake module is
+at 100%, service-sidecar validation at 86%, work-item storage at 89%, and the
+GitHub provider at 90%. The focused intake/provenance mutation wave killed
+581/711 mutants (81.72%); its survivor-derived tests pin exact collection
+bounds, public identifier families, unknown operation rejection, and separate
+provenance for distinct same-revision reads. The full GitHub provider mutation
+wave killed 740/854 mutants (86.65%). Neither passing wave produced timeouts,
+uncovered mutants, suspicious outcomes, or crashes.
 
 ### M14.3: Jira reference provider
 

@@ -231,6 +231,11 @@ class FakeControlPlane:
     def import_work_item(self, **kwargs: object) -> dict[str, object]:
         return self._called("work-item.import", **kwargs)
 
+    def import_work_item_from_service_operation(
+        self, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("work-item.import-operation", **kwargs)
+
     def get_work_item(self, work_item_id: str) -> dict[str, object]:
         return self._called("work-item.show", work_item_id=work_item_id)
 
@@ -751,6 +756,10 @@ class CLITests(unittest.TestCase):
                 True,
                 (
                     ("import", "create or update a normalized work item"),
+                    (
+                        "import-operation",
+                        "import one completed provider work read",
+                    ),
                     ("show", "show work-item lifecycle metadata"),
                     ("complete", "seal completed work memory"),
                     ("reopen", "start a fresh work-memory generation"),
@@ -1149,6 +1158,10 @@ class CLITests(unittest.TestCase):
                     "--revoked-by",
                 ),
                 ("work-item", "import"): ("--project", "--imported-by"),
+                ("work-item", "import-operation"): (
+                    "--project",
+                    "--imported-by",
+                ),
                 ("work-item", "complete"): (
                     "--expected-thread-version",
                     "--completed-by",
@@ -1654,6 +1667,27 @@ class CLITests(unittest.TestCase):
                     {"work_item_id": "wki_" + "6" * 32},
                 ),
                 {"operation": "work-item.show"},
+            ),
+            (
+                "work-item.import-operation",
+                [
+                    "work-item",
+                    "import-operation",
+                    "sop_" + "1" * 32,
+                    "--project",
+                    "box-project",
+                    "--imported-by",
+                    "operator",
+                ],
+                (
+                    "work-item.import-operation",
+                    {
+                        "project_key": "box-project",
+                        "operation_id": "sop_" + "1" * 32,
+                        "imported_by_handle": "operator",
+                    },
+                ),
+                {"operation": "work-item.import-operation"},
             ),
             (
                 "work-item.complete",
@@ -2188,6 +2222,7 @@ class CLITests(unittest.TestCase):
             },
             "work-item": {
                 "import": "create or update a normalized work item",
+                "import-operation": "import one completed provider work read",
                 "show": "show work-item lifecycle metadata",
                 "complete": "seal completed work memory",
                 "reopen": "start a fresh work-memory generation",

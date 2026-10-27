@@ -1430,6 +1430,7 @@ class WorkflowStorageTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE work_item_service_imports;
                 DROP TRIGGER workflow_configuration_version_immutable_update;
                 DROP TRIGGER workflow_configuration_version_immutable_delete;
                 CREATE TABLE workflow_configuration_versions_v31 (
@@ -1891,6 +1892,7 @@ class WorkflowStorageTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE work_item_service_imports;
                 DROP TABLE workflow_completions;
                 DROP TABLE workflow_provider_targets;
                 DROP TABLE workflow_landing_chains;

@@ -41,10 +41,12 @@ metadata. Credential-bearing integrations own their upstream secret material;
 the core records and enforces what may be invoked without becoming the secret
 store itself.
 
-External work enters through a versioned, forge-neutral import document. Its
-text is untrusted input, not authority: it cannot choose a project, profile,
-credential, network policy, or lifecycle transition. Magic Glass Box does not
-silently synchronize work items back to their source.
+External work enters through a versioned, provider-neutral import document,
+either supplied locally or returned by one explicitly authorized work read.
+Its text is untrusted input, not authority: it cannot choose a project,
+profile, credential, network policy, or lifecycle transition. Reads never
+become implicit imports, and Magic Glass Box does not silently synchronize work
+items back to their source.
 
 Magic Glass Box owns integration semantics: candidate revisions, dependencies,
 exact-head gates, authorization, and durable receipts. It does not bake a forge

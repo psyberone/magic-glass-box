@@ -110,10 +110,12 @@ the exact project/candidate decision. Project-routed creation must pass the
 corresponding `cpb_...` binding ID so the operation and route are pinned in the
 same transaction.
 
-List operations accept an explicit page cursor from 1 through 10,000, a limit
-from 1 through 100, and `open`, `closed`, or `all` state. Their receipt result
-contains only normalized metadata and a `next_cursor`; it never contains an
-issue body, comment, transcript, provider URL, or raw response. `work.get`
+The legacy GitHub list operation accepts an explicit page cursor from 1 through
+10,000, a limit from 1 through 100, and `open`, `closed`, or `all` state. Those
+GitHub-owned selection values remain operation input; the normalized
+`work.list` receipt exposes only bounded references and whether the selected
+window was truncated. It never contains a provider cursor, status name, issue
+body, comment, transcript, provider URL, or raw response. `work.get`
 returns exactly one normalized work-item v1 document, including the bounded
 issue body as its execution brief (or the title when the body is blank). That
 document is still untrusted content and is not imported automatically: an

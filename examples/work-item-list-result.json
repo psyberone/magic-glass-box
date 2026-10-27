@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "assignees": ["agent-one"],
+      "external_id": "ABC-42",
+      "labels": ["m14"],
+      "object_id": "ABC-42",
+      "source_updated_at": "2026-10-27T12:00:00.000000Z",
+      "title": "Prove normalized work intake"
+    }
+  ],
+  "schema_version": 1,
+  "truncated": false
+}

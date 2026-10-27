@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5800,6 +5800,35 @@ BEGIN
 END;
 """
 
+WORK_INTAKE_SCHEMA = """
+CREATE TABLE work_item_service_imports (
+    id TEXT PRIMARY KEY,
+    work_item_version_id TEXT NOT NULL,
+    service_operation_attempt_id TEXT NOT NULL UNIQUE,
+    imported_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (work_item_version_id)
+        REFERENCES work_item_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (service_operation_attempt_id)
+        REFERENCES service_operation_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (imported_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX work_item_service_import_version
+    ON work_item_service_imports(work_item_version_id, created_at, id);
+
+CREATE TRIGGER work_item_service_import_immutable_update
+BEFORE UPDATE ON work_item_service_imports
+BEGIN
+    SELECT RAISE(ABORT, 'work item service imports are immutable');
+END;
+CREATE TRIGGER work_item_service_import_immutable_delete
+BEFORE DELETE ON work_item_service_imports
+BEGIN
+    SELECT RAISE(ABORT, 'work item service imports cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -5845,7 +5874,8 @@ SCHEMA_V38 = SCHEMA_V37 + ADVISORY_DIRECTOR_SCHEMA
 SCHEMA_V39 = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
 SCHEMA_V40 = SCHEMA_V39 + WORKFLOW_SCOPE_REVIEW_SCHEMA
 SCHEMA_V41 = SCHEMA_V40 + OPERABILITY_SCHEMA
-SCHEMA = SCHEMA_V41 + SERVICE_RESOURCE_SCHEMA
+SCHEMA_V42 = SCHEMA_V41 + SERVICE_RESOURCE_SCHEMA
+SCHEMA = SCHEMA_V42 + WORK_INTAKE_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -5888,4 +5918,5 @@ MIGRATIONS = {
     39: WORKFLOW_SCOPE_REVIEW_SCHEMA,
     40: OPERABILITY_SCHEMA,
     41: SERVICE_RESOURCE_SCHEMA,
+    42: WORK_INTAKE_SCHEMA,
 }

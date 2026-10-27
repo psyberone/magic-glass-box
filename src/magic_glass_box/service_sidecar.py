@@ -15,12 +15,14 @@ from typing import Any, Protocol, cast
 
 from .domain import (
     ValidationError,
+    WorkItemEnvelope,
     canonical_json,
     content_sha256,
     parse_rfc3339_timestamp,
     require_string,
     validate_provider_name,
 )
+from .work_intake import WorkItemListResult
 
 SERVICE_SIDECAR_SCHEMA_VERSION = 1
 SERVICE_SIDECAR_PROTOCOL_VERSION = 1
@@ -1231,6 +1233,27 @@ class ServiceOperationResponse:
                 or receipt is None
             ):
                 raise ValidationError("successful service operation is inconsistent")
+            if authority["capability"].version == 1 and authority[
+                "capability"
+            ].name in {"work.get", "work.list"}:
+                assert receipt is not None
+                raw_result = receipt.result
+                if not isinstance(raw_result, dict):
+                    raise ValidationError(
+                        "successful work service operation requires a result object"
+                    )
+                if authority["capability"].name == "work.get":
+                    normalized_result = WorkItemEnvelope.from_mapping(
+                        raw_result
+                    ).to_dict()
+                else:
+                    normalized_result = WorkItemListResult.from_mapping(
+                        raw_result
+                    ).to_dict()
+                if raw_result != normalized_result:
+                    raise ValidationError(
+                        "service operation work result must be canonical"
+                    )
         elif error_code is None or receipt is not None:
             raise ValidationError(
                 f"{outcome} service operation must have an error and no receipt"

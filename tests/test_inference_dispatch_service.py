@@ -418,6 +418,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE work_item_service_imports;
                 DROP TRIGGER run_provider_grant_allowance_default;
                 DROP TABLE run_provider_invocation_allowances;
                 DROP TABLE supervisor_discovery_cursors;
@@ -1644,6 +1645,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
+                DROP TABLE work_item_service_imports;
                 DROP TRIGGER run_provider_grant_allowance_default;
                 DROP TABLE run_provider_invocation_allowances;
                 DROP TABLE supervisor_discovery_cursors;

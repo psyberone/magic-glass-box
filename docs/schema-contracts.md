@@ -91,6 +91,15 @@ resources. Control-plane schema v42 stores the kind and external ID separately
 and migrates every legacy v1 operation as a repository while preserving its
 immutable spec and digest.
 
+Milestone 14.2 publishes `work-item-list-result-v1.schema.json`. `work.get` v1
+uses the existing work-item v1 contract; runtime validation requires the
+controller form to be canonical. The list result holds at most 100 normalized
+references and no provider cursor, status, query, URL, or raw description.
+Runtime validation additionally enforces UTF-8 byte ceilings and independently
+unique object and external IDs. Control-plane schema v43 adds an immutable link
+from each explicit service import to the exact successful operation attempt;
+the operation and receipt digests remain in their existing append-only ledgers.
+
 Milestone 11 adds `provider-landing-v1.schema.json` and
 `provider-landing-receipt-v1.schema.json`. The authority binds one queue/policy/
 candidate/evidence snapshot to the exact project capability binding and service

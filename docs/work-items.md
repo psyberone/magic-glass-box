@@ -1,10 +1,11 @@
 # Work-item import contract
 
-Magic Glass Box accepts forge-neutral work through the versioned JSON contract
-in [`schemas/work-item-v1.schema.json`](../schemas/work-item-v1.schema.json).
-Import is the only external work-item operation: the control plane does not
-fetch, export, synchronize, close, or otherwise mutate objects in a source
-service.
+Magic Glass Box accepts provider-neutral work through the versioned JSON
+contract in
+[`schemas/work-item-v1.schema.json`](../schemas/work-item-v1.schema.json).
+An operator may import either a local document or the normalized result of one
+explicitly authorized `work.get` service operation. A read never imports,
+exports, synchronizes, closes, or otherwise mutates work by itself.
 
 ## Identity and upsert behavior
 
@@ -75,7 +76,30 @@ magic-glass-box run create \
 
 Provider-specific adapters can live in separate packages or user-contributed
 repositories. They need no privileged plugin interface inside the orchestrator.
-M11's optional GitHub capability provider also returns the same envelope as the
-normalized result of an explicitly authorized `work.get` read. That result is
-still imported only by a deliberate operator action; listing or reading remote
-work never mutates the local work-item ledger by itself.
+
+Out-of-process service providers use the same core-owned result contracts:
+
+- `work.get` v1 returns one canonical work-item v1 envelope; and
+- `work.list` v1 returns one discovery window matching
+  [`work-item-list-result-v1.schema.json`](../schemas/work-item-list-result-v1.schema.json).
+
+The list result contains at most 100 bounded references and a `truncated`
+indicator. It deliberately excludes provider cursors, status names, queries,
+raw descriptions, comments, and URLs. Listing is discovery only and cannot
+create or update a durable item.
+
+After a project-bound `work.get` operation succeeds, import its result
+deliberately:
+
+```console
+magic-glass-box work-item import-operation sop_<id> \
+  --project box-project \
+  --imported-by operator
+```
+
+The command requires the operation's immutable capability binding to name that
+exact project and accepts only a successful `work.get` v1 read. It runs the
+ordinary atomic upsert and appends an immutable link to the exact service
+operation attempt and receipt digest. Repeating the same operation is a true
+no-op. Unbinding `work.get` prevents new project-routed reads without erasing or
+invalidating a result that was already captured under valid authority.

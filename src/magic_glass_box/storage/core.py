@@ -396,6 +396,10 @@ class DatabaseCore:
                     "service_operation_capability_bindings",
                     "SELECT COUNT(*) FROM service_operation_capability_bindings",
                 ),
+                (
+                    "work_item_service_imports",
+                    "SELECT COUNT(*) FROM work_item_service_imports",
+                ),
                 ("provider_grants", "SELECT COUNT(*) FROM provider_grants"),
                 (
                     "run_provider_invocation_allowances",

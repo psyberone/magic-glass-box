@@ -489,13 +489,13 @@ class GitHubProviderTests(unittest.TestCase):
                         "assignees": ["mgb-bot"],
                         "external_id": "github.com/acme/widgets/issues/42",
                         "labels": ["agent-ready"],
-                        "number": 42,
-                        "state": "open",
+                        "object_id": "42",
+                        "source_updated_at": "2098-12-31T23:00:00.000000Z",
                         "title": "Bounded issue",
-                        "updated_at": "2098-12-31T23:00:00.000000Z",
                     }
                 ],
-                "next_cursor": 2,
+                "schema_version": 1,
+                "truncated": True,
             },
         )
         self.assertNotIn("body", str(response.receipt.result))
@@ -1872,7 +1872,7 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(accepted_list.outcome, "succeeded")
         self.assertEqual(
             accepted_list.receipt.result,
-            {"items": [], "next_cursor": None},
+            {"items": [], "schema_version": 1, "truncated": False},
         )
 
         checks_request = request(

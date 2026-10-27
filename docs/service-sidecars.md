@@ -64,7 +64,7 @@ be added separately, but a worker proposal cannot become integration authority.
 The protocol advertises a version and a subset of bounded families such as:
 
 - `work.*` — list/get normalized work metadata and explicitly authorized work
-  mutations;
+  effects when a later core contract defines one;
 - `change.*` — create or inspect a proposed code change;
 - `checks.*` — read normalized CI and approval evidence;
 - `refs.*` — inspect or create exact repository refs; and
@@ -74,10 +74,13 @@ Operations are individually versioned and paginated or otherwise bounded. A
 successful read receipt may carry one bounded normalized JSON result in
 addition to its identity and evidence digest. The sidecar normalizes provider
 responses; raw payloads, comments, transcripts, and unrestricted message bodies
-do not cross into the core. `work.get` may return the existing bounded
-forge-neutral work-item envelope, including its execution brief, so it can be
-fed deliberately into the ordinary import path. No connector silently imports,
-exports, or synchronizes work.
+do not cross into the core. `work.get` v1 must return the canonical bounded
+provider-neutral work-item envelope, including its execution brief.
+`work.list` v1 must return the core-owned bounded reference window; provider
+cursors, status names, query syntax, and raw descriptions are not result
+fields. A successful get can be fed deliberately into `work-item
+import-operation`. No connector silently imports, exports, or synchronizes
+work.
 
 Provider routing is an explicit allowlist. If a project does not bind a
 capability to a provider, that surface is unavailable and is not advertised to

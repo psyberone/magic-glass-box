@@ -495,16 +495,19 @@ while an interaction remains open. See [agent-gateway.md](agent-gateway.md),
 
 The core accepts only the normalized v1 document described in
 [work-items.md](work-items.md). It has no built-in forge client. Import adapters
-run outside the control plane and may only submit content; project selection,
-assignment, profiles, credentials, network policy, and lifecycle remain trusted
-local decisions. Imported content is therefore never an authority channel.
+run outside the control plane; credential-isolated service providers may return
+the same canonical envelope through an authorized `work.get` read. Project
+selection, assignment, profiles, credentials, network policy, and lifecycle
+remain trusted local decisions. A provider read is never an implicit import,
+and imported content is never an authority channel.
 
 Provider-specific operations remain outside the core. M10 implements their
 provider-neutral actuator boundary and explicit project-to-controller routing.
 M11 now binds that boundary to the integration queue for `landing.invoke` and
 supplies the first out-of-process GitHub implementation. Its bounded read
 receipts can carry normalized work/change results without retaining raw GitHub
-payloads; `work.get` emits the existing forge-neutral work-item envelope. A
+payloads; `work.get` emits the existing provider-neutral work-item envelope and
+an explicit import retains its exact operation/receipt provenance. A
 worker may provide a result or review, but cannot turn it into landing
 authority. The core checks
 the exact candidate or fold, dependencies, current ref, gates, lane lease, and
