@@ -81,6 +81,16 @@ core-owned modes for the currently defined `work.get`/`work.list` v1,
 v1, `change.open` v1, and `landing.invoke` v1 effects while still permitting
 operator-only extension names that cannot be project-bound.
 
+Milestone 14.1 publishes v2 generations of the four service-sidecar contracts.
+V1 remains accepted with its exact repository-shaped canonical bytes. V2 uses
+one core-owned resource tuple with `repository` and `work_project` as the only
+initial kinds, renames the target reference to `object_id`, and forbids Git
+object revisions on non-repository targets. Runtime validation additionally
+requires matching schema/protocol generations and identical mapping/target
+resources. Control-plane schema v42 stores the kind and external ID separately
+and migrates every legacy v1 operation as a repository while preserving its
+immutable spec and digest.
+
 Milestone 11 adds `provider-landing-v1.schema.json` and
 `provider-landing-receipt-v1.schema.json`. The authority binds one queue/policy/
 candidate/evidence snapshot to the exact project capability binding and service

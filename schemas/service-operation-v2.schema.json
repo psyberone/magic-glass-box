@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:service-operation:v2",
+  "title": "Magic Glass Box Service Operation v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capability",
+    "connector_name",
+    "deployment_sha256",
+    "idempotency_key",
+    "mapping",
+    "parameters",
+    "request_bytes",
+    "response_bytes",
+    "schema_version",
+    "target",
+    "timeout_ms"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "connector_name": { "$ref": "#/$defs/name" },
+    "deployment_sha256": { "$ref": "#/$defs/sha256" },
+    "mapping": { "$ref": "#/$defs/mapping" },
+    "capability": { "$ref": "#/$defs/capability" },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "target": { "$ref": "#/$defs/target" },
+    "parameters": { "$ref": "#/$defs/parameters" },
+    "request_bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 },
+    "response_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+    "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 120000 }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "text256": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": ".*\\S.*"
+    },
+    "text512": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": ".*\\S.*"
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "name", "version"],
+      "properties": {
+        "mode": { "enum": ["read", "effect"] },
+        "name": {
+          "type": "string",
+          "pattern": "^(work|change|checks|refs|landing)\\.[a-z][a-z0-9_-]{0,63}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "name": { "enum": ["work.get", "work.list", "change.get", "change.list", "checks.read"] },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "read" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": { "enum": ["change.open", "landing.invoke", "refs.publish"] },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "effect" } } }
+        }
+      ]
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["external_id", "kind"],
+      "properties": {
+        "external_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?=.*\\S)[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "kind": { "enum": ["repository", "work_project"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "repository" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "external_id": {
+                "pattern": "^(?=.*\\S)[^:@?#\\u0000-\\u001f\\u007f]+$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "credential_scope_sha256",
+        "host",
+        "name",
+        "resource",
+        "service"
+      ],
+      "properties": {
+        "account": { "$ref": "#/$defs/text256" },
+        "credential_scope_sha256": { "$ref": "#/$defs/sha256" },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/@?#\\u0000-\\u001f\\u007f]+$"
+        },
+        "name": { "$ref": "#/$defs/name" },
+        "resource": { "$ref": "#/$defs/resource" },
+        "service": { "$ref": "#/$defs/name" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "desired_revision",
+        "expected_revision",
+        "object_format",
+        "object_id",
+        "resource"
+      ],
+      "properties": {
+        "resource": { "$ref": "#/$defs/resource" },
+        "object_id": { "$ref": "#/$defs/text512" },
+        "object_format": { "enum": [null, "sha1", "sha256"] },
+        "expected_revision": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "desired_revision": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "object_format": { "const": null } } },
+          "then": {
+            "properties": {
+              "expected_revision": { "const": null },
+              "desired_revision": { "const": null }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "object_format": { "const": "sha1" } } },
+          "then": {
+            "properties": {
+              "expected_revision": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+              "desired_revision": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "object_format": { "const": "sha256" } } },
+          "then": {
+            "properties": {
+              "expected_revision": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+              "desired_revision": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "resource": {
+                "properties": { "kind": { "const": "work_project" } },
+                "required": ["kind"]
+              }
+            },
+            "required": ["resource"]
+          },
+          "then": {
+            "properties": {
+              "object_format": { "const": null },
+              "expected_revision": { "const": null },
+              "desired_revision": { "const": null }
+            }
+          }
+        }
+      ]
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "access_token", "accessToken", "api_key", "apiKey", "api_token",
+            "apiToken", "authorization", "bearer_token", "bearerToken",
+            "credential", "credential-ref", "credential_ref", "credentialRef",
+            "credentials", "password", "private_key", "privateKey",
+            "refresh_token", "refreshToken", "secret", "token"
+          ]
+        }
+      }
+    }
+  }
+}

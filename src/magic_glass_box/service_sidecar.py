@@ -24,7 +24,9 @@ from .domain import (
 
 SERVICE_SIDECAR_SCHEMA_VERSION = 1
 SERVICE_SIDECAR_PROTOCOL_VERSION = 1
-SUPPORTED_SERVICE_SIDECAR_PROTOCOL_VERSIONS = frozenset({1})
+LATEST_SERVICE_SIDECAR_SCHEMA_VERSION = 2
+SUPPORTED_SERVICE_SIDECAR_SCHEMA_VERSIONS = frozenset({1, 2})
+SUPPORTED_SERVICE_SIDECAR_PROTOCOL_VERSIONS = frozenset({1, 2})
 MAX_SERVICE_CAPABILITIES = 64
 MAX_SERVICE_MAPPINGS = 64
 MAX_OPERATION_PARAMETERS_BYTES = 256 * 1024
@@ -43,6 +45,7 @@ CAPABILITY_RE = re.compile(
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 OBJECT_FORMAT_LENGTHS = {"sha1": 40, "sha256": 64}
+CORE_SERVICE_RESOURCE_KINDS = frozenset({"repository", "work_project"})
 HOST_RE = re.compile(
     r"^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|"
     r"\[[0-9a-f:.]+\])(?::[1-9][0-9]{0,4})?$"
@@ -119,11 +122,18 @@ def _exact_fields(
 
 
 def _schema_version(value: object) -> int:
-    if isinstance(value, bool) or value != SERVICE_SIDECAR_SCHEMA_VERSION:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value not in SUPPORTED_SERVICE_SIDECAR_SCHEMA_VERSIONS
+    ):
         raise ValidationError(
-            f"schema_version must be {SERVICE_SIDECAR_SCHEMA_VERSION}"
+            "schema_version must be one of "
+            + ", ".join(
+                str(item) for item in sorted(SUPPORTED_SERVICE_SIDECAR_SCHEMA_VERSIONS)
+            )
         )
-    return SERVICE_SIDECAR_SCHEMA_VERSION
+    return value
 
 
 def _protocol_version(value: object) -> int:
@@ -140,6 +150,18 @@ def _protocol_version(value: object) -> int:
             )
         )
     return value
+
+
+def _contract_versions(
+    schema_version: object, protocol_version: object
+) -> tuple[int, int]:
+    schema = _schema_version(schema_version)
+    protocol = _protocol_version(protocol_version)
+    if schema != protocol:
+        raise ValidationError(
+            "service sidecar schema and connector protocol versions must match"
+        )
+    return schema, protocol
 
 
 def _sha256(value: object, *, field: str) -> str:
@@ -334,26 +356,74 @@ def core_service_capability(name: object, version: object) -> ServiceCapability:
     return ServiceCapability(parsed_name, parsed_version, mode)
 
 
+def _service_resource_parts(value: object) -> tuple[str, str]:
+    if not isinstance(value, dict):
+        raise ValidationError("service resource must be an object")
+    _exact_fields(
+        value,
+        expected={"kind", "external_id"},
+        subject="service resource",
+    )
+    kind = value["kind"]
+    if kind not in CORE_SERVICE_RESOURCE_KINDS:
+        raise ValidationError("service resource kind is not core-defined")
+    if kind == "repository":
+        external_id = _repository(value["external_id"])
+    else:
+        external_id = _nonblank(
+            value["external_id"],
+            field="service resource external_id",
+            max_bytes=512,
+        )
+        if any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in external_id
+        ):
+            raise ValidationError("service resource external_id is invalid")
+    return kind, external_id
+
+
+@dataclass(frozen=True)
+class ServiceResource:
+    kind: str
+    external_id: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> ServiceResource:
+        kind, external_id = _service_resource_parts(value)
+        return cls(kind=kind, external_id=external_id)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"external_id": self.external_id, "kind": self.kind}
+
+
 @dataclass(frozen=True)
 class ServiceMapping:
     name: str
     service: str
     host: str
-    repository: str
+    resource: ServiceResource
     account: str
     credential_scope_sha256: str
+    _wire_schema_version: int
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> ServiceMapping:
         if not isinstance(value, dict):
             raise ValidationError("service mapping must be an object")
+        has_repository = "repository" in value
+        has_resource = "resource" in value
+        if has_repository == has_resource:
+            raise ValidationError(
+                "service mapping must contain exactly one resource authority"
+            )
+        wire_schema_version = 1 if has_repository else 2
         _exact_fields(
             value,
             expected={
                 "name",
                 "service",
                 "host",
-                "repository",
+                "repository" if has_repository else "resource",
                 "account",
                 "credential_scope_sha256",
             },
@@ -365,7 +435,14 @@ class ServiceMapping:
                 value["service"], field="service mapping service"
             ),
             host=_host(value["host"]),
-            repository=_repository(value["repository"]),
+            resource=(
+                ServiceResource(
+                    kind="repository",
+                    external_id=_repository(value["repository"]),
+                )
+                if has_repository
+                else ServiceResource.from_mapping(value["resource"])
+            ),
             account=_nonblank(
                 value["account"], field="service mapping account", max_bytes=256
             ),
@@ -373,17 +450,32 @@ class ServiceMapping:
                 value["credential_scope_sha256"],
                 field="service mapping credential scope",
             ),
+            _wire_schema_version=wire_schema_version,
         )
 
+    @property
+    def wire_schema_version(self) -> int:
+        return self._wire_schema_version
+
+    @property
+    def repository(self) -> str:
+        if self.resource.kind != "repository":
+            raise ValidationError("service mapping is not repository-backed")
+        return self.resource.external_id
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "account": self.account,
             "credential_scope_sha256": self.credential_scope_sha256,
             "host": self.host,
             "name": self.name,
-            "repository": self.repository,
             "service": self.service,
         }
+        if self._wire_schema_version == 1:
+            result["repository"] = self.repository
+        else:
+            result["resource"] = self.resource.to_dict()
+        return result
 
 
 @dataclass(frozen=True)
@@ -421,6 +513,9 @@ class ServiceSidecarSpec:
             },
             subject="service sidecar spec",
         )
+        schema_version, connector_protocol_version = _contract_versions(
+            value["schema_version"], value["connector_protocol_version"]
+        )
         raw_capabilities = value["capabilities"]
         if (
             not isinstance(raw_capabilities, list)
@@ -448,11 +543,13 @@ class ServiceSidecarSpec:
         mappings = tuple(ServiceMapping.from_mapping(item) for item in raw_mappings)
         if len({item.name for item in mappings}) != len(mappings):
             raise ValidationError("service sidecar mapping names must be unique")
+        if any(item.wire_schema_version != schema_version for item in mappings):
+            raise ValidationError(
+                "service sidecar mappings do not match its schema version"
+            )
         result = cls(
-            schema_version=_schema_version(value["schema_version"]),
-            connector_protocol_version=_protocol_version(
-                value["connector_protocol_version"]
-            ),
+            schema_version=schema_version,
+            connector_protocol_version=connector_protocol_version,
             deployment_sha256=_sha256(
                 value["deployment_sha256"], field="service sidecar deployment"
             ),
@@ -510,6 +607,8 @@ class ServiceSidecarSpec:
         )
         if not isinstance(operation, ServiceOperationSpec):
             raise ValidationError("operation must be a ServiceOperationSpec")
+        if operation.schema_version != self.schema_version:
+            raise ValidationError("operation schema does not match sidecar")
         if operation.connector_name != connector_name:
             raise ValidationError("operation connector does not match sidecar")
         if operation.deployment_sha256 != self.deployment_sha256:
@@ -547,21 +646,29 @@ class ServiceSidecarSpec:
 
 @dataclass(frozen=True)
 class ServiceOperationTarget:
-    repository: str
-    resource_id: str
+    resource: ServiceResource
+    object_id: str
     object_format: str | None
     expected_revision: str | None
     desired_revision: str | None
+    _wire_schema_version: int
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> ServiceOperationTarget:
         if not isinstance(value, dict):
             raise ValidationError("service operation target must be an object")
+        has_repository = "repository" in value or "resource_id" in value
+        has_resource = "resource" in value or "object_id" in value
+        if has_repository == has_resource:
+            raise ValidationError(
+                "service operation target must contain exactly one resource shape"
+            )
+        wire_schema_version = 1 if has_repository else 2
         _exact_fields(
             value,
             expected={
-                "repository",
-                "resource_id",
+                "repository" if has_repository else "resource",
+                "resource_id" if has_repository else "object_id",
                 "object_format",
                 "expected_revision",
                 "desired_revision",
@@ -586,26 +693,58 @@ class ServiceOperationTarget:
                 ):
                     raise ValidationError(f"service operation {field} is invalid")
             revisions[field] = revision
+        resource = (
+            ServiceResource(
+                kind="repository",
+                external_id=_repository(value["repository"]),
+            )
+            if has_repository
+            else ServiceResource.from_mapping(value["resource"])
+        )
+        if resource.kind != "repository" and object_format is not None:
+            raise ValidationError(
+                "non-repository service targets cannot contain object revisions"
+            )
         return cls(
-            repository=_repository(value["repository"]),
-            resource_id=_nonblank(
-                value["resource_id"],
-                field="service operation resource_id",
+            resource=resource,
+            object_id=_nonblank(
+                value["resource_id" if has_repository else "object_id"],
+                field="service operation object_id",
                 max_bytes=512,
             ),
             object_format=object_format,
             expected_revision=revisions["expected_revision"],
             desired_revision=revisions["desired_revision"],
+            _wire_schema_version=wire_schema_version,
         )
 
+    @property
+    def wire_schema_version(self) -> int:
+        return self._wire_schema_version
+
+    @property
+    def repository(self) -> str:
+        if self.resource.kind != "repository":
+            raise ValidationError("service operation target is not repository-backed")
+        return self.resource.external_id
+
+    @property
+    def resource_id(self) -> str:
+        return self.object_id
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "desired_revision": self.desired_revision,
             "expected_revision": self.expected_revision,
             "object_format": self.object_format,
-            "repository": self.repository,
-            "resource_id": self.resource_id,
         }
+        if self._wire_schema_version == 1:
+            result["repository"] = self.repository
+            result["resource_id"] = self.object_id
+        else:
+            result["resource"] = self.resource.to_dict()
+            result["object_id"] = self.object_id
+        return result
 
 
 @dataclass(frozen=True)
@@ -643,6 +782,7 @@ class ServiceOperationSpec:
             },
             subject="service operation spec",
         )
+        schema_version = _schema_version(value["schema_version"])
         parameters = value["parameters"]
         if not isinstance(parameters, dict):
             raise ValidationError("service operation parameters must be an object")
@@ -652,9 +792,16 @@ class ServiceOperationSpec:
             raise ValidationError("service operation parameters are oversized")
         mapping = ServiceMapping.from_mapping(value["mapping"])
         target = ServiceOperationTarget.from_mapping(value["target"])
-        if target.repository != mapping.repository:
+        if (
+            mapping.wire_schema_version != schema_version
+            or target.wire_schema_version != schema_version
+        ):
             raise ValidationError(
-                "service operation repository does not match its mapping"
+                "service operation resources do not match its schema version"
+            )
+        if target.resource != mapping.resource:
+            raise ValidationError(
+                "service operation resource does not match its mapping"
             )
         idempotency_key = value["idempotency_key"]
         if (
@@ -669,7 +816,7 @@ class ServiceOperationSpec:
         if len(input_json.encode("utf-8")) > request_bytes:
             raise ValidationError("service operation input exceeds request limit")
         return cls(
-            schema_version=_schema_version(value["schema_version"]),
+            schema_version=schema_version,
             connector_name=validate_provider_name(
                 value["connector_name"], field="service operation connector_name"
             ),
@@ -742,11 +889,17 @@ def _operation_authority(value: Mapping[str, Any]) -> dict[str, Any]:
     phase = value["phase"]
     if phase not in {"invoke", "reconcile"}:
         raise ValidationError("service operation phase is invalid")
+    schema_version, connector_protocol_version = _contract_versions(
+        value["schema_version"], value["connector_protocol_version"]
+    )
+    mapping = ServiceMapping.from_mapping(value["mapping"])
+    if mapping.wire_schema_version != schema_version:
+        raise ValidationError(
+            "service operation mapping does not match its schema version"
+        )
     return {
-        "schema_version": _schema_version(value["schema_version"]),
-        "connector_protocol_version": _protocol_version(
-            value["connector_protocol_version"]
-        ),
+        "schema_version": schema_version,
+        "connector_protocol_version": connector_protocol_version,
         "operation_id": _identifier(
             value["operation_id"],
             field="operation_id",
@@ -760,7 +913,7 @@ def _operation_authority(value: Mapping[str, Any]) -> dict[str, Any]:
         "deployment_sha256": _sha256(
             value["deployment_sha256"], field="service operation deployment"
         ),
-        "mapping": ServiceMapping.from_mapping(value["mapping"]),
+        "mapping": mapping,
         "capability": ServiceCapability.from_mapping(value["capability"]),
         "phase": phase,
         "input_sha256": _sha256(value["input_sha256"], field="service operation input"),
@@ -806,7 +959,7 @@ class ServiceOperationRequest:
             raise ValidationError("operation must be a ServiceOperationSpec")
         return cls.from_mapping(
             {
-                "schema_version": SERVICE_SIDECAR_SCHEMA_VERSION,
+                "schema_version": operation.schema_version,
                 "connector_protocol_version": connector_protocol_version,
                 "operation_id": operation_id,
                 "connector_id": connector_id,
@@ -834,9 +987,13 @@ class ServiceOperationRequest:
         )
         authority = _operation_authority(value)
         target = ServiceOperationTarget.from_mapping(value["target"])
-        if target.repository != authority["mapping"].repository:
+        if target.wire_schema_version != authority["schema_version"]:
             raise ValidationError(
-                "service operation repository does not match its mapping"
+                "service operation target does not match its schema version"
+            )
+        if target.resource != authority["mapping"].resource:
+            raise ValidationError(
+                "service operation resource does not match its mapping"
             )
         parameters = value["parameters"]
         if not isinstance(parameters, dict):

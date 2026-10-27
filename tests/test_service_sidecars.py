@@ -20,6 +20,7 @@ from magic_glass_box.service_sidecar import (
     ServiceOperationRequest,
     ServiceOperationResponse,
     ServiceOperationSpec,
+    ServiceResource,
     ServiceSidecarAmbiguousError,
     ServiceSidecarSpec,
     ServiceSidecarUnavailableError,
@@ -88,6 +89,67 @@ def operation_spec(**overrides: object) -> ServiceOperationSpec:
     return ServiceOperationSpec.from_mapping(value)
 
 
+def resource_sidecar_spec(socket_path: Path, **overrides: object) -> ServiceSidecarSpec:
+    value: dict[str, object] = {
+        "schema_version": 2,
+        "connector_protocol_version": 2,
+        "deployment_sha256": "e" * 64,
+        "transport": {"kind": "unix", "socket_path": str(socket_path)},
+        "capabilities": [
+            {"name": "work.get", "version": 1, "mode": "read"},
+            {"name": "work.list", "version": 1, "mode": "read"},
+        ],
+        "mappings": [
+            {
+                "name": "primary",
+                "service": "example-work",
+                "host": "work.example.test",
+                "resource": {"kind": "work_project", "external_id": "ABC"},
+                "account": "automation",
+                "credential_scope_sha256": "f" * 64,
+            }
+        ],
+        "request_bytes": 32768,
+        "response_bytes": 65536,
+        "timeout_ms": 30000,
+        "max_concurrency": 2,
+        "max_requests_per_minute": 30,
+    }
+    value.update(overrides)
+    return ServiceSidecarSpec.from_mapping(value)
+
+
+def resource_operation_spec(**overrides: object) -> ServiceOperationSpec:
+    value: dict[str, object] = {
+        "schema_version": 2,
+        "connector_name": "example-work-sidecar",
+        "deployment_sha256": "e" * 64,
+        "mapping": {
+            "name": "primary",
+            "service": "example-work",
+            "host": "work.example.test",
+            "resource": {"kind": "work_project", "external_id": "ABC"},
+            "account": "automation",
+            "credential_scope_sha256": "f" * 64,
+        },
+        "capability": {"name": "work.get", "version": 1, "mode": "read"},
+        "idempotency_key": "get-work-abc-42",
+        "target": {
+            "resource": {"kind": "work_project", "external_id": "ABC"},
+            "object_id": "ABC-42",
+            "object_format": None,
+            "expected_revision": None,
+            "desired_revision": None,
+        },
+        "parameters": {},
+        "request_bytes": 16384,
+        "response_bytes": 32768,
+        "timeout_ms": 10000,
+    }
+    value.update(overrides)
+    return ServiceOperationSpec.from_mapping(value)
+
+
 class ServiceSidecarContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -147,6 +209,141 @@ class ServiceSidecarContractTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     connector.validate_operation("example-sidecar", changed)
 
+    def test_v2_resource_authority_is_not_repository_shaped(self) -> None:
+        connector = resource_sidecar_spec(self.socket_path)
+        operation = resource_operation_spec()
+
+        connector.validate_operation("example-work-sidecar", operation)
+        self.assertEqual(
+            ServiceSidecarSpec.from_mapping(connector.to_dict()), connector
+        )
+        self.assertEqual(
+            ServiceOperationSpec.from_mapping(operation.to_dict()), operation
+        )
+        self.assertEqual(
+            operation.mapping.resource,
+            ServiceResource(kind="work_project", external_id="ABC"),
+        )
+        self.assertEqual(operation.target.object_id, "ABC-42")
+        self.assertNotIn("repository", operation.mapping.to_dict())
+        self.assertNotIn("repository", operation.target.to_dict())
+        self.assertNotIn("resource_id", operation.target.to_dict())
+
+        request = ServiceOperationRequest.create(
+            operation_id="sop_" + "1" * 32,
+            connector_id="ssc_" + "2" * 32,
+            connector_protocol_version=2,
+            operation=operation,
+            phase="invoke",
+            deadline=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(
+                timespec="microseconds"
+            ),
+        )
+        self.assertEqual(request.schema_version, 2)
+        self.assertEqual(request.connector_protocol_version, 2)
+        self.assertEqual(request.mapping.resource.kind, "work_project")
+        self.assertEqual(request.target.resource, request.mapping.resource)
+        self.assertEqual(
+            ServiceOperationRequest.from_mapping(request.to_dict()), request
+        )
+
+    def test_v1_authority_retains_its_exact_wire_digest(self) -> None:
+        connector = sidecar_spec(Path("/tmp/service.sock"))  # noqa: S108
+        operation = operation_spec()
+
+        self.assertEqual(
+            connector.digest,
+            "5a418404fb998f70b20ac4812dc192b3999b249f55cbdf53de25781e116d29bc",
+        )
+        self.assertEqual(
+            operation.digest,
+            "a0b1e1685b01887292593699c2e9569156d36767b95745ced9d556554dedd27b",
+        )
+        self.assertEqual(
+            operation.input_sha256,
+            "aa08035edfe94a255382f87a0c838b1f80598a418df4b5999db428511142e84d",
+        )
+        self.assertEqual(connector.schema_version, 1)
+        self.assertEqual(connector.connector_protocol_version, 1)
+        self.assertEqual(connector.mappings[0].resource.kind, "repository")
+        self.assertEqual(connector.mappings[0].resource.external_id, "acme/widgets")
+        self.assertEqual(operation.target.object_id, "candidate-42")
+        self.assertIn("repository", operation.mapping.to_dict())
+        self.assertIn("resource_id", operation.target.to_dict())
+
+    def test_resource_contract_rejects_mixed_or_provider_native_authority(self) -> None:
+        invalid_sidecars = []
+        wrong_protocol = resource_sidecar_spec(self.socket_path).to_dict()
+        wrong_protocol["connector_protocol_version"] = 1
+        invalid_sidecars.append(wrong_protocol)
+        legacy_mapping = resource_sidecar_spec(self.socket_path).to_dict()
+        legacy_mapping["mappings"][0] = {
+            "name": "primary",
+            "service": "example-work",
+            "host": "work.example.test",
+            "repository": "ABC",
+            "account": "automation",
+            "credential_scope_sha256": "f" * 64,
+        }
+        invalid_sidecars.append(legacy_mapping)
+        provider_native_kind = resource_sidecar_spec(self.socket_path).to_dict()
+        provider_native_kind["mappings"][0]["resource"]["kind"] = "jira_project"
+        invalid_sidecars.append(provider_native_kind)
+        for resource in (
+            {"kind": "work_project", "external_id": ""},
+            {"kind": "work_project", "external_id": "ABC\x1f"},
+            {"kind": "work_project", "external_id": "ABC\x7f"},
+            {"kind": "work_project", "external_id": "a" * 513},
+            {"kind": "repository", "external_id": "https://example.test/acme/repo"},
+            {"kind": True, "external_id": "ABC"},
+            {"kind": "work_project", "external_id": "ABC", "provider": "jira"},
+        ):
+            invalid_resource = resource_sidecar_spec(self.socket_path).to_dict()
+            invalid_resource["mappings"][0]["resource"] = resource
+            invalid_sidecars.append(invalid_resource)
+
+        for value in invalid_sidecars:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                ServiceSidecarSpec.from_mapping(value)
+
+        mismatched_target = resource_operation_spec().to_dict()
+        mismatched_target["target"]["resource"]["external_id"] = "OTHER"
+        with self.assertRaisesRegex(ValidationError, "resource"):
+            ServiceOperationSpec.from_mapping(mismatched_target)
+
+        revisioned_work = resource_operation_spec().to_dict()
+        revisioned_work["target"].update(
+            {
+                "object_format": "sha1",
+                "expected_revision": "a" * 40,
+                "desired_revision": "b" * 40,
+            }
+        )
+        with self.assertRaisesRegex(ValidationError, "non-repository"):
+            ServiceOperationSpec.from_mapping(revisioned_work)
+
+        legacy_with_resource = sidecar_spec(self.socket_path).to_dict()
+        mapping = legacy_with_resource["mappings"][0]
+        mapping["resource"] = {
+            "kind": "repository",
+            "external_id": mapping.pop("repository"),
+        }
+        with self.assertRaises(ValidationError):
+            ServiceSidecarSpec.from_mapping(legacy_with_resource)
+
+        spaced = ServiceResource.from_mapping(
+            {"kind": "work_project", "external_id": "Customer Platform"}
+        )
+        self.assertEqual(spaced.external_id, "Customer Platform")
+
+        repository_sidecar = resource_sidecar_spec(self.socket_path).to_dict()
+        repository_sidecar["mappings"][0]["resource"] = {
+            "kind": "repository",
+            "external_id": "acme/widgets",
+        }
+        parsed_repository = ServiceSidecarSpec.from_mapping(repository_sidecar)
+        self.assertEqual(parsed_repository.mappings[0].repository, "acme/widgets")
+
     def test_core_capabilities_own_their_safety_mode(self) -> None:
         advertised = sidecar_spec(self.socket_path).to_dict()
         advertised["capabilities"][0]["mode"] = "read"
@@ -176,6 +373,18 @@ class ServiceSidecarContractTests(unittest.TestCase):
                 self.subTest(invalid=invalid),
                 self.assertRaisesRegex(
                     ValidationError, "connector_protocol_version must be one of"
+                ),
+            ):
+                ServiceSidecarSpec.from_mapping(candidate)
+
+    def test_schema_version_rejects_boolean_and_numeric_lookalikes(self) -> None:
+        for invalid in (True, 1.0, 2.0):
+            candidate = resource_sidecar_spec(self.socket_path).to_dict()
+            candidate["schema_version"] = invalid
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(
+                    ValidationError, "schema_version must be one of"
                 ),
             ):
                 ServiceSidecarSpec.from_mapping(candidate)

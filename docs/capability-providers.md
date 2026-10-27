@@ -1,12 +1,12 @@
 # Capability providers and project routing
 
-**Status: implemented foundation with post-M11 expansion roadmap.**
+**Status: implemented foundation; M14 resource-neutral expansion in progress.**
 
 Schema v24 implements the first narrow routing seam: core-owned capability
 modes, explicit single-controller project bindings, audited unbinding, and an
-atomic operation-to-binding pin. Profile/run grants and heterogeneous resource
-bindings remain later work; their absence does not widen the implemented
-surface.
+atomic operation-to-binding pin. Schema v42 adds the first heterogeneous
+resource authority without changing that routing model. Profile/run service
+grants remain later work; their absence does not widen the implemented surface.
 
 Magic Glass Box exposes small, versioned semantic capabilities rather than
 provider-native clients. An agent asks for a kind of work to be performed; it
@@ -182,13 +182,12 @@ duplicating the merge. It does not add
 Jira, GitLab, remote runners, dynamic plugin loading, a provider marketplace,
 or a universal resource schema.
 
-The capability-provider direction may change how the GitHub implementation is
-factored and named, but not what either milestone must prove. A later
-heterogeneous implementation—such as Jira or a controlled Azure runner—should
-pressure-test a versioned resource-binding model rather than pretending every
-external resource is a repository. Existing v1 contracts should be preserved
-or advanced explicitly; provider-specific fields must not leak into the agent
-surface to avoid a version change.
+The capability-provider direction does not retroactively change M10 or M11.
+M14 advances the service contract explicitly: v1 stays repository-shaped and
+digest-stable, while v2 replaces the repository field with a core-owned
+`resource` tuple. The initial kinds are `repository` and `work_project`;
+provider-native labels such as `jira_project` do not enter core authority.
+Adding another kind requires a core contract change, not a sidecar invention.
 
 ## Post-M11 sequence
 

@@ -1,0 +1,39 @@
+{
+  "capabilities": [
+    {
+      "mode": "read",
+      "name": "work.get",
+      "version": 1
+    },
+    {
+      "mode": "read",
+      "name": "work.list",
+      "version": 1
+    }
+  ],
+  "connector_protocol_version": 2,
+  "deployment_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "mappings": [
+    {
+      "account": "automation",
+      "credential_scope_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "host": "work.example.test",
+      "name": "primary",
+      "resource": {
+        "external_id": "ABC",
+        "kind": "work_project"
+      },
+      "service": "example-work"
+    }
+  ],
+  "max_concurrency": 2,
+  "max_requests_per_minute": 30,
+  "request_bytes": 32768,
+  "response_bytes": 65536,
+  "schema_version": 2,
+  "timeout_ms": 30000,
+  "transport": {
+    "kind": "unix",
+    "socket_path": "/var/run/magic-glass-box/example-work.sock"
+  }
+}

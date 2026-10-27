@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5607,6 +5607,199 @@ OPERABILITY_SCHEMA = (
     PROVIDER_INVOCATION_LIMIT_SCHEMA + SUPERVISOR_DISCOVERY_CURSOR_SCHEMA
 )
 
+SERVICE_RESOURCE_SCHEMA = """
+DROP TRIGGER service_sidecar_identity_immutable;
+DROP TRIGGER service_sidecar_immutable_delete;
+DROP TRIGGER service_operation_identity_immutable;
+DROP TRIGGER service_operation_immutable_delete;
+DROP INDEX service_sidecar_state;
+DROP INDEX service_operation_state;
+DROP INDEX service_operation_sidecar;
+
+CREATE TABLE service_sidecars_v42 (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version IN (1, 2)),
+    connector_protocol_version INTEGER NOT NULL CHECK (
+        connector_protocol_version IN (1, 2)
+        AND connector_protocol_version = schema_version
+    ),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE CHECK (length(content_sha256) = 64),
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    transport_kind TEXT NOT NULL CHECK (transport_kind = 'unix'),
+    socket_path TEXT NOT NULL,
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 1),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 1),
+    timeout_ms INTEGER NOT NULL CHECK (timeout_ms >= 100),
+    max_concurrency INTEGER NOT NULL CHECK (
+        max_concurrency BETWEEN 1 AND 16
+    ),
+    max_requests_per_minute INTEGER NOT NULL CHECK (
+        max_requests_per_minute BETWEEN 1 AND 10000
+    ),
+    created_by TEXT NOT NULL,
+    revoked_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (revoked_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'active' AND revoked_by IS NULL AND revoked_at IS NULL)
+        OR
+        (state = 'revoked' AND revoked_by IS NOT NULL AND revoked_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE service_operations_v42 (
+    id TEXT PRIMARY KEY,
+    service_sidecar_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'pending', 'dispatching', 'uncertain', 'retryable', 'throttled',
+            'succeeded', 'denied', 'conflict', 'cancelled'
+        )
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version IN (1, 2)),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    sidecar_content_sha256 TEXT NOT NULL CHECK (
+        length(sidecar_content_sha256) = 64
+    ),
+    deployment_sha256 TEXT NOT NULL CHECK (length(deployment_sha256) = 64),
+    mapping_name TEXT NOT NULL,
+    service TEXT NOT NULL,
+    host TEXT NOT NULL,
+    resource_kind TEXT NOT NULL CHECK (
+        resource_kind IN ('repository', 'work_project')
+    ),
+    resource_external_id TEXT NOT NULL CHECK (length(resource_external_id) >= 1),
+    account TEXT NOT NULL,
+    credential_scope_sha256 TEXT NOT NULL CHECK (
+        length(credential_scope_sha256) = 64
+    ),
+    capability_name TEXT NOT NULL,
+    capability_version INTEGER NOT NULL CHECK (capability_version >= 1),
+    capability_mode TEXT NOT NULL CHECK (capability_mode IN ('read', 'effect')),
+    idempotency_key TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+    request_bytes INTEGER NOT NULL CHECK (request_bytes >= 1),
+    response_bytes INTEGER NOT NULL CHECK (response_bytes >= 1),
+    timeout_ms INTEGER NOT NULL CHECK (timeout_ms >= 100),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    eligible_at TEXT,
+    completed_at TEXT,
+    UNIQUE (service_sidecar_id, idempotency_key),
+    FOREIGN KEY (service_sidecar_id)
+        REFERENCES service_sidecars_v42(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state IN ('pending', 'dispatching', 'uncertain')
+            AND eligible_at IS NULL AND completed_at IS NULL)
+        OR
+        (state IN ('retryable', 'throttled')
+            AND eligible_at IS NOT NULL AND completed_at IS NULL)
+        OR
+        (state IN ('succeeded', 'denied', 'conflict', 'cancelled')
+            AND eligible_at IS NULL AND completed_at IS NOT NULL)
+    )
+) STRICT;
+
+INSERT INTO service_sidecars_v42 (
+    id, name, state, version, schema_version, connector_protocol_version,
+    spec_json, content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency,
+    max_requests_per_minute, created_by, revoked_by, created_at, updated_at,
+    revoked_at
+)
+SELECT
+    id, name, state, version, schema_version, connector_protocol_version,
+    spec_json, content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency,
+    max_requests_per_minute, created_by, revoked_by, created_at, updated_at,
+    revoked_at
+FROM service_sidecars;
+
+INSERT INTO service_operations_v42 (
+    id, service_sidecar_id, state, version, schema_version, spec_json,
+    content_sha256, sidecar_content_sha256, deployment_sha256, mapping_name,
+    service, host, resource_kind, resource_external_id, account,
+    credential_scope_sha256, capability_name, capability_version,
+    capability_mode, idempotency_key, input_sha256, request_bytes,
+    response_bytes, timeout_ms, created_by, created_at, updated_at, eligible_at,
+    completed_at
+)
+SELECT
+    id, service_sidecar_id, state, version, schema_version, spec_json,
+    content_sha256, sidecar_content_sha256, deployment_sha256, mapping_name,
+    service, host,
+    CASE schema_version
+        WHEN 1 THEN 'repository'
+        ELSE json_extract(spec_json, '$.mapping.resource.kind')
+    END,
+    CASE schema_version
+        WHEN 1 THEN json_extract(spec_json, '$.mapping.repository')
+        ELSE json_extract(spec_json, '$.mapping.resource.external_id')
+    END,
+    account,
+    credential_scope_sha256, capability_name, capability_version,
+    capability_mode, idempotency_key, input_sha256, request_bytes,
+    response_bytes, timeout_ms, created_by, created_at, updated_at, eligible_at,
+    completed_at
+FROM service_operations;
+
+DROP TABLE service_operations;
+DROP TABLE service_sidecars;
+ALTER TABLE service_sidecars_v42 RENAME TO service_sidecars;
+ALTER TABLE service_operations_v42 RENAME TO service_operations;
+
+CREATE INDEX service_sidecar_state
+    ON service_sidecars(state, created_at, id);
+CREATE INDEX service_operation_state
+    ON service_operations(state, eligible_at, created_at, id);
+CREATE INDEX service_operation_sidecar
+    ON service_operations(service_sidecar_id, created_at, id);
+
+CREATE TRIGGER service_sidecar_identity_immutable
+BEFORE UPDATE OF
+    id, name, schema_version, connector_protocol_version, spec_json,
+    content_sha256, deployment_sha256, transport_kind, socket_path,
+    request_bytes, response_bytes, timeout_ms, max_concurrency,
+    max_requests_per_minute, created_by, created_at
+ON service_sidecars
+BEGIN
+    SELECT RAISE(ABORT, 'service sidecar identity is immutable');
+END;
+CREATE TRIGGER service_sidecar_immutable_delete
+BEFORE DELETE ON service_sidecars
+BEGIN
+    SELECT RAISE(ABORT, 'service sidecars cannot be deleted');
+END;
+CREATE TRIGGER service_operation_identity_immutable
+BEFORE UPDATE OF
+    id, service_sidecar_id, schema_version, spec_json, content_sha256,
+    sidecar_content_sha256, deployment_sha256, mapping_name, service, host,
+    resource_kind, resource_external_id, account, credential_scope_sha256,
+    capability_name, capability_version, capability_mode, idempotency_key,
+    input_sha256, request_bytes, response_bytes, timeout_ms, created_by,
+    created_at
+ON service_operations
+BEGIN
+    SELECT RAISE(ABORT, 'service operation identity is immutable');
+END;
+CREATE TRIGGER service_operation_immutable_delete
+BEFORE DELETE ON service_operations
+BEGIN
+    SELECT RAISE(ABORT, 'service operations cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -5651,7 +5844,8 @@ SCHEMA_V37 = (
 SCHEMA_V38 = SCHEMA_V37 + ADVISORY_DIRECTOR_SCHEMA
 SCHEMA_V39 = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
 SCHEMA_V40 = SCHEMA_V39 + WORKFLOW_SCOPE_REVIEW_SCHEMA
-SCHEMA = SCHEMA_V40 + OPERABILITY_SCHEMA
+SCHEMA_V41 = SCHEMA_V40 + OPERABILITY_SCHEMA
+SCHEMA = SCHEMA_V41 + SERVICE_RESOURCE_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -5693,4 +5887,5 @@ MIGRATIONS = {
     38: WORKFLOW_SCOPE_BINDING_SCHEMA,
     39: WORKFLOW_SCOPE_REVIEW_SCHEMA,
     40: OPERABILITY_SCHEMA,
+    41: SERVICE_RESOURCE_SCHEMA,
 }

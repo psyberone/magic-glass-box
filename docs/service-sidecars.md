@@ -4,8 +4,9 @@ Milestone 10 implements the credential-free core half of the service-sidecar
 boundary: immutable registration, exact semantic operation authority, a bounded
 Unix-socket protocol, a durable attempt ledger, and uncertain-effect
 reconciliation. Provider-specific code does not execute in the core. Milestone
-11 now supplies the first out-of-process reference provider for GitHub; its live
-repository exit proof remains pending.
+11 supplies the first out-of-process reference provider for GitHub and
+completed its live repository proof. Milestone 14 now advances the wire
+contract for a non-repository work controller without changing v1.
 
 Service sidecars are optional credential-bearing add-ons. They execute
 already-authorized provider mechanics; they do not own candidate readiness,
@@ -99,7 +100,7 @@ Before use, a sidecar registers:
 
 - protocol version and connector identity;
 - supported capability versions;
-- operator-owned service, host, repository, and account mappings;
+- operator-owned service, host, resource, and account mappings;
 - an effective credential-scope fingerprint without the credential value; and
 - transport, response-size, duration, rate, and concurrency limits.
 
@@ -109,6 +110,15 @@ duplicate-free, and one absolute deadline bounds connect, send, and receive.
 An external carrier would need its own revocable client authentication; public
 reachability is not authentication. Worker-supplied hosts, repositories,
 account names, or socket paths never select the connector.
+
+The published v1 registration and operation shapes keep their original
+`repository` and `resource_id` fields and exact canonical digests. Protocol v2
+uses a core-owned `{kind, external_id}` resource plus an `object_id`. The
+initial kinds are `repository` and `work_project`; non-repository targets cannot
+carry Git object revisions. Schema and protocol generations must match, and a
+mapping and target must name the identical resource. The provider name remains
+separate, so Jira, another issue system, and an operator-defined adapter all use
+`work_project` rather than minting provider-native authority types.
 
 Every invocation binds the operation, mapping, account, scope fingerprint,
 exact revisions or work-object IDs, limits, and durable operation ID. A
@@ -159,10 +169,10 @@ capability.
 
 Registration and operation documents are published as Draft 2020-12 schemas in
 `schemas/service-sidecar-v1.schema.json` and
-`schemas/service-operation-v1.schema.json`. The on-wire correlated envelopes
-are `service-operation-request-v1.schema.json` and
-`service-operation-response-v1.schema.json`; runnable examples live in
-`examples/`.
+`schemas/service-operation-v1.schema.json`, with the resource-neutral generation
+in the corresponding `*-v2.schema.json` files. Each generation also publishes
+its correlated operation request and response. Runnable v1 and v2 examples live
+in `examples/`.
 
 ```console
 magic-glass-box service-sidecar register example \
@@ -201,9 +211,8 @@ independent add-ons implementing only the families they support.
 
 This capability-provider direction does not expand M10 or M11. M10 proves the
 credential-free operation and reconciliation kernel; M11 proves one GitHub
-provider against it. Later heterogeneous providers may require a new versioned
-resource-binding shape rather than forcing Jira projects, runners, or other
-resources into v1's repository-shaped mapping.
+provider against v1. M14's explicit v2 resource authority prevents Jira
+projects and future bounded resources from being disguised as repositories.
 
 No provider-specific SDK, CLI, credential, configuration path, status vocabulary,
 or merge quirk belongs in the Magic Glass Box core.

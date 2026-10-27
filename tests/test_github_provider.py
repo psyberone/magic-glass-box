@@ -1965,7 +1965,16 @@ class GitHubProviderTests(unittest.TestCase):
             replace(base, response_limit_bytes=self.spec.response_bytes + 1),
             replace(base, mapping=replace(base.mapping, name="secondary")),
             replace(base, capability=replace(base.capability, version=2)),
-            replace(base, target=replace(base.target, repository="other/widgets")),
+            replace(
+                base,
+                target=replace(
+                    base.target,
+                    resource=replace(
+                        base.target.resource,
+                        external_id="other/widgets",
+                    ),
+                ),
+            ),
             replace(base, target=replace(base.target, object_format="sha256")),
         )
         for variant in variants:

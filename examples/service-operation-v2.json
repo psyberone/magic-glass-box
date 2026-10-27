@@ -1,0 +1,36 @@
+{
+  "capability": {
+    "mode": "read",
+    "name": "work.get",
+    "version": 1
+  },
+  "connector_name": "example-work-sidecar",
+  "deployment_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "idempotency_key": "get-work-abc-42",
+  "mapping": {
+    "account": "automation",
+    "credential_scope_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "host": "work.example.test",
+    "name": "primary",
+    "resource": {
+      "external_id": "ABC",
+      "kind": "work_project"
+    },
+    "service": "example-work"
+  },
+  "parameters": {},
+  "request_bytes": 16384,
+  "response_bytes": 32768,
+  "schema_version": 2,
+  "target": {
+    "desired_revision": null,
+    "expected_revision": null,
+    "object_format": null,
+    "object_id": "ABC-42",
+    "resource": {
+      "external_id": "ABC",
+      "kind": "work_project"
+    }
+  },
+  "timeout_ms": 10000
+}

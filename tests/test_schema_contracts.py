@@ -774,18 +774,27 @@ class ArtifactSchemaContractTests(unittest.TestCase):
 class ServiceSidecarSchemaContractTests(unittest.TestCase):
     repository = Path(__file__).resolve().parents[1]
 
-    def load(self, name: str) -> tuple[Draft202012Validator, dict[str, Any]]:
+    def load_version(
+        self, name: str, version: int
+    ) -> tuple[Draft202012Validator, dict[str, Any]]:
         schema = json.loads(
-            (self.repository / "schemas" / f"{name}-v1.schema.json").read_text()
+            (self.repository / "schemas" / f"{name}-v{version}.schema.json").read_text()
         )
         example = json.loads(
-            (self.repository / "examples" / f"{name}.json").read_text()
+            (
+                self.repository
+                / "examples"
+                / (f"{name}.json" if version == 1 else f"{name}-v{version}.json")
+            ).read_text()
         )
         Draft202012Validator.check_schema(schema)
         return (
             Draft202012Validator(schema, format_checker=FormatChecker()),
             example,
         )
+
+    def load(self, name: str) -> tuple[Draft202012Validator, dict[str, Any]]:
+        return self.load_version(name, 1)
 
     def test_service_sidecar_examples_match_runtime_contracts(self) -> None:
         contracts = (
@@ -808,6 +817,45 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
         assert isinstance(response, ServiceOperationResponse)
         assert isinstance(request, ServiceOperationRequest)
         response.validate_correlation(request)
+
+    def test_resource_authority_examples_match_v2_runtime_contracts(self) -> None:
+        contracts = (
+            ("service-sidecar", ServiceSidecarSpec.from_mapping),
+            ("service-operation", ServiceOperationSpec.from_mapping),
+            ("service-operation-request", ServiceOperationRequest.from_mapping),
+            ("service-operation-response", ServiceOperationResponse.from_mapping),
+        )
+        parsed: dict[str, object] = {}
+        for name, factory in contracts:
+            with self.subTest(name=name):
+                validator, example = self.load_version(name, 2)
+                validator.validate(example)
+                value = factory(example)
+                validator.validate(value.to_dict())
+                self.assertEqual(value.to_dict(), example)
+                parsed[name] = value
+        response = parsed["service-operation-response"]
+        request = parsed["service-operation-request"]
+        assert isinstance(response, ServiceOperationResponse)
+        assert isinstance(request, ServiceOperationRequest)
+        response.validate_correlation(request)
+
+    def test_v2_schema_rejects_legacy_and_provider_native_resource_shapes(
+        self,
+    ) -> None:
+        validator, sidecar = self.load_version("service-sidecar", 2)
+        legacy = copy.deepcopy(sidecar)
+        mapping = legacy["mappings"][0]
+        mapping["repository"] = mapping.pop("resource")["external_id"]
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(legacy)
+
+        provider_native = copy.deepcopy(sidecar)
+        provider_native["mappings"][0]["resource"]["kind"] = "jira_project"
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(provider_native)
+        with self.assertRaises(ValidationError):
+            ServiceSidecarSpec.from_mapping(provider_native)
 
     def test_schema_and_runtime_reject_unsafe_service_authority(self) -> None:
         validator, sidecar = self.load("service-sidecar")

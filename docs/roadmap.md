@@ -1724,15 +1724,74 @@ authority or failure-path wave fell below the 80% floor.
 
 ## Milestone 14: heterogeneous work provider
 
-**Status: candidate milestone; first pressure test of non-repository resources**
+**Status: in progress; first pressure test of non-repository resources**
 
-- Advance resource bindings without pretending every external resource is a
-  repository.
-- Implement one bounded work-system provider—Jira is the leading real use
-  case—for normalized list/get/import and explicitly selected status effects.
-- Prove a mixed project whose work comes from Jira while candidates, checks,
-  and landing remain on GitHub. Agents see only semantic capabilities and MGB
-  correlation IDs.
+M14 is split into honest checkpoints so the generic seam is proven before Jira
+mechanics can distort it:
+
+### M14.1: versioned resource authority
+
+**Status: complete**
+
+- Preserve the complete service-sidecar v1 repository contract and its exact
+  canonical digests.
+- Publish service contract v2 with core-owned `repository` and `work_project`
+  resource kinds. Provider-native types such as `jira_project` are rejected;
+  the configured service name supplies the adapter identity.
+- Store and dispatch the exact resource kind/external-ID tuple, migrate legacy
+  operations as repositories without rewriting their specs, and permit a
+  project work capability to bind a non-repository controller.
+
+**Checkpoint:** a v2 `work.get` operation bound to a `work_project` survives
+registration, storage, dispatch, and correlated response parsing, while every
+published v1 example and digest remains unchanged.
+
+The completed checkpoint publishes all four v2 service contracts and examples,
+stores resource kind and external ID separately in schema v42, and proves a
+real v41 operation migrates without changing its immutable spec or digest. The
+full repository gate passes with 1,239 tests and 87% aggregate statement-plus-
+branch coverage. The focused final-code mutation wave killed 42/49 selected
+mutants initially; survivor analysis added exact boolean/float schema-version,
+valid v2 repository, and space-bearing work-project tests that killed five more,
+for an effective 47/49 (95.92%). The two remaining mutations change only
+private validation-field labels and do not change accepted authority or error
+type.
+
+### M14.2: normalized work intake seam
+
+- Define one bounded controller result for list/get plus an explicit import
+  command that upserts through the existing work-item contract; reads never
+  become implicit synchronization.
+- Keep work-system cursors, status names, query syntax, and raw descriptions on
+  the provider side. MGB retains only the normalized work envelope and exact
+  operation/receipt provenance needed for the import.
+- Prove idempotent update-or-insert behavior, disabled-capability failure, and
+  malformed/oversized provider-result rejection.
+
+### M14.3: Jira reference provider
+
+- Implement Jira list/get against an operator-selected base URL, project
+  mapping, account, and credential source outside MGB and all workers.
+- Add only the smallest core-owned status effect justified by the live use
+  case, with explicit target state, durable idempotency, and uncertain-effect
+  reconciliation; do not expose Jira transitions, JQL, or a raw HTTP surface
+  to an agent.
+- Supply provider conformance, credential-containment, pagination, throttling,
+  error, and lost-response tests before any live call.
+
+### M14.4: mixed-provider exit proof
+
+- Configure one MGB project whose work intake is a v2 Jira `work_project`
+  controller while candidate publication, checks, change creation, and landing
+  remain on the v1 GitHub repository controller.
+- Import one Jira-backed item, execute the ordinary producer/reviewer/
+  maintainer flow, and retain MGB correlation IDs across the two providers.
+
+**Milestone exit proof:** the worker and workflow name only semantic
+capabilities. No Jira credential, JQL, transition ID, GitHub credential, raw
+provider payload, or sidecar socket enters the worker, work item, or audit log.
+Disabling either binding removes only that surface and never causes implicit
+provider fallback.
 
 ## Milestone 15: controlled remote execution provider
 

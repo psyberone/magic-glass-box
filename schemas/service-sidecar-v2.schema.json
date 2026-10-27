@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:service-sidecar:v2",
+  "title": "Magic Glass Box Service Sidecar v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capabilities",
+    "connector_protocol_version",
+    "deployment_sha256",
+    "mappings",
+    "max_concurrency",
+    "max_requests_per_minute",
+    "request_bytes",
+    "response_bytes",
+    "schema_version",
+    "timeout_ms",
+    "transport"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "connector_protocol_version": { "const": 2 },
+    "deployment_sha256": { "$ref": "#/$defs/sha256" },
+    "transport": { "$ref": "#/$defs/transport" },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "mappings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/mapping" }
+    },
+    "request_bytes": { "type": "integer", "minimum": 1, "maximum": 2097152 },
+    "response_bytes": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+    "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 120000 },
+    "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 16 },
+    "max_requests_per_minute": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "socket_path"],
+      "properties": {
+        "kind": { "const": "unix" },
+        "socket_path": {
+          "type": "string",
+          "pattern": "^/[^\\u0000-\\u001f\\u007f]*$",
+          "maxLength": 100
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "name", "version"],
+      "properties": {
+        "mode": { "enum": ["read", "effect"] },
+        "name": {
+          "type": "string",
+          "pattern": "^(work|change|checks|refs|landing)\\.[a-z][a-z0-9_-]{0,63}$"
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "name": { "enum": ["work.get", "work.list", "change.get", "change.list", "checks.read"] },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "read" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": { "enum": ["change.open", "landing.invoke", "refs.publish"] },
+              "version": { "const": 1 }
+            },
+            "required": ["name", "version"]
+          },
+          "then": { "properties": { "mode": { "const": "effect" } } }
+        }
+      ]
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["external_id", "kind"],
+      "properties": {
+        "external_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?=.*\\S)[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "kind": { "enum": ["repository", "work_project"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "repository" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "external_id": {
+                "pattern": "^(?=.*\\S)[^:@?#\\u0000-\\u001f\\u007f]+$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "credential_scope_sha256",
+        "host",
+        "name",
+        "resource",
+        "service"
+      ],
+      "properties": {
+        "account": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": ".*\\S.*"
+        },
+        "credential_scope_sha256": { "$ref": "#/$defs/sha256" },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/@?#\\u0000-\\u001f\\u007f]+$"
+        },
+        "name": { "$ref": "#/$defs/name" },
+        "resource": { "$ref": "#/$defs/resource" },
+        "service": { "$ref": "#/$defs/name" }
+      }
+    }
+  }
+}

@@ -14,7 +14,12 @@ from magic_glass_box.db import (
     NotFoundError,
 )
 from magic_glass_box.domain import ProjectContext, ValidationError
-from tests.test_service_sidecars import operation_spec, sidecar_spec
+from tests.test_service_sidecars import (
+    operation_spec,
+    resource_operation_spec,
+    resource_sidecar_spec,
+    sidecar_spec,
+)
 
 
 class ProjectCapabilityBindingTests(unittest.TestCase):
@@ -86,6 +91,37 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ConflictError, "already bound"):
             self.bind(sidecar_name="secondary-sidecar")
+
+    def test_work_capability_binds_a_work_project_without_repository_aliasing(
+        self,
+    ) -> None:
+        self.database.register_service_sidecar(
+            name="example-work-sidecar",
+            spec=resource_sidecar_spec(self.root / "work.sock"),
+            created_by=self.user["id"],
+        )
+        binding = self.database.bind_project_capability(
+            project_key="demo-project",
+            capability_name="work.get",
+            capability_version=1,
+            sidecar_name="example-work-sidecar",
+            mapping_name="primary",
+            bound_by=self.user["id"],
+        )
+
+        mapping = binding["controller"]["mapping"]
+        self.assertEqual(
+            mapping["resource"],
+            {"external_id": "ABC", "kind": "work_project"},
+        )
+        self.assertNotIn("repository", mapping)
+        operation = self.database.create_service_operation(
+            spec=resource_operation_spec(),
+            created_by=self.user["id"],
+            project_capability_binding_id=binding["id"],
+        )
+        self.assertEqual(operation["project_capability_binding_id"], binding["id"])
+        self.assertEqual(operation["spec"]["target"]["resource"], mapping["resource"])
 
     def test_absence_unbind_and_revocation_fail_closed_without_fallback(self) -> None:
         with self.assertRaisesRegex(ConflictError, "project capability is unavailable"):

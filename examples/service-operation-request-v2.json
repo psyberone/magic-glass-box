@@ -1,0 +1,39 @@
+{
+  "capability": {
+    "mode": "read",
+    "name": "work.get",
+    "version": 1
+  },
+  "connector_id": "ssc_22222222222222222222222222222222",
+  "connector_protocol_version": 2,
+  "deadline": "2026-10-27T18:00:00.000000+00:00",
+  "deployment_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "input_sha256": "dc9d26473b7a2efa21399a92caa7e4c5db07758a83b402d95f9e85b2e73e6919",
+  "mapping": {
+    "account": "automation",
+    "credential_scope_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "host": "work.example.test",
+    "name": "primary",
+    "resource": {
+      "external_id": "ABC",
+      "kind": "work_project"
+    },
+    "service": "example-work"
+  },
+  "operation_id": "sop_11111111111111111111111111111111",
+  "parameters": {},
+  "phase": "invoke",
+  "request_limit_bytes": 16384,
+  "response_limit_bytes": 32768,
+  "schema_version": 2,
+  "target": {
+    "desired_revision": null,
+    "expected_revision": null,
+    "object_format": null,
+    "object_id": "ABC-42",
+    "resource": {
+      "external_id": "ABC",
+      "kind": "work_project"
+    }
+  }
+}

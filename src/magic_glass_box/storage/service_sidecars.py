@@ -769,12 +769,12 @@ class ServiceSidecarStorage:
             "INSERT INTO service_operations "
             "(id, service_sidecar_id, state, version, schema_version, "
             "spec_json, content_sha256, sidecar_content_sha256, "
-            "deployment_sha256, mapping_name, service, host, repository, "
-            "account, credential_scope_sha256, capability_name, "
+            "deployment_sha256, mapping_name, service, host, resource_kind, "
+            "resource_external_id, account, credential_scope_sha256, capability_name, "
             "capability_version, capability_mode, idempotency_key, "
             "input_sha256, request_bytes, response_bytes, timeout_ms, "
             "created_by, created_at, updated_at) "
-            "VALUES (?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "VALUES (?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
             "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 operation_id,
@@ -787,7 +787,8 @@ class ServiceSidecarStorage:
                 spec.mapping.name,
                 spec.mapping.service,
                 spec.mapping.host,
-                spec.mapping.repository,
+                spec.mapping.resource.kind,
+                spec.mapping.resource.external_id,
                 spec.mapping.account,
                 spec.mapping.credential_scope_sha256,
                 spec.capability.name,

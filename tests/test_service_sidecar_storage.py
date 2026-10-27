@@ -23,7 +23,13 @@ from magic_glass_box.service_sidecar import (
     ServiceOperationResponse,
     ServiceOperationSpec,
 )
-from tests.test_service_sidecars import operation_spec, sidecar_spec
+from magic_glass_box.storage.schema import SCHEMA_V41
+from tests.test_service_sidecars import (
+    operation_spec,
+    resource_operation_spec,
+    resource_sidecar_spec,
+    sidecar_spec,
+)
 
 
 def successful_response(
@@ -105,7 +111,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         )
 
     def test_schema_twenty_four_registers_immutable_redacted_authority(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 41)
+        self.assertEqual(SCHEMA_VERSION, 42)
         self.assertIn("CREATE TABLE service_sidecars", SERVICE_SIDECAR_SCHEMA)
         self.assertIn(
             "CREATE TABLE project_capability_bindings", CAPABILITY_BINDING_SCHEMA
@@ -204,6 +210,130 @@ class ServiceSidecarStorageTests(unittest.TestCase):
                 "project_capability_binding_events",
                 "service_operation_capability_bindings",
             }.issubset(tables)
+        )
+        with closing(self.database.connect()) as connection:
+            operation_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(service_operations)")
+            }
+        self.assertIn("resource_kind", operation_columns)
+        self.assertIn("resource_external_id", operation_columns)
+        self.assertNotIn("repository", operation_columns)
+
+    def test_v2_work_resource_authority_is_stored_and_dispatched_exactly(self) -> None:
+        spec = resource_sidecar_spec(self.root / "work.sock")
+        sidecar = self.database.register_service_sidecar(
+            name="example-work-sidecar",
+            spec=spec,
+            created_by=self.user["id"],
+        )
+        operation_specification = resource_operation_spec()
+        operation = self.database.create_service_operation(
+            spec=operation_specification,
+            created_by=self.user["id"],
+        )
+
+        self.assertEqual(sidecar["schema_version"], 2)
+        self.assertEqual(sidecar["spec"], spec.to_dict())
+        self.assertEqual(operation["schema_version"], 2)
+        self.assertEqual(operation["spec"], operation_specification.to_dict())
+        with closing(self.database.connect()) as connection:
+            stored = connection.execute(
+                "SELECT resource_kind, resource_external_id "
+                "FROM service_operations WHERE id = ?",
+                (operation["id"],),
+            ).fetchone()
+        self.assertEqual(stored["resource_kind"], "work_project")
+        self.assertEqual(stored["resource_external_id"], "ABC")
+
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="supervisor-one",
+            expected_version=1,
+            lease_seconds=30,
+        )
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        self.assertEqual(request.schema_version, 2)
+        self.assertEqual(request.connector_protocol_version, 2)
+        self.assertEqual(request.mapping.resource.kind, "work_project")
+        self.assertEqual(request.mapping.resource.external_id, "ABC")
+        self.assertEqual(request.target.object_id, "ABC-42")
+
+    def test_schema_forty_two_preserves_legacy_repository_operations(self) -> None:
+        legacy_path = self.root / "schema-v41.db"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(SCHEMA_V41)
+            connection.execute("PRAGMA user_version = 41")
+        legacy_path.chmod(0o600)
+        legacy = Database(legacy_path)
+        user = legacy.create_user("legacy-operator", "Legacy Operator")
+        registered = legacy.register_service_sidecar(
+            name="legacy-sidecar",
+            spec=self.spec,
+            created_by=user["id"],
+        )
+        operation = operation_spec()
+        operation_id = "sop_11111111111111111111111111111111"
+        timestamp = "2026-10-27T12:00:00.000000+00:00"
+        with closing(legacy.connect()) as connection, connection:
+            connection.execute(
+                "INSERT INTO service_operations "
+                "(id, service_sidecar_id, state, version, schema_version, "
+                "spec_json, content_sha256, sidecar_content_sha256, "
+                "deployment_sha256, mapping_name, service, host, repository, "
+                "account, credential_scope_sha256, capability_name, "
+                "capability_version, capability_mode, idempotency_key, "
+                "input_sha256, request_bytes, response_bytes, timeout_ms, "
+                "created_by, created_at, updated_at) "
+                "VALUES (?, ?, 'pending', 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    registered["id"],
+                    operation.canonical,
+                    operation.digest,
+                    self.spec.digest,
+                    operation.deployment_sha256,
+                    operation.mapping.name,
+                    operation.mapping.service,
+                    operation.mapping.host,
+                    operation.mapping.repository,
+                    operation.mapping.account,
+                    operation.mapping.credential_scope_sha256,
+                    operation.capability.name,
+                    operation.capability.version,
+                    operation.capability.mode,
+                    operation.idempotency_key,
+                    operation.input_sha256,
+                    operation.request_bytes,
+                    operation.response_bytes,
+                    operation.timeout_ms,
+                    user["id"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        first = legacy.initialize()
+        second = legacy.initialize()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema_version"], 42)
+        migrated = legacy.get_service_operation(operation_id)
+        self.assertEqual(migrated["spec"], operation.to_dict())
+        with closing(legacy.connect()) as connection:
+            stored = connection.execute(
+                "SELECT resource_kind, resource_external_id "
+                "FROM service_operations WHERE id = ?",
+                (operation_id,),
+            ).fetchone()
+        self.assertEqual(
+            dict(stored),
+            {
+                "resource_kind": "repository",
+                "resource_external_id": "acme/widgets",
+            },
         )
 
     def test_operation_creation_is_exact_idempotent_and_fail_closed(self) -> None:

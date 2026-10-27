@@ -1,0 +1,53 @@
+{
+  "capability": {
+    "mode": "read",
+    "name": "work.get",
+    "version": 1
+  },
+  "connector_id": "ssc_22222222222222222222222222222222",
+  "connector_protocol_version": 2,
+  "deadline": "2026-10-27T18:00:00.000000+00:00",
+  "deployment_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "error_code": null,
+  "input_sha256": "dc9d26473b7a2efa21399a92caa7e4c5db07758a83b402d95f9e85b2e73e6919",
+  "mapping": {
+    "account": "automation",
+    "credential_scope_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "host": "work.example.test",
+    "name": "primary",
+    "resource": {
+      "external_id": "ABC",
+      "kind": "work_project"
+    },
+    "service": "example-work"
+  },
+  "operation_id": "sop_11111111111111111111111111111111",
+  "outcome": "succeeded",
+  "phase": "invoke",
+  "provider_status": 200,
+  "receipt": {
+    "closed_references": [],
+    "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "observed_revision": null,
+    "remote_identity": "ABC-42",
+    "result": {
+      "acceptance_criteria": [],
+      "brief": "Return one bounded work item through a non-repository controller.",
+      "constraints": [],
+      "context": [],
+      "external_id": "ABC-42",
+      "labels": ["m14"],
+      "priority": "normal",
+      "schema_version": 1,
+      "source": "example-work",
+      "source_updated_at": "2026-10-27T12:00:00Z",
+      "title": "Prove heterogeneous work authority"
+    }
+  },
+  "request_bytes": 512,
+  "request_limit_bytes": 16384,
+  "response_bytes": 768,
+  "response_limit_bytes": 32768,
+  "retry_after_seconds": null,
+  "schema_version": 2
+}
