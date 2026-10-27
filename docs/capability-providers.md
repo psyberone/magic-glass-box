@@ -1,6 +1,7 @@
 # Capability providers and project routing
 
-**Status: implemented foundation; M14 resource-neutral expansion in progress.**
+**Status: implemented foundation; M14 deterministic mixed-provider expansion
+complete, live external proof pending.**
 
 Schema v24 implements the first narrow routing seam: core-owned capability
 modes, explicit single-controller project bindings, audited unbinding, and an
@@ -209,3 +210,12 @@ The next provider pressure tests are intentionally heterogeneous:
 Bitbucket, raw Git, additional issue systems, interaction carriers, local and
 hosted agents, and additional inference providers remain candidates selected by
 demonstrated need. See [roadmap.md](roadmap.md) for the milestone boundaries.
+
+M14's deterministic mixed-provider proof now exercises the first item end to
+end: Jira v2 work intake is explicitly imported with immutable operation
+provenance, while exact candidate publication, change creation, checks, and
+landing route through four GitHub v1 bindings. The workflow and workers retain
+only MGB-owned correlation and normalized work data. Removing either provider
+surface fails closed without discovering or falling back to the other. The
+final external run remains opt-in because it needs an operator-selected Jira
+credential/issue and a destructive sacrificial GitHub target.

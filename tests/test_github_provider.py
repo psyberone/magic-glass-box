@@ -1010,6 +1010,70 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(reconciled.provider_status, 200)
         self.assertEqual(len(reconcile_api.calls), 1)
 
+    def test_change_open_treats_mismatched_created_authority_as_uncertain(self) -> None:
+        for section, field, value in (
+            ("head", "ref", "mgb/another-candidate"),
+            ("head", "sha", "f" * 40),
+            ("base", "ref", "release"),
+            ("base", "sha", "f" * 40),
+        ):
+            with self.subTest(section=section, field=field):
+                created = pull()
+                created.pop("merged")
+                created[section][field] = value
+                api = FakeGitHubAPI(
+                    [
+                        api_response(200, []),
+                        api_response(200, ref(BASE)),
+                        api_response(200, ref(HEAD, "mgb/op-42")),
+                        api_response(201, created),
+                    ]
+                )
+
+                response = GitHubProvider(self.spec, api).invoke(
+                    request(
+                        self.socket_path,
+                        "change.open",
+                        resource_id="refs/heads/mgb/op-42",
+                        parameters={
+                            "base_ref": "refs/heads/main",
+                            "body": "Bounded summary.",
+                            "draft": True,
+                            "head_ref": "refs/heads/mgb/op-42",
+                            "title": "Candidate 42",
+                        },
+                    )
+                )
+
+                self.assertEqual(response.outcome, "uncertain")
+                self.assertEqual(response.error_code, "github-response-invalid")
+                self.assertIsNone(response.receipt)
+
+    def test_change_reconcile_rejects_a_pull_from_another_base_revision(self) -> None:
+        existing = pull(base_sha="f" * 40)
+
+        response = GitHubProvider(
+            self.spec, FakeGitHubAPI([api_response(200, [existing])])
+        ).invoke(
+            request(
+                self.socket_path,
+                "change.open",
+                phase="reconcile",
+                resource_id="refs/heads/mgb/op-42",
+                parameters={
+                    "base_ref": "refs/heads/main",
+                    "body": "Bounded summary.",
+                    "draft": True,
+                    "head_ref": "refs/heads/mgb/op-42",
+                    "title": "Candidate 42",
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "not_found")
+        self.assertEqual(response.error_code, "github-change-not-found")
+        self.assertIsNone(response.receipt)
+
     def test_change_reconcile_reports_absence_without_creating(self) -> None:
         api = FakeGitHubAPI([api_response(200, [])])
         response = GitHubProvider(self.spec, api).invoke(

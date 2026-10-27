@@ -1724,7 +1724,8 @@ authority or failure-path wave fell below the 80% floor.
 
 ## Milestone 14: heterogeneous work provider
 
-**Status: in progress; first pressure test of non-repository resources**
+**Status: in progress; deterministic mixed-provider proof complete, explicitly
+authorized live proof pending**
 
 M14 is split into honest checkpoints so the generic seam is proven before Jira
 mechanics can distort it:
@@ -1841,6 +1842,8 @@ outcomes.
 
 ### M14.4: mixed-provider exit proof
 
+**Status: deterministic proof complete; live external execution pending**
+
 - Configure one MGB project whose work intake is a v2 Jira `work_project`
   controller while candidate publication, checks, change creation, and landing
   remain on the v1 GitHub repository controller.
@@ -1852,6 +1855,43 @@ capabilities. No Jira credential, JQL, transition ID, GitHub credential, raw
 provider payload, or sidecar socket enters the worker, work item, or audit log.
 Disabling either binding removes only that surface and never causes implicit
 provider fallback.
+
+The deterministic proof now composes both real provider implementations through
+the durable operation ledger. A v2 Jira `work.get` result is normalized,
+persisted, and explicitly imported with its exact operation, attempt, receipt,
+and capability-binding provenance. That item then completes the ordinary
+producer, independent reviewer, maintainer approval, candidate publication,
+change creation, hosted-check read, provider landing, and work-thread closeout
+path. Publication, change, checks, and landing are four separately bound v1
+GitHub capabilities tied to the exact gated candidate revision. The producer
+and reviewer have distinct profiles and Krab identities and receive no direct
+provider authority.
+
+The proof asserts the worker projections, normalized work item, work memory,
+and workflow event ledger contain no provider socket, Jira account ID/status,
+JQL, transition ID, raw issue ID, or credential-shaped value. Unbinding GitHub
+landing leaves Jira intake available; unbinding Jira intake leaves GitHub
+checks available; GitHub's separately registered `work.get` capability never
+becomes an implicit fallback. All cross-provider joins remain MGB-owned IDs.
+
+This integration pass exposed and fixed one real M11 correlation gap: a
+successful `change.open` response had checked the exact candidate SHA but not
+the authorized head ref, base ref, and base SHA. A mismatched response after
+the create effect is now `uncertain`, while reconciliation will not reuse a
+pull request from another base revision.
+
+Checkpoint evidence: 1,311 tests pass with Ruff format/lint clean and 87%
+aggregate statement-plus-branch coverage; the GitHub provider remains at 90%.
+A clean final-code GitHub-provider mutation wave killed 2,327/2,776 mutants
+(83.83%). The exact new head/base SHA and ref correlation conditions were all
+killed; remaining survivors do not remove those authority checks.
+
+The remaining M14 exit action is deliberately external rather than simulated:
+run one read-only Jira issue import using an operator-selected private
+credential file and one explicitly destructive GitHub publication/open/check/
+landing sequence against a sacrificial repository. No credential or live
+target has been inferred from the workstation, so that run awaits explicit
+operator configuration and authorization.
 
 ## Milestone 15: controlled remote execution provider
 

@@ -27,13 +27,16 @@ from magic_glass_box.domain import (
     canonical_json,
 )
 from magic_glass_box.executor import SandboxResult
+from magic_glass_box.github_provider import GitHubProvider
 from magic_glass_box.integration import LandingReceiptRequest
+from magic_glass_box.jira_provider import JiraProvider
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.service_sidecar import (
     ServiceOperationRequest,
     ServiceOperationResponse,
+    ServiceOperationSpec,
     ServiceSidecarSpec,
 )
 from magic_glass_box.storage.errors import ConcurrentUpdateError, ConflictError
@@ -41,6 +44,34 @@ from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION, WorkflowDirector
 from magic_glass_box.workflow_scope import WorkflowScopeReview
 from magic_glass_box.workflows import WorkflowConfigurationSpec
+from tests.test_github_provider import (
+    FakeGitHubAPI,
+    FakeGitPublisher,
+)
+from tests.test_github_provider import (
+    api_response as github_api_response,
+)
+from tests.test_github_provider import (
+    pull as github_pull,
+)
+from tests.test_github_provider import (
+    ref as github_ref,
+)
+from tests.test_github_provider import (
+    sidecar_spec as github_sidecar_spec,
+)
+from tests.test_jira_provider import (
+    FakeJiraAPI,
+)
+from tests.test_jira_provider import (
+    api_response as jira_api_response,
+)
+from tests.test_jira_provider import (
+    issue as jira_issue,
+)
+from tests.test_jira_provider import (
+    sidecar_spec as jira_sidecar_spec,
+)
 
 
 def git(binary: Path, *arguments: str, cwd: Path) -> str:
@@ -702,6 +733,65 @@ class WorkflowDirectorTests(unittest.TestCase):
             sidecar_name="github-main",
             mapping_name="primary",
             bound_by=self.user["id"],
+        )
+
+    @staticmethod
+    def provider_operation_spec(
+        *,
+        sidecar_name: str,
+        sidecar: ServiceSidecarSpec,
+        capability_name: str,
+        capability_mode: str,
+        idempotency_key: str,
+        target: dict[str, object],
+        parameters: dict[str, object],
+    ) -> ServiceOperationSpec:
+        return ServiceOperationSpec.from_mapping(
+            {
+                "schema_version": sidecar.schema_version,
+                "connector_name": sidecar_name,
+                "deployment_sha256": sidecar.deployment_sha256,
+                "mapping": sidecar.mappings[0].to_dict(),
+                "capability": {
+                    "name": capability_name,
+                    "version": 1,
+                    "mode": capability_mode,
+                },
+                "idempotency_key": idempotency_key,
+                "target": target,
+                "parameters": parameters,
+                "request_bytes": sidecar.request_bytes,
+                "response_bytes": sidecar.response_bytes,
+                "timeout_ms": sidecar.timeout_ms,
+            }
+        )
+
+    def complete_bound_provider_operation(
+        self,
+        *,
+        spec: ServiceOperationSpec,
+        binding_id: str,
+        owner_id: str,
+        invoke: Callable[[ServiceOperationRequest], ServiceOperationResponse],
+    ) -> dict[str, object]:
+        operation = self.database.create_service_operation(
+            spec=spec,
+            created_by=self.user["id"],
+            project_capability_binding_id=binding_id,
+        )
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id=owner_id,
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        response = invoke(ServiceOperationRequest.from_mapping(dispatch["request"]))
+        return self.database.complete_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id=owner_id,
+            expected_operation_version=dispatch["operation"]["version"],
+            response=response,
         )
 
     @staticmethod
@@ -1553,6 +1643,462 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertEqual(memory["state"], "active")
         self.assertEqual(memory["assignments"][0]["id"], assignment["id"])
         self.assertNotIn("outcome", {entry["kind"] for entry in memory["entries"]})
+
+    def test_mixed_jira_intake_and_github_delivery_preserve_authority_boundaries(
+        self,
+    ) -> None:
+        jira = jira_sidecar_spec(self.root / "jira-provider.sock")
+        self.database.register_service_sidecar(
+            name="jira-main", spec=jira, created_by=self.user["id"]
+        )
+        jira_binding = self.database.bind_project_capability(
+            project_key="workflow-project",
+            capability_name="work.get",
+            capability_version=1,
+            sidecar_name="jira-main",
+            mapping_name="primary",
+            bound_by=self.user["id"],
+        )
+        jira_api = FakeJiraAPI(
+            [
+                jira_api_response(
+                    200,
+                    jira_issue(
+                        title="Exercise the mixed-provider delivery path",
+                    ),
+                )
+            ]
+        )
+        jira_operation = self.complete_bound_provider_operation(
+            spec=self.provider_operation_spec(
+                sidecar_name="jira-main",
+                sidecar=jira,
+                capability_name="work.get",
+                capability_mode="read",
+                idempotency_key="m14-mixed-jira-work-get",
+                target={
+                    "resource": {"kind": "work_project", "external_id": "ABC"},
+                    "object_id": "ABC-42",
+                    "object_format": None,
+                    "expected_revision": None,
+                    "desired_revision": None,
+                },
+                parameters={},
+            ),
+            binding_id=jira_binding["id"],
+            owner_id="m14-jira-provider",
+            invoke=JiraProvider(jira, jira_api).invoke,
+        )
+        imported = self.database.import_work_item_from_service_operation(
+            project_key="workflow-project",
+            operation_id=jira_operation["id"],
+            imported_by=self.user["id"],
+        )
+        self.assertEqual(imported["import_status"], "created")
+        self.assertEqual(imported["source"], "jira")
+        self.assertEqual(
+            imported["content"]["title"],
+            "Exercise the mixed-provider delivery path",
+        )
+        self.assertEqual(len(imported["service_imports"]), 1)
+        jira_provenance = imported["service_imports"][0]
+        self.assertEqual(jira_provenance["service_operation_id"], jira_operation["id"])
+        self.assertEqual(
+            jira_provenance["service_operation_attempt_id"],
+            jira_operation["attempts"][0]["id"],
+        )
+        self.assertEqual(jira_provenance["capability_binding_id"], jira_binding["id"])
+
+        github_document = github_sidecar_spec(
+            self.root / "github-provider.sock"
+        ).to_dict()
+        github_document["capabilities"].append(
+            {"name": "refs.publish", "version": 1, "mode": "effect"}
+        )
+        github = ServiceSidecarSpec.from_mapping(github_document)
+        self.database.register_service_sidecar(
+            name="github-main", spec=github, created_by=self.user["id"]
+        )
+        github_bindings: dict[str, dict[str, object]] = {}
+        for capability_name in (
+            "refs.publish",
+            "change.open",
+            "checks.read",
+            "landing.invoke",
+        ):
+            github_bindings[capability_name] = self.database.bind_project_capability(
+                project_key="workflow-project",
+                capability_name=capability_name,
+                capability_version=1,
+                sidecar_name="github-main",
+                mapping_name="primary",
+                bound_by=self.user["id"],
+            )
+
+        self.database.create_workflow_configuration(
+            project_key="workflow-project",
+            name="m14-mixed-provider",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [],
+                    "max_correction_rounds": 2,
+                    "landing_mode": "provider",
+                }
+            ),
+            producer_profile_name="Producer",
+            reviewer_profile_name="Reviewer",
+            created_by=self.user["id"],
+        )
+        execution = self.database.start_workflow_execution(
+            project_key="workflow-project",
+            configuration_name="m14-mixed-provider",
+            work_item_id=imported["id"],
+            source_revision=self.base,
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=imported["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            idempotency_key="m14-mixed-provider-workflow",
+            requested_by=self.user["id"],
+        )
+        landing, gate = self.drive_approved_to_landing(execution)
+        policy = self.database.get_gate_policy(gate["policy_id"])
+        head_revision = policy["head_revision"]
+        target_ref = "refs/heads/mgb/m14-" + gate["candidate_id"].removeprefix("cnd_")
+        candidate_repository = self.candidates.repository_path(
+            self.project["id"], policy["object_format"]
+        )
+
+        publisher = FakeGitPublisher()
+        publication_api = FakeGitHubAPI(
+            [
+                github_api_response(404, {"message": "missing"}),
+                github_api_response(
+                    200,
+                    github_ref(
+                        head_revision,
+                        target_ref.removeprefix("refs/heads/"),
+                    ),
+                ),
+            ]
+        )
+        publication = self.complete_bound_provider_operation(
+            spec=self.provider_operation_spec(
+                sidecar_name="github-main",
+                sidecar=github,
+                capability_name="refs.publish",
+                capability_mode="effect",
+                idempotency_key="m14-mixed-github-publish",
+                target={
+                    "repository": "acme/widgets",
+                    "resource_id": target_ref,
+                    "object_format": "sha1",
+                    "expected_revision": None,
+                    "desired_revision": head_revision,
+                },
+                parameters={"source_repository": str(candidate_repository)},
+            ),
+            binding_id=github_bindings["refs.publish"]["id"],
+            owner_id="m14-github-publisher",
+            invoke=GitHubProvider(github, publication_api, publisher=publisher).invoke,
+        )
+        self.assertEqual(publication["state"], "succeeded")
+        self.assertEqual(len(publisher.calls), 1)
+        self.assertEqual(publisher.calls[0]["desired_revision"], head_revision)
+
+        opened_pull = github_pull(base_sha=self.base, head_sha=head_revision)
+        opened_pull.pop("merged")
+        opened_pull["head"]["ref"] = target_ref.removeprefix("refs/heads/")
+        change_api = FakeGitHubAPI(
+            [
+                github_api_response(200, []),
+                github_api_response(200, github_ref(self.base)),
+                github_api_response(
+                    200,
+                    github_ref(
+                        head_revision,
+                        target_ref.removeprefix("refs/heads/"),
+                    ),
+                ),
+                github_api_response(201, opened_pull),
+            ]
+        )
+        opened = self.complete_bound_provider_operation(
+            spec=self.provider_operation_spec(
+                sidecar_name="github-main",
+                sidecar=github,
+                capability_name="change.open",
+                capability_mode="effect",
+                idempotency_key="m14-mixed-github-open",
+                target={
+                    "repository": "acme/widgets",
+                    "resource_id": target_ref,
+                    "object_format": "sha1",
+                    "expected_revision": self.base,
+                    "desired_revision": head_revision,
+                },
+                parameters={
+                    "base_ref": "refs/heads/main",
+                    "body": "Candidate produced and gated by Magic Glass Box.",
+                    "draft": False,
+                    "head_ref": target_ref,
+                    "title": "M14 mixed-provider candidate",
+                },
+            ),
+            binding_id=github_bindings["change.open"]["id"],
+            owner_id="m14-github-change",
+            invoke=GitHubProvider(
+                github, change_api, publisher=FakeGitPublisher()
+            ).invoke,
+        )
+        self.assertEqual(opened["state"], "succeeded")
+        self.assertEqual(
+            opened["attempts"][0]["receipt"]["observed_revision"], head_revision
+        )
+
+        checks_api = FakeGitHubAPI(
+            [
+                github_api_response(
+                    200,
+                    github_pull(base_sha=self.base, head_sha=head_revision),
+                ),
+                github_api_response(
+                    200,
+                    {
+                        "total_count": 1,
+                        "check_runs": [
+                            {
+                                "name": "unit",
+                                "status": "completed",
+                                "conclusion": "success",
+                            }
+                        ],
+                    },
+                ),
+                github_api_response(200, {"state": "success", "statuses": []}),
+                github_api_response(
+                    200,
+                    [
+                        {
+                            "id": 1,
+                            "state": "APPROVED",
+                            "submitted_at": "2098-12-31T23:00:00Z",
+                            "user": {"login": "reviewer"},
+                        }
+                    ],
+                ),
+            ]
+        )
+        checks = self.complete_bound_provider_operation(
+            spec=self.provider_operation_spec(
+                sidecar_name="github-main",
+                sidecar=github,
+                capability_name="checks.read",
+                capability_mode="read",
+                idempotency_key="m14-mixed-github-checks",
+                target={
+                    "repository": "acme/widgets",
+                    "resource_id": "42",
+                    "object_format": "sha1",
+                    "expected_revision": self.base,
+                    "desired_revision": head_revision,
+                },
+                parameters={
+                    "required_approvals": 1,
+                    "required_checks": ["unit"],
+                },
+            ),
+            binding_id=github_bindings["checks.read"]["id"],
+            owner_id="m14-github-checks",
+            invoke=GitHubProvider(
+                github, checks_api, publisher=FakeGitPublisher()
+            ).invoke,
+        )
+        self.assertEqual(checks["state"], "succeeded")
+        self.assertEqual(
+            checks["attempts"][0]["receipt"]["observed_revision"], head_revision
+        )
+
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(landing["id"])
+        target = self.control.configure_workflow_provider_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            resource_id="42",
+            merge_method="squash",
+            configured_by_handle="operator",
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        issued_execution = self.database.get_workflow_execution(claimed["id"])
+        issued = self.control.get_provider_landing(
+            issued_execution["landing"]["provider_landing_id"]
+        )
+        landing_operation = issued["operation"]
+        landing_dispatch = self.database.begin_service_operation_attempt(
+            landing_operation["id"],
+            phase="invoke",
+            owner_id="m14-github-landing",
+            expected_version=landing_operation["version"],
+            lease_seconds=60,
+        )
+        landing_request = ServiceOperationRequest.from_mapping(
+            landing_dispatch["request"]
+        )
+        observed_revision = "f" * 40
+        landing_api = FakeGitHubAPI(
+            [
+                github_api_response(
+                    200,
+                    github_pull(base_sha=self.base, head_sha=head_revision),
+                ),
+                github_api_response(200, github_ref(self.base)),
+                github_api_response(
+                    200,
+                    {"sha": observed_revision, "merged": True, "message": "ok"},
+                ),
+                github_api_response(
+                    200,
+                    github_pull(
+                        state="closed",
+                        merged=True,
+                        base_sha=observed_revision,
+                        head_sha=head_revision,
+                    ),
+                ),
+                github_api_response(200, github_ref(observed_revision)),
+            ]
+        )
+        landing_response = GitHubProvider(
+            github, landing_api, publisher=FakeGitPublisher()
+        ).invoke(landing_request)
+        settled_operation = self.database.complete_service_operation_attempt(
+            landing_dispatch["attempt"]["id"],
+            owner_id="m14-github-landing",
+            expected_operation_version=landing_dispatch["operation"]["version"],
+            response=landing_response,
+        )
+        self.assertEqual(settled_operation["state"], "succeeded")
+        self.assertFalse(
+            self.director().advance(
+                issued_execution["id"], expected_version=issued_execution["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(issued_execution["id"])
+        self.assertTrue(
+            self.director().advance(landed["id"], expected_version=landed["version"])
+        )
+        completion = self.database.get_workflow_execution(landed["id"])
+        self.assertTrue(
+            self.director().advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        finished = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(
+            (finished["state"], finished["stage"]), ("completed", "completion")
+        )
+        self.assertEqual(finished["work_item_id"], imported["id"])
+        self.assertEqual(
+            finished["work_item_version_id"], imported["work_item_version_id"]
+        )
+        self.assertEqual(finished["completion"]["candidate_id"], gate["candidate_id"])
+        self.assertEqual(finished["completion"]["observed_revision"], observed_revision)
+        self.assertEqual(
+            issued["provider_landing"]["capability_binding_id"],
+            github_bindings["landing.invoke"]["id"],
+        )
+        self.assertEqual(
+            issued["provider_landing"]["service_operation_id"],
+            settled_operation["id"],
+        )
+        self.assertEqual(target["resource_id"], "42")
+
+        producer = self.database.find_workflow_run(finished["id"], 0, "producer")
+        reviewer = self.database.find_workflow_run(finished["id"], 0, "reviewer")
+        self.assertIsNotNone(producer)
+        self.assertIsNotNone(reviewer)
+        assert producer is not None and reviewer is not None
+        self.assertNotEqual(
+            producer["profile_version_id"], reviewer["profile_version_id"]
+        )
+        self.assertNotEqual(
+            self.database.get_run_transport(producer["id"])["agent_krab_identity_id"],
+            self.database.get_run_transport(reviewer["id"])["agent_krab_identity_id"],
+        )
+        producer_execution = self.database.get_run_execution(producer["id"])
+        reviewer_execution = self.database.get_run_execution(reviewer["id"])
+        self.assertEqual(producer_execution["provider_authority_names"], [])
+        self.assertEqual(reviewer_execution["provider_authority_names"], [])
+        self.assertEqual(producer_execution["work_item"]["id"], imported["id"])
+        self.assertEqual(reviewer_execution["work_item"]["id"], imported["id"])
+
+        worker_and_workflow_projection = canonical_json(
+            {
+                "producer": producer_execution,
+                "reviewer": reviewer_execution,
+                "work_item": self.database.get_work_item(imported["id"]),
+                "workflow_events": finished["events"],
+            }
+        )
+        for private_value in (
+            str(self.root / "jira-provider.sock"),
+            str(self.root / "github-provider.sock"),
+            "jira-account-123",
+            "operator@example.test",
+            "mgb-bot",
+            "e" * 64,
+            "Operator",
+            "In Progress",
+            "10042",
+            "jql",
+            "transitionId",
+            "ghp_",
+        ):
+            self.assertNotIn(private_value, worker_and_workflow_projection)
+
+        self.database.unbind_project_capability(
+            github_bindings["landing.invoke"]["id"],
+            expected_version=1,
+            unbound_by=self.user["id"],
+        )
+        with self.assertRaisesRegex(ConflictError, "capability is unavailable"):
+            self.database.resolve_project_capability(
+                "workflow-project", "landing.invoke", 1
+            )
+        self.assertEqual(
+            self.database.resolve_project_capability("workflow-project", "work.get", 1)[
+                "id"
+            ],
+            jira_binding["id"],
+        )
+
+        self.database.unbind_project_capability(
+            jira_binding["id"],
+            expected_version=1,
+            unbound_by=self.user["id"],
+        )
+        with self.assertRaisesRegex(ConflictError, "capability is unavailable"):
+            self.database.resolve_project_capability("workflow-project", "work.get", 1)
+        self.assertEqual(
+            self.database.resolve_project_capability(
+                "workflow-project", "checks.read", 1
+            )["id"],
+            github_bindings["checks.read"]["id"],
+        )
 
     def test_provider_target_is_invoked_settled_and_closed_by_replacements(
         self,

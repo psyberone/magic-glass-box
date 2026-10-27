@@ -874,6 +874,7 @@ class GitHubProvider:
                 == parameters["head_ref"].removeprefix("refs/heads/")
                 and item["base_ref"]
                 == parameters["base_ref"].removeprefix("refs/heads/")
+                and item["base_sha"] == invocation.request.target.expected_revision
             ):
                 return item, None
         return None, None
@@ -941,12 +942,15 @@ class GitHubProvider:
         provider_status: int,
     ) -> ServiceOperationResponse:
         request = invocation.request
-        if pull["head_sha"] != request.target.desired_revision:
-            return self._failure(
-                invocation,
-                outcome="conflict",
-                provider_status=provider_status,
-                error_code="github-revision-conflict",
+        parameters = self._change_parameters(request)
+        if (
+            pull["head_sha"] != request.target.desired_revision
+            or pull["base_sha"] != request.target.expected_revision
+            or pull["head_ref"] != parameters["head_ref"].removeprefix("refs/heads/")
+            or pull["base_ref"] != parameters["base_ref"].removeprefix("refs/heads/")
+        ):
+            raise GitHubProviderError(
+                "GitHub pull request response does not match change authority"
             )
         identity = github_remote_identity(
             request.mapping.host, request.mapping.repository, pull["number"]
