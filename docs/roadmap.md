@@ -1736,7 +1736,7 @@ authority or failure-path wave fell below the 80% floor.
 
 ## Milestone 15: controlled remote execution provider
 
-**Status: candidate milestone**
+**Status: candidate milestone; next major product boundary**
 
 - Define submit, inspect, cancel, reconcile, and evidence-collection semantics
   for an exact candidate and operator-defined test recipe.
@@ -1746,6 +1746,35 @@ authority or failure-path wave fell below the 80% floor.
 - Retain bounded result identity, exit status, timing, recipe/image identity,
   and output digest; collect artifacts through the same hostile-output boundary
   used for local workers.
+
+## Post-Milestone 15 audit and dogfood gate
+
+**Status: planned hard boundary before Milestone 16+**
+
+This gate does not add work to or reorder M14 and M15. Complete both milestones
+at their natural scope, then freeze one exact clean M15 commit for assessment:
+
+- run a whole-repository Panopticon scan plus two independent blind reviews
+  against that same commit;
+- reconcile their reproducible findings under MGB's actual trust boundary,
+  retain disagreements honestly, and complete one bounded remediation pass
+  with the ordinary RED-first tests, branch-aware coverage floor, and focused
+  mutation checks;
+- freeze the remediated build as the coordinator rather than hot-reloading or
+  self-modifying it, and point it at a separate isolated checkout of MGB;
+- import one small but real MGB work item, avoiding a first-run schema or
+  control-plane bootstrap change, and exercise Discovery, implementation,
+  independent review, maintainer approval, GitHub landing, durable closeout,
+  and process-restart recovery under an explicit inference budget (initial
+  target: no more than $5); and
+- follow a genuine changes-requested round if review finds one, without
+  manufacturing a rejection merely to satisfy the proof.
+
+The merged candidate affects only the next operator-controlled MGB restart.
+M16+ provider expansion begins only after the dogfood report proves exact-head
+authority, credential containment, a clean target checkout, complete audit
+provenance, and honest accounting—or records a failed run and its remediation
+instead of declaring success by ceremony.
 
 ## Milestone 16+: provider breadth by demonstrated need
 
