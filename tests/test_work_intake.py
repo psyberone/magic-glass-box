@@ -16,7 +16,11 @@ from magic_glass_box.service_sidecar import (
     ServiceOperationResponse,
 )
 from magic_glass_box.storage.schema import SCHEMA_V42
-from magic_glass_box.work_intake import WorkItemListResult, WorkItemReference
+from magic_glass_box.work_intake import (
+    WorkItemListResult,
+    WorkItemReference,
+    WorkItemStateResult,
+)
 from tests.test_service_sidecars import resource_operation_spec, resource_sidecar_spec
 
 
@@ -49,15 +53,26 @@ def work_reference(**overrides: object) -> dict[str, object]:
     return value
 
 
-def operation_request(*, capability: str) -> ServiceOperationRequest:
+def operation_request(
+    *, capability: str, parameters: dict[str, object] | None = None
+) -> ServiceOperationRequest:
+    default_parameters: dict[str, object] = (
+        {"limit": 100}
+        if capability == "work.list"
+        else ({"desired_state": "done"} if capability == "work.state" else {})
+    )
     operation = resource_operation_spec(
-        capability={"name": capability, "version": 1, "mode": "read"},
+        capability={
+            "name": capability,
+            "version": 1,
+            "mode": "effect" if capability == "work.state" else "read",
+        },
         idempotency_key=f"{capability}-normalized-result",
         target={
             **resource_operation_spec().target.to_dict(),
             "object_id": "work-items" if capability == "work.list" else "ABC-42",
         },
-        parameters={"limit": 100} if capability == "work.list" else {},
+        parameters=default_parameters if parameters is None else parameters,
     )
     return ServiceOperationRequest.create(
         operation_id="sop_" + "1" * 32,
@@ -114,6 +129,40 @@ class WorkControllerResultTests(unittest.TestCase):
             schema["$id"],
             "urn:magic-glass-box:schema:work-item-list-result:v1",
         )
+
+    def test_published_state_result_matches_the_runtime_contract(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        schema = json.loads(
+            (repository / "schemas/work-item-state-result-v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        example = json.loads(
+            (repository / "examples/work-item-state-result.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        Draft202012Validator.check_schema(schema)
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        validator.validate(example)
+        self.assertEqual(WorkItemStateResult.from_mapping(example).to_dict(), example)
+        self.assertEqual(
+            schema["$id"],
+            "urn:magic-glass-box:schema:work-item-state-result:v1",
+        )
+
+        invalid = (
+            [],
+            {"schema_version": 1},
+            {**example, "provider_status": "Done"},
+            {**example, "schema_version": True},
+            {**example, "object_id": " "},
+            {**example, "desired_state": "open"},
+            {**example, "state": "open"},
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                WorkItemStateResult.from_mapping(value)
 
     def test_reference_and_list_result_are_strict_bounded_and_canonical(self) -> None:
         reference = WorkItemReference.from_mapping(work_reference())
@@ -302,10 +351,40 @@ class WorkControllerResultTests(unittest.TestCase):
         )
         self.assertEqual(list_response.receipt.result, list_result)
 
+        state_request = operation_request(capability="work.state")
+        state_result = {
+            "desired_state": "done",
+            "object_id": "ABC-42",
+            "schema_version": 1,
+            "state": "done",
+        }
+        state_response = ServiceOperationResponse.from_mapping(
+            response_for(state_request, state_result)
+        )
+        self.assertEqual(state_response.receipt.result, state_result)
+        state_response.validate_correlation(state_request)
+
+        wrong_object = ServiceOperationResponse.from_mapping(
+            response_for(state_request, {**state_result, "object_id": "ABC-43"})
+        )
+        with self.assertRaises(ValidationError):
+            wrong_object.validate_correlation(state_request)
+
+        wrong_parameters_request = operation_request(
+            capability="work.state", parameters={"desired_state": "open"}
+        )
+        wrong_parameters = ServiceOperationResponse.from_mapping(
+            response_for(wrong_parameters_request, state_result)
+        )
+        with self.assertRaises(ValidationError):
+            wrong_parameters.validate_correlation(wrong_parameters_request)
+
         malformed = (
             (get_request, {**work_item(), "raw": {"provider": "body"}}),
             (list_request, {"items": [], "next_cursor": "jira-token"}),
             (list_request, [{"external_id": "ABC-42"}]),
+            (state_request, {**state_result, "transition_id": "31"}),
+            (state_request, {**state_result, "state": "provider-done"}),
         )
         for request, result in malformed:
             with self.subTest(result=result), self.assertRaises(ValidationError):

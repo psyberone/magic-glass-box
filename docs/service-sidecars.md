@@ -80,7 +80,9 @@ provider-neutral work-item envelope, including its execution brief.
 cursors, status names, query syntax, and raw descriptions are not result
 fields. A successful get can be fed deliberately into `work-item
 import-operation`. No connector silently imports, exports, or synchronizes
-work.
+work. `work.state` v1 is the initial work effect: it names only the core-owned
+`done` state and returns the strict provider-neutral state result. Provider
+status and transition identifiers remain private configuration and mechanics.
 
 Provider routing is an explicit allowlist. If a project does not bind a
 capability to a provider, that surface is unavailable and is not advertised to
@@ -89,8 +91,8 @@ provider client. Bindings may be granular enough to allow a read while
 disabling a related mutation, but remain semantic operations rather than a
 mirror of every vendor endpoint.
 
-The core currently defines `refs.publish` v1, `change.open` v1, and
-`landing.invoke` v1 as effects. `work.get`, `work.list`, `change.get`,
+The core currently defines `work.state` v1, `refs.publish` v1, `change.open` v1,
+and `landing.invoke` v1 as effects. `work.get`, `work.list`, `change.get`,
 `change.list`, and `checks.read` v1 are reads. A provider must advertise the
 matching version and mode before it can be bound. Syntactically valid
 experimental capability names may still be registered for deliberate
@@ -209,13 +211,18 @@ import-ready work, publishes exact candidate refs from an allowlisted candidate
 root, opens deterministic changes, reads named checks/approvals, and binds
 head-enforced landing to the existing integration authority. The credential
 directory and candidate root are process configuration, not worker-visible or
-stored operation credentials. GitLab, Jira, and future services remain
-independent add-ons implementing only the families they support.
+stored operation credentials. Milestone 14's separately executed
+[Jira reference provider](jira-provider.md) proves the same boundary for a v2
+`work_project`: its private file owns the Jira base URL, account, API token, and
+core-state-to-provider-status mapping, while MGB and workers receive only
+normalized work contracts. GitLab and future services remain independent
+add-ons implementing only the families they support.
 
 This capability-provider direction does not expand M10 or M11. M10 proves the
 credential-free operation and reconciliation kernel; M11 proves one GitHub
 provider against v1. M14's explicit v2 resource authority prevents Jira
 projects and future bounded resources from being disguised as repositories.
 
-No provider-specific SDK, CLI, credential, configuration path, status vocabulary,
-or merge quirk belongs in the Magic Glass Box core.
+No provider-specific SDK, CLI, credential, configuration path, status
+vocabulary, or merge quirk belongs in the Magic Glass Box core. Core-owned
+states such as `done` are semantic outcomes, not aliases for a Jira status.

@@ -114,7 +114,7 @@
         {
           "if": {
             "properties": {
-              "name": { "const": "change.open" },
+              "name": { "enum": ["work.state", "change.open"] },
               "version": { "const": 1 }
             },
             "required": ["name", "version"]

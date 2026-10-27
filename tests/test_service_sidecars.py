@@ -358,6 +358,13 @@ class ServiceSidecarContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "core-defined mode"):
             ServiceSidecarSpec.from_mapping(ref_publication)
 
+        work_state = resource_sidecar_spec(self.socket_path).to_dict()
+        work_state["capabilities"].append(
+            {"name": "work.state", "version": 1, "mode": "read"}
+        )
+        with self.assertRaisesRegex(ValidationError, "core-defined mode"):
+            ServiceSidecarSpec.from_mapping(work_state)
+
         extension = sidecar_spec(self.socket_path).to_dict()
         extension["capabilities"].append(
             {"name": "work.operator_extension", "version": 1, "mode": "effect"}

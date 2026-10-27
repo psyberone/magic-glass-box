@@ -1,0 +1,36 @@
+{
+  "capability": {
+    "mode": "read",
+    "name": "work.get",
+    "version": 1
+  },
+  "connector_name": "jira-main",
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "jira-work-get-abc-42",
+  "mapping": {
+    "account": "operator@example.test",
+    "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "host": "example.atlassian.net",
+    "name": "primary",
+    "resource": {
+      "external_id": "ABC",
+      "kind": "work_project"
+    },
+    "service": "jira"
+  },
+  "parameters": {},
+  "request_bytes": 131072,
+  "response_bytes": 524288,
+  "schema_version": 2,
+  "target": {
+    "desired_revision": null,
+    "expected_revision": null,
+    "object_format": null,
+    "object_id": "ABC-42",
+    "resource": {
+      "external_id": "ABC",
+      "kind": "work_project"
+    }
+  },
+  "timeout_ms": 30000
+}

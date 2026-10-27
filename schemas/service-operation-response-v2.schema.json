@@ -115,7 +115,7 @@
         {
           "if": {
             "properties": {
-              "name": { "enum": ["change.open", "landing.invoke", "refs.publish"] },
+              "name": { "enum": ["work.state", "change.open", "landing.invoke", "refs.publish"] },
               "version": { "const": 1 }
             },
             "required": ["name", "version"]

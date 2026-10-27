@@ -13,6 +13,7 @@ from .domain import (
 )
 
 WORK_ITEM_LIST_SCHEMA_VERSION = 1
+WORK_ITEM_STATE_SCHEMA_VERSION = 1
 MAX_WORK_ITEM_REFERENCES = 100
 MAX_WORK_ITEM_LIST_BYTES = 256 * 1024
 
@@ -174,3 +175,57 @@ class WorkItemListResult:
     @property
     def canonical(self) -> str:
         return canonical_json(self.to_dict())
+
+
+@dataclass(frozen=True)
+class WorkItemStateResult:
+    """Core-owned successful observation for one exact work-state effect."""
+
+    schema_version: int
+    object_id: str
+    desired_state: str
+    state: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> WorkItemStateResult:
+        if not isinstance(value, dict):
+            raise ValidationError("work item state result must be an object")
+        expected = {"schema_version", "object_id", "desired_state", "state"}
+        unknown = set(value) - expected
+        missing = expected - set(value)
+        if unknown:
+            raise ValidationError(
+                "work item state result contains unknown fields: "
+                + ", ".join(sorted(unknown))
+            )
+        if missing:
+            raise ValidationError(
+                "work item state result is missing fields: "
+                + ", ".join(sorted(missing))
+            )
+        schema_version = value["schema_version"]
+        if (
+            isinstance(schema_version, bool)
+            or schema_version != WORK_ITEM_STATE_SCHEMA_VERSION
+        ):
+            raise ValidationError(
+                f"schema_version must be {WORK_ITEM_STATE_SCHEMA_VERSION}"
+            )
+        desired_state = value["desired_state"]
+        state = value["state"]
+        if desired_state != "done" or state != desired_state:
+            raise ValidationError("work item state result must observe done")
+        return cls(
+            schema_version=schema_version,
+            object_id=_nonblank(value["object_id"], field="object_id", max_bytes=512),
+            desired_state=desired_state,
+            state=state,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "desired_state": self.desired_state,
+            "object_id": self.object_id,
+            "schema_version": self.schema_version,
+            "state": self.state,
+        }

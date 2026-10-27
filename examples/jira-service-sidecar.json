@@ -1,0 +1,44 @@
+{
+  "capabilities": [
+    {
+      "mode": "read",
+      "name": "work.get",
+      "version": 1
+    },
+    {
+      "mode": "read",
+      "name": "work.list",
+      "version": 1
+    },
+    {
+      "mode": "effect",
+      "name": "work.state",
+      "version": 1
+    }
+  ],
+  "connector_protocol_version": 2,
+  "deployment_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "mappings": [
+    {
+      "account": "operator@example.test",
+      "credential_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "host": "example.atlassian.net",
+      "name": "primary",
+      "resource": {
+        "external_id": "ABC",
+        "kind": "work_project"
+      },
+      "service": "jira"
+    }
+  ],
+  "max_concurrency": 2,
+  "max_requests_per_minute": 30,
+  "request_bytes": 131072,
+  "response_bytes": 524288,
+  "schema_version": 2,
+  "timeout_ms": 30000,
+  "transport": {
+    "kind": "unix",
+    "socket_path": "/var/run/magic-glass-box/jira.sock"
+  }
+}

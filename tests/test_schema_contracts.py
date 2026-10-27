@@ -840,6 +840,32 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
         assert isinstance(request, ServiceOperationRequest)
         response.validate_correlation(request)
 
+    def test_jira_reference_examples_match_v2_runtime_contracts(self) -> None:
+        documents = (
+            (
+                "jira-service-sidecar",
+                "service-sidecar",
+                ServiceSidecarSpec.from_mapping,
+            ),
+            ("jira-work-get", "service-operation", ServiceOperationSpec.from_mapping),
+            ("jira-work-list", "service-operation", ServiceOperationSpec.from_mapping),
+            ("jira-work-state", "service-operation", ServiceOperationSpec.from_mapping),
+        )
+        for example_name, schema_name, factory in documents:
+            with self.subTest(example_name=example_name):
+                schema = json.loads(
+                    (
+                        self.repository / "schemas" / f"{schema_name}-v2.schema.json"
+                    ).read_text()
+                )
+                example = json.loads(
+                    (self.repository / "examples" / f"{example_name}.json").read_text()
+                )
+                validator = Draft202012Validator(schema, format_checker=FormatChecker())
+                validator.validate(example)
+                parsed = factory(example)
+                self.assertEqual(parsed.to_dict(), example)
+
     def test_v2_schema_rejects_legacy_and_provider_native_resource_shapes(
         self,
     ) -> None:
@@ -971,6 +997,25 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
                             validator.validate(wrong_read_mode)
                         with self.assertRaises(ValidationError):
                             factory(wrong_read_mode)
+
+                for version in (1, 2):
+                    versioned_validator, versioned_example = self.load_version(
+                        name, version
+                    )
+                    wrong_state_mode = copy.deepcopy(versioned_example)
+                    capability = (
+                        wrong_state_mode["capabilities"][0]
+                        if name == "service-sidecar"
+                        else wrong_state_mode["capability"]
+                    )
+                    capability.update(
+                        {"mode": "read", "name": "work.state", "version": 1}
+                    )
+                    with self.subTest(name=name, version=version):
+                        with self.assertRaises(SchemaValidationError):
+                            versioned_validator.validate(wrong_state_mode)
+                        with self.assertRaises(ValidationError):
+                            factory(wrong_state_mode)
 
 
 if __name__ == "__main__":

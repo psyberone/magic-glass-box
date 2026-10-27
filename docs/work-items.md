@@ -81,7 +81,11 @@ Out-of-process service providers use the same core-owned result contracts:
 
 - `work.get` v1 returns one canonical work-item v1 envelope; and
 - `work.list` v1 returns one discovery window matching
-  [`work-item-list-result-v1.schema.json`](../schemas/work-item-list-result-v1.schema.json).
+  [`work-item-list-result-v1.schema.json`](../schemas/work-item-list-result-v1.schema.json);
+  and
+- `work.state` v1 explicitly requests and confirms the initial core-owned
+  `done` state using
+  [`work-item-state-result-v1.schema.json`](../schemas/work-item-state-result-v1.schema.json).
 
 The list result contains at most 100 bounded references and a `truncated`
 indicator. It deliberately excludes provider cursors, status names, queries,
@@ -103,3 +107,8 @@ ordinary atomic upsert and appends an immutable link to the exact service
 operation attempt and receipt digest. Repeating the same operation is a true
 no-op. Unbinding `work.get` prevents new project-routed reads without erasing or
 invalidating a result that was already captured under valid authority.
+
+`work.state` is an explicit effect, never part of import or synchronization.
+Its durable operation is idempotent and reconciled through the ordinary
+service-sidecar ledger. A provider maps `done` to its private status mechanism;
+provider names and identifiers do not become work-item fields.

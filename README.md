@@ -56,6 +56,10 @@ This repository currently contains the first executable vertical slice:
   capabilities and mappings, bounded Unix transport, durable invoke/reconcile
   attempts, rate and concurrency limits, and conservative lost-response
   recovery without storing credentials or raw provider payloads;
+- a credential-isolated Jira Cloud reference provider over service protocol
+  v2, with project-scoped normalized work list/get, explicit import, and one
+  idempotent core-owned `done` effect whose provider status and transition
+  details never cross the sidecar boundary;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;
@@ -216,7 +220,9 @@ provider-verified landing, bounded work/change lists, and exact normalized reads
 from an explicitly selected `GH_CONFIG_DIR`. See
 [docs/service-sidecars.md](docs/service-sidecars.md) for the implemented
 operation boundary, [docs/github-provider.md](docs/github-provider.md) for the
-reference add-on, and
+repository reference add-on,
+[docs/jira-provider.md](docs/jira-provider.md) for the heterogeneous work
+provider, and
 [docs/capability-providers.md](docs/capability-providers.md) for the broader
 provider-routing model.
 

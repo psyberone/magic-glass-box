@@ -78,8 +78,8 @@ sidecar mapping. Unbinding disables new project-routed operations; it does not
 rewrite existing operation authority. Published service schemas enforce the
 core-owned modes for the currently defined `work.get`/`work.list` v1,
 `change.get`/`change.list` v1, and `checks.read` v1 reads plus `refs.publish`
-v1, `change.open` v1, and `landing.invoke` v1 effects while still permitting
-operator-only extension names that cannot be project-bound.
+v1, `work.state` v1, `change.open` v1, and `landing.invoke` v1 effects while
+still permitting operator-only extension names that cannot be project-bound.
 
 Milestone 14.1 publishes v2 generations of the four service-sidecar contracts.
 V1 remains accepted with its exact repository-shaped canonical bytes. V2 uses
@@ -99,6 +99,13 @@ Runtime validation additionally enforces UTF-8 byte ceilings and independently
 unique object and external IDs. Control-plane schema v43 adds an immutable link
 from each explicit service import to the exact successful operation attempt;
 the operation and receipt digests remain in their existing append-only ledgers.
+
+Milestone 14.3 publishes `work-item-state-result-v1.schema.json` and adds
+`work.state` v1 as a core-owned effect. The initial version can only request
+and confirm `done` for one exact work object. Its success result contains no
+provider status name or ID, transition ID, query, or raw response. Both v1 and
+v2 service-schema generations pin its effect mode; invoke/reconcile durability
+remains the existing service-operation protocol.
 
 Milestone 11 adds `provider-landing-v1.schema.json` and
 `provider-landing-receipt-v1.schema.json`. The authority binds one queue/policy/

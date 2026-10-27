@@ -1798,6 +1798,8 @@ uncovered mutants, suspicious outcomes, or crashes.
 
 ### M14.3: Jira reference provider
 
+**Status: complete**
+
 - Implement Jira list/get against an operator-selected base URL, project
   mapping, account, and credential source outside MGB and all workers.
 - Add only the smallest core-owned status effect justified by the live use
@@ -1806,6 +1808,36 @@ uncovered mutants, suspicious outcomes, or crashes.
   to an agent.
 - Supply provider conformance, credential-containment, pagination, throttling,
   error, and lost-response tests before any live call.
+
+The completed reference provider exposes only `work.list` and `work.get` reads
+plus the initial `work.state` effect through the v2 service-sidecar protocol.
+List discovery uses a provider-owned, bounded project query and returns only
+normalized work references; get validates and flattens bounded Jira document
+content into the existing work-item envelope. Provider cursors, JQL, raw Jira
+objects, status names, transition IDs, and reusable credentials stay behind
+the carrier boundary.
+
+The initial state surface deliberately supports only `done`. Its configured
+core state maps privately to a Jira status ID, transition discovery remains an
+internal provider operation, and the provider reads before and after applying
+the transition. A lost effect response or failed post-observation is retained
+as `uncertain`; reconcile only observes current state and never repeats the
+effect. Credentials are loaded by the carrier from an owner-controlled `0600`
+regular file, while its HTTPS origin, endpoint set, redirects, request and
+response sizes, deadlines, and retry metadata are all bounded.
+
+Checkpoint evidence: 1,308 tests pass with Ruff format/lint clean and 87%
+aggregate statement-plus-branch coverage. The Jira provider is at 91%, its
+credential-bearing carrier is at 93%, normalized work intake remains at 100%,
+and service-sidecar protocol validation is at 86%.
+
+Focused final-code mutation evidence killed 1,717/2,063 mutants (83.23%)
+across the Jira provider, Jira carrier, and normalized work-intake module.
+Survivor-derived tests pin exact document, byte, list, transition, and retry
+bounds; credential-file ownership; cumulative multi-call response budgets;
+provider-status evidence; and lost-response reconciliation. The final run had
+three timeouts and no uncovered, suspicious, skipped, interrupted, or crashing
+outcomes.
 
 ### M14.4: mixed-provider exit proof
 

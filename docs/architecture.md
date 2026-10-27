@@ -507,7 +507,11 @@ M11 now binds that boundary to the integration queue for `landing.invoke` and
 supplies the first out-of-process GitHub implementation. Its bounded read
 receipts can carry normalized work/change results without retaining raw GitHub
 payloads; `work.get` emits the existing provider-neutral work-item envelope and
-an explicit import retains its exact operation/receipt provenance. A
+an explicit import retains its exact operation/receipt provenance. M14 adds a
+separate Jira provider over the v2 `work_project` resource. Jira credentials,
+JQL, statuses, and transitions remain inside that process; the core sees only
+`work.list`, `work.get`, and the initial idempotent `work.state=done` semantic
+surface. A
 worker may provide a result or review, but cannot turn it into landing
 authority. The core checks
 the exact candidate or fold, dependencies, current ref, gates, lane lease, and

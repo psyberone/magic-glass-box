@@ -178,9 +178,8 @@ publication, bounded normalized work/change reads, deterministic change
 creation, named checks and approvals, truthful landing assurance, lost-response
 reconciliation, and credential containment. Its live repository exit proof
 published, opened, landed, and reconciled an exact disposable candidate without
-duplicating the merge. It does not add
-Jira, GitLab, remote runners, dynamic plugin loading, a provider marketplace,
-or a universal resource schema.
+duplicating the merge. It did not add Jira, GitLab, remote runners, dynamic
+plugin loading, a provider marketplace, or a universal resource schema.
 
 The capability-provider direction does not retroactively change M10 or M11.
 M14 advances the service contract explicitly: v1 stays repository-shaped and
@@ -200,8 +199,8 @@ model provider.
 
 The next provider pressure tests are intentionally heterogeneous:
 
-1. a work-system provider, likely Jira, paired with GitHub candidates and
-   landing in one project;
+1. the implemented Jira work provider, paired next with GitHub candidates and
+   landing in one M14.4 project;
 2. a controlled execution provider for an exact candidate and pinned remote
    test recipe, with no agent-selected SSH target or command; and
 3. a second forge provider, likely GitLab, driven through the same conformance

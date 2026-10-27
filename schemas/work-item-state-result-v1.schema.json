@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:work-item-state-result:v1",
+  "title": "Magic Glass Box Work Item State Result v1",
+  "description": "One provider-neutral successful observation of the initial done work state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["desired_state", "object_id", "schema_version", "state"],
+  "properties": {
+    "desired_state": { "const": "done" },
+    "object_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "\\S"
+    },
+    "schema_version": { "const": 1 },
+    "state": { "const": "done" }
+  }
+}

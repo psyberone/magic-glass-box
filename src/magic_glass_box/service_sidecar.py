@@ -22,7 +22,7 @@ from .domain import (
     require_string,
     validate_provider_name,
 )
-from .work_intake import WorkItemListResult
+from .work_intake import WorkItemListResult, WorkItemStateResult
 
 SERVICE_SIDECAR_SCHEMA_VERSION = 1
 SERVICE_SIDECAR_PROTOCOL_VERSION = 1
@@ -73,6 +73,7 @@ CORE_SERVICE_CAPABILITY_MODES: Mapping[tuple[str, int], str] = MappingProxyType(
     {
         ("work.get", 1): "read",
         ("work.list", 1): "read",
+        ("work.state", 1): "effect",
         ("change.get", 1): "read",
         ("change.list", 1): "read",
         ("change.open", 1): "effect",
@@ -1235,7 +1236,7 @@ class ServiceOperationResponse:
                 raise ValidationError("successful service operation is inconsistent")
             if authority["capability"].version == 1 and authority[
                 "capability"
-            ].name in {"work.get", "work.list"}:
+            ].name in {"work.get", "work.list", "work.state"}:
                 assert receipt is not None
                 raw_result = receipt.result
                 if not isinstance(raw_result, dict):
@@ -1246,8 +1247,12 @@ class ServiceOperationResponse:
                     normalized_result = WorkItemEnvelope.from_mapping(
                         raw_result
                     ).to_dict()
-                else:
+                elif authority["capability"].name == "work.list":
                     normalized_result = WorkItemListResult.from_mapping(
+                        raw_result
+                    ).to_dict()
+                else:
+                    normalized_result = WorkItemStateResult.from_mapping(
                         raw_result
                     ).to_dict()
                 if raw_result != normalized_result:
@@ -1307,6 +1312,20 @@ class ServiceOperationResponse:
             ):
                 raise ValidationError(
                     "service sidecar receipt revision does not match the target"
+                )
+        if (
+            self.receipt is not None
+            and self.capability.name == "work.state"
+            and self.capability.version == 1
+        ):
+            state = WorkItemStateResult.from_mapping(self.receipt.result)
+            if state.object_id != request.target.object_id:
+                raise ValidationError(
+                    "service sidecar work-state result does not match the target"
+                )
+            if request.parameters != {"desired_state": state.desired_state}:
+                raise ValidationError(
+                    "service sidecar work-state result does not match the request"
                 )
 
 
