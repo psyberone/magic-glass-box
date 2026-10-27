@@ -1959,6 +1959,12 @@ instead of declaring success by ceremony.
 
 **Status: candidates, not commitments**
 
+- Revisit the Jira write surface only after M15 and its audit/dogfood gate.
+  Start from the smallest demonstrated provider-neutral operations beyond the
+  existing `done` transition—such as a bounded comment or additional lifecycle
+  state—and give each operation its own explicit effect binding. Assignment or
+  field edits require a concrete use case; agents never receive arbitrary Jira
+  update, transition, or REST authority.
 - A second forge provider, likely GitLab, must pass the capability conformance
   suite and expose only the operations it truthfully supports.
 - Bitbucket, raw Git actuators, additional work systems, interaction carriers,
