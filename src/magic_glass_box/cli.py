@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -48,7 +49,7 @@ from .inference import (
     InferenceGrantSpec,
 )
 from .integration import IntegrationError
-from .krab import KrabError
+from .krab import MAX_BODY_BYTES, MAX_NOTE_BYTES, KrabError
 from .orchestration import (
     CandidateReviewWorkspaces,
     RunCoordinator,
@@ -215,6 +216,29 @@ def _json_file(path: Path) -> dict[str, Any]:
     return value
 
 
+def _text_file(path: Path, *, maximum: int, label: str) -> str:
+    try:
+        with path.open(mode="rb") as stream:
+            raw = stream.read(maximum + 1)
+    except OSError as exc:
+        raise InputError(f"cannot read {label} file {path}: {exc}") from exc
+    if not raw or len(raw) > maximum:
+        raise InputError(f"{label} file must contain between 1 and {maximum} bytes")
+    try:
+        value = raw.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise InputError(f"{label} file must be UTF-8") from exc
+    if "\x00" in value:
+        raise InputError(f"{label} file must not contain NUL")
+    return value
+
+
+def _krab_object(value: object) -> object:
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    return value
+
+
 def _emit(value: object, *, stream: Any | None = None) -> None:
     if stream is None:
         stream = sys.stdout
@@ -307,6 +331,99 @@ def build_parser() -> argparse.ArgumentParser:
     activity.add_argument("--after", type=int, default=0)
     activity.add_argument("--limit", type=int, default=50)
     activity.add_argument("--wait", type=int, default=0)
+    projects = krab_commands.add_parser(
+        "projects", help="list projects visible to one Krab identity"
+    )
+    projects.add_argument("instance")
+    projects.add_argument("--as-user", required=True, dest="krab_handle")
+    sessions = krab_commands.add_parser(
+        "sessions", help="list sessions visible in one Krab project"
+    )
+    sessions.add_argument("instance")
+    sessions.add_argument("project_key")
+    sessions.add_argument("--as-user", required=True, dest="krab_handle")
+    session_create = krab_commands.add_parser(
+        "session-create", help="create a bounded Krab session"
+    )
+    session_create.add_argument("instance")
+    session_create.add_argument("project_key")
+    session_create.add_argument("--as-user", required=True, dest="krab_handle")
+    session_create.add_argument("--label", required=True)
+    session_create.add_argument("--participant", required=True, action="append")
+    session_create.add_argument("--idempotency-key", required=True)
+    session_close = krab_commands.add_parser(
+        "session-close", help="close a terminal Krab session"
+    )
+    session_close.add_argument("instance")
+    session_close.add_argument("project_key")
+    session_close.add_argument("session_id")
+    session_close.add_argument("--as-user", required=True, dest="krab_handle")
+    session_close.add_argument("--idempotency-key", required=True)
+    inbox = krab_commands.add_parser(
+        "inbox", help="read one identity's bounded project inbox"
+    )
+    inbox.add_argument("instance")
+    inbox.add_argument("project_key")
+    inbox.add_argument("--as-user", required=True, dest="krab_handle")
+    inbox_cursor = inbox.add_mutually_exclusive_group()
+    inbox_cursor.add_argument("--after", type=int)
+    inbox_cursor.add_argument("--unread", action="store_true")
+    inbox.add_argument("--limit", type=int, default=50)
+    inbox.add_argument("--wait", type=int, default=0)
+    inbox_ack = krab_commands.add_parser(
+        "inbox-ack", help="acknowledge handled inbox events"
+    )
+    inbox_ack.add_argument("instance")
+    inbox_ack.add_argument("project_key")
+    inbox_ack.add_argument("--as-user", required=True, dest="krab_handle")
+    inbox_ack.add_argument("--through", required=True, type=int)
+    inbox_ack.add_argument("--idempotency-key", required=True)
+    send = krab_commands.add_parser("send", help="send one bounded Krab session item")
+    send.add_argument("instance")
+    send.add_argument("project_key")
+    send.add_argument("session_id")
+    send.add_argument("--as-user", required=True, dest="krab_handle")
+    send.add_argument("--to", required=True, dest="recipient_handle")
+    send.add_argument("--title", required=True)
+    send.add_argument("--body-file", required=True, type=Path)
+    send.add_argument("--idempotency-key", required=True)
+    send.add_argument("--claim", dest="claim_id")
+    send.add_argument(
+        "--completion-policy",
+        choices=("workflow", "receipt"),
+        default="workflow",
+    )
+    item_show = krab_commands.add_parser("item-show", help="read one Krab session item")
+    item_show.add_argument("instance")
+    item_show.add_argument("project_key")
+    item_show.add_argument("session_id")
+    item_show.add_argument("item_id")
+    item_show.add_argument("--as-user", required=True, dest="krab_handle")
+    item_status = krab_commands.add_parser(
+        "item-status", help="transition one Krab session item"
+    )
+    item_status.add_argument("instance")
+    item_status.add_argument("project_key")
+    item_status.add_argument("session_id")
+    item_status.add_argument("item_id")
+    item_status.add_argument("--as-user", required=True, dest="krab_handle")
+    item_status.add_argument(
+        "--status",
+        required=True,
+        choices=(
+            "open.pending",
+            "open.in_progress",
+            "open.under_review",
+            "open.needs_changes",
+            "open.approved",
+            "closed.approved",
+            "closed.rejected",
+            "closed.handled",
+        ),
+    )
+    item_status.add_argument("--expected-version", required=True, type=int)
+    item_status.add_argument("--idempotency-key", required=True)
+    item_status.add_argument("--note-file", type=Path)
 
     project = commands.add_parser("project", help="manage project context")
     project_commands = project.add_subparsers(dest="project_command", required=True)
@@ -1410,6 +1527,121 @@ def _dispatch(
                     after=args.after,
                     limit=args.limit,
                     wait=args.wait,
+                )
+            )
+        if args.krab_command == "projects":
+            return {
+                "projects": [
+                    _krab_object(project)
+                    for project in control.krab_projects(
+                        instance_name=args.instance,
+                        krab_handle=args.krab_handle,
+                    )
+                ]
+            }
+        if args.krab_command == "sessions":
+            return {
+                "sessions": [
+                    _krab_object(session)
+                    for session in control.krab_sessions(
+                        instance_name=args.instance,
+                        krab_handle=args.krab_handle,
+                        project_key=args.project_key,
+                    )
+                ]
+            }
+        if args.krab_command == "session-create":
+            return _krab_object(
+                control.create_krab_session(
+                    instance_name=args.instance,
+                    krab_handle=args.krab_handle,
+                    project_key=args.project_key,
+                    label=args.label,
+                    participant_handles=tuple(args.participant),
+                    idempotency_key=args.idempotency_key,
+                )
+            )
+        if args.krab_command == "session-close":
+            return _krab_object(
+                control.close_krab_session(
+                    instance_name=args.instance,
+                    krab_handle=args.krab_handle,
+                    project_key=args.project_key,
+                    session_id=args.session_id,
+                    idempotency_key=args.idempotency_key,
+                )
+            )
+        if args.krab_command == "inbox":
+            return _krab_object(
+                control.krab_inbox(
+                    instance_name=args.instance,
+                    krab_handle=args.krab_handle,
+                    project_key=args.project_key,
+                    after=(None if args.unread else (args.after or 0)),
+                    unread=args.unread,
+                    limit=args.limit,
+                    wait=args.wait,
+                )
+            )
+        if args.krab_command == "inbox-ack":
+            return _krab_object(
+                control.ack_krab_inbox(
+                    instance_name=args.instance,
+                    krab_handle=args.krab_handle,
+                    project_key=args.project_key,
+                    through=args.through,
+                    idempotency_key=args.idempotency_key,
+                )
+            )
+        if args.krab_command == "send":
+            return _krab_object(
+                control.send_krab_item(
+                    instance_name=args.instance,
+                    krab_handle=args.krab_handle,
+                    project_key=args.project_key,
+                    session_id=args.session_id,
+                    recipient_handle=args.recipient_handle,
+                    title=args.title,
+                    body=_text_file(
+                        args.body_file,
+                        maximum=MAX_BODY_BYTES,
+                        label="Krab body",
+                    ),
+                    claim_id=args.claim_id,
+                    completion_policy=args.completion_policy,
+                    idempotency_key=args.idempotency_key,
+                )
+            )
+        if args.krab_command == "item-show":
+            return _krab_object(
+                control.get_krab_item(
+                    instance_name=args.instance,
+                    krab_handle=args.krab_handle,
+                    project_key=args.project_key,
+                    session_id=args.session_id,
+                    item_id=args.item_id,
+                )
+            )
+        if args.krab_command == "item-status":
+            return _krab_object(
+                control.change_krab_item_status(
+                    instance_name=args.instance,
+                    krab_handle=args.krab_handle,
+                    project_key=args.project_key,
+                    session_id=args.session_id,
+                    item_id=args.item_id,
+                    status=args.status,
+                    expected_version=args.expected_version,
+                    note=(
+                        None
+                        if args.note_file is None
+                        else _text_file(
+                            args.note_file,
+                            maximum=MAX_NOTE_BYTES,
+                            label="Krab note",
+                        )
+                    ),
+                    idempotency_key=args.idempotency_key,
                 )
             )
     if args.command == "project":

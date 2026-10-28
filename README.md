@@ -17,8 +17,9 @@ This repository currently contains the first executable vertical slice:
   enforcing a state machine;
 - a durable, metadata-only interaction ledger for typed questions, approvals,
   and choices, with atomic run-state transitions and optimistic concurrency;
-- a bounded, typed Krab client for `whoami`, project inventory, project
-  activity, and idempotent session-item write/read operations;
+- a bounded, typed Krab client for identity and project inventory, metadata-only
+  activity, coordinator session/inbox operations, and optimistic idempotent
+  session-item workflows;
 - verified human-interaction routing that correlates Krab item IDs while
   keeping private question and response content out of control-plane storage;
 - a private-file credential resolver for non-inference authorities such as
@@ -173,6 +174,12 @@ These commands use the platform state directory. Passing `--db` is supported,
 but the retained-result and candidate stores are created beside that database;
 do not point it into a source checkout unless the whole state location is
 ignored and treated as disposable local control-plane data.
+
+An operator can bind a private Krab token by reference, then use the typed
+coordinator surface for project/session discovery, bounded inbox reads,
+idempotent sends and transitions, and explicit inbox acknowledgement. The
+token never enters MGB state or a worker. See
+[docs/krab-coordinator.md](docs/krab-coordinator.md).
 
 Start an inference connector with its credentials in its own private state,
 then register only its credential-free authority and a connector-bound grant:

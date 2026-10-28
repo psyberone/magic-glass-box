@@ -137,6 +137,11 @@ project-activity projection.
   files remain supported for separately scoped non-inference authorities such
   as Krab and are never persisted. The core does not resolve AI-provider
   credentials.
+- The operator-facing Krab coordinator hooks resolve that reference only for a
+  typed request, re-attest the stable user ID on every command, and leave role,
+  session, transition, and inbox-cursor authority in Krab. Private inbox bodies
+  and notes may cross the authenticated CLI response but are not ingested into
+  control-plane state. See [krab-coordinator.md](krab-coordinator.md).
 - An inference grant is an immutable, content-addressed binding to a registered
   connector deployment, route, semantic protocol, exact model, limits, and
   credential-scope fingerprint. A protocol-v2 grant also pins one versioned,

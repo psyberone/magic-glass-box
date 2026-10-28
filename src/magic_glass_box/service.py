@@ -87,7 +87,17 @@ from .inference import (
     UnixInferenceConnectorClient,
 )
 from .integration import FoldManifest, LandingReceiptRequest
-from .krab import ActivityPage, KrabClient, KrabError, SessionItem
+from .krab import (
+    ActivityPage,
+    InboxAck,
+    InboxPage,
+    KrabClient,
+    KrabError,
+    KrabProject,
+    KrabSession,
+    SessionCloseReceipt,
+    SessionItem,
+)
 from .provider import (
     ProviderAmbiguousError,
     ProviderBudgetError,
@@ -3009,6 +3019,152 @@ class ControlPlane:
     ) -> ActivityPage:
         _, _, client = self._authenticated_client(instance_name, krab_handle)
         return client.activity(project_key, after=after, limit=limit, wait=wait)
+
+    def krab_projects(
+        self, *, instance_name: str, krab_handle: str
+    ) -> tuple[KrabProject, ...]:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.projects()
+
+    def krab_sessions(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+    ) -> tuple[KrabSession, ...]:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.sessions(project_key)
+
+    def create_krab_session(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+        label: str,
+        participant_handles: tuple[str, ...],
+        idempotency_key: str,
+    ) -> KrabSession:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.create_session(
+            project_key,
+            label=label,
+            participant_handles=participant_handles,
+            idempotency_key=idempotency_key,
+        )
+
+    def close_krab_session(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+        session_id: str,
+        idempotency_key: str,
+    ) -> SessionCloseReceipt:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.close_session(
+            project_key, session_id, idempotency_key=idempotency_key
+        )
+
+    def krab_inbox(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+        after: int | None = 0,
+        unread: bool = False,
+        limit: int = 50,
+        wait: int = 0,
+    ) -> InboxPage:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.inbox(
+            project_key,
+            after=after,
+            unread=unread,
+            limit=limit,
+            wait=wait,
+        )
+
+    def ack_krab_inbox(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+        through: int,
+        idempotency_key: str,
+    ) -> InboxAck:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.ack_inbox(
+            project_key,
+            through=through,
+            idempotency_key=idempotency_key,
+        )
+
+    def send_krab_item(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+        session_id: str,
+        recipient_handle: str,
+        title: str,
+        body: str,
+        idempotency_key: str,
+        claim_id: str | None = None,
+        completion_policy: str = "workflow",
+    ) -> SessionItem:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.create_session_item(
+            project_key,
+            session_id,
+            recipient_handle=recipient_handle,
+            title=title,
+            body=body,
+            idempotency_key=idempotency_key,
+            claim_id=claim_id,
+            completion_policy=completion_policy,
+        )
+
+    def get_krab_item(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+        session_id: str,
+        item_id: str,
+    ) -> SessionItem:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.get_session_item(project_key, session_id, item_id)
+
+    def change_krab_item_status(
+        self,
+        *,
+        instance_name: str,
+        krab_handle: str,
+        project_key: str,
+        session_id: str,
+        item_id: str,
+        status: str,
+        expected_version: int,
+        note: str | None,
+        idempotency_key: str,
+    ) -> SessionItem:
+        _, _, client = self._authenticated_client(instance_name, krab_handle)
+        return client.change_session_item_status(
+            project_key,
+            session_id,
+            item_id,
+            status=status,
+            expected_version=expected_version,
+            note=note,
+            idempotency_key=idempotency_key,
+        )
 
     def _authenticated_client(
         self,

@@ -10,12 +10,17 @@ from magic_glass_box import __version__
 from magic_glass_box.krab import (
     ActivityEvent,
     ActivityPage,
+    InboxAck,
+    InboxEvent,
+    InboxPage,
     KrabClient,
     KrabError,
     KrabHTTPError,
     KrabIdentity,
     KrabProject,
+    KrabSession,
     KrabUserRef,
+    SessionCloseReceipt,
     SessionItem,
     SessionItemHistoryEvent,
     SessionItemReminder,
@@ -227,6 +232,81 @@ def reminder_response() -> dict[str, Any]:
     }
 
 
+def session_response(*, created: bool = False) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "session_id": SESSION_ID,
+        "project_key": "box-project",
+        "state": "active",
+        "created_by": USER_ID,
+        "created_at": "2026-10-08T12:00:00Z",
+    }
+    if created:
+        metadata.update(
+            {
+                "project_id": PROJECT_ID,
+                "participants": [
+                    {"user_id": USER_ID, "handle": "agent_one"},
+                    {"user_id": OTHER_USER_ID, "handle": "agent_two"},
+                ],
+            }
+        )
+    else:
+        metadata["closed_at"] = None
+    return {
+        "trusted_metadata": metadata,
+        "untrusted_text": {"label": "Coordination room"},
+        "content_risk_flags": ["untrusted"],
+    }
+
+
+def inbox_event(sequence: int = 7, *, kind: str = "item.created") -> dict[str, Any]:
+    event = valid_event(sequence)
+    event["trusted_metadata"].update(
+        {
+            "kind": kind,
+            "from_status": None,
+            "to_status": "open.pending",
+            "current_status": "open.pending",
+            "completion_policy": "workflow",
+        }
+    )
+    event["untrusted_text"] = {"title": "Review the candidate"}
+    if kind == "item.created":
+        event["untrusted_text"]["body"] = "Untrusted coordinator message"
+    elif kind == "status.changed":
+        event["trusted_metadata"].update(
+            {
+                "from_status": "open.under_review",
+                "to_status": "open.needs_changes",
+                "current_status": "open.needs_changes",
+            }
+        )
+    event["content_risk_flags"] = ["instruction_override"]
+    return event
+
+
+def inbox_response(
+    events: list[dict[str, Any]],
+    *,
+    after: int = 0,
+    next_cursor: int | None = None,
+    acked_through: int = 0,
+    unread: bool = False,
+) -> dict[str, Any]:
+    if next_cursor is None:
+        next_cursor = events[-1]["trusted_metadata"]["event_seq"] if events else after
+    return {
+        "trusted_metadata": {
+            "project_key": "box-project",
+            "after": after,
+            "next_cursor": next_cursor,
+            "acked_through": acked_through,
+            "unread": unread,
+        },
+        "events": events,
+    }
+
+
 class KrabClientTests(unittest.TestCase):
     def test_total_deadline_interrupts_a_stalled_response_header_read(self) -> None:
         class HeaderStallConnection(FakeConnection):
@@ -317,6 +397,326 @@ class KrabClientTests(unittest.TestCase):
         )
         self.assertEqual(connection.factory_args, ("127.0.0.1", 8765, 40.0))
         self.assertTrue(connection.closed)
+
+    def test_sessions_are_typed_and_mutations_are_idempotent(self) -> None:
+        listed_client, listed_connection = client_for(
+            FakeResponse(200, {"sessions": [session_response()]})
+        )
+
+        sessions = listed_client.sessions("box-project")
+
+        self.assertEqual(
+            sessions,
+            (
+                KrabSession(
+                    session_id=SESSION_ID,
+                    project_key="box-project",
+                    state="active",
+                    created_by_id=USER_ID,
+                    created_at="2026-10-08T12:00:00Z",
+                    closed_at=None,
+                    untrusted_label="Coordination room",
+                    content_risk_flags=("untrusted",),
+                    participants=(),
+                    project_id=None,
+                ),
+            ),
+        )
+        self.assertEqual(
+            listed_connection.requests[0][1],
+            "/v1/projects/box-project/sessions",
+        )
+
+        created_client, created_connection = client_for(
+            FakeResponse(201, session_response(created=True))
+        )
+        created = created_client.create_session(
+            "box-project",
+            label="Coordination room",
+            participant_handles=("agent_two", "agent_one", "agent_two"),
+            idempotency_key="mgb.session:1234",
+        )
+        self.assertEqual(created.project_id, PROJECT_ID)
+        self.assertEqual(
+            created.participants,
+            (
+                KrabUserRef(USER_ID, "agent_one"),
+                KrabUserRef(OTHER_USER_ID, "agent_two"),
+            ),
+        )
+        method, target, body, headers = created_connection.requests[0]
+        self.assertEqual(
+            (method, target),
+            ("POST", "/v1/projects/box-project/sessions"),
+        )
+        self.assertEqual(
+            json.loads((body or b"").decode("utf-8")),
+            {
+                "label": "Coordination room",
+                "participants": ["agent_one", "agent_two"],
+            },
+        )
+        self.assertEqual(headers["Idempotency-Key"], "mgb.session:1234")
+
+        closed_response = {
+            "trusted_metadata": {
+                "session_id": SESSION_ID,
+                "project_key": "box-project",
+                "state": "closed",
+                "closed_at": "2026-10-09T12:00:00Z",
+            }
+        }
+        closed_client, closed_connection = client_for(
+            FakeResponse(200, closed_response)
+        )
+        closed = closed_client.close_session(
+            "box-project", SESSION_ID, idempotency_key="mgb.session:close-1234"
+        )
+        self.assertEqual(
+            closed,
+            SessionCloseReceipt(
+                SESSION_ID,
+                "box-project",
+                "closed",
+                "2026-10-09T12:00:00Z",
+            ),
+        )
+        self.assertEqual(
+            closed_connection.requests[0][0:3],
+            (
+                "POST",
+                "/v1/projects/box-project/sessions/" + SESSION_ID + "/close",
+                b"{}",
+            ),
+        )
+
+    def test_session_hooks_reject_invalid_requests_and_response_scope(self) -> None:
+        client, _ = client_for(FakeResponse(200, {"sessions": []}))
+        with self.assertRaisesRegex(KrabError, "participants"):
+            client.create_session(
+                "box-project",
+                label="room",
+                participant_handles=(),
+                idempotency_key="mgb.session:1234",
+            )
+        with self.assertRaisesRegex(KrabError, "idempotency"):
+            client.close_session("box-project", SESSION_ID, idempotency_key="short")
+        with self.assertRaisesRegex(KrabError, "session label"):
+            client.create_session(
+                "box-project",
+                label="x" * 257,
+                participant_handles=("agent_one",),
+                idempotency_key="mgb.session:1234",
+            )
+
+        wrong = session_response()
+        wrong["trusted_metadata"]["project_key"] = "other-project"
+        invalid, _ = client_for(FakeResponse(200, {"sessions": [wrong]}))
+        with self.assertRaisesRegex(KrabError, "another project"):
+            invalid.sessions("box-project")
+
+        duplicate = session_response()
+        duplicate_client, _ = client_for(
+            FakeResponse(200, {"sessions": [duplicate, duplicate]})
+        )
+        with self.assertRaisesRegex(KrabError, "duplicate sessions"):
+            duplicate_client.sessions("box-project")
+
+    def test_inbox_is_typed_private_and_acknowledged_explicitly(self) -> None:
+        event = inbox_event()
+        client, connection = client_for(
+            FakeResponse(200, inbox_response([event], unread=True, after=3))
+        )
+
+        page = client.inbox("box-project", after=None, unread=True, limit=17, wait=9)
+
+        self.assertEqual(
+            page,
+            InboxPage(
+                project_key="box-project",
+                after=3,
+                next_cursor=7,
+                acked_through=0,
+                unread=True,
+                events=(
+                    InboxEvent(
+                        event_seq=7,
+                        kind="item.created",
+                        project_key="box-project",
+                        session_id=SESSION_ID,
+                        item_id=ITEM_ID,
+                        actor=KrabUserRef(USER_ID, "agent_one"),
+                        creator=KrabUserRef(USER_ID, "agent_one"),
+                        recipient=KrabUserRef(OTHER_USER_ID, "agent_two"),
+                        work_claim=None,
+                        from_status=None,
+                        to_status="open.pending",
+                        current_status="open.pending",
+                        version=7,
+                        created_at="2026-10-08T12:00:00Z",
+                        untrusted_title="Review the candidate",
+                        untrusted_body="Untrusted coordinator message",
+                        untrusted_note=None,
+                        content_risk_flags=("instruction_override",),
+                        completion_policy="workflow",
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(
+            connection.requests[0][1],
+            "/v1/projects/box-project/inbox?limit=17&wait=9&unread=1",
+        )
+
+        ack_response = {
+            "trusted_metadata": {
+                "project_key": "box-project",
+                "acked_through": 7,
+                "updated_at": "2026-10-09T12:00:00Z",
+            }
+        }
+        ack_client, ack_connection = client_for(FakeResponse(200, ack_response))
+        ack = ack_client.ack_inbox(
+            "box-project", through=7, idempotency_key="mgb.inbox:ack-1234"
+        )
+        self.assertEqual(
+            ack,
+            InboxAck("box-project", 7, "2026-10-09T12:00:00Z"),
+        )
+        self.assertEqual(
+            json.loads((ack_connection.requests[0][2] or b"").decode("utf-8")),
+            {"through": 7},
+        )
+        self.assertEqual(
+            ack_connection.requests[0][3]["Idempotency-Key"],
+            "mgb.inbox:ack-1234",
+        )
+
+    def test_inbox_rejects_ambiguous_cursor_and_inconsistent_events(self) -> None:
+        client, _ = client_for(FakeResponse(200, inbox_response([])))
+        with self.assertRaisesRegex(KrabError, "after and unread"):
+            client.inbox("box-project", after=0, unread=True)
+        with self.assertRaisesRegex(KrabError, "through"):
+            client.ack_inbox(
+                "box-project", through=True, idempotency_key="mgb.inbox:ack-1234"
+            )
+
+        wrong = inbox_event()
+        wrong["trusted_metadata"]["project_key"] = "other-project"
+        invalid, _ = client_for(FakeResponse(200, inbox_response([wrong])))
+        with self.assertRaisesRegex(KrabError, "another project"):
+            invalid.inbox("box-project")
+
+        malformed = inbox_event()
+        malformed["untrusted_text"]["note"] = "unexpected on creation"
+        malformed_client, _ = client_for(FakeResponse(200, inbox_response([malformed])))
+        with self.assertRaisesRegex(KrabError, "inbox event text"):
+            malformed_client.inbox("box-project")
+
+        status_event = inbox_event(kind="status.changed")
+        status_event["untrusted_text"]["note"] = "Please address the findings."
+        status_client, _ = client_for(FakeResponse(200, inbox_response([status_event])))
+        parsed = status_client.inbox("box-project").events[0]
+        self.assertEqual(parsed.untrusted_note, "Please address the findings.")
+        self.assertIsNone(parsed.untrusted_body)
+
+        oversized_note = inbox_event(kind="status.changed")
+        oversized_note["untrusted_text"]["note"] = "x" * (4 * 1024 + 1)
+        oversized_client, _ = client_for(
+            FakeResponse(200, inbox_response([oversized_note]))
+        )
+        with self.assertRaisesRegex(KrabError, "invalid inbox event note"):
+            oversized_client.inbox("box-project")
+
+    def test_send_receipt_and_status_transition_are_explicit(self) -> None:
+        receipt_response = session_item_response(created=True)
+        receipt_response["trusted_metadata"]["completion_policy"] = "receipt"
+        client, connection = client_for(FakeResponse(201, receipt_response))
+
+        client.create_session_item(
+            "box-project",
+            SESSION_ID,
+            recipient_handle="agent_two",
+            title="Please acknowledge",
+            body="Private body",
+            idempotency_key="mgb.item:receipt-1234",
+            completion_policy="receipt",
+        )
+
+        self.assertEqual(
+            json.loads((connection.requests[0][2] or b"").decode("utf-8")),
+            {
+                "to": "agent_two",
+                "title": "Please acknowledge",
+                "body": "Private body",
+                "completion_policy": "receipt",
+            },
+        )
+
+        changed_response = session_item_response(created=True)
+        changed_response["trusted_metadata"].update(
+            {
+                "status": "open.needs_changes",
+                "version": 2,
+                "completion_policy": "workflow",
+            }
+        )
+        changed_client, changed_connection = client_for(
+            FakeResponse(200, changed_response)
+        )
+        changed = changed_client.change_session_item_status(
+            "box-project",
+            SESSION_ID,
+            ITEM_ID,
+            status="open.needs_changes",
+            expected_version=1,
+            note="Please address the review findings.",
+            idempotency_key="mgb.item:status-1234",
+        )
+        self.assertEqual(changed.status, "open.needs_changes")
+        self.assertEqual(changed.version, 2)
+        self.assertEqual(
+            changed_connection.requests[0][0:2],
+            (
+                "PATCH",
+                "/v1/projects/box-project/sessions/"
+                + SESSION_ID
+                + "/items/"
+                + ITEM_ID
+                + "/status",
+            ),
+        )
+        self.assertEqual(
+            json.loads((changed_connection.requests[0][2] or b"").decode("utf-8")),
+            {
+                "status": "open.needs_changes",
+                "expected_version": 1,
+                "note": "Please address the review findings.",
+            },
+        )
+
+    def test_status_transition_rejects_invalid_optimistic_input(self) -> None:
+        client, _ = client_for(FakeResponse(200, session_item_response(created=True)))
+        with self.assertRaisesRegex(KrabError, "expected version"):
+            client.change_session_item_status(
+                "box-project",
+                SESSION_ID,
+                ITEM_ID,
+                status="open.in_progress",
+                expected_version=0,
+                note=None,
+                idempotency_key="mgb.item:status-1234",
+            )
+        with self.assertRaisesRegex(KrabError, "requires a note"):
+            client.change_session_item_status(
+                "box-project",
+                SESSION_ID,
+                ITEM_ID,
+                status="closed.rejected",
+                expected_version=1,
+                note=None,
+                idempotency_key="mgb.item:status-1234",
+            )
 
     def test_create_session_item_is_typed_idempotent_and_explicitly_untrusted(
         self,

@@ -21,9 +21,11 @@ from magic_glass_box.cli import (
     _emit,
     _handle_sigterm,
     _json_file,
+    _krab_object,
     _serve_control_room,
     _serve_supervisor,
     _TerminationRequested,
+    _text_file,
     build_parser,
     main,
 )
@@ -95,6 +97,35 @@ class FakeControlPlane:
     def project_activity(self, **kwargs: object) -> ActivityPage:
         self.calls.append(("krab.activity", kwargs))
         return ActivityPage("box-project", 0, 0, ())
+
+    def krab_projects(self, **kwargs: object) -> tuple[dict[str, object], ...]:
+        self.calls.append(("krab.projects", kwargs))
+        return ({"project_key": "box-project", "role": "coordinator"},)
+
+    def krab_sessions(self, **kwargs: object) -> tuple[dict[str, object], ...]:
+        self.calls.append(("krab.sessions", kwargs))
+        return ({"session_id": "ses_" + "1" * 32},)
+
+    def create_krab_session(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.session-create", **kwargs)
+
+    def close_krab_session(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.session-close", **kwargs)
+
+    def krab_inbox(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.inbox", **kwargs)
+
+    def ack_krab_inbox(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.inbox-ack", **kwargs)
+
+    def send_krab_item(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.send", **kwargs)
+
+    def get_krab_item(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.item-show", **kwargs)
+
+    def change_krab_item_status(self, **kwargs: object) -> dict[str, object]:
+        return self._called("krab.item-status", **kwargs)
 
     def accept_interaction_response(
         self, interaction_id: str, **kwargs: object
@@ -510,6 +541,40 @@ class CLITests(unittest.TestCase):
         _emit({"message": "café"}, stream=stream)
         self.assertEqual(stream.getvalue(), '{\n  "message": "café"\n}\n')
 
+    def test_krab_text_files_are_bounded_utf8_and_nonempty(self) -> None:
+        path = Path(self.temporary.name) / "message.txt"
+        path.write_text("café", encoding="utf-8")
+        self.assertEqual(
+            _text_file(path, maximum=16, label="Krab body"),
+            "café",
+        )
+        self.assertEqual(
+            _krab_object(ActivityPage("box-project", 0, 0, ())),
+            {
+                "project_key": "box-project",
+                "after": 0,
+                "next_cursor": 0,
+                "events": (),
+            },
+        )
+
+        cases = (
+            (b"", "between 1 and 4 bytes"),
+            (b"12345", "between 1 and 4 bytes"),
+            (b"\xff", "must be UTF-8"),
+            (b"a\x00b", "must not contain NUL"),
+        )
+        for raw, message in cases:
+            path.write_bytes(raw)
+            with (
+                self.subTest(raw=raw),
+                self.assertRaisesRegex(InputError, message),
+            ):
+                _text_file(path, maximum=4, label="Krab body")
+
+        with self.assertRaisesRegex(InputError, "cannot read"):
+            _text_file(path.with_name("missing.txt"), maximum=4, label="Krab body")
+
     def test_parser_exposes_the_documented_command_help_contract(self) -> None:
         parser = build_parser()
         self.assertEqual(parser.prog, "magic-glass-box")
@@ -586,6 +651,15 @@ class CLITests(unittest.TestCase):
                         "verify and retain a Krab credential reference",
                     ),
                     ("activity", "read metadata-only project activity"),
+                    ("projects", "list projects visible to one Krab identity"),
+                    ("sessions", "list sessions visible in one Krab project"),
+                    ("session-create", "create a bounded Krab session"),
+                    ("session-close", "close a terminal Krab session"),
+                    ("inbox", "read one identity's bounded project inbox"),
+                    ("inbox-ack", "acknowledge handled inbox events"),
+                    ("send", "send one bounded Krab session item"),
+                    ("item-show", "read one Krab session item"),
+                    ("item-status", "transition one Krab session item"),
                 ),
             ),
             ("project",): (
@@ -984,6 +1058,35 @@ class CLITests(unittest.TestCase):
                 ("krab", "instance-add"): ("--url",),
                 ("krab", "identity-add"): ("--token-file",),
                 ("krab", "activity"): ("--as-user",),
+                ("krab", "projects"): ("--as-user",),
+                ("krab", "sessions"): ("--as-user",),
+                ("krab", "session-create"): (
+                    "--as-user",
+                    "--label",
+                    "--participant",
+                    "--idempotency-key",
+                ),
+                ("krab", "session-close"): ("--as-user", "--idempotency-key"),
+                ("krab", "inbox"): ("--as-user",),
+                ("krab", "inbox-ack"): (
+                    "--as-user",
+                    "--through",
+                    "--idempotency-key",
+                ),
+                ("krab", "send"): (
+                    "--as-user",
+                    "--to",
+                    "--title",
+                    "--body-file",
+                    "--idempotency-key",
+                ),
+                ("krab", "item-show"): ("--as-user",),
+                ("krab", "item-status"): (
+                    "--as-user",
+                    "--status",
+                    "--expected-version",
+                    "--idempotency-key",
+                ),
                 ("project", "add"): (
                     "--instance",
                     "--as-user",
@@ -1296,6 +1399,20 @@ class CLITests(unittest.TestCase):
         self.assertEqual(
             choices,
             {
+                (("krab", "send"), "completion_policy"): (
+                    "workflow",
+                    "receipt",
+                ),
+                (("krab", "item-status"), "status"): (
+                    "open.pending",
+                    "open.in_progress",
+                    "open.under_review",
+                    "open.needs_changes",
+                    "open.approved",
+                    "closed.approved",
+                    "closed.rejected",
+                    "closed.handled",
+                ),
                 (("supervisor", "run"), "log_level"): (
                     "DEBUG",
                     "INFO",
@@ -1396,6 +1513,10 @@ class CLITests(unittest.TestCase):
     def test_all_administrative_routes_dispatch(self) -> None:
         context = Path(self.temporary.name) / "context.json"
         context.write_text('{"purpose":"Build Magic Glass Box"}', encoding="utf-8")
+        message_body = Path(self.temporary.name) / "message.txt"
+        message_body.write_text("Private coordinator message", encoding="utf-8")
+        review_note = Path(self.temporary.name) / "review-note.txt"
+        review_note.write_text("Please address the findings.", encoding="utf-8")
         spec = Path(self.temporary.name) / "profile.json"
         spec.write_text(
             '{"image":"agent@sha256:abc","command":["agent"]}',
@@ -1522,6 +1643,244 @@ class CLITests(unittest.TestCase):
                     "next_cursor": 0,
                     "project_key": "box-project",
                 },
+            ),
+            (
+                "krab.projects",
+                ["krab", "projects", "local", "--as-user", "agent_one"],
+                (
+                    "krab.projects",
+                    {"instance_name": "local", "krab_handle": "agent_one"},
+                ),
+                {"projects": [{"project_key": "box-project", "role": "coordinator"}]},
+            ),
+            (
+                "krab.sessions",
+                [
+                    "krab",
+                    "sessions",
+                    "local",
+                    "box-project",
+                    "--as-user",
+                    "agent_one",
+                ],
+                (
+                    "krab.sessions",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                    },
+                ),
+                {"sessions": [{"session_id": "ses_" + "1" * 32}]},
+            ),
+            (
+                "krab.session-create",
+                [
+                    "krab",
+                    "session-create",
+                    "local",
+                    "box-project",
+                    "--as-user",
+                    "agent_one",
+                    "--label",
+                    "Review room",
+                    "--participant",
+                    "agent_one",
+                    "--participant",
+                    "agent_two",
+                    "--idempotency-key",
+                    "mgb.session:1234",
+                ],
+                (
+                    "krab.session-create",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                        "label": "Review room",
+                        "participant_handles": ("agent_one", "agent_two"),
+                        "idempotency_key": "mgb.session:1234",
+                    },
+                ),
+                {"operation": "krab.session-create"},
+            ),
+            (
+                "krab.session-close",
+                [
+                    "krab",
+                    "session-close",
+                    "local",
+                    "box-project",
+                    "ses_" + "1" * 32,
+                    "--as-user",
+                    "agent_one",
+                    "--idempotency-key",
+                    "mgb.session:close-1234",
+                ],
+                (
+                    "krab.session-close",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                        "session_id": "ses_" + "1" * 32,
+                        "idempotency_key": "mgb.session:close-1234",
+                    },
+                ),
+                {"operation": "krab.session-close"},
+            ),
+            (
+                "krab.inbox",
+                [
+                    "krab",
+                    "inbox",
+                    "local",
+                    "box-project",
+                    "--as-user",
+                    "agent_one",
+                    "--unread",
+                    "--limit",
+                    "17",
+                    "--wait",
+                    "9",
+                ],
+                (
+                    "krab.inbox",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                        "after": None,
+                        "unread": True,
+                        "limit": 17,
+                        "wait": 9,
+                    },
+                ),
+                {"operation": "krab.inbox"},
+            ),
+            (
+                "krab.inbox-ack",
+                [
+                    "krab",
+                    "inbox-ack",
+                    "local",
+                    "box-project",
+                    "--as-user",
+                    "agent_one",
+                    "--through",
+                    "7",
+                    "--idempotency-key",
+                    "mgb.inbox:ack-1234",
+                ],
+                (
+                    "krab.inbox-ack",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                        "through": 7,
+                        "idempotency_key": "mgb.inbox:ack-1234",
+                    },
+                ),
+                {"operation": "krab.inbox-ack"},
+            ),
+            (
+                "krab.send",
+                [
+                    "krab",
+                    "send",
+                    "local",
+                    "box-project",
+                    "ses_" + "1" * 32,
+                    "--as-user",
+                    "agent_one",
+                    "--to",
+                    "agent_two",
+                    "--title",
+                    "Review request",
+                    "--body-file",
+                    str(message_body),
+                    "--completion-policy",
+                    "receipt",
+                    "--idempotency-key",
+                    "mgb.item:send-1234",
+                ],
+                (
+                    "krab.send",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                        "session_id": "ses_" + "1" * 32,
+                        "recipient_handle": "agent_two",
+                        "title": "Review request",
+                        "body": "Private coordinator message",
+                        "claim_id": None,
+                        "completion_policy": "receipt",
+                        "idempotency_key": "mgb.item:send-1234",
+                    },
+                ),
+                {"operation": "krab.send"},
+            ),
+            (
+                "krab.item-show",
+                [
+                    "krab",
+                    "item-show",
+                    "local",
+                    "box-project",
+                    "ses_" + "1" * 32,
+                    "itm_" + "2" * 32,
+                    "--as-user",
+                    "agent_one",
+                ],
+                (
+                    "krab.item-show",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                        "session_id": "ses_" + "1" * 32,
+                        "item_id": "itm_" + "2" * 32,
+                    },
+                ),
+                {"operation": "krab.item-show"},
+            ),
+            (
+                "krab.item-status",
+                [
+                    "krab",
+                    "item-status",
+                    "local",
+                    "box-project",
+                    "ses_" + "1" * 32,
+                    "itm_" + "2" * 32,
+                    "--as-user",
+                    "agent_one",
+                    "--status",
+                    "open.needs_changes",
+                    "--expected-version",
+                    "1",
+                    "--note-file",
+                    str(review_note),
+                    "--idempotency-key",
+                    "mgb.item:status-1234",
+                ],
+                (
+                    "krab.item-status",
+                    {
+                        "instance_name": "local",
+                        "krab_handle": "agent_one",
+                        "project_key": "box-project",
+                        "session_id": "ses_" + "1" * 32,
+                        "item_id": "itm_" + "2" * 32,
+                        "status": "open.needs_changes",
+                        "expected_version": 1,
+                        "note": "Please address the findings.",
+                        "idempotency_key": "mgb.item:status-1234",
+                    },
+                ),
+                {"operation": "krab.item-status"},
             ),
             (
                 "project.add",
@@ -1889,6 +2248,33 @@ class CLITests(unittest.TestCase):
         self.assertEqual(parsed.wait, 0)
         self.assertEqual(parsed.krab_handle, "agent_one")
 
+        inbox = parser.parse_args(
+            [
+                "krab",
+                "inbox",
+                "local",
+                "box-project",
+                "--as-user",
+                "agent_one",
+            ]
+        )
+        self.assertIsNone(inbox.after)
+        self.assertFalse(inbox.unread)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "krab",
+                    "inbox",
+                    "local",
+                    "box-project",
+                    "--as-user",
+                    "agent_one",
+                    "--after",
+                    "1",
+                    "--unread",
+                ]
+            )
+
         with (
             redirect_stderr(io.StringIO()),
             self.assertRaises(SystemExit) as missing_importer,
@@ -2172,6 +2558,15 @@ class CLITests(unittest.TestCase):
                 "instance-add": "add a Krab origin",
                 "identity-add": "verify and retain a Krab credential reference",
                 "activity": "read metadata-only project activity",
+                "projects": "list projects visible to one Krab identity",
+                "sessions": "list sessions visible in one Krab project",
+                "session-create": "create a bounded Krab session",
+                "session-close": "close a terminal Krab session",
+                "inbox": "read one identity's bounded project inbox",
+                "inbox-ack": "acknowledge handled inbox events",
+                "send": "send one bounded Krab session item",
+                "item-show": "read one Krab session item",
+                "item-status": "transition one Krab session item",
             },
             "project": {
                 "add": "verify and register a visible Krab project",

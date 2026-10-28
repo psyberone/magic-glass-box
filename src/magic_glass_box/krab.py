@@ -20,6 +20,7 @@ from .domain import validate_krab_id, validate_project_key
 DEFAULT_KRAB_PORT = 8765
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 32 * 1024
+MAX_LABEL_BYTES = 256
 MAX_TITLE_BYTES = 512
 MAX_BODY_BYTES = 16 * 1024
 MAX_NOTE_BYTES = 4 * 1024
@@ -135,6 +136,28 @@ class KrabUserRef:
 
 
 @dataclass(frozen=True)
+class KrabSession:
+    session_id: str
+    project_key: str
+    state: str
+    created_by_id: str
+    created_at: str
+    closed_at: str | None
+    untrusted_label: str
+    content_risk_flags: tuple[str, ...]
+    participants: tuple[KrabUserRef, ...]
+    project_id: str | None
+
+
+@dataclass(frozen=True)
+class SessionCloseReceipt:
+    session_id: str
+    project_key: str
+    state: str
+    closed_at: str
+
+
+@dataclass(frozen=True)
 class WorkClaimRef:
     claim_id: str
     kind: str
@@ -189,6 +212,46 @@ class ActivityPage:
     after: int
     next_cursor: int
     events: tuple[ActivityEvent, ...]
+
+
+@dataclass(frozen=True)
+class InboxEvent:
+    event_seq: int
+    kind: str
+    project_key: str
+    session_id: str
+    item_id: str
+    actor: KrabUserRef
+    creator: KrabUserRef
+    recipient: KrabUserRef
+    work_claim: WorkClaimRef | None
+    from_status: str | None
+    to_status: str | None
+    current_status: str
+    version: int
+    created_at: str
+    untrusted_title: str
+    untrusted_body: str | None
+    untrusted_note: str | None
+    content_risk_flags: tuple[str, ...]
+    completion_policy: str = "workflow"
+
+
+@dataclass(frozen=True)
+class InboxPage:
+    project_key: str
+    after: int
+    next_cursor: int
+    acked_through: int
+    unread: bool
+    events: tuple[InboxEvent, ...]
+
+
+@dataclass(frozen=True)
+class InboxAck:
+    project_key: str
+    acked_through: int
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -327,6 +390,12 @@ def _handle(value: object) -> str:
     return value
 
 
+def _idempotency_key(value: object) -> str:
+    if not isinstance(value, str) or IDEMPOTENCY_KEY_RE.fullmatch(value) is None:
+        raise KrabError("invalid idempotency key")
+    return value
+
+
 def _user_ref(value: object, label: str) -> KrabUserRef:
     item = _exact_object(value, fields={"user_id", "handle"}, label=label)
     try:
@@ -383,6 +452,187 @@ def _item_status(value: object, *, nullable: bool = False) -> str | None:
     if not isinstance(value, str) or value not in ITEM_STATUS:
         raise KrabError("invalid session-item status")
     return value
+
+
+def _session(
+    value: object,
+    *,
+    project_key: str,
+    created: bool,
+) -> KrabSession:
+    response = _exact_object(
+        value,
+        fields={"trusted_metadata", "untrusted_text", "content_risk_flags"},
+        label="session",
+    )
+    metadata_fields = {
+        "session_id",
+        "project_key",
+        "state",
+        "created_by",
+        "created_at",
+    }
+    metadata_fields.update({"project_id", "participants"} if created else {"closed_at"})
+    metadata = _exact_object(
+        response["trusted_metadata"],
+        fields=metadata_fields,
+        label="session metadata",
+    )
+    text = _exact_object(
+        response["untrusted_text"], fields={"label"}, label="session text"
+    )
+    if metadata["project_key"] != project_key:
+        raise KrabError("session belongs to another project")
+    try:
+        session_id = validate_krab_id(metadata["session_id"], "ses")
+        creator_id = validate_krab_id(metadata["created_by"], "usr")
+    except ValueError as exc:
+        raise KrabError("invalid session object ID") from exc
+    state = metadata["state"]
+    if state not in {"active", "closed"}:
+        raise KrabError("invalid session state")
+    closed_value = None if created else metadata["closed_at"]
+    if state == "closed":
+        if created or closed_value is None:
+            raise KrabError("invalid closed session timestamp")
+        closed_at = _timestamp(closed_value, label="session close timestamp")
+    else:
+        if closed_value is not None:
+            raise KrabError("invalid active session timestamp")
+        closed_at = None
+
+    project_id: str | None = None
+    participants: tuple[KrabUserRef, ...] = ()
+    if created:
+        try:
+            project_id = validate_krab_id(metadata["project_id"], "prj")
+        except ValueError as exc:
+            raise KrabError("invalid session project ID") from exc
+        participant_values = metadata["participants"]
+        if (
+            not isinstance(participant_values, list)
+            or not 1 <= len(participant_values) <= 32
+        ):
+            raise KrabError("invalid session participants")
+        participants = tuple(
+            _user_ref(entry, "session participant") for entry in participant_values
+        )
+        if (
+            len({entry.user_id for entry in participants}) != len(participants)
+            or len({entry.handle for entry in participants}) != len(participants)
+            or tuple(sorted(participants, key=lambda entry: entry.handle))
+            != participants
+            or creator_id not in {entry.user_id for entry in participants}
+        ):
+            raise KrabError("invalid session participants")
+
+    return KrabSession(
+        session_id=session_id,
+        project_key=project_key,
+        state=state,
+        created_by_id=creator_id,
+        created_at=_timestamp(
+            metadata["created_at"], label="session creation timestamp"
+        ),
+        closed_at=closed_at,
+        untrusted_label=_text(
+            text["label"], label="session label", max_bytes=MAX_LABEL_BYTES
+        ),
+        content_risk_flags=_risk_flags(response["content_risk_flags"], label="session"),
+        participants=participants,
+        project_id=project_id,
+    )
+
+
+def _inbox_event(value: object, *, project_key: str) -> InboxEvent:
+    event = _exact_object(
+        value,
+        fields={"trusted_metadata", "untrusted_text", "content_risk_flags"},
+        label="inbox event",
+    )
+    metadata = _exact_object(
+        event["trusted_metadata"],
+        fields={
+            "event_seq",
+            "kind",
+            "project_key",
+            "session_id",
+            "item_id",
+            "actor",
+            "creator",
+            "recipient",
+            "work_claim",
+            "from_status",
+            "to_status",
+            "current_status",
+            "completion_policy",
+            "version",
+            "created_at",
+        },
+        label="inbox event metadata",
+    )
+    if metadata["project_key"] != project_key:
+        raise KrabError("inbox event belongs to another project")
+    kind = metadata["kind"]
+    if not isinstance(kind, str) or kind not in EVENT_KINDS:
+        raise KrabError("invalid inbox event kind")
+    expected_text = {"title", "body"} if kind == "item.created" else {"title"}
+    raw_text = event["untrusted_text"]
+    if kind == "status.changed" and isinstance(raw_text, dict) and "note" in raw_text:
+        expected_text.add("note")
+    text = _exact_object(raw_text, fields=expected_text, label="inbox event text")
+    try:
+        session_id = validate_krab_id(metadata["session_id"], "ses")
+        item_id = validate_krab_id(metadata["item_id"], "itm")
+    except ValueError as exc:
+        raise KrabError("invalid inbox event object ID") from exc
+    from_status = _item_status(metadata["from_status"], nullable=True)
+    to_status = _item_status(metadata["to_status"], nullable=True)
+    current_status = _item_status(metadata["current_status"]) or ""
+    completion_policy = _completion_policy(
+        metadata["completion_policy"],
+        statuses=(from_status, to_status, current_status),
+        label="inbox event",
+    )
+    body = (
+        _text(text["body"], label="inbox event body", max_bytes=MAX_BODY_BYTES)
+        if "body" in text
+        else None
+    )
+    note = (
+        _text(text["note"], label="inbox event note", max_bytes=MAX_NOTE_BYTES)
+        if "note" in text
+        else None
+    )
+    if note == "":
+        raise KrabError("invalid inbox event note")
+    return InboxEvent(
+        event_seq=_integer(
+            metadata["event_seq"], minimum=1, label="inbox event sequence"
+        ),
+        kind=kind,
+        project_key=project_key,
+        session_id=session_id,
+        item_id=item_id,
+        actor=_user_ref(metadata["actor"], "inbox event actor"),
+        creator=_user_ref(metadata["creator"], "inbox event creator"),
+        recipient=_user_ref(metadata["recipient"], "inbox event recipient"),
+        work_claim=_work_claim(metadata["work_claim"]),
+        from_status=from_status,
+        to_status=to_status,
+        current_status=current_status,
+        version=_integer(metadata["version"], minimum=1, label="item version"),
+        created_at=_timestamp(metadata["created_at"], label="inbox event timestamp"),
+        untrusted_title=_text(
+            text["title"], label="inbox event title", max_bytes=MAX_TITLE_BYTES
+        ),
+        untrusted_body=body,
+        untrusted_note=note,
+        content_risk_flags=_risk_flags(
+            event["content_risk_flags"], label="inbox event"
+        ),
+        completion_policy=completion_policy,
+    )
 
 
 def _completion_policy(
@@ -765,6 +1015,229 @@ class KrabClient:
             )
         return tuple(projects)
 
+    def sessions(self, project_key: str) -> tuple[KrabSession, ...]:
+        try:
+            key = validate_project_key(project_key)
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        payload = _exact_object(
+            self._request("/v1/projects/" + quote(key, safe="") + "/sessions"),
+            fields={"sessions"},
+            label="session-list response",
+        )
+        entries = payload["sessions"]
+        if not isinstance(entries, list) or len(entries) > 10_000:
+            raise KrabError("invalid session list")
+        sessions = tuple(
+            _session(entry, project_key=key, created=False) for entry in entries
+        )
+        if len({session.session_id for session in sessions}) != len(sessions):
+            raise KrabError("session response contains duplicate sessions")
+        return sessions
+
+    def create_session(
+        self,
+        project_key: str,
+        *,
+        label: str,
+        participant_handles: tuple[str, ...],
+        idempotency_key: str,
+    ) -> KrabSession:
+        try:
+            key = validate_project_key(project_key)
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        request_label = _text(label, label="session label", max_bytes=MAX_LABEL_BYTES)
+        if (
+            not isinstance(participant_handles, tuple)
+            or not 1 <= len(participant_handles) <= 32
+        ):
+            raise KrabError("session participants must contain 1 to 32 handles")
+        handles = tuple(sorted({_handle(value) for value in participant_handles}))
+        response = self._request(
+            "/v1/projects/" + quote(key, safe="") + "/sessions",
+            method="POST",
+            payload={"label": request_label, "participants": list(handles)},
+            idempotency_key=_idempotency_key(idempotency_key),
+            expected_status=201,
+        )
+        return _session(response, project_key=key, created=True)
+
+    def close_session(
+        self,
+        project_key: str,
+        session_id: str,
+        *,
+        idempotency_key: str,
+    ) -> SessionCloseReceipt:
+        try:
+            key = validate_project_key(project_key)
+            session = validate_krab_id(session_id, "ses")
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        response = _exact_object(
+            self._request(
+                "/v1/projects/"
+                + quote(key, safe="")
+                + "/sessions/"
+                + quote(session, safe="")
+                + "/close",
+                method="POST",
+                payload={},
+                idempotency_key=_idempotency_key(idempotency_key),
+            ),
+            fields={"trusted_metadata"},
+            label="session-close response",
+        )
+        metadata = _exact_object(
+            response["trusted_metadata"],
+            fields={"session_id", "project_key", "state", "closed_at"},
+            label="session-close metadata",
+        )
+        if metadata["session_id"] != session:
+            raise KrabError("session-close response session does not match the request")
+        if metadata["project_key"] != key:
+            raise KrabError("session-close response project does not match the request")
+        if metadata["state"] != "closed":
+            raise KrabError("invalid session-close state")
+        return SessionCloseReceipt(
+            session_id=session,
+            project_key=key,
+            state="closed",
+            closed_at=_timestamp(
+                metadata["closed_at"], label="session close timestamp"
+            ),
+        )
+
+    def inbox(
+        self,
+        project_key: str,
+        *,
+        after: int | None = 0,
+        unread: bool = False,
+        limit: int = 50,
+        wait: int = 0,
+    ) -> InboxPage:
+        try:
+            key = validate_project_key(project_key)
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        if not isinstance(unread, bool):
+            raise KrabError("unread must be a boolean")
+        if unread and after is not None:
+            raise KrabError("after and unread cannot be used together")
+        if after is not None and (
+            isinstance(after, bool) or not isinstance(after, int) or after < 0
+        ):
+            raise KrabError("after must be a non-negative integer")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise KrabError("limit must be between 1 and 100")
+        if isinstance(wait, bool) or not isinstance(wait, int) or not 0 <= wait <= 30:
+            raise KrabError("wait must be between 0 and 30")
+        query: dict[str, str | int] = {"limit": limit, "wait": wait}
+        if unread:
+            query["unread"] = 1
+        else:
+            query["after"] = 0 if after is None else after
+        payload = _exact_object(
+            self._request("/v1/projects/" + quote(key, safe="") + "/inbox", query),
+            fields={"trusted_metadata", "events"},
+            label="inbox response",
+        )
+        metadata = _exact_object(
+            payload["trusted_metadata"],
+            fields={
+                "project_key",
+                "after",
+                "next_cursor",
+                "acked_through",
+                "unread",
+            },
+            label="inbox metadata",
+        )
+        if metadata["project_key"] != key:
+            raise KrabError("inbox response project does not match the request")
+        response_after = _integer(metadata["after"], minimum=0, label="inbox after")
+        if not unread and response_after != (0 if after is None else after):
+            raise KrabError("inbox response cursor does not match the request")
+        if metadata["unread"] is not unread:
+            raise KrabError("inbox response mode does not match the request")
+        next_cursor = _integer(
+            metadata["next_cursor"], minimum=0, label="inbox next cursor"
+        )
+        acked_through = _integer(
+            metadata["acked_through"], minimum=0, label="inbox acknowledgement"
+        )
+        entries = payload["events"]
+        if not isinstance(entries, list) or len(entries) > limit:
+            raise KrabError("invalid inbox event list")
+        events = tuple(_inbox_event(entry, project_key=key) for entry in entries)
+        if any(
+            current.event_seq <= previous.event_seq
+            for previous, current in zip(events, events[1:], strict=False)
+        ):
+            raise KrabError("inbox events are not strictly ordered")
+        if events and events[0].event_seq <= response_after:
+            raise KrabError("inbox event does not follow the response cursor")
+        expected_cursor = events[-1].event_seq if events else response_after
+        if next_cursor != expected_cursor:
+            raise KrabError("inbox next cursor does not match its events")
+        return InboxPage(
+            project_key=key,
+            after=response_after,
+            next_cursor=next_cursor,
+            acked_through=acked_through,
+            unread=unread,
+            events=events,
+        )
+
+    def ack_inbox(
+        self,
+        project_key: str,
+        *,
+        through: int,
+        idempotency_key: str,
+    ) -> InboxAck:
+        try:
+            key = validate_project_key(project_key)
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        if isinstance(through, bool) or not isinstance(through, int) or through < 0:
+            raise KrabError("through must be a non-negative integer")
+        response = _exact_object(
+            self._request(
+                "/v1/projects/" + quote(key, safe="") + "/inbox/ack",
+                method="POST",
+                payload={"through": through},
+                idempotency_key=_idempotency_key(idempotency_key),
+            ),
+            fields={"trusted_metadata"},
+            label="inbox-ack response",
+        )
+        metadata = _exact_object(
+            response["trusted_metadata"],
+            fields={"project_key", "acked_through", "updated_at"},
+            label="inbox-ack metadata",
+        )
+        if metadata["project_key"] != key:
+            raise KrabError("inbox-ack response project does not match the request")
+        acked_through = _integer(
+            metadata["acked_through"], minimum=0, label="inbox acknowledgement"
+        )
+        if acked_through != through:
+            raise KrabError("inbox-ack response cursor does not match the request")
+        return InboxAck(
+            project_key=key,
+            acked_through=acked_through,
+            updated_at=_timestamp(
+                metadata["updated_at"], label="inbox update timestamp"
+            ),
+        )
+
     def work_claims(
         self,
         project_key: str,
@@ -899,6 +1372,7 @@ class KrabClient:
         body: str,
         idempotency_key: str,
         claim_id: str | None = None,
+        completion_policy: str = "workflow",
     ) -> SessionItem:
         try:
             key = validate_project_key(project_key)
@@ -914,11 +1388,12 @@ class KrabClient:
             raise KrabError("invalid session-item title")
         if not request_body:
             raise KrabError("invalid session-item body")
+        request_key = _idempotency_key(idempotency_key)
         if (
-            not isinstance(idempotency_key, str)
-            or IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None
+            not isinstance(completion_policy, str)
+            or completion_policy not in COMPLETION_POLICIES
         ):
-            raise KrabError("invalid idempotency key")
+            raise KrabError("invalid completion policy")
         request: dict[str, Any] = {
             "to": recipient,
             "title": request_title,
@@ -929,6 +1404,8 @@ class KrabClient:
                 request["claim_id"] = validate_krab_id(claim_id, "clm")
             except ValueError as exc:
                 raise KrabError(str(exc)) from exc
+        if completion_policy != "workflow":
+            request["completion_policy"] = completion_policy
         response = self._request(
             "/v1/projects/"
             + quote(key, safe="")
@@ -937,7 +1414,7 @@ class KrabClient:
             + "/items",
             method="POST",
             payload=request,
-            idempotency_key=idempotency_key,
+            idempotency_key=request_key,
             expected_status=201,
         )
         return _session_item(
@@ -947,6 +1424,72 @@ class KrabClient:
             item_id=None,
             created=True,
         )
+
+    def change_session_item_status(
+        self,
+        project_key: str,
+        session_id: str,
+        item_id: str,
+        *,
+        status: str,
+        expected_version: int,
+        note: str | None,
+        idempotency_key: str,
+    ) -> SessionItem:
+        try:
+            key = validate_project_key(project_key)
+            session = validate_krab_id(session_id, "ses")
+            item = validate_krab_id(item_id, "itm")
+        except ValueError as exc:
+            raise KrabError(str(exc)) from exc
+        target_status = _item_status(status) or ""
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            raise KrabError("expected version must be a positive integer")
+        request_note = (
+            None
+            if note is None
+            else _text(note, label="session-item note", max_bytes=MAX_NOTE_BYTES)
+        )
+        if request_note == "":
+            raise KrabError("invalid session-item note")
+        if target_status in {"open.needs_changes", "closed.rejected"} and (
+            request_note is None
+        ):
+            raise KrabError("session-item status requires a note")
+        request: dict[str, Any] = {
+            "status": target_status,
+            "expected_version": expected_version,
+        }
+        if request_note is not None:
+            request["note"] = request_note
+        response = self._request(
+            "/v1/projects/"
+            + quote(key, safe="")
+            + "/sessions/"
+            + quote(session, safe="")
+            + "/items/"
+            + quote(item, safe="")
+            + "/status",
+            method="PATCH",
+            payload=request,
+            idempotency_key=_idempotency_key(idempotency_key),
+        )
+        changed = _session_item(
+            response,
+            project_key=key,
+            session_id=session,
+            item_id=item,
+            created=True,
+        )
+        if changed.status != target_status:
+            raise KrabError("session-item status response does not match the request")
+        if changed.version != expected_version + 1:
+            raise KrabError("session-item status response version is inconsistent")
+        return changed
 
     def get_session_item(
         self, project_key: str, session_id: str, item_id: str
@@ -987,11 +1530,7 @@ class KrabClient:
             item = validate_krab_id(item_id, "itm")
         except ValueError as exc:
             raise KrabError(str(exc)) from exc
-        if (
-            not isinstance(idempotency_key, str)
-            or IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None
-        ):
-            raise KrabError("invalid idempotency key")
+        request_key = _idempotency_key(idempotency_key)
         response = _exact_object(
             self._request(
                 "/v1/projects/"
@@ -1003,7 +1542,7 @@ class KrabClient:
                 + "/notify",
                 method="POST",
                 payload={},
-                idempotency_key=idempotency_key,
+                idempotency_key=request_key,
                 expected_status=202,
             ),
             fields={"trusted_metadata"},

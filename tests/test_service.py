@@ -16,7 +16,16 @@ from magic_glass_box.domain import (
     SupervisionPolicy,
     WorkItemEnvelope,
 )
-from magic_glass_box.krab import ActivityPage, KrabError, KrabIdentity, KrabProject
+from magic_glass_box.krab import (
+    ActivityPage,
+    InboxAck,
+    InboxPage,
+    KrabError,
+    KrabIdentity,
+    KrabProject,
+    KrabSession,
+    SessionCloseReceipt,
+)
 from magic_glass_box.service import (
     ControlPlane,
     activity_to_dict,
@@ -38,6 +47,9 @@ class FakeKrabClient:
         self.identity = identity
         self.visible_projects = projects
         self.activity_calls: list[tuple[str, dict[str, object]]] = []
+        self.coordinator_calls: list[
+            tuple[str, tuple[object, ...], dict[str, object]]
+        ] = []
 
     def whoami(self) -> KrabIdentity:
         return self.identity
@@ -49,6 +61,71 @@ class FakeKrabClient:
         self.activity_calls.append((project_key, kwargs))
         after = int(kwargs["after"])
         return ActivityPage(project_key, after, after, ())
+
+    def sessions(self, project_key: str) -> tuple[KrabSession, ...]:
+        self.coordinator_calls.append(("sessions", (project_key,), {}))
+        return ()
+
+    def create_session(self, project_key: str, **kwargs: object) -> KrabSession:
+        self.coordinator_calls.append(("create_session", (project_key,), kwargs))
+        return KrabSession(
+            "ses_" + "3" * 32,
+            project_key,
+            "active",
+            self.identity.user_id,
+            "2026-10-27T12:00:00Z",
+            None,
+            "Room",
+            (),
+            (),
+            PROJECT_ID,
+        )
+
+    def close_session(
+        self, project_key: str, session_id: str, **kwargs: object
+    ) -> SessionCloseReceipt:
+        self.coordinator_calls.append(
+            ("close_session", (project_key, session_id), kwargs)
+        )
+        return SessionCloseReceipt(
+            session_id, project_key, "closed", "2026-10-27T13:00:00Z"
+        )
+
+    def inbox(self, project_key: str, **kwargs: object) -> InboxPage:
+        self.coordinator_calls.append(("inbox", (project_key,), kwargs))
+        return InboxPage(project_key, 0, 0, 0, bool(kwargs["unread"]), ())
+
+    def ack_inbox(self, project_key: str, **kwargs: object) -> InboxAck:
+        self.coordinator_calls.append(("ack_inbox", (project_key,), kwargs))
+        return InboxAck(project_key, int(kwargs["through"]), "2026-10-27T14:00:00Z")
+
+    def create_session_item(
+        self, project_key: str, session_id: str, **kwargs: object
+    ) -> object:
+        self.coordinator_calls.append(
+            ("create_session_item", (project_key, session_id), kwargs)
+        )
+        return {"kind": "sent"}
+
+    def get_session_item(
+        self, project_key: str, session_id: str, item_id: str
+    ) -> object:
+        self.coordinator_calls.append(
+            ("get_session_item", (project_key, session_id, item_id), {})
+        )
+        return {"kind": "item"}
+
+    def change_session_item_status(
+        self, project_key: str, session_id: str, item_id: str, **kwargs: object
+    ) -> object:
+        self.coordinator_calls.append(
+            (
+                "change_session_item_status",
+                (project_key, session_id, item_id),
+                kwargs,
+            )
+        )
+        return {"kind": "changed"}
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -289,6 +366,135 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(
             profile_from_mapping({"image": "agent", "command": ["run"]}).image,
             "agent",
+        )
+
+    def test_coordinator_krab_hooks_use_the_bound_identity(self) -> None:
+        self.control.add_krab_identity(
+            instance_name="Local Krab", credential_path=self.token_path
+        )
+        auth = {
+            "instance_name": "Local Krab",
+            "krab_handle": "agent_one",
+        }
+
+        self.assertEqual(self.control.krab_projects(**auth), (self.project,))
+        self.assertEqual(
+            self.control.krab_sessions(project_key="box-project", **auth), ()
+        )
+        self.assertEqual(
+            self.clients[-1].coordinator_calls,
+            [("sessions", ("box-project",), {})],
+        )
+
+        session = self.control.create_krab_session(
+            project_key="box-project",
+            label="Room",
+            participant_handles=("agent_one", "agent_two"),
+            idempotency_key="mgb.session:1234",
+            **auth,
+        )
+        self.assertEqual(session.untrusted_label, "Room")
+        self.assertEqual(
+            self.clients[-1].coordinator_calls,
+            [
+                (
+                    "create_session",
+                    ("box-project",),
+                    {
+                        "label": "Room",
+                        "participant_handles": ("agent_one", "agent_two"),
+                        "idempotency_key": "mgb.session:1234",
+                    },
+                )
+            ],
+        )
+
+        closed = self.control.close_krab_session(
+            project_key="box-project",
+            session_id="ses_" + "3" * 32,
+            idempotency_key="mgb.session:close-1234",
+            **auth,
+        )
+        self.assertEqual(closed.state, "closed")
+
+        page = self.control.krab_inbox(
+            project_key="box-project",
+            after=None,
+            unread=True,
+            limit=17,
+            wait=9,
+            **auth,
+        )
+        self.assertTrue(page.unread)
+        self.assertEqual(
+            self.clients[-1].coordinator_calls,
+            [
+                (
+                    "inbox",
+                    ("box-project",),
+                    {"after": None, "unread": True, "limit": 17, "wait": 9},
+                )
+            ],
+        )
+
+        ack = self.control.ack_krab_inbox(
+            project_key="box-project",
+            through=7,
+            idempotency_key="mgb.inbox:ack-1234",
+            **auth,
+        )
+        self.assertEqual(ack.acked_through, 7)
+
+        sent = self.control.send_krab_item(
+            project_key="box-project",
+            session_id="ses_" + "3" * 32,
+            recipient_handle="agent_two",
+            title="Please review",
+            body="Private body",
+            idempotency_key="mgb.item:send-1234",
+            claim_id=None,
+            completion_policy="workflow",
+            **auth,
+        )
+        self.assertEqual(sent, {"kind": "sent"})
+
+        shown = self.control.get_krab_item(
+            project_key="box-project",
+            session_id="ses_" + "3" * 32,
+            item_id="itm_" + "4" * 32,
+            **auth,
+        )
+        self.assertEqual(shown, {"kind": "item"})
+
+        changed = self.control.change_krab_item_status(
+            project_key="box-project",
+            session_id="ses_" + "3" * 32,
+            item_id="itm_" + "4" * 32,
+            status="open.needs_changes",
+            expected_version=1,
+            note="Address findings",
+            idempotency_key="mgb.item:status-1234",
+            **auth,
+        )
+        self.assertEqual(changed, {"kind": "changed"})
+        self.assertEqual(
+            self.clients[-1].coordinator_calls,
+            [
+                (
+                    "change_session_item_status",
+                    (
+                        "box-project",
+                        "ses_" + "3" * 32,
+                        "itm_" + "4" * 32,
+                    ),
+                    {
+                        "status": "open.needs_changes",
+                        "expected_version": 1,
+                        "note": "Address findings",
+                        "idempotency_key": "mgb.item:status-1234",
+                    },
+                )
+            ],
         )
 
     def test_work_item_lifecycle_resolves_operator_handles(self) -> None:
