@@ -232,3 +232,9 @@ This milestone is a controlled validator, not a general remote-interaction
 sidecar. There is no hostname parameter, shell endpoint, arbitrary command,
 raw SSH/`docker` access, provider credential injection, remote workspace edit,
 or automatic deployment surface.
+
+The accepted M15 deployment installs the runner in a private host environment.
+The planned [containerized runner appliance](containerized-runner-appliance.md)
+would instead use a forced `docker exec` only as transport into a pinned runner
+controller while preserving fresh job containers and every authority above. It
+is design-only until its own post-dogfood acceptance proof passes.

@@ -1,7 +1,7 @@
 # Capability providers and project routing
 
-**Status: implemented foundation; M14 mixed-provider expansion and explicitly
-authorized live external proof complete.**
+**Status: implemented foundation; M14 mixed-provider expansion and M15
+controlled remote-execution proofs complete.**
 
 Schema v24 implements the first narrow routing seam: core-owned capability
 modes, explicit single-controller project bindings, audited unbinding, and an
@@ -205,13 +205,17 @@ The provider pressure tests are intentionally heterogeneous:
    candidates and landing in one M14.4 project;
 2. the implemented controlled execution provider for an exact candidate and
    pinned remote test recipe, with no agent-selected SSH target or command;
-   its live remote-host exit proof remains the M15 checkpoint; and
-3. a second forge provider, likely GitLab, driven through the same conformance
-   contract rather than copied GitHub mechanics.
+   its live remote-host exit proof completed M15, while the planned
+   [containerized runner appliance](containerized-runner-appliance.md) changes
+   deployment rather than authority; and
+3. a second forge provider, with the owned GitLab.com mirror available as the
+   first conformance target, driven through the same contract rather than
+   copied GitHub mechanics.
 
-Bitbucket, raw Git, additional issue systems, interaction carriers, local and
-hosted agents, and additional inference providers remain candidates selected by
-demonstrated need. See [roadmap.md](roadmap.md) for the milestone boundaries.
+The owned Bitbucket Cloud mirror supplies another live forge target. Azure
+DevOps, raw Git, additional issue systems, interaction carriers, local and
+hosted agents, and additional inference providers remain candidates selected
+by demonstrated need. See [roadmap.md](roadmap.md) for the milestone boundaries.
 
 M14's deterministic mixed-provider proof exercises the first item end to end:
 Jira v2 work intake is explicitly imported with immutable operation

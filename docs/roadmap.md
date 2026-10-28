@@ -2023,9 +2023,53 @@ authority, credential containment, a clean target checkout, complete audit
 provenance, and honest accounting—or records a failed run and its remediation
 instead of declaring success by ceremony.
 
-## Milestone 16+: provider breadth by demonstrated need
+## Milestone 16A: containerized remote runner appliance
+
+**Status: planned candidate after the post-M15 audit and dogfood gate**
+
+Package the M15 remote runner as a pinned, already-running controller image so
+an SSH target needs only OpenSSH, Docker, the image, private durable state, and
+a dedicated forced key. SSH becomes a framed transport into one exact
+controller container rather than a way to invoke installed MGB or toolchain
+commands on the host.
+
+- Pin the forced command to `docker exec -i` against one exact controller
+  container ID and one fixed runner entrypoint. Ignore caller command text,
+  environment, TTY, forwarding, and container selection.
+- Keep the long-lived controller separate from disposable job containers.
+  `docker exec` enters only the runner protocol; operator-authored,
+  digest-bound recipes continue to run in fresh pinned job containers with
+  per-job resource and evidence boundaries.
+- Prefer a dedicated rootless Docker daemon. A controller using the rootful
+  Docker socket is explicitly labelled host-authority mode and requires an
+  operator acceptance; containerization alone does not constrain that socket.
+- Preserve the M15 exact-candidate, uncertain-effect, cancellation, timeout,
+  and evidence contracts. Add deployment inspection for controller image,
+  configuration, state identity, protocol version, engine mode, and recipe
+  authority.
+- Prove fail-closed behavior for a missing or substituted controller,
+  restart/reconciliation without duplication, job-to-job isolation, absence of
+  host prerequisites beyond Docker/OpenSSH, and continued credential and
+  host-mount containment.
+
+There is no generic agent-facing `exec(command)` operation. A “raw” command is
+eligible only after the operator turns it into a bounded recipe, and it still
+runs in a disposable job container rather than the controller. The complete
+design and acceptance boundary are in
+[containerized-runner-appliance.md](containerized-runner-appliance.md).
+
+## Milestone 16B+: provider breadth by demonstrated need
 
 **Status: candidates, not commitments**
+
+The live test estate now contains this repository on GitHub, GitLab.com, and
+Bitbucket Cloud—the three mainstream standalone cloud forges. That gives later
+forge adapters one owned repository and one plausible candidate history on
+each service without committing MGB to implement all three at once. Azure
+DevOps Repos is the notable enterprise fourth; it remains a future target only
+when a real project and account create a demonstrated need. Self-hosted GitLab,
+Gitea/Forgejo, and other forges likewise remain separate conformance targets,
+not assumed equivalents of their cloud namesakes.
 
 - Revisit the Jira write surface only after M15 and its audit/dogfood gate.
   Start from the smallest demonstrated provider-neutral operations beyond the
@@ -2033,11 +2077,14 @@ instead of declaring success by ceremony.
   state—and give each operation its own explicit effect binding. Assignment or
   field edits require a concrete use case; agents never receive arbitrary Jira
   update, transition, or REST authority.
-- A second forge provider, likely GitLab, must pass the capability conformance
-  suite and expose only the operations it truthfully supports.
-- Bitbucket, raw Git actuators, additional work systems, interaction carriers,
-  hosted agents, local agents, and inference providers remain independent
-  additions selected by real use cases.
+- GitLab is the first second-forge candidate because its cloud mirror is now
+  available. It must pass the capability conformance suite and expose only the
+  operations it truthfully supports; GitHub mechanics are not copied by
+  assumption.
+- Bitbucket Cloud is also available as a live target. Azure DevOps, raw Git
+  actuators, additional work systems, interaction carriers, hosted agents,
+  local agents, and inference providers remain independent additions selected
+  by real use cases.
 - Provider breadth does not weaken the rule that no binding means no
   capability. MGB never guesses a controller or exposes a provider-native
   escape hatch to an agent.
