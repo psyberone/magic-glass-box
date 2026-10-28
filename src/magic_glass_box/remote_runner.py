@@ -532,6 +532,8 @@ class DockerCLI:
                 "max-size=4m",
                 "--log-opt",
                 "max-file=1",
+                "--log-opt",
+                "compress=false",
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,nodev,size=268435456",  # noqa: S108
                 str(values["image_id"]),
