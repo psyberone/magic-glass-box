@@ -1915,7 +1915,7 @@ final-code mutation wave killed all 21/21 completion-policy mutants (100%).
 
 ## Milestone 15: controlled remote execution provider
 
-**Status: candidate milestone; next major product boundary**
+**Status: implementation complete; live remote-host exit proof pending**
 
 - Define submit, inspect, cancel, reconcile, and evidence-collection semantics
   for an exact candidate and operator-defined test recipe.
@@ -1925,6 +1925,51 @@ final-code mutation wave killed all 21/21 completion-policy mutants (100%).
 - Retain bounded result identity, exit status, timing, recipe/image identity,
   and output digest; collect artifacts through the same hostile-output boundary
   used for local workers.
+
+The implemented v1 surface defines separately bindable `execution.submit`,
+`execution.inspect`, `execution.cancel`, and `execution.collect` capabilities.
+Submission authority is derived from an exact durable candidate and active
+project binding; every follow-up is derived from the successful submission
+receipt and retains its controller, source operation, candidate, recipe, image,
+and remote execution identity. Submit and cancel use the existing uncertain-
+effect ledger. Their reconciliation paths may finish only a remote intent or
+cancellation marker that already exists and never create an absent effect.
+
+The first carrier owns one private SSH key and known-hosts file, a fixed
+destination and forced helper, and a logical mapping to MGB's private candidate
+repository. It packages the candidate with the raw Git snapshot boundary—not
+`git archive`—so attributes and filters remain inert, then binds every status
+to that archive's exact size and digest. The remote mode-`0600` recipe file
+pins an immutable image, argv, duration, stop, CPU, memory, PID, output, and
+artifact ceilings. Docker receives no network, no ambient client credentials,
+a read-only candidate and root, dropped capabilities, and no-new-privileges.
+
+Optional recipe artifacts cross through one size-limited gzip-tar upload file,
+not a writable host directory. Paths, types, symlinks, counts, and compressed
+and expanded sizes are validated through a counted streaming quarantine—never
+an attacker-sized in-memory member list—before the existing hostile
+workspace-result capture produces the normalized evidence bundle. Output
+content remains out of SQLite and receipts; only its bounded byte count and
+framed digest are retained.
+
+Recipe timeouts are enforced when the runner is observed, so the v1 operator or
+supervisor must keep inspecting an active job; an outage-independent remote
+watchdog is deliberately not claimed. Once observed, a timeout is terminal and
+cannot be reported as success: a zero result from the forced stop is normalized
+to exit `124`, while a nonzero container exit remains intact.
+
+The final implementation gate passed 1,388 tests at 87% repository-wide
+branch-aware coverage. The five M15 production modules have 86% aggregate
+branch-aware coverage (81–99% individually). A focused final-code mutation
+campaign killed 3,342 of 4,162 mutants (80.30%), clearing the 80% floor.
+
+The remaining M15 exit checkpoint is one explicitly authorized proof against
+the operator-owned remote host: forced-command containment, exact candidate
+execution, terminal inspection, evidence collection, one deliberately lost
+effect response reconciled without duplication, cancellation, and a scan that
+finds no SSH or Docker credential in control-plane state or worker-visible
+material. That live proof remains deliberately separate from the fully green
+implementation evidence above.
 
 ## Post-Milestone 15 audit and dogfood gate
 

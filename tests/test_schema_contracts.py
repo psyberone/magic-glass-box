@@ -21,6 +21,7 @@ from magic_glass_box.domain import (
     WorkLogEntry,
     WorkMemoryCheckpoint,
 )
+from magic_glass_box.execution import ExecutionEvidenceResult, ExecutionStatusResult
 from magic_glass_box.executor import DockerImage
 from magic_glass_box.gates import (
     GateError,
@@ -280,6 +281,25 @@ class ArtifactSchemaContractTests(unittest.TestCase):
             object_format="sha1",
         )
         candidate_validator.validate(runtime_candidate.to_dict())
+
+    def test_controlled_execution_examples_match_runtime_contracts(self) -> None:
+        contracts = (
+            ("execution-status-result", ExecutionStatusResult.from_mapping),
+            ("execution-evidence-result", ExecutionEvidenceResult.from_mapping),
+        )
+        for name, factory in contracts:
+            with self.subTest(name=name):
+                validator, example = self.load(name)
+                validator.validate(example)
+                parsed = factory(example)
+                self.assertEqual(parsed.to_dict(), example)
+
+        validator, evidence = self.load("execution-evidence-result")
+        inconsistent = copy.deepcopy(evidence)
+        inconsistent["artifact_bytes"] = 1
+        validator.validate(inconsistent)
+        with self.assertRaises(ValidationError):
+            ExecutionEvidenceResult.from_mapping(inconsistent)
 
     def test_artifact_schemas_and_runtime_reject_invalid_identity(self) -> None:
         result_validator, result = self.load("result")
@@ -850,6 +870,49 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
             ("jira-work-get", "service-operation", ServiceOperationSpec.from_mapping),
             ("jira-work-list", "service-operation", ServiceOperationSpec.from_mapping),
             ("jira-work-state", "service-operation", ServiceOperationSpec.from_mapping),
+        )
+        for example_name, schema_name, factory in documents:
+            with self.subTest(example_name=example_name):
+                schema = json.loads(
+                    (
+                        self.repository / "schemas" / f"{schema_name}-v2.schema.json"
+                    ).read_text()
+                )
+                example = json.loads(
+                    (self.repository / "examples" / f"{example_name}.json").read_text()
+                )
+                validator = Draft202012Validator(schema, format_checker=FormatChecker())
+                validator.validate(example)
+                parsed = factory(example)
+                self.assertEqual(parsed.to_dict(), example)
+
+    def test_controlled_execution_examples_match_v2_runtime_contracts(self) -> None:
+        documents = (
+            (
+                "execution-service-sidecar",
+                "service-sidecar",
+                ServiceSidecarSpec.from_mapping,
+            ),
+            (
+                "execution-submit",
+                "service-operation",
+                ServiceOperationSpec.from_mapping,
+            ),
+            (
+                "execution-inspect",
+                "service-operation",
+                ServiceOperationSpec.from_mapping,
+            ),
+            (
+                "execution-cancel",
+                "service-operation",
+                ServiceOperationSpec.from_mapping,
+            ),
+            (
+                "execution-collect",
+                "service-operation",
+                ServiceOperationSpec.from_mapping,
+            ),
         )
         for example_name, schema_name, factory in documents:
             with self.subTest(example_name=example_name):

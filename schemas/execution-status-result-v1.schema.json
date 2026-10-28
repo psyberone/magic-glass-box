@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:execution-status-result:v1",
+  "title": "Magic Glass Box Controlled Execution Status Result v1",
+  "description": "One bounded provider-neutral observation of a pinned remote execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "candidate_revision",
+    "execution_id",
+    "exit_code",
+    "finished_at",
+    "image_id",
+    "object_format",
+    "recipe_id",
+    "recipe_sha256",
+    "schema_version",
+    "source_bytes",
+    "source_sha256",
+    "started_at",
+    "state",
+    "submitted_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "execution_id": { "type": "string", "pattern": "^rex_[0-9a-f]{32}$" },
+    "state": {
+      "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+    },
+    "candidate_revision": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "object_format": { "enum": ["sha1", "sha256"] },
+    "recipe_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "recipe_sha256": { "$ref": "#/$defs/sha256" },
+    "image_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "source_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+    "source_sha256": { "$ref": "#/$defs/sha256" },
+    "submitted_at": { "type": "string", "format": "date-time" },
+    "started_at": { "type": ["string", "null"], "format": "date-time" },
+    "finished_at": { "type": ["string", "null"], "format": "date-time" },
+    "exit_code": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 255
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "object_format": { "const": "sha1" } } },
+      "then": {
+        "properties": {
+          "candidate_revision": { "pattern": "^[0-9a-f]{40}$" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "object_format": { "const": "sha256" } } },
+      "then": {
+        "properties": {
+          "candidate_revision": { "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "queued" } } },
+      "then": {
+        "properties": {
+          "started_at": { "const": null },
+          "finished_at": { "const": null },
+          "exit_code": { "const": null }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "running" } } },
+      "then": {
+        "properties": {
+          "started_at": { "type": "string" },
+          "finished_at": { "const": null },
+          "exit_code": { "const": null }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "succeeded" } } },
+      "then": {
+        "properties": {
+          "started_at": { "type": "string" },
+          "finished_at": { "type": "string" },
+          "exit_code": { "const": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "failed" } } },
+      "then": {
+        "properties": {
+          "started_at": { "type": "string" },
+          "finished_at": { "type": "string" },
+          "exit_code": { "type": "integer", "minimum": 1, "maximum": 255 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "cancelled" } } },
+      "then": {
+        "properties": {
+          "finished_at": { "type": "string" },
+          "exit_code": { "const": null }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

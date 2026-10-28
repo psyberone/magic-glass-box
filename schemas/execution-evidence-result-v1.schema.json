@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:execution-evidence-result:v1",
+  "title": "Magic Glass Box Controlled Execution Evidence Result v1",
+  "description": "Bounded terminal evidence for one pinned remote execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_bundle",
+    "artifact_bytes",
+    "artifact_count",
+    "artifact_encoding",
+    "artifact_sha256",
+    "duration_ms",
+    "execution",
+    "output_bytes",
+    "output_sha256",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "execution": { "$ref": "#/$defs/status" },
+    "duration_ms": { "type": "integer", "minimum": 0, "maximum": 86400000 },
+    "output_bytes": { "type": "integer", "minimum": 0, "maximum": 25165824 },
+    "output_sha256": { "$ref": "#/$defs/sha256" },
+    "artifact_bytes": { "type": "integer", "minimum": 0, "maximum": 2097152 },
+    "artifact_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "artifact_sha256": { "$ref": "#/$defs/sha256" },
+    "artifact_encoding": { "const": "tar+gzip+base64" },
+    "artifact_bundle": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "maxLength": 2796204
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_revision",
+        "execution_id",
+        "exit_code",
+        "finished_at",
+        "image_id",
+        "object_format",
+        "recipe_id",
+        "recipe_sha256",
+        "schema_version",
+        "source_bytes",
+        "source_sha256",
+        "started_at",
+        "state",
+        "submitted_at"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "execution_id": { "type": "string", "pattern": "^rex_[0-9a-f]{32}$" },
+        "state": { "enum": ["succeeded", "failed", "cancelled"] },
+        "candidate_revision": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "object_format": { "enum": ["sha1", "sha256"] },
+        "recipe_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "recipe_sha256": { "$ref": "#/$defs/sha256" },
+        "image_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "source_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "submitted_at": { "type": "string", "format": "date-time" },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "exit_code": { "type": ["integer", "null"], "minimum": 0, "maximum": 255 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "object_format": { "const": "sha1" } } },
+          "then": { "properties": { "candidate_revision": { "pattern": "^[0-9a-f]{40}$" } } }
+        },
+        {
+          "if": { "properties": { "object_format": { "const": "sha256" } } },
+          "then": { "properties": { "candidate_revision": { "pattern": "^[0-9a-f]{64}$" } } }
+        },
+        {
+          "if": { "properties": { "state": { "const": "succeeded" } } },
+          "then": {
+            "properties": {
+              "started_at": { "type": "string" },
+              "exit_code": { "const": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "failed" } } },
+          "then": {
+            "properties": {
+              "started_at": { "type": "string" },
+              "exit_code": { "type": "integer", "minimum": 1, "maximum": 255 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "cancelled" } } },
+          "then": { "properties": { "exit_code": { "const": null } } }
+        }
+      ]
+    }
+  }
+}

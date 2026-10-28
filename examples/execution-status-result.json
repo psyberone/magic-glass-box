@@ -1,0 +1,16 @@
+{
+  "candidate_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "execution_id": "rex_33333333333333333333333333333333",
+  "exit_code": 0,
+  "finished_at": "2026-10-28T12:00:05.000000+00:00",
+  "image_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "object_format": "sha1",
+  "recipe_id": "quality",
+  "recipe_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "schema_version": 1,
+  "source_bytes": 17,
+  "source_sha256": "2bec12b4b590104ae734d2d91e6d9f1bdbb938b65d031606bdb15ee7b1e9bd41",
+  "started_at": "2026-10-28T12:00:01.000000+00:00",
+  "state": "succeeded",
+  "submitted_at": "2026-10-28T12:00:00.000000+00:00"
+}

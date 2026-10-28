@@ -57,6 +57,11 @@ from .domain import (
     canonical_json,
     validate_krab_id,
 )
+from .execution_operations import (
+    ExecutionRecipeAuthority,
+    build_execution_followup,
+    build_execution_submission,
+)
 from .gates import (
     GATE_EVIDENCE_SCHEMA_VERSION,
     ExactGateInputs,
@@ -1168,6 +1173,80 @@ class ControlPlane:
             spec=spec,
             created_by=creator["id"],
             project_capability_binding_id=project_capability_binding_id,
+        )
+
+    def create_execution_submission(
+        self,
+        *,
+        project_key: str,
+        candidate_id: str,
+        recipe: ExecutionRecipeAuthority,
+        request_key: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        """Create one exact, project-bound remote execution submission."""
+
+        creator = self.database.get_user(created_by_handle)
+        if creator["active"] != 1:
+            raise ConflictError("execution operation creator is inactive")
+        candidate = self.database.get_candidate(candidate_id)
+        binding = self.database.resolve_project_capability(
+            project_key, "execution.submit", 1
+        )
+        sidecar = self.database.get_service_sidecar(
+            binding["controller"]["sidecar_name"]
+        )
+        operation = build_execution_submission(
+            candidate=candidate,
+            binding=binding,
+            sidecar=sidecar,
+            recipe=recipe,
+            request_key=request_key,
+        )
+        return self.database.create_service_operation(
+            spec=operation,
+            created_by=creator["id"],
+            project_capability_binding_id=binding["id"],
+        )
+
+    def create_execution_followup(
+        self,
+        *,
+        submission_operation_id: str,
+        action: str,
+        request_key: str,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        """Create an inspect/cancel/collect operation from submission provenance."""
+
+        if action not in {"inspect", "cancel", "collect"}:
+            raise ValidationError("execution follow-up action is invalid")
+        creator = self.database.get_user(created_by_handle)
+        if creator["active"] != 1:
+            raise ConflictError("execution operation creator is inactive")
+        submission = self.database.get_service_operation(submission_operation_id)
+        source_binding_id = submission["project_capability_binding_id"]
+        if source_binding_id is None:
+            raise ConflictError("execution submission is not project-bound")
+        source_binding = self.database.get_project_capability_binding(source_binding_id)
+        binding = self.database.resolve_project_capability(
+            source_binding["project"]["key"], f"execution.{action}", 1
+        )
+        sidecar = self.database.get_service_sidecar(
+            binding["controller"]["sidecar_name"]
+        )
+        operation = build_execution_followup(
+            submission=submission,
+            submission_binding=source_binding,
+            binding=binding,
+            sidecar=sidecar,
+            action=action,
+            request_key=request_key,
+        )
+        return self.database.create_service_operation(
+            spec=operation,
+            created_by=creator["id"],
+            project_capability_binding_id=binding["id"],
         )
 
     def execute_service_operation(

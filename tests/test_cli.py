@@ -739,6 +739,14 @@ class CLITests(unittest.TestCase):
                         "operation-reconcile",
                         "reconcile one uncertain service operation",
                     ),
+                    (
+                        "execution-submit-create",
+                        "derive one exact remote execution submission",
+                    ),
+                    (
+                        "execution-followup-create",
+                        "derive inspect, cancel, or collect from a submission",
+                    ),
                 ),
             ),
             ("capability",): (
@@ -1139,6 +1147,20 @@ class CLITests(unittest.TestCase):
                     "--owner",
                     "--expected-version",
                 ),
+                ("service-sidecar", "execution-submit-create"): (
+                    "--project",
+                    "--candidate",
+                    "--recipe-id",
+                    "--recipe-sha256",
+                    "--image-id",
+                    "--request-key",
+                    "--created-by",
+                ),
+                ("service-sidecar", "execution-followup-create"): (
+                    "--action",
+                    "--request-key",
+                    "--created-by",
+                ),
                 ("capability", "bind"): (
                     "--version",
                     "--sidecar",
@@ -1282,6 +1304,11 @@ class CLITests(unittest.TestCase):
                     "CRITICAL",
                 ),
                 (("gate", "review-record"), "outcome"): ("passed", "failed"),
+                (("service-sidecar", "execution-followup-create"), "action"): (
+                    "inspect",
+                    "cancel",
+                    "collect",
+                ),
                 (("workflow", "list"), "state"): (
                     "active",
                     "cancelled",
@@ -2213,6 +2240,12 @@ class CLITests(unittest.TestCase):
                 "operation-list": "list recent durable service operations",
                 "operation-execute": "invoke one authorized service operation",
                 "operation-reconcile": ("reconcile one uncertain service operation"),
+                "execution-submit-create": (
+                    "derive one exact remote execution submission"
+                ),
+                "execution-followup-create": (
+                    "derive inspect, cancel, or collect from a submission"
+                ),
             },
             "capability": {
                 "bind": "bind one project capability to a controller",

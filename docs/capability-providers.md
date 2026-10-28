@@ -123,8 +123,9 @@ The umbrella architecture contains several deliberately different contracts:
 - **inference connectors** perform transient, quota-consuming model calls with
   separate budget and ambiguity rules;
 - **runtime adapters** launch local agent processes in MGB-controlled workers;
-- **execution providers** may later submit, inspect, cancel, reconcile, and
-  collect bounded evidence from remote jobs; and
+- **execution providers** submit, inspect, cancel, reconcile, and collect
+  bounded evidence from remote jobs through the M15 controlled-runner
+  contract; and
 - **interaction providers** may later carry correlated human questions,
   approvals, notifications, and responses.
 
@@ -202,8 +203,9 @@ The provider pressure tests are intentionally heterogeneous:
 
 1. the implemented and live-proven Jira work provider paired with GitHub
    candidates and landing in one M14.4 project;
-2. a controlled execution provider for an exact candidate and pinned remote
-   test recipe, with no agent-selected SSH target or command; and
+2. the implemented controlled execution provider for an exact candidate and
+   pinned remote test recipe, with no agent-selected SSH target or command;
+   its live remote-host exit proof remains the M15 checkpoint; and
 3. a second forge provider, likely GitLab, driven through the same conformance
    contract rather than copied GitHub mechanics.
 

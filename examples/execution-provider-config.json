@@ -1,0 +1,14 @@
+{
+  "account": "runner",
+  "git_binary": "/usr/bin/git",
+  "host": "runner.example.test",
+  "identity_file": "/home/operator/.config/magic-glass-box/runner_ed25519",
+  "known_hosts_file": "/home/operator/.config/magic-glass-box/runner_known_hosts",
+  "port": 22,
+  "remote_helper": "/usr/local/bin/magic-glass-box-remote-runner",
+  "repositories": {
+    "acme/widgets": "/home/operator/.local/state/magic-glass-box/candidates/widgets.git"
+  },
+  "schema_version": 1,
+  "ssh_binary": "/usr/bin/ssh"
+}

@@ -42,7 +42,7 @@ SERVICE_SIDECAR_ID_RE = re.compile(r"^ssc_[0-9a-f]{32}$")
 SERVICE_OPERATION_ID_RE = re.compile(r"^sop_[0-9a-f]{32}$")
 CAPABILITY_BINDING_ID_RE = re.compile(r"^cpb_[0-9a-f]{32}$")
 CAPABILITY_RE = re.compile(
-    r"^(?:work|change|checks|refs|landing)\.[a-z][a-z0-9_-]{0,63}$"
+    r"^(?:work|change|checks|refs|landing|execution)\.[a-z][a-z0-9_-]{0,63}$"
 )
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -80,6 +80,10 @@ CORE_SERVICE_CAPABILITY_MODES: Mapping[tuple[str, int], str] = MappingProxyType(
         ("checks.read", 1): "read",
         ("refs.publish", 1): "effect",
         ("landing.invoke", 1): "effect",
+        ("execution.submit", 1): "effect",
+        ("execution.inspect", 1): "read",
+        ("execution.cancel", 1): "effect",
+        ("execution.collect", 1): "read",
     }
 )
 
@@ -1259,6 +1263,28 @@ class ServiceOperationResponse:
                     raise ValidationError(
                         "service operation work result must be canonical"
                     )
+            if authority["capability"].version == 1 and authority[
+                "capability"
+            ].name.startswith("execution."):
+                from .execution import (
+                    ExecutionEvidenceResult,
+                    ExecutionStatusResult,
+                )
+
+                assert receipt is not None
+                raw_result = receipt.result
+                if authority["capability"].name == "execution.collect":
+                    normalized_result = ExecutionEvidenceResult.from_mapping(
+                        raw_result
+                    ).to_dict()
+                else:
+                    normalized_result = ExecutionStatusResult.from_mapping(
+                        raw_result
+                    ).to_dict()
+                if raw_result != normalized_result:
+                    raise ValidationError(
+                        "service operation execution result must be canonical"
+                    )
         elif error_code is None or receipt is not None:
             raise ValidationError(
                 f"{outcome} service operation must have an error and no receipt"
@@ -1326,6 +1352,47 @@ class ServiceOperationResponse:
             if request.parameters != {"desired_state": state.desired_state}:
                 raise ValidationError(
                     "service sidecar work-state result does not match the request"
+                )
+        if (
+            self.receipt is not None
+            and self.capability.version == 1
+            and self.capability.name.startswith("execution.")
+        ):
+            from .execution import ExecutionEvidenceResult, ExecutionStatusResult
+
+            if self.capability.name == "execution.collect":
+                status = ExecutionEvidenceResult.from_mapping(
+                    self.receipt.result
+                ).execution
+            else:
+                status = ExecutionStatusResult.from_mapping(self.receipt.result)
+            parameters = request.parameters
+            expected = {
+                "image_id": status.image_id,
+                "recipe_id": status.recipe_id,
+                "recipe_sha256": status.recipe_sha256,
+            }
+            if self.capability.name != "execution.submit":
+                expected["execution_id"] = status.execution_id
+                submission_operation_id = parameters.get("submission_operation_id")
+                if (
+                    not isinstance(submission_operation_id, str)
+                    or SERVICE_OPERATION_ID_RE.fullmatch(submission_operation_id)
+                    is None
+                ):
+                    raise ValidationError(
+                        "service sidecar execution submission identity is invalid"
+                    )
+                expected["submission_operation_id"] = submission_operation_id
+            if (
+                parameters != expected
+                or status.object_format != request.target.object_format
+                or status.candidate_revision != request.target.desired_revision
+                or self.receipt.observed_revision != status.candidate_revision
+                or self.receipt.remote_identity != f"execution:{status.execution_id}"
+            ):
+                raise ValidationError(
+                    "service sidecar execution result does not match the request"
                 )
 
 

@@ -107,6 +107,18 @@ provider status name or ID, transition ID, query, or raw response. Both v1 and
 v2 service-schema generations pin its effect mode; invoke/reconcile durability
 remains the existing service-operation protocol.
 
+Milestone 15 publishes `execution-status-result-v1.schema.json` and
+`execution-evidence-result-v1.schema.json`. Status binds one remote execution
+identity to the exact candidate revision, object format, raw-source archive
+digest, recipe digest, image digest, lifecycle timestamps, and terminal exit
+status. Evidence requires a terminal status and adds exact duration, bounded
+captured-output identity, and one digest-bound gzip-tar artifact bundle. Both
+service-schema generations pin `execution.submit` and `execution.cancel` as
+effects and `execution.inspect` and `execution.collect` as reads. Runtime
+validation additionally proves operation/submission provenance, exact
+controller and resource continuity, lifecycle consistency, timestamp-derived
+duration, and result/receipt correlation.
+
 Milestone 11 adds `provider-landing-v1.schema.json` and
 `provider-landing-receipt-v1.schema.json`. The authority binds one queue/policy/
 candidate/evidence snapshot to the exact project capability binding and service

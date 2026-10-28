@@ -33,6 +33,7 @@ from .domain import (
     ValidationError,
     WorkItemEnvelope,
 )
+from .execution_operations import ExecutionRecipeAuthority
 from .executor import (
     DEFAULT_RUN_TIMEOUT_SECONDS,
     DockerCLI,
@@ -676,6 +677,29 @@ def build_parser() -> argparse.ArgumentParser:
     operation_reconcile.add_argument("operation_id")
     operation_reconcile.add_argument("--owner", required=True)
     operation_reconcile.add_argument("--expected-version", required=True, type=int)
+    execution_submit_create = service_sidecar_commands.add_parser(
+        "execution-submit-create",
+        help="derive one exact remote execution submission",
+    )
+    execution_submit_create.add_argument("--project", required=True)
+    execution_submit_create.add_argument("--candidate", required=True)
+    execution_submit_create.add_argument("--recipe-id", required=True)
+    execution_submit_create.add_argument("--recipe-sha256", required=True)
+    execution_submit_create.add_argument("--image-id", required=True)
+    execution_submit_create.add_argument("--request-key", required=True)
+    execution_submit_create.add_argument("--created-by", required=True)
+    execution_followup_create = service_sidecar_commands.add_parser(
+        "execution-followup-create",
+        help="derive inspect, cancel, or collect from a submission",
+    )
+    execution_followup_create.add_argument("submission_operation_id")
+    execution_followup_create.add_argument(
+        "--action",
+        required=True,
+        choices=("inspect", "cancel", "collect"),
+    )
+    execution_followup_create.add_argument("--request-key", required=True)
+    execution_followup_create.add_argument("--created-by", required=True)
 
     capability = commands.add_parser(
         "capability",
@@ -1673,6 +1697,27 @@ def _dispatch(
                 args.operation_id,
                 owner_id=args.owner,
                 expected_version=args.expected_version,
+            )
+        if args.service_sidecar_command == "execution-submit-create":
+            return control.create_execution_submission(
+                project_key=args.project,
+                candidate_id=args.candidate,
+                recipe=ExecutionRecipeAuthority.from_mapping(
+                    {
+                        "recipe_id": args.recipe_id,
+                        "recipe_sha256": args.recipe_sha256,
+                        "image_id": args.image_id,
+                    }
+                ),
+                request_key=args.request_key,
+                created_by_handle=args.created_by,
+            )
+        if args.service_sidecar_command == "execution-followup-create":
+            return control.create_execution_followup(
+                submission_operation_id=args.submission_operation_id,
+                action=args.action,
+                request_key=args.request_key,
+                created_by_handle=args.created_by,
             )
     if args.command == "capability":
         if args.capability_command == "bind":

@@ -1,0 +1,27 @@
+{
+  "artifact_bundle": "",
+  "artifact_bytes": 0,
+  "artifact_count": 0,
+  "artifact_encoding": "tar+gzip+base64",
+  "artifact_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "duration_ms": 4000,
+  "execution": {
+    "candidate_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "execution_id": "rex_33333333333333333333333333333333",
+    "exit_code": 0,
+    "finished_at": "2026-10-28T12:00:05.000000+00:00",
+    "image_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "object_format": "sha1",
+    "recipe_id": "quality",
+    "recipe_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "schema_version": 1,
+    "source_bytes": 17,
+    "source_sha256": "2bec12b4b590104ae734d2d91e6d9f1bdbb938b65d031606bdb15ee7b1e9bd41",
+    "started_at": "2026-10-28T12:00:01.000000+00:00",
+    "state": "succeeded",
+    "submitted_at": "2026-10-28T12:00:00.000000+00:00"
+  },
+  "output_bytes": 17,
+  "output_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+  "schema_version": 1
+}

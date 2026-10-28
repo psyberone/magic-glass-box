@@ -60,6 +60,11 @@ This repository currently contains the first executable vertical slice:
   v2, with project-scoped normalized work list/get, explicit import, and one
   idempotent core-owned `done` effect whose provider status and transition
   details never cross the sidecar boundary;
+- a controlled remote-execution provider that derives authority from an exact
+  candidate and project binding, carries a raw digest-bound snapshot through
+  one fixed credential-isolated SSH route, runs only an operator-pinned image
+  and recipe, and returns bounded status and hostile-output evidence without
+  exposing a hostname, shell, Docker socket, or credential to a worker;
 - raw Git-tree snapshots pinned to an immutable SHA-1 or SHA-256 commit, with
   committed blob bytes and executable modes preserved; attributes are inert,
   including CRLF/ident/export-subst conversion, filters, and export-ignore;
@@ -222,7 +227,9 @@ from an explicitly selected `GH_CONFIG_DIR`. See
 operation boundary, [docs/github-provider.md](docs/github-provider.md) for the
 repository reference add-on,
 [docs/jira-provider.md](docs/jira-provider.md) for the heterogeneous work
-provider, and
+provider,
+[docs/controlled-execution-provider.md](docs/controlled-execution-provider.md)
+for the exact-candidate remote validation boundary, and
 [docs/capability-providers.md](docs/capability-providers.md) for the broader
 provider-routing model.
 

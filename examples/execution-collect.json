@@ -1,0 +1,42 @@
+{
+  "capability": {
+    "mode": "read",
+    "name": "execution.collect",
+    "version": 1
+  },
+  "connector_name": "remote-main",
+  "deployment_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "idempotency_key": "execution-collect:sop_77777777777777777777777777777777:terminal-evidence",
+  "mapping": {
+    "account": "runner",
+    "credential_scope_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "host": "runner.example.test",
+    "name": "azure-quality",
+    "resource": {
+      "external_id": "acme/widgets",
+      "kind": "repository"
+    },
+    "service": "ssh-runner"
+  },
+  "parameters": {
+    "execution_id": "rex_33333333333333333333333333333333",
+    "image_id": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "recipe_id": "quality",
+    "recipe_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "submission_operation_id": "sop_77777777777777777777777777777777"
+  },
+  "request_bytes": 131072,
+  "response_bytes": 4194304,
+  "schema_version": 2,
+  "target": {
+    "desired_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expected_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "object_format": "sha1",
+    "object_id": "cnd_22222222222222222222222222222222",
+    "resource": {
+      "external_id": "acme/widgets",
+      "kind": "repository"
+    }
+  },
+  "timeout_ms": 30000
+}

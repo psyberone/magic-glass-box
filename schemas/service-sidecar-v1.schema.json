@@ -76,7 +76,7 @@
         "mode": { "enum": ["read", "effect"] },
         "name": {
           "type": "string",
-          "pattern": "^(work|change|checks|refs|landing)\\.[a-z][a-z0-9_-]{0,63}$"
+          "pattern": "^(work|change|checks|refs|landing|execution)\\.[a-z][a-z0-9_-]{0,63}$"
         },
         "version": { "type": "integer", "minimum": 1, "maximum": 1000000 }
       },
@@ -84,7 +84,7 @@
         {
           "if": {
             "properties": {
-              "name": { "enum": ["work.get", "work.list", "change.get", "change.list"] },
+              "name": { "enum": ["work.get", "work.list", "change.get", "change.list", "execution.inspect", "execution.collect"] },
               "version": { "const": 1 }
             },
             "required": ["name", "version"]
@@ -94,7 +94,7 @@
         {
           "if": {
             "properties": {
-              "name": { "enum": ["work.state", "change.open"] },
+              "name": { "enum": ["work.state", "change.open", "execution.submit", "execution.cancel"] },
               "version": { "const": 1 }
             },
             "required": ["name", "version"]

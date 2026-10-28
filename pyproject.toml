@@ -26,9 +26,11 @@ openai-connector = ["PyJWT[crypto]>=2.10,<3"]
 
 [project.scripts]
 magic-glass-box = "magic_glass_box.cli:main"
+magic-glass-box-execution-provider = "magic_glass_box.execution_provider_cli:main"
 magic-glass-box-github-provider = "magic_glass_box.github_provider_cli:main"
 magic-glass-box-jira-provider = "magic_glass_box.jira_provider_cli:main"
 magic-glass-box-openai-connector = "magic_glass_box.openai_chatgpt_cli:main"
+magic-glass-box-remote-runner = "magic_glass_box.remote_runner:main"
 magic-glass-box-worker = "magic_glass_box.worker_transport:main"
 
 [tool.setuptools]
@@ -68,7 +70,7 @@ also_copy = ["Makefile", "scripts/", "schemas/", "examples/", "docker/"]
 # behavior without making capitalization or wording a compatibility surface.
 do_not_mutate_patterns = [
     '^\s*"(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA|BEGIN|COMMIT|ROLLBACK)\b',
-    '^\s*raise\s+(?:GatewayContractError|GitHubProviderError|GitHubProviderCLIError|JiraProviderError|JiraProviderCLIError|JiraTransportError|ValidationError|argparse\.ArgumentTypeError)\b',
+    '^\s*raise\s+(?:ExecutionOperationError|ExecutionProviderCLIError|ExecutionProviderError|GatewayContractError|GitHubProviderError|GitHubProviderCLIError|JiraProviderError|JiraProviderCLIError|JiraTransportError|RemoteRunnerError|ValidationError|argparse\.ArgumentTypeError)\b',
     '^\s*(?:field|subject|help|description|prog)\s*=',
 ]
 do_not_mutate = [

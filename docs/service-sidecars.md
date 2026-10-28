@@ -68,7 +68,9 @@ The protocol advertises a version and a subset of bounded families such as:
 - `change.*` — create or inspect a proposed code change;
 - `checks.*` — read normalized CI and approval evidence;
 - `refs.*` — inspect or create exact repository refs; and
-- `landing.*` — invoke and reconcile one authorized landing.
+- `landing.*` — invoke and reconcile one authorized landing; and
+- `execution.*` — submit, inspect, cancel, and collect bounded evidence for an
+  exact candidate under an operator-pinned remote recipe.
 
 Operations are individually versioned and paginated or otherwise bounded. A
 successful read receipt may carry one bounded normalized JSON result in
@@ -92,9 +94,10 @@ disabling a related mutation, but remain semantic operations rather than a
 mirror of every vendor endpoint.
 
 The core currently defines `work.state` v1, `refs.publish` v1, `change.open` v1,
-and `landing.invoke` v1 as effects. `work.get`, `work.list`, `change.get`,
-`change.list`, and `checks.read` v1 are reads. A provider must advertise the
-matching version and mode before it can be bound. Syntactically valid
+`landing.invoke` v1, `execution.submit` v1, and `execution.cancel` v1 as
+effects. `work.get`, `work.list`, `change.get`, `change.list`, `checks.read`,
+`execution.inspect`, and `execution.collect` v1 are reads. A provider must
+advertise the matching version and mode before it can be bound. Syntactically valid
 experimental capability names may still be registered for deliberate
 operator-only use, but cannot be project-bound until the core defines their
 durable meaning.
@@ -217,6 +220,14 @@ stored operation credentials. Milestone 14's separately executed
 core-state-to-provider-status mapping, while MGB and workers receive only
 normalized work contracts. GitLab and future services remain independent
 add-ons implementing only the families they support.
+
+Milestone 15's separately executed
+[controlled execution provider](controlled-execution-provider.md) derives an
+exact raw candidate snapshot, uses one fixed credential-isolated SSH carrier,
+and invokes only an operator-pinned remote recipe and image. Submit and cancel
+retain effect uncertainty and reconciliation; inspect and evidence collection
+remain retryable reads. Neither a hostname nor a command is an operation
+parameter or worker capability.
 
 This capability-provider direction does not expand M10 or M11. M10 proves the
 credential-free operation and reconciliation kernel; M11 proves one GitHub

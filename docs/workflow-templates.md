@@ -346,8 +346,9 @@ remained explicit maintainer approval and the bounded landing-retry ruling.
 
 The advisory contract, configuration, execution ledger, structural blindness,
 worker gateway, bounded director, and non-gating operator surface are now
-fixed. Heterogeneous work providers and controlled remote execution remain
-later milestones. The completed
-`implementation-v1` proof, schema-v32 named-role ledger, schema-v34 Discovery
-evidence ledger, schema-v35 bounded director, and bounded Discovery operator
-surface establish the immutable prescription seam they reuse.
+fixed. The completed `implementation-v1` proof, schema-v32 named-role ledger,
+schema-v34 Discovery evidence ledger, schema-v35 bounded director, and bounded
+Discovery operator surface establish the immutable prescription seam now
+reused by heterogeneous work providers and controlled remote execution.
+Additional provider breadth remains a later-milestone choice driven by
+demonstrated need.
