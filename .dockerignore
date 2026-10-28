@@ -5,4 +5,6 @@
 !src/magic_glass_box/
 !src/magic_glass_box/**
 !docker/
+!docker/m15-remote-proof.Dockerfile
+!docker/m15_remote_proof.py
 !docker/runtime-proof.Dockerfile
