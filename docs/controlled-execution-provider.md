@@ -76,6 +76,8 @@ interval, CPU, memory, PID, and evidence ceilings. Docker is invoked with:
 - no network, a read-only root filesystem, all capabilities dropped, and
   `no-new-privileges`;
 - fixed CPU, memory, PID, temporary-filesystem, output-log, and stop bounds;
+- the `local` log driver with one uncompressed bounded file (Docker 29 rejects
+  compression when `max-file=1`);
 - the candidate workspace mounted read-only; and
 - no inherited Docker client configuration or registry credential.
 
@@ -92,8 +94,13 @@ exit, the runner treats a non-empty file as hostile: it rejects traversal,
 unsafe symlinks, duplicate or aliased paths, hard links and special files,
 oversized content, and excessive path counts before extracting into quarantine.
 The ordinary `WorkspaceResultStore` boundary then captures and packages the
-verified changes. Artifact content and raw stdout/stderr do not enter logs or
-SQLite; the normalized receipt carries the artifact bundle and output digests.
+verified changes. Artifact content and raw stdout/stderr do not enter
+control-plane logs or SQLite. Raw output remains only in the bounded remote
+Docker log, while the normalized receipt carries the artifact bundle plus
+output size and digest.
+Even zero changed artifact paths produce a non-empty, digest-bound normalized
+result bundle; `artifact_count`, not bundle byte length, expresses an empty
+artifact set.
 
 The upload file is mode `0666` only so arbitrary non-root image users can write
 the bind-mounted file. Its per-job directory and every ancestor controlled by
@@ -168,6 +175,49 @@ Create and execute a `collect` follow-up after the status is terminal. A lost
 submit or cancel response uses the existing `operation-reconcile` command on
 that same operation ID. Do not create a replacement effect merely because its
 first response was lost.
+
+## Repeatable live proof
+
+`docker/m15-remote-proof.Dockerfile` builds the non-root proof image and
+`scripts/check_live_remote_execution.py` drives the explicitly authorized
+end-to-end check. The script requires a clean repository with both `HEAD` and
+`HEAD^`, creates a real candidate for that delta, starts a private local
+carrier, and creates two real jobs on the configured remote runner. Its proof
+root must not already exist.
+
+First build the image on the remote host, put its immutable image ID into two
+operator-owned recipes named `m15-proof` and `cancel-proof`, and inspect the
+runner to obtain their recipe digests. Install a dedicated SSH key whose
+`authorized_keys` entry forces that exact runner and configuration. Prepare a
+mode-`0600` carrier connection document containing only the fixed SSH and Git
+executables, destination, account, credential-file paths, and absolute remote
+helper path. Then run:
+
+```console
+PYTHONPATH=src .venv/bin/python scripts/check_live_remote_execution.py \
+  --repository "$PWD" \
+  --proof-root /absolute/private/new-proof-root \
+  --proof-id m15-forge-YYYYMMDD-a \
+  --connection-config /absolute/private/connection.json \
+  --image-id sha256:<image-digest> \
+  --quality-recipe-sha256 <quality-recipe-digest> \
+  --cancel-recipe-sha256 <cancel-recipe-digest> \
+  --confirmation I_UNDERSTAND_THIS_USES_FORGE
+```
+
+The proof discards the first successful submit response, requires the durable
+operation to enter `uncertain`, and reconciles it to the same remote execution.
+It then waits for success, collects one artifact, submits a second job, cancels
+it, and collects a zero-path evidence bundle. Finally it scans SQLite,
+worker-visible files, carrier streams, and the private report for the raw SSH
+key, known-hosts material, and private credential paths. Keep the private
+report and remote job state until the milestone audit is complete.
+
+The accepted M15 proof ran on 2026-10-27 against source commit `fc87018`. It
+passed both execution paths and an independent host-side inspection of network,
+mount, user, capability, image, resource, log, and credential boundaries. The
+two earlier stopped attempts and their RED-first remediations remain documented
+in the ignored internal proof report.
 
 ## Published contracts and limits
 

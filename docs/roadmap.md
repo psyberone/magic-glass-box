@@ -1915,7 +1915,7 @@ final-code mutation wave killed all 21/21 completion-policy mutants (100%).
 
 ## Milestone 15: controlled remote execution provider
 
-**Status: implementation complete; live remote-host exit proof pending**
+**Status: complete**
 
 - Define submit, inspect, cancel, reconcile, and evidence-collection semantics
   for an exact candidate and operator-defined test recipe.
@@ -1963,13 +1963,36 @@ branch-aware coverage. The five M15 production modules have 86% aggregate
 branch-aware coverage (81–99% individually). A focused final-code mutation
 campaign killed 3,342 of 4,162 mutants (80.30%), clearing the 80% floor.
 
-The remaining M15 exit checkpoint is one explicitly authorized proof against
-the operator-owned remote host: forced-command containment, exact candidate
-execution, terminal inspection, evidence collection, one deliberately lost
-effect response reconciled without duplication, cancellation, and a scan that
-finds no SSH or Docker credential in control-plane state or worker-visible
-material. That live proof remains deliberately separate from the fully green
-implementation evidence above.
+The explicitly authorized remote-host exit proof completed on 2026-10-27
+against clean source commit `fc87018`. A forced-command-only SSH key rejected an
+attempted shell command. The accepted quality execution used the exact durable
+candidate, deliberately lost its first successful submit response, entered
+`uncertain`, reconciled to the same remote execution without duplication, ran
+72 focused tests in a networkless non-root container, and returned one bounded
+artifact. A separate execution was cancelled and collected with zero changed
+artifact paths inside a valid digest-bound result bundle. Scans found no SSH
+key, known-hosts material, or private credential path in SQLite,
+worker-visible source, provider streams, or the proof report; the remote Docker
+client directory was empty.
+
+The host-side audit confirmed exactly two accepted proof jobs; a pinned image,
+network mode `none`, read-only root and candidate, one writable artifact file,
+all capabilities dropped, `no-new-privileges`, no Docker socket, non-root UID,
+and the configured CPU, memory, PID, file, temporary-filesystem, and local-log
+bounds. The accepted image ID was `sha256:1657049acad45057c4528c055b7e0495a583913526897ddb02007afedab66089`;
+the quality and cancellation recipe digests were respectively
+`f846631c91ba8459d40380dd852838ff3016310d65e7c99e12f4cb72e5513e89`
+and `fdf3b29350d6e9d113c3ff26c4ca04f84df56b54550de42df2f2a152ea67939c`.
+
+Two prior proof attempts remain recorded rather than erased. The first exposed
+a Docker 29 incompatibility between `max-file=1` and implicit local-log
+compression; a RED-first production correction now sets `compress=false`, the
+focused mutation pass killed 4/4 mutants, and the full gate passed 1,406 tests.
+The second completed both remote executions but exposed a proof-harness mistake
+that equated zero changed paths with a zero-byte result envelope; a RED-first
+test corrected that assertion. The final pre-proof gate passed 1,407 tests at
+87% branch-aware coverage. These were honest failed runs with fresh state for
+each retry, not rewritten evidence.
 
 ## Post-Milestone 15 audit and dogfood gate
 

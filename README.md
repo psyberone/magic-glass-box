@@ -153,7 +153,12 @@ the worker has `--network none`, direct egress fails, and a typed request still
 reaches the orchestrator. A second live proof reaches one policy-pinned local
 provider through a separately launched connector while undeclared grants,
 destinations, models, direct networking, and credential exposure all fail
-closed. The retired `krab_only` mode continues to fail closed.
+closed. Controlled remote execution has likewise completed its live
+operator-owned-host proof: a forced-command carrier recovered a deliberately
+lost submit response without duplication, collected bounded evidence, and
+cancelled a second job while the worker remained networkless, non-root, and
+without SSH or Docker credentials. The retired `krab_only` mode continues to
+fail closed.
 
 ## Quick start
 
