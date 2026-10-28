@@ -12,6 +12,13 @@ does not execute provider-native commands, grant authority, interpret arbitrary
 graphs, or replace the candidate, gate, run, work-memory, interaction,
 supervision, and integration ledgers.
 
+The next planned evolution is deliberately evidence-first: exercise these
+contracts during M16 dogfood, reconcile that report with the Panopticon
+coordinator's operating experience during the M17 contract consultation, and
+implement only the accepted smallest reusable slice in M18. The engagement,
+reuse boundary, and independent-review separation are defined in
+[reusable-workflow-template-program.md](reusable-workflow-template-program.md).
+
 ## Three records, three jobs
 
 | Record | Purpose |

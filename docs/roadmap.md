@@ -1994,38 +1994,108 @@ test corrected that assertion. The final pre-proof gate passed 1,407 tests at
 87% branch-aware coverage. These were honest failed runs with fresh state for
 each retry, not rewritten evidence.
 
-## Post-Milestone 15 audit and dogfood gate
+## Gate 15→16: whole-product audit and remediation
 
-**Status: planned hard boundary before Milestone 16+**
+**Status: next**
 
-This gate does not add work to or reorder M14 and M15. Complete both milestones
-at their natural scope, then freeze one exact clean M15 commit for assessment:
+Freeze one exact clean post-M15 commit, then assess the same source through a
+whole-repository Panopticon scan and two independent blind reviews. Reconcile
+only reproducible findings under MGB's actual trust boundary, retain reviewer
+disagreements honestly, and complete one bounded remediation wave with
+RED-first tests, the branch-aware coverage floor, and focused mutation checks.
+Run the full accepted gate again after the last source change and freeze the
+remediated commit rather than hot-reloading it during dogfood.
 
-- run a whole-repository Panopticon scan plus two independent blind reviews
-  against that same commit;
-- reconcile their reproducible findings under MGB's actual trust boundary,
-  retain disagreements honestly, and complete one bounded remediation pass
-  with the ordinary RED-first tests, branch-aware coverage floor, and focused
-  mutation checks;
-- freeze the remediated build as the coordinator rather than hot-reloading or
-  self-modifying it, and point it at a separate isolated checkout of MGB;
-- import one small but real MGB work item, avoiding a first-run schema or
-  control-plane bootstrap change, and exercise Discovery, implementation,
-  independent review, maintainer approval, GitHub landing, durable closeout,
-  and process-restart recovery under an explicit inference budget (initial
-  target: no more than $5); and
-- follow a genuine changes-requested round if review finds one, without
-  manufacturing a rejection merely to satisfy the proof.
+The Panopticon coordinator may operate or advise the scan in that existing
+role. Template design does not begin during remediation: audit mechanics and
+repo-specific defenses are evidence, not automatic workflow requirements.
 
-The merged candidate affects only the next operator-controlled MGB restart.
-M16+ provider expansion begins only after the dogfood report proves exact-head
-authority, credential containment, a clean target checkout, complete audit
-provenance, and honest accounting—or records a failed run and its remediation
-instead of declaring success by ceremony.
+**Exit:** one remediated clean commit, a finding-by-finding disposition report,
+the accepted quality and mutation evidence, and no unresolved blocking finding.
 
-## Milestone 16A: containerized remote runner appliance
+## Milestone 16: controlled dogfood and operating evidence
 
-**Status: planned candidate after the post-M15 audit and dogfood gate**
+**Status: planned after the Gate 15→16 freeze**
+
+Run the frozen MGB build as coordinator against a separate isolated MGB
+checkout and one small, real work item. Avoid a first-run schema or bootstrap
+change. Exercise the current templates without modifying them mid-run:
+Discovery, implementation, independent review, maintainer approval, provider
+landing, durable closeout, process replacement, and supervisor restart
+recovery. Use an explicit inference budget with an initial ceiling of $5.
+
+A genuine changes-requested verdict must return to the original producer and
+complete through a fresh candidate if it occurs; the proof must not manufacture
+a rejection. Failed or stalled dogfood is retained and remediated rather than
+rewritten into a ceremonial pass.
+
+Before the run, the Panopticon coordinator helps define the bounded observation
+rubric in
+[reusable-workflow-template-program.md](reusable-workflow-template-program.md).
+During the run they are a read-only observer and available domain consultant
+through the existing Krab project, not a hidden manual supervisor. After the
+report is frozen, they join a structured debrief that classifies mechanical
+work, judgment, missing authority, provider leakage, and project-specific
+practice without selecting an implementation shape.
+
+**Exit:** exact-head and credential-containment evidence, a clean target
+checkout, complete audit provenance, honest cost/time accounting, a durable
+friction and intervention log, and a frozen dogfood report suitable as design
+input.
+
+## Milestone 17: reusable workflow-template contract
+
+**Status: planned design milestone after M16 evidence**
+
+Bring the Panopticon coordinator in formally as the practice-domain
+co-designer. Use a living, decision-tracked consultation to reconcile three
+inputs: the already-captured Panopticon operating memo, MGB's existing
+`discovery-v1`/`implementation-v1`/`advisory-review-v1` contracts, and the M16
+dogfood report.
+
+Resolve the reuse unit, fixed lifecycle boundary, coordinator/control-plane
+split, Discovery topology, gate-review versus advisory-review relationship,
+mechanical delta-review policy, budgets, review-round ceilings, lifecycle
+hooks, wake-channel behavior, and follow-up semantics. Separate portable
+contract from project configuration and Panopticon-specific test mechanics.
+No production schema or runtime behavior is authorized inside this milestone.
+
+The coordinator supplies domain fidelity and evidence; the product owner rules
+scope and authority. A separate reviewer later supplies independent technical
+approval, so the principal co-designer is not the sole gate reviewer.
+
+**Exit:** a resolved/deferred decision log, fixed topology and typed-artifact
+contract, authority and negative-case tables, migration ruling, bounded
+acceptance plan, and one deliberately small recommendation for M18. See
+[reusable-workflow-template-program.md](reusable-workflow-template-program.md).
+
+## Milestone 18: first reusable-template delivery
+
+**Status: planned from the accepted M17 contract**
+
+Implement only M17's smallest accepted reuse slice. Preserve the prohibition
+on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
+portable credentials or profile identities. Project activation must bind every
+required local profile, capability, controller, budget, and owner policy or
+fail closed.
+
+Develop RED-first across happy and sad paths, retain the 85% branch-aware
+coverage floor, and run focused mutation checks over the new authority and
+transition boundaries. Prove the same reusable contract in two materially
+different owned projects—initially MGB and Imitation Krab are the natural
+candidates—without embedding either project's provider or test mechanics.
+
+The Panopticon coordinator reviews fidelity to the accepted M17 practice
+contract. A separate blind reviewer and the ordinary security/quality gates
+decide whether the implementation lands.
+
+**Exit:** two-project live evidence, restart and genuine correction-loop
+coverage when naturally triggered, truthful budget and closeout records,
+coordinator fidelity disposition, and independent technical approval.
+
+## Milestone 19: containerized remote runner appliance
+
+**Status: planned infrastructure candidate after M18**
 
 Package the M15 remote runner as a pinned, already-running controller image so
 an SSH target needs only OpenSSH, Docker, the image, private durable state, and
@@ -2058,7 +2128,7 @@ runs in a disposable job container rather than the controller. The complete
 design and acceptance boundary are in
 [containerized-runner-appliance.md](containerized-runner-appliance.md).
 
-## Milestone 16B+: provider breadth by demonstrated need
+## Milestone 20+: provider breadth by demonstrated need
 
 **Status: candidates, not commitments**
 

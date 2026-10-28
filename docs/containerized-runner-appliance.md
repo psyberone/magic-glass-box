@@ -1,7 +1,7 @@
 # Containerized remote runner appliance
 
-**Status: design only; planned M16A candidate after the post-M15 audit and
-dogfood gate.**
+**Status: design only; planned Milestone 19 candidate after audit, dogfood, and
+the first reusable-template delivery.**
 
 The M15 SSH carrier proved the controlled-execution protocol against an
 operator-owned host. Its first deployment installs the MGB runner and its
@@ -129,7 +129,7 @@ existing bounded status and evidence documents.
 
 ## Acceptance proof
 
-M16A is complete only when a repeatable live proof demonstrates all of the
+M19 is complete only when a repeatable live proof demonstrates all of the
 following:
 
 - the remote host has no MGB Python package or Git dependency outside the
