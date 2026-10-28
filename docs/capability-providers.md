@@ -212,10 +212,11 @@ The provider pressure tests are intentionally heterogeneous:
    first conformance target, driven through the same contract rather than
    copied GitHub mechanics.
 
-The owned Bitbucket Cloud mirror supplies another live forge target. Azure
-DevOps, raw Git, additional issue systems, interaction carriers, local and
-hosted agents, and additional inference providers remain candidates selected
-by demonstrated need. See [roadmap.md](roadmap.md) for the milestone boundaries.
+The owned Bitbucket Cloud and Azure DevOps Repos mirrors supply two more live
+forge targets. Their adapters, raw Git, additional issue systems, interaction
+carriers, local and hosted agents, and additional inference providers remain
+candidates selected by demonstrated need. See [roadmap.md](roadmap.md) for the
+milestone boundaries.
 
 M14's deterministic mixed-provider proof exercises the first item end to end:
 Jira v2 work intake is explicitly imported with immutable operation

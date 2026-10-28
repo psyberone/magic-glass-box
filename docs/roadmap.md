@@ -2062,14 +2062,13 @@ design and acceptance boundary are in
 
 **Status: candidates, not commitments**
 
-The live test estate now contains this repository on GitHub, GitLab.com, and
-Bitbucket Cloud—the three mainstream standalone cloud forges. That gives later
-forge adapters one owned repository and one plausible candidate history on
-each service without committing MGB to implement all three at once. Azure
-DevOps Repos is the notable enterprise fourth; it remains a future target only
-when a real project and account create a demonstrated need. Self-hosted GitLab,
-Gitea/Forgejo, and other forges likewise remain separate conformance targets,
-not assumed equivalents of their cloud namesakes.
+The live test estate now contains synchronized copies of this repository on
+GitHub, GitLab.com, Bitbucket Cloud, and Azure DevOps Repos. That covers the
+four major cloud forge families and gives later adapters one owned repository
+and one plausible candidate history on each service without committing MGB to
+implement all four at once. Self-hosted GitLab, Gitea/Forgejo, and other forges
+remain separate conformance targets, not assumed equivalents of their cloud
+namesakes.
 
 - Revisit the Jira write surface only after M15 and its audit/dogfood gate.
   Start from the smallest demonstrated provider-neutral operations beyond the
@@ -2081,10 +2080,10 @@ not assumed equivalents of their cloud namesakes.
   available. It must pass the capability conformance suite and expose only the
   operations it truthfully supports; GitHub mechanics are not copied by
   assumption.
-- Bitbucket Cloud is also available as a live target. Azure DevOps, raw Git
-  actuators, additional work systems, interaction carriers, hosted agents,
-  local agents, and inference providers remain independent additions selected
-  by real use cases.
+- Bitbucket Cloud and Azure DevOps Repos are also available as live targets.
+  Their adapters, raw Git actuators, additional work systems, interaction
+  carriers, hosted agents, local agents, and inference providers remain
+  independent additions selected by real use cases.
 - Provider breadth does not weaken the rule that no binding means no
   capability. MGB never guesses a controller or exposes a provider-native
   escape hatch to an agent.
