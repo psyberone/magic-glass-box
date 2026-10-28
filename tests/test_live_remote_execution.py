@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -97,6 +99,26 @@ class M15LiveRemoteExecutionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(proof.LiveProofError, "successful result"):
             proof.success_result({**operation, "state": "uncertain"})
+
+    def test_cancelled_evidence_retains_its_empty_result_bundle(self) -> None:
+        proof = load_live_proof_module()
+        bundle = b"bounded empty result bundle"
+        evidence = {
+            "artifact_bundle": base64.b64encode(bundle).decode("ascii"),
+            "artifact_bytes": len(bundle),
+            "artifact_count": 0,
+            "artifact_sha256": hashlib.sha256(bundle).hexdigest(),
+            "execution": {"state": "cancelled"},
+        }
+
+        self.assertEqual(
+            proof._assert_evidence(
+                evidence,
+                expected_state="cancelled",
+                expect_artifact=False,
+            ),
+            {"state": "cancelled"},
+        )
 
     def test_atomic_private_json_is_mode_0600(self) -> None:
         proof = load_live_proof_module()

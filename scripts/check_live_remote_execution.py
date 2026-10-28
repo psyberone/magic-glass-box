@@ -611,8 +611,9 @@ def _assert_evidence(
         or not isinstance(artifact_sha256, str)
         or hashlib.sha256(raw_bundle).hexdigest() != artifact_sha256
         or len(raw_bundle) != artifact_bytes
-        or (expect_artifact and (artifact_count != 1 or artifact_bytes <= 0))
-        or (not expect_artifact and (artifact_count != 0 or artifact_bytes != 0))
+        or artifact_bytes <= 0
+        or (expect_artifact and artifact_count != 1)
+        or (not expect_artifact and artifact_count != 0)
     ):
         raise LiveProofError("remote evidence artifact identity is inconsistent")
     return dict(execution)
