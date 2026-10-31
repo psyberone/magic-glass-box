@@ -7,8 +7,9 @@ import tempfile
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
-from magic_glass_box.candidates import GitCandidateStore
+from magic_glass_box.candidates import CandidateError, GitCandidateStore
 from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import Database
 from magic_glass_box.discovery import (
@@ -3289,6 +3290,66 @@ class WorkflowDirectorTests(unittest.TestCase):
                 decision="cancel",
                 resolved_by_handle="operator",
             )
+
+    def test_successful_producer_with_no_changes_opens_a_ruling(self) -> None:
+        self.assertFalse(
+            self.director().advance(
+                self.execution["id"], expected_version=self.execution["version"]
+            )
+        )
+        producer = self.database.find_workflow_run(self.execution["id"], 0, "producer")
+        self.finish_run(
+            producer,
+            source_revision=producer["source_revision"],
+            before="base\n",
+            after="base\n",
+        )
+
+        self.assertTrue(
+            self.director().advance(
+                self.execution["id"], expected_version=self.execution["version"]
+            )
+        )
+
+        stopped = self.database.get_workflow_execution(self.execution["id"])
+        self.assertEqual(stopped["stage"], "build")
+        self.assertEqual(
+            [(ruling["kind"], ruling["run_id"]) for ruling in stopped["rulings"]],
+            [("producer_failed", producer["id"])],
+        )
+        self.assertEqual(
+            self.database.list_candidates(producer_run_id=producer["id"]), []
+        )
+
+    def test_other_candidate_errors_remain_fail_closed(self) -> None:
+        self.assertFalse(
+            self.director().advance(
+                self.execution["id"], expected_version=self.execution["version"]
+            )
+        )
+        producer = self.database.find_workflow_run(self.execution["id"], 0, "producer")
+        self.finish_run(
+            producer,
+            source_revision=producer["source_revision"],
+            before="base\n",
+            after="changed\n",
+        )
+
+        with (
+            mock.patch.object(
+                self.control,
+                "create_candidate",
+                side_effect=CandidateError("candidate store is unavailable"),
+            ),
+            self.assertRaisesRegex(CandidateError, "store is unavailable"),
+        ):
+            self.director().advance(
+                self.execution["id"], expected_version=self.execution["version"]
+            )
+
+        stopped = self.database.get_workflow_execution(self.execution["id"])
+        self.assertEqual(stopped["rulings"], [])
+        self.assertEqual(stopped["stage"], "build")
 
     def test_failed_or_silent_reviewer_opens_the_exact_ruling(self) -> None:
         cases = (

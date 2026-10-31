@@ -126,13 +126,16 @@ reviewer. Waiting for a worker or maintainer defers the claim without consuming
 its finite retry budget. A stage transition increments the execution version,
 settles the old action, and makes exactly one next-stage action discoverable.
 
-Failed producer/reviewer runs, missing typed verdicts, failed validations,
-provider landing failures, landing-authority mismatches, cancellations, and an
-exhausted correction budget open a durable workflow ruling. An open ruling
-stops action discovery for that execution and appears in the control-room
-attention projection. `workflow ruling-show` and `workflow ruling-resolve`
-provide the explicit operator boundary. A correction-limit ruling may authorize
-one additional bounded round. A validation-failed ruling may rerun that exact
+Failed producer/reviewer runs, a successful producer result with no candidate
+changes, missing typed verdicts, failed validations, provider landing failures,
+landing-authority mismatches, cancellations, and an exhausted correction budget
+open a durable workflow ruling. The no-change case is the narrow
+`producer_failed` outcome; candidate integrity, recovery, and storage failures
+remain operational errors and fail closed. An open ruling stops action
+discovery for that execution and appears in the control-room attention
+projection. `workflow ruling-show` and `workflow ruling-resolve` provide the
+explicit operator boundary. A correction-limit ruling may authorize one
+additional bounded round. A validation-failed ruling may rerun that exact
 immutable validation once, and an exact failed-provider-landing ruling may
 authorize one retry of that attempt. Each retry requires its own ruling; neither
 path can alter the pinned command, image, policy, or candidate. Other rulings

@@ -21,6 +21,7 @@ from magic_glass_box.candidates import (
     CandidateManifest,
     GitCandidateStore,
     MaterializedCandidate,
+    NoCandidateChangesError,
     load_candidate_store_identity,
 )
 from magic_glass_box.db import (
@@ -627,7 +628,7 @@ class CandidateKernelTests(unittest.TestCase):
                     self.project_id, self.repository, self.result, blobs
                 )
         empty = ResultManifest(1, self.attempt_id, self.base, ())
-        with self.assertRaisesRegex(CandidateError, "no changes"):
+        with self.assertRaisesRegex(NoCandidateChangesError, "no changes"):
             self.store.materialize(self.project_id, self.repository, empty, {})
         with self.assertRaisesRegex(CandidateError, "validated manifest"):
             self.store.materialize(  # type: ignore[arg-type]

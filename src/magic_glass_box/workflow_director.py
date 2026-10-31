@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .candidates import GitCandidateStore
+from .candidates import GitCandidateStore, NoCandidateChangesError
 from .domain import SupervisionPolicy
 from .executor import DockerExecutor
 from .results import WorkspaceResultStore
@@ -82,12 +82,15 @@ class WorkflowDirector:
         candidate = self._candidate_for_run(producer)
         if candidate is None:
             attempt = self._successful_attempt(producer)
-            self.control.create_candidate(
-                attempt["id"],
-                created_by_handle=execution["requested_by"],
-                result_store=self.result_store,
-                candidate_store=self.candidate_store,
-            )
+            try:
+                self.control.create_candidate(
+                    attempt["id"],
+                    created_by_handle=execution["requested_by"],
+                    result_store=self.result_store,
+                    candidate_store=self.candidate_store,
+                )
+            except NoCandidateChangesError:
+                return self._ruling(execution, "producer_failed", run_id=producer["id"])
             return False
 
         gate = self.database.get_workflow_gate(execution["id"], correction_round)

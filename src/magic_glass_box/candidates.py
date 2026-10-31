@@ -71,6 +71,10 @@ class CandidateError(RuntimeError):
     """A retained result could not be represented as a trusted candidate."""
 
 
+class NoCandidateChangesError(CandidateError):
+    """A valid retained result has no change from its pinned source revision."""
+
+
 @dataclass(frozen=True)
 class CandidateStoreIdentity:
     schema_version: int
@@ -1473,7 +1477,7 @@ class GitCandidateStore:
         if not isinstance(result, ResultManifest):
             raise CandidateError("candidate result must be a validated manifest")
         if not result.changes:
-            raise CandidateError("candidate result contains no changes")
+            raise NoCandidateChangesError("candidate result contains no changes")
         self._validate_result_blobs(result, blobs)
         operation = self._new_operation()
         source: Path | None = None
