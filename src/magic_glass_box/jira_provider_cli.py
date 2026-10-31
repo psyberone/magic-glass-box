@@ -546,6 +546,7 @@ def serve_unix(socket_path: Path, max_invocations: int, provider: JiraProvider) 
                 OSError,
             ),
             client_timeout=min(300.0, provider.spec.timeout_ms / 1000 + 1.0),
+            max_concurrency=provider.spec.max_concurrency,
         )
     except UnixSidecarError as exc:
         raise JiraProviderCLIError(str(exc)) from exc

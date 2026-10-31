@@ -547,6 +547,20 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 expected_context_version_id="pcv_" + "0" * 32,
             )
 
+    def test_retry_preserves_the_directed_discovery_role(self) -> None:
+        execution = self.start()
+        investigator = self.create_role_run(execution, "investigator")
+        failed = self.run_attempt(investigator, exit_code=17)
+
+        replacement = self.database.retry_run(
+            investigator["id"],
+            requested_by=self.user["id"],
+            expected_run_version=failed["run_version"],
+        )
+
+        current = self.database.get_discovery_execution(execution["id"])
+        self.assertEqual(current["runs"]["investigator"]["run_id"], replacement["id"])
+
     def test_completed_go_ruling_can_pin_one_implementation_scope(self) -> None:
         discovery = self.complete_discovery()
         self.create_implementation_configuration()
@@ -1898,7 +1912,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 43)
+        self.assertEqual(SCHEMA_VERSION, 45)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

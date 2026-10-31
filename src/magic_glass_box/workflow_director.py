@@ -383,19 +383,24 @@ class WorkflowDirector:
             return self._ruling(
                 execution, "landing_cancelled", policy_id=landing["policy_id"]
             )
-        if (
-            landing["queue_state"] == "refold_required"
-            and execution["correction_round"] > 0
-        ):
-            self.control.accept_workflow_landing_chain(
-                execution["id"],
-                expected_queue_version=landing["queue_version"],
-                accepted_by_handle=execution["requested_by"],
+        if landing["queue_state"] == "refold_required":
+            accepted = None
+            if execution["correction_round"] > 0:
+                accepted = self.control.accept_workflow_landing_chain(
+                    execution["id"],
+                    expected_queue_version=landing["queue_version"],
+                    accepted_by_handle=execution["requested_by"],
+                )
+            if accepted is not None:
+                # Chain acceptance advances queue authority, not the workflow
+                # execution version. Keep this version-bound supervisor action
+                # deferred so it can observe the new queue state on its next pass.
+                return False
+            return self._ruling(
+                execution,
+                "landing_refold_required",
+                policy_id=landing["policy_id"],
             )
-            # Chain acceptance advances queue authority, not the workflow
-            # execution version. Keep this version-bound supervisor action
-            # deferred so it can observe the new queue state on its next pass.
-            return False
 
         if landing["queue_state"] != "landed":
             if mode == "provider":

@@ -1104,6 +1104,8 @@ PROVIDER_RESERVED_HEADERS = {
     "upgrade",
     "user-agent",
 }
+MAX_PROVIDER_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 def validate_provider_name(value: object, *, field: str = "provider name") -> str:
@@ -1278,13 +1280,13 @@ class ProviderGrantSpec:
                 value["request_bytes"],
                 field="request_bytes",
                 minimum=1,
-                maximum=2 * 1024 * 1024,
+                maximum=MAX_PROVIDER_REQUEST_BYTES,
             ),
             response_bytes=_bounded_integer(
                 value["response_bytes"],
                 field="response_bytes",
                 minimum=1,
-                maximum=4 * 1024 * 1024,
+                maximum=MAX_PROVIDER_RESPONSE_BYTES,
             ),
             timeout_ms=_bounded_integer(
                 value["timeout_ms"],

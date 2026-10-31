@@ -364,11 +364,37 @@ class DockerExecutor:
         uid: int | None = None,
         gid: int | None = None,
         limits: DockerLimits | None = None,
+        storage_admission: Callable[[SandboxRequest], bool] | None = None,
+        allow_unenforced_worker_storage: bool = False,
     ):
+        if not isinstance(allow_unenforced_worker_storage, bool):
+            raise ExecutionError("allow_unenforced_worker_storage must be boolean")
         self.engine = engine
         self.uid = os.getuid() if uid is None else uid
         self.gid = os.getgid() if gid is None else gid
         self.limits = limits or DockerLimits()
+        self.storage_admission = storage_admission
+        self.allow_unenforced_worker_storage = allow_unenforced_worker_storage
+
+    def _admit_worker_storage(self, request: SandboxRequest) -> None:
+        host_writable = (
+            request.profile.workspace_mode is WorkspaceMode.COPY_ON_WRITE
+            or request.gateway_directory is not None
+        )
+        if not host_writable:
+            return
+        admitted = False
+        if self.storage_admission is not None:
+            try:
+                admitted = self.storage_admission(request) is True
+            except Exception as exc:
+                raise ExecutionError("worker storage quota admission failed") from exc
+        if admitted or self.allow_unenforced_worker_storage:
+            return
+        raise ExecutionError(
+            "writable worker storage requires a hard byte and inode quota; "
+            "configure quota admission or explicitly allow unenforced storage"
+        )
 
     def execute(
         self,
@@ -376,6 +402,7 @@ class DockerExecutor:
         *,
         before_start: Callable[[SandboxPlan, str], None] | None = None,
     ) -> SandboxResult:
+        self._admit_worker_storage(request)
         image = self.engine.inspect_image(request.profile.image)
         if image.declared_volumes:
             raise ExecutionError(

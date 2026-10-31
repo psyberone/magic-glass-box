@@ -9,7 +9,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
@@ -235,6 +235,7 @@ class InboxEvent:
     untrusted_note: str | None
     content_risk_flags: tuple[str, ...]
     completion_policy: str = "workflow"
+    in_reply_to_item_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +285,8 @@ class SessionItem:
     content_risk_flags: tuple[str, ...]
     history: tuple[SessionItemHistoryEvent, ...]
     completion_policy: str = "workflow"
+    in_reply_to_item_id: str | None = None
+    reply_binding_present: bool = field(default=False, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -550,25 +553,30 @@ def _inbox_event(value: object, *, project_key: str) -> InboxEvent:
         fields={"trusted_metadata", "untrusted_text", "content_risk_flags"},
         label="inbox event",
     )
+    metadata_fields = {
+        "event_seq",
+        "kind",
+        "project_key",
+        "session_id",
+        "item_id",
+        "actor",
+        "creator",
+        "recipient",
+        "work_claim",
+        "from_status",
+        "to_status",
+        "current_status",
+        "version",
+        "created_at",
+    }
+    raw_metadata = event["trusted_metadata"]
+    if isinstance(raw_metadata, dict) and "completion_policy" in raw_metadata:
+        metadata_fields.add("completion_policy")
+    if isinstance(raw_metadata, dict) and "in_reply_to_item_id" in raw_metadata:
+        metadata_fields.add("in_reply_to_item_id")
     metadata = _exact_object(
-        event["trusted_metadata"],
-        fields={
-            "event_seq",
-            "kind",
-            "project_key",
-            "session_id",
-            "item_id",
-            "actor",
-            "creator",
-            "recipient",
-            "work_claim",
-            "from_status",
-            "to_status",
-            "current_status",
-            "completion_policy",
-            "version",
-            "created_at",
-        },
+        raw_metadata,
+        fields=metadata_fields,
         label="inbox event metadata",
     )
     if metadata["project_key"] != project_key:
@@ -586,11 +594,12 @@ def _inbox_event(value: object, *, project_key: str) -> InboxEvent:
         item_id = validate_krab_id(metadata["item_id"], "itm")
     except ValueError as exc:
         raise KrabError("invalid inbox event object ID") from exc
+    in_reply_to_item_id = _reply_binding(metadata, label="inbox event")
     from_status = _item_status(metadata["from_status"], nullable=True)
     to_status = _item_status(metadata["to_status"], nullable=True)
     current_status = _item_status(metadata["current_status"]) or ""
     completion_policy = _completion_policy(
-        metadata["completion_policy"],
+        metadata.get("completion_policy", "workflow"),
         statuses=(from_status, to_status, current_status),
         label="inbox event",
     )
@@ -632,6 +641,7 @@ def _inbox_event(value: object, *, project_key: str) -> InboxEvent:
             event["content_risk_flags"], label="inbox event"
         ),
         completion_policy=completion_policy,
+        in_reply_to_item_id=in_reply_to_item_id,
     )
 
 
@@ -652,6 +662,16 @@ def _completion_policy(
     if not valid:
         raise KrabError(f"invalid {label} completion policy for status")
     return value
+
+
+def _reply_binding(metadata: Mapping[str, Any], *, label: str) -> str | None:
+    value = metadata.get("in_reply_to_item_id")
+    if value is None:
+        return None
+    try:
+        return validate_krab_id(value, "itm")
+    except ValueError as exc:
+        raise KrabError(f"invalid {label} reply binding") from exc
 
 
 def _session_item_history(value: object) -> SessionItemHistoryEvent:
@@ -733,6 +753,8 @@ def _session_item(
     raw_metadata = response["trusted_metadata"]
     if isinstance(raw_metadata, dict) and "completion_policy" in raw_metadata:
         metadata_fields.add("completion_policy")
+    if isinstance(raw_metadata, dict) and "in_reply_to_item_id" in raw_metadata:
+        metadata_fields.add("in_reply_to_item_id")
     metadata = _exact_object(
         raw_metadata,
         fields=metadata_fields,
@@ -754,6 +776,8 @@ def _session_item(
         raise KrabError("session-item session does not match the request")
     if item_id is not None and response_item_id != item_id:
         raise KrabError("session-item item does not match the request")
+    reply_binding_present = "in_reply_to_item_id" in metadata
+    in_reply_to_item_id = _reply_binding(metadata, label="session-item")
 
     history: tuple[SessionItemHistoryEvent, ...] = ()
     if not created:
@@ -812,6 +836,8 @@ def _session_item(
         ),
         history=history,
         completion_policy=completion_policy,
+        in_reply_to_item_id=in_reply_to_item_id,
+        reply_binding_present=reply_binding_present,
     )
 
 
@@ -1373,6 +1399,7 @@ class KrabClient:
         idempotency_key: str,
         claim_id: str | None = None,
         completion_policy: str = "workflow",
+        in_reply_to_item_id: str | None = None,
     ) -> SessionItem:
         try:
             key = validate_project_key(project_key)
@@ -1402,6 +1429,13 @@ class KrabClient:
         if claim_id is not None:
             try:
                 request["claim_id"] = validate_krab_id(claim_id, "clm")
+            except ValueError as exc:
+                raise KrabError(str(exc)) from exc
+        if in_reply_to_item_id is not None:
+            try:
+                request["in_reply_to_item_id"] = validate_krab_id(
+                    in_reply_to_item_id, "itm"
+                )
             except ValueError as exc:
                 raise KrabError(str(exc)) from exc
         if completion_policy != "workflow":

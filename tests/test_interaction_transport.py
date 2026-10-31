@@ -487,6 +487,22 @@ class InteractionTransportTests(unittest.TestCase):
                 ),
                 "after the request",
             ),
+            (
+                replace(
+                    original,
+                    reply_binding_present=True,
+                    in_reply_to_item_id=None,
+                ),
+                "reply binding",
+            ),
+            (
+                replace(
+                    original,
+                    reply_binding_present=True,
+                    in_reply_to_item_id="itm_" + "f" * 32,
+                ),
+                "reply binding",
+            ),
         )
         for candidate, message in cases:
             with (
@@ -503,6 +519,29 @@ class InteractionTransportTests(unittest.TestCase):
             self.assertEqual((current["state"], current["version"]), ("open", 1))
             self.assertEqual(current["run_state"], "waiting_for_input")
         self.client.response_item = original
+
+    def test_exact_krab_reply_binding_is_accepted_and_rechecked(self) -> None:
+        run = self.running_run()
+        opened = self.open_interaction(run)
+        self.client.response_item = replace(
+            self.client.response_item,
+            reply_binding_present=True,
+            in_reply_to_item_id=REQUEST_ITEM_ID,
+        )
+
+        accepted = self.control.accept_interaction_response(
+            opened["id"],
+            response_item_id=RESPONSE_ITEM_ID,
+            expected_version=opened["version"],
+        )
+
+        self.assertEqual(accepted.response_item_id, RESPONSE_ITEM_ID)
+        self.client.response_item = replace(
+            self.client.response_item,
+            in_reply_to_item_id="itm_" + "f" * 32,
+        )
+        with self.assertRaisesRegex(KrabError, "reply binding"):
+            self.control.read_interaction_response(run["id"], opened["id"])
 
     def test_inactive_bound_user_cannot_answer_an_interaction(self) -> None:
         run = self.running_run()

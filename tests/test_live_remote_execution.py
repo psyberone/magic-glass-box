@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,6 +121,61 @@ class M15LiveRemoteExecutionTests(unittest.TestCase):
             ),
             {"state": "cancelled"},
         )
+
+    def test_quality_evidence_requires_the_expected_proof_document(self) -> None:
+        proof = load_live_proof_module()
+
+        def evidence(summary: dict[str, object]) -> dict[str, object]:
+            payload = (json.dumps(summary, sort_keys=True) + "\n").encode()
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w:gz") as archive:
+                member = tarfile.TarInfo("m15-proof.json")
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+            bundle = output.getvalue()
+            return {
+                "artifact_bundle": base64.b64encode(bundle).decode("ascii"),
+                "artifact_bytes": len(bundle),
+                "artifact_count": 1,
+                "artifact_sha256": hashlib.sha256(bundle).hexdigest(),
+                "execution": {"state": "succeeded"},
+            }
+
+        summary: dict[str, object] = {
+            "boundary": {
+                "docker_authority": "absent",
+                "network_interfaces": ["lo"],
+                "network_routes": "loopback-only",
+                "root_filesystem": "read-only",
+                "runtime_user": "non-root",
+                "workspace": "read-only",
+            },
+            "python": "3.11.15",
+            "schema_version": 1,
+            "status": "passed",
+            "test_count": 79,
+            "test_modules": [
+                "tests.test_execution_operations",
+                "tests.test_execution_provider",
+                "tests.test_execution_provider_cli",
+                "tests.test_remote_runner",
+            ],
+        }
+
+        self.assertEqual(
+            proof._assert_evidence(
+                evidence(summary),
+                expected_state="succeeded",
+                expect_artifact=True,
+            ),
+            {"state": "succeeded"},
+        )
+        with self.assertRaisesRegex(proof.LiveProofError, "quality artifact"):
+            proof._assert_evidence(
+                evidence({**summary, "status": "not-really-tested"}),
+                expected_state="succeeded",
+                expect_artifact=True,
+            )
 
     def test_atomic_private_json_is_mode_0600(self) -> None:
         proof = load_live_proof_module()

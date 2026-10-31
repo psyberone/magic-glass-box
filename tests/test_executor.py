@@ -708,6 +708,71 @@ class DockerExecutorTests(unittest.TestCase):
             self.executor.execute(self.request)
         self.assertEqual(self.engine.calls, [("inspect", "agent:local")])
 
+    def test_writable_host_storage_requires_explicit_admission(self) -> None:
+        writable_profile = AgentProfileSpec.create(
+            image="agent:local",
+            command=["agent"],
+            workspace_mode=WorkspaceMode.COPY_ON_WRITE,
+            network_mode=NetworkMode.NONE,
+        )
+        writable = SandboxRequest(
+            RUN_ID,
+            writable_profile,
+            self.workspace,
+            RuntimeLaunch(writable_profile.command),
+            {},
+        )
+        gateway = Path(self.temporary.name) / "gateway"
+        gateway.mkdir(mode=0o700)
+        for name in (
+            GATEWAY_REQUEST_NAME,
+            GATEWAY_REQUEST_READY_NAME,
+            GATEWAY_RESPONSE_NAME,
+            GATEWAY_RESPONSE_READY_NAME,
+        ):
+            (gateway / name).touch(mode=0o600)
+        gateway_profile = AgentProfileSpec.create(
+            image="agent:local",
+            command=["agent"],
+            workspace_mode=WorkspaceMode.READ_ONLY,
+            network_mode=NetworkMode.GATEWAY_ONLY,
+            gateway_capabilities=(GatewayCapability.RUN_DESCRIBE,),
+        )
+        gateway_request = SandboxRequest(
+            RUN_ID,
+            gateway_profile,
+            self.workspace,
+            RuntimeLaunch(gateway_profile.command),
+            {},
+            gateway,
+        )
+
+        for request in (writable, gateway_request):
+            with (
+                self.subTest(network_mode=request.profile.network_mode),
+                self.assertRaisesRegex(ExecutionError, "hard byte and inode quota"),
+            ):
+                self.executor.execute(request)
+        self.assertEqual(self.engine.calls, [])
+
+        admission = mock.Mock(return_value=True)
+        admitted = DockerExecutor(
+            self.engine,
+            uid=os.getuid(),
+            gid=os.getgid(),
+            storage_admission=admission,
+        )
+        admitted.execute(writable)
+        admission.assert_called_once_with(writable)
+
+        explicitly_unenforced = DockerExecutor(
+            self.engine,
+            uid=os.getuid(),
+            gid=os.getgid(),
+            allow_unenforced_worker_storage=True,
+        )
+        explicitly_unenforced.execute(gateway_request)
+
     def test_start_failure_preserves_error_and_still_removes(self) -> None:
         failure = ExecutionError("start failed")
         self.engine.failure = ("start", failure)

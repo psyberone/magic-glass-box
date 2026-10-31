@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,6 +41,7 @@ TRANSPORT_HOST = "127.0.0.1"
 TRANSPORT_PORT = 8766
 MAX_VENDOR_REQUEST_BYTES = 2 * 1024 * 1024
 PROVIDER_GATEWAY_TIMEOUT_SECONDS = 30.0
+MAX_PROVIDER_TRANSPORT_CONCURRENCY = 16
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _DEFAULT_GATEWAY_TIMEOUT = object()
@@ -182,6 +185,20 @@ def _write_file(path: Path, value: bytes) -> None:
         os.close(descriptor)
 
 
+def _acquire_file_lock(descriptor: int, *, deadline: float) -> None:
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WorkerTransportError("gateway mailbox lock timed out") from None
+            time.sleep(min(0.01, remaining))
+        except OSError as exc:
+            raise WorkerTransportError("gateway mailbox lock is unavailable") from exc
+
+
 @dataclass(frozen=True)
 class _Marker:
     sequence: int
@@ -297,9 +314,12 @@ class FileGatewayClient:
         ):
             raise WorkerTransportError("gateway timeout is invalid")
         request_path = self.directory / GATEWAY_REQUEST_NAME
+        deadline = time.monotonic() + float(effective_timeout)
         descriptor = _safe_file(request_path, os.O_RDWR)
+        locked = False
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            _acquire_file_lock(descriptor, deadline=deadline)
+            locked = True
             sequence = self._next_sequence()
             request_id = "worker-" + uuid.uuid4().hex
             raw = (
@@ -331,6 +351,7 @@ class FileGatewayClient:
                     request_id,
                     float(effective_timeout),
                     allow_progress=operation == "provider.invoke",
+                    initial_deadline=deadline,
                 )
             except WorkerTransportError as exc:
                 raise GatewayRequestCommittedError(
@@ -338,7 +359,8 @@ class FileGatewayClient:
                 ) from exc
         finally:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
         return response
@@ -350,8 +372,11 @@ class FileGatewayClient:
         timeout: float,
         *,
         allow_progress: bool,
+        initial_deadline: float | None = None,
     ) -> dict[str, Any]:
-        deadline = time.monotonic() + timeout
+        deadline = (
+            time.monotonic() + timeout if initial_deadline is None else initial_deadline
+        )
         last_heartbeat = 0
         while time.monotonic() < deadline:
             ready_raw = _read_file(
@@ -613,9 +638,50 @@ class _TransportServer(ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         transport: ProviderHTTPTransport,
+        *,
+        max_concurrency: int = MAX_PROVIDER_TRANSPORT_CONCURRENCY,
     ):
+        if (
+            isinstance(max_concurrency, bool)
+            or not isinstance(max_concurrency, int)
+            or not 1 <= max_concurrency <= MAX_PROVIDER_TRANSPORT_CONCURRENCY
+        ):
+            raise WorkerTransportError("provider transport concurrency is invalid")
         self.transport = transport
+        self._client_slots = threading.BoundedSemaphore(max_concurrency)
         super().__init__(address, _TransportHandler)
+
+    def process_request(  # type: ignore[override]
+        self,
+        request: socket.socket,
+        client_address: tuple[str, int],
+    ) -> None:
+        if not self._client_slots.acquire(blocking=False):
+            with suppress(OSError):
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Cache-Control: no-store\r\n"
+                    b"Connection: close\r\n"
+                    b"Retry-After: 1\r\n\r\n"
+                )
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._client_slots.release()
+            raise
+
+    def process_request_thread(  # type: ignore[override]
+        self,
+        request: socket.socket,
+        client_address: tuple[str, int],
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._client_slots.release()
 
 
 class _TransportHandler(BaseHTTPRequestHandler):

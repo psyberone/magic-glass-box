@@ -1,23 +1,28 @@
 PYTHON ?= .venv/bin/python
-MUTMUT_RUN_ARGS ?=
+MUTMUT ?= "$(PYTHON)" scripts/run_mutmut.py
+MUTMUT_RUN_ARGS ?= --max-children 4
 
 .PHONY: test lint coverage mutation mutation-clean quality candidate-test gate-test integration-test service-sidecar-test live-supervisor
+.PHONY: require-git
 
-test:
+require-git:
+	@command -v git >/dev/null 2>&1 || { echo "Git is required for this gate" >&2; exit 2; }
+
+test: require-git
 	PYTHONPATH=src "$(PYTHON)" -m unittest discover -s tests -v
 
 lint:
 	"$(PYTHON)" -m ruff format --check .
 	"$(PYTHON)" -m ruff check .
 
-coverage:
+coverage: require-git
 	"$(PYTHON)" -m coverage erase
 	PYTHONPATH=src "$(PYTHON)" -m coverage run -m unittest discover -s tests
 	"$(PYTHON)" -m coverage report
 
-mutation:
-	PYTHONDONTWRITEBYTECODE=1 "$(PYTHON)" -m mutmut run $(MUTMUT_RUN_ARGS)
-	"$(PYTHON)" -m mutmut export-cicd-stats
+mutation: require-git
+	PYTHONDONTWRITEBYTECODE=1 $(MUTMUT) run $(MUTMUT_RUN_ARGS)
+	$(MUTMUT) export-cicd-stats
 	"$(PYTHON)" scripts/check_mutation_score.py \
 		--stats mutants/mutmut-cicd-stats.json --minimum 80
 
@@ -28,13 +33,13 @@ mutation-clean:
 
 quality: lint coverage
 
-candidate-test:
+candidate-test: require-git
 	PYTHONPATH=src "$(PYTHON)" -m unittest tests.test_candidates -v
 
-gate-test:
+gate-test: require-git
 	PYTHONPATH=src "$(PYTHON)" -m unittest tests.test_integration_gates -v
 
-integration-test:
+integration-test: require-git
 	PYTHONPATH=src "$(PYTHON)" -m unittest tests.test_integration_queue -v
 
 service-sidecar-test:

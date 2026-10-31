@@ -55,11 +55,15 @@ MAX_COMMAND_ARGUMENTS = 64
 MAX_COMMAND_ARGUMENT_BYTES = 1024
 MAX_SOURCE_PATHS = 200_000
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
+MAX_ARCHIVE_EXTENSION_BYTES = 64 * 1024
+MAX_ARCHIVE_EXTENSION_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_DOCKER_OUTPUT_BYTES = 4 * 1024 * 1024
+MAX_CONCURRENT_REMOTE_JOBS = 4
 TIMEOUT_EXIT_CODE = 124
 MIN_MEMORY_BYTES = 64 * 1024 * 1024
 MAX_MEMORY_BYTES = 64 * 1024 * 1024 * 1024
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+CONTAINER_USER_RE = re.compile(r"^[1-9][0-9]*(?::[1-9][0-9]*)?$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DOCKER_STATUS = frozenset(
     {"created", "restarting", "running", "removing", "paused", "exited", "dead"}
@@ -68,6 +72,134 @@ DOCKER_STATUS = frozenset(
 
 class RemoteRunnerError(RuntimeError):
     """The remote helper rejected or could not safely execute a pinned job."""
+
+
+def _tar_member_size(header: bytes) -> int:
+    try:
+        size = tarfile.nti(header[124:136])
+    except (ValueError, tarfile.TarError) as exc:
+        raise RemoteRunnerError("candidate archive header is invalid") from exc
+    if size < 0:
+        raise RemoteRunnerError("candidate archive header is invalid")
+    return size
+
+
+def _copy_exact(
+    source: Any,
+    destination: Any,
+    length: int,
+    *,
+    expanded: list[int],
+    expanded_limit: int,
+) -> None:
+    remaining = length
+    while remaining:
+        chunk = source.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise RemoteRunnerError("candidate archive is truncated")
+        expanded[0] += len(chunk)
+        if expanded[0] > expanded_limit:
+            raise RemoteRunnerError("archive expanded content is oversized")
+        destination.write(chunk)
+        remaining -= len(chunk)
+
+
+def _validated_tar_stream(
+    archive: bytes, *, max_bytes: int, max_paths: int
+) -> tempfile.SpooledTemporaryFile[bytes]:
+    """Decompress and frame-check tar input before tarfile parses extensions."""
+
+    stream: tempfile.SpooledTemporaryFile[bytes] = tempfile.SpooledTemporaryFile(  # noqa: SIM115 - ownership is transferred to the caller
+        max_size=min(max_bytes, 1024 * 1024), mode="w+b"
+    )
+    expanded = [0]
+    expanded_limit = (
+        max_bytes
+        + MAX_ARCHIVE_EXTENSION_TOTAL_BYTES
+        + max_paths * 1024
+        + tarfile.RECORDSIZE
+    )
+    logical_paths = 0
+    regular_bytes = 0
+    extension_bytes = 0
+    extension_types = {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    }
+    allowed_types = {
+        tarfile.REGTYPE,
+        tarfile.AREGTYPE,
+        tarfile.DIRTYPE,
+        tarfile.SYMTYPE,
+    }
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(archive), mode="rb") as source:
+            while True:
+                header = source.read(tarfile.BLOCKSIZE)
+                if not header:
+                    break
+                if len(header) != tarfile.BLOCKSIZE:
+                    raise RemoteRunnerError("candidate archive is truncated")
+                expanded[0] += len(header)
+                if expanded[0] > expanded_limit:
+                    raise RemoteRunnerError("archive expanded content is oversized")
+                stream.write(header)
+                if not any(header):
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        expanded[0] += len(chunk)
+                        if expanded[0] > expanded_limit:
+                            raise RemoteRunnerError(
+                                "archive expanded content is oversized"
+                            )
+                        if any(chunk):
+                            raise RemoteRunnerError(
+                                "candidate archive has data after its trailer"
+                            )
+                        stream.write(chunk)
+                    break
+                member_size = _tar_member_size(header)
+                member_type = header[156:157] or tarfile.AREGTYPE
+                if member_type in extension_types:
+                    extension_bytes += member_size
+                    if (
+                        member_size > MAX_ARCHIVE_EXTENSION_BYTES
+                        or extension_bytes > MAX_ARCHIVE_EXTENSION_TOTAL_BYTES
+                    ):
+                        raise RemoteRunnerError(
+                            "archive expanded metadata is oversized"
+                        )
+                elif member_type in allowed_types:
+                    logical_paths += 1
+                    if logical_paths > max_paths:
+                        raise RemoteRunnerError("archive has too many paths")
+                    if member_type in {tarfile.REGTYPE, tarfile.AREGTYPE}:
+                        regular_bytes += member_size
+                        if regular_bytes > max_bytes:
+                            raise RemoteRunnerError("archive content is oversized")
+                else:
+                    raise RemoteRunnerError("candidate archive file type is unsafe")
+                padded_size = (
+                    (member_size + tarfile.BLOCKSIZE - 1)
+                    // (tarfile.BLOCKSIZE)
+                    * tarfile.BLOCKSIZE
+                )
+                _copy_exact(
+                    source,
+                    stream,
+                    padded_size,
+                    expanded=expanded,
+                    expanded_limit=expanded_limit,
+                )
+        stream.seek(0)
+        return stream
+    except Exception:
+        stream.close()
+        raise
 
 
 def _exact(value: object, *, fields: set[str], subject: str) -> dict[str, Any]:
@@ -424,6 +556,8 @@ class DockerState:
 
 
 class DockerBackend(Protocol):
+    def image_user(self, image_id: str) -> str: ...
+
     def create(self, **values: object) -> None: ...
 
     def start(self, container_name: str, *, timeout_seconds: int) -> None: ...
@@ -437,6 +571,14 @@ class DockerBackend(Protocol):
     def logs(
         self, container_name: str, *, timeout_seconds: int
     ) -> tuple[bytes, bytes]: ...
+
+    def artifacts(
+        self,
+        container_name: str,
+        *,
+        timeout_seconds: int,
+        output_limit: int,
+    ) -> bytes: ...
 
 
 class CandidateMaterializer(Protocol):
@@ -481,6 +623,7 @@ class DockerCLI:
                 input_bytes=b"",
                 timeout=float(timeout),
                 stdout_limit=output_limit,
+                stderr_limit=output_limit,
                 environment=environment,
             )
         except Exception as exc:
@@ -488,6 +631,26 @@ class DockerCLI:
         if result.returncode not in allowed:
             raise RemoteRunnerError("Docker command failed")
         return result.stdout, result.stderr, result.returncode
+
+    def image_user(self, image_id: str) -> str:
+        if not isinstance(image_id, str) or IMAGE_ID_RE.fullmatch(image_id) is None:
+            raise RemoteRunnerError("Docker image identity is invalid")
+        stdout, _, _ = self._run(
+            ["image", "inspect", "--format", "{{json .Config}}", image_id],
+            timeout=30,
+        )
+        document = _strict_json(stdout, subject="Docker image policy")
+        user = document.get("User")
+        volumes = document.get("Volumes")
+        if (
+            not isinstance(user, str)
+            or CONTAINER_USER_RE.fullmatch(user) is None
+            or (volumes is not None and volumes != {})
+        ):
+            raise RemoteRunnerError(
+                "Docker image must pin a non-root numeric user and declare no volumes"
+            )
+        return user
 
     def create(self, **values: object) -> None:
         command = values["command"]
@@ -516,16 +679,17 @@ class DockerCLI:
                 str(values["memory_bytes"]),
                 "--cpus",
                 f"{cpu_millis / 1000:.3f}",
+                "--user",
+                str(values["user"]),
                 "--workdir",
                 "/workspace",
                 "--mount",
                 f"type=bind,src={values['workspace']},dst=/workspace,readonly",
-                "--mount",
-                f"type=bind,src={values['artifact_upload']},dst=/mgb-artifacts.tar.gz",
+                "--tmpfs",
+                "/mgb-artifacts:rw,noexec,nosuid,nodev,"
+                f"size={values['max_artifact_bytes']}",
                 "--env",
-                "MGB_ARTIFACT_PATH=/mgb-artifacts.tar.gz",
-                "--ulimit",
-                f"fsize={values['max_artifact_bytes']}:{values['max_artifact_bytes']}",
+                "MGB_ARTIFACT_PATH=/mgb-artifacts/result.tar.gz",
                 "--log-driver",
                 "local",
                 "--log-opt",
@@ -546,13 +710,20 @@ class DockerCLI:
         self._run(["start", container_name], timeout=min(timeout_seconds, 120))
 
     def inspect(self, container_name: str) -> DockerState | None:
-        stdout, _, returncode = self._run(
+        stdout, stderr, returncode = self._run(
             ["inspect", "--format", "{{json .State}}", container_name],
             timeout=30,
             allowed=frozenset({0, 1}),
         )
         if returncode == 1:
-            return None
+            message = stderr.decode("utf-8", errors="replace").strip().lower()
+            if re.fullmatch(
+                r"error(?::| response from daemon:) no such "
+                r"(?:object|container): [^\r\n]+",
+                message,
+            ):
+                return None
+            raise RemoteRunnerError("Docker command failed")
         document = _strict_json(stdout, subject="Docker state")
         required = {"Status", "StartedAt", "FinishedAt", "ExitCode"}
         if not required.issubset(document):
@@ -600,6 +771,50 @@ class DockerCLI:
             raise RemoteRunnerError("Docker logs exceed their limit")
         return stdout, stderr
 
+    def artifacts(
+        self,
+        container_name: str,
+        *,
+        timeout_seconds: int,
+        output_limit: int,
+    ) -> bytes:
+        stdout, _, _ = self._run(
+            ["cp", f"{container_name}:/mgb-artifacts/result.tar.gz", "-"],
+            timeout=min(timeout_seconds, 120),
+            output_limit=output_limit + 64 * 1024,
+        )
+        try:
+            with tarfile.open(fileobj=io.BytesIO(stdout), mode="r|") as archive:
+                members = []
+                payload = b""
+                for member in archive:
+                    members.append(member.name)
+                    if (
+                        len(members) != 1
+                        or not member.isfile()
+                        or PurePosixPath(member.name).name != "result.tar.gz"
+                        or member.size > output_limit
+                    ):
+                        raise RemoteRunnerError(
+                            "Docker artifact copy is invalid or oversized"
+                        )
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise RemoteRunnerError("Docker artifact copy is invalid")
+                    with extracted:
+                        payload = extracted.read(output_limit + 1)
+                    if len(payload) != member.size or len(payload) > output_limit:
+                        raise RemoteRunnerError(
+                            "Docker artifact copy is invalid or oversized"
+                        )
+                if len(members) != 1:
+                    raise RemoteRunnerError("Docker artifact copy is invalid")
+                return payload
+        except RemoteRunnerError:
+            raise
+        except (OSError, tarfile.TarError) as exc:
+            raise RemoteRunnerError("Docker artifact copy is invalid") from exc
+
 
 class CandidateArchiveMaterializer:
     @staticmethod
@@ -618,17 +833,18 @@ class CandidateArchiveMaterializer:
         symlinks: list[tuple[str, str]] = []
         total = 0
         count = 0
-        stream_mode = {"r:gz": "r|gz"}.get(mode)
-        if stream_mode is None:
+        if mode != "r:gz":
             raise RemoteRunnerError("candidate archive encoding is invalid")
         try:
-            source = tarfile.open(  # noqa: SIM115
-                fileobj=io.BytesIO(archive), mode=stream_mode
+            validated = _validated_tar_stream(
+                archive, max_bytes=max_bytes, max_paths=max_paths
             )
+            source = tarfile.open(fileobj=validated, mode="r|")  # noqa: SIM115
         except (OSError, tarfile.TarError) as exc:
             raise RemoteRunnerError("candidate archive is invalid") from exc
         try:
             with (
+                validated,
                 source,
                 tempfile.TemporaryDirectory(
                     prefix=".mgb-extract-", dir=destination.parent
@@ -860,16 +1076,6 @@ class RemoteRunner:
             raise RemoteRunnerError("remote artifact directory is unsafe")
         return path
 
-    def artifact_upload_path(self, execution_id: str) -> Path:
-        path = self._job_directory(execution_id) / "artifact-upload.tar.gz"
-        try:
-            info = path.lstat()
-        except OSError as exc:
-            raise RemoteRunnerError("remote artifact upload is unavailable") from exc
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise RemoteRunnerError("remote artifact upload is unsafe")
-        return path
-
     @staticmethod
     def _atomic_json(path: Path, value: object) -> None:
         raw = canonical_json(value).encode("utf-8")
@@ -882,6 +1088,13 @@ class RemoteRunner:
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, path)
+            directory_descriptor = os.open(
+                path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
         except OSError as exc:
             temporary.unlink(missing_ok=True)
             raise RemoteRunnerError("remote job state cannot be written") from exc
@@ -962,8 +1175,9 @@ class RemoteRunner:
         recipe: RemoteRecipe,
     ) -> None:
         directory = self._job_directory(execution_id)
+        user = self.docker.image_user(recipe.image_id)
+        self._set_runtime_phase(execution_id, "create_dispatched")
         self.docker.create(
-            artifact_upload=directory / "artifact-upload.tar.gz",
             command=recipe.command,
             container_name=self._container_name(execution_id),
             cpu_millis=recipe.cpu_millis,
@@ -974,8 +1188,76 @@ class RemoteRunner:
             pids_limit=recipe.pids_limit,
             read_only_root=True,
             timeout_seconds=recipe.timeout_seconds,
+            user=user,
             workspace=directory / "workspace",
         )
+        self._set_runtime_phase(execution_id, "created")
+
+    def _runtime(self, execution_id: str) -> dict[str, Any]:
+        runtime = self._read_json(self._job_directory(execution_id) / "runtime.json")
+        if set(runtime) not in (
+            {"container_name", "submitted_at", "timeout_at"},
+            {"container_name", "submitted_at", "timeout_at", "phase"},
+        ):
+            raise RemoteRunnerError("remote job runtime fields are invalid")
+        phase = runtime.get("phase", "legacy")
+        if phase not in {
+            "legacy",
+            "intent",
+            "create_dispatched",
+            "created",
+            "start_dispatched",
+            "started",
+            "terminal",
+        }:
+            raise RemoteRunnerError("remote job runtime phase is invalid")
+        runtime["phase"] = phase
+        return runtime
+
+    def _set_runtime_phase(self, execution_id: str, phase: str) -> None:
+        runtime = self._runtime(execution_id)
+        runtime["phase"] = phase
+        self._atomic_json(self._job_directory(execution_id) / "runtime.json", runtime)
+
+    def _terminal_status(self, execution_id: str) -> ExecutionStatusResult | None:
+        path = self._job_directory(execution_id) / "status.json"
+        if not path.exists():
+            return None
+        try:
+            result = ExecutionStatusResult.from_mapping(self._read_json(path))
+        except (TypeError, ValidationError) as exc:
+            raise RemoteRunnerError("remote terminal status is invalid") from exc
+        if result.state not in {"succeeded", "failed", "cancelled"}:
+            raise RemoteRunnerError("remote terminal status is invalid")
+        return result
+
+    def _active_job_count(self) -> int:
+        active = 0
+        for directory in self.jobs.iterdir():
+            if (
+                not directory.is_dir()
+                or EXECUTION_ID_RE.fullmatch(directory.name) is None
+            ):
+                continue
+            if self._terminal_status(directory.name) is not None:
+                continue
+            state = self.docker.inspect(self._container_name(directory.name))
+            if state is None:
+                if self._runtime(directory.name)["phase"] != "intent":
+                    active += 1
+            elif state.status not in {"exited", "dead"}:
+                active += 1
+            if active >= MAX_CONCURRENT_REMOTE_JOBS:
+                return active
+        return active
+
+    def _persist_terminal_status(
+        self, execution_id: str, result: ExecutionStatusResult
+    ) -> None:
+        self._atomic_json(
+            self._job_directory(execution_id) / "status.json", result.to_dict()
+        )
+        self._set_runtime_phase(execution_id, "terminal")
 
     @staticmethod
     def _container_name(execution_id: str) -> str:
@@ -1007,8 +1289,16 @@ class RemoteRunner:
             if directory.exists():
                 self._assert_job(job, execution_id)
                 self._assert_archive(candidate_archive, execution_id)
+                terminal = self._terminal_status(execution_id)
+                if terminal is not None:
+                    return terminal
                 state = self.docker.inspect(self._container_name(execution_id))
                 if state is None:
+                    runtime = self._runtime(execution_id)
+                    if runtime["phase"] != "intent":
+                        raise RemoteRunnerError(
+                            "remote execution outcome is unavailable"
+                        )
                     self._result_store(recipe).stage(
                         self._attempt_id(execution_id),
                         directory / "artifacts",
@@ -1017,15 +1307,27 @@ class RemoteRunner:
                     self._materialize_candidate(execution_id, candidate_archive)
                     self._create_container(execution_id, recipe)
                     state = self.docker.inspect(self._container_name(execution_id))
-                if state is not None and state.status == "created":
+                stop_requested = any(
+                    (directory / marker).exists()
+                    for marker in ("cancel-requested", "timeout-requested")
+                )
+                if (
+                    state is not None
+                    and state.status == "created"
+                    and not stop_requested
+                ):
+                    self._set_runtime_phase(execution_id, "start_dispatched")
                     self.docker.start(
                         self._container_name(execution_id),
                         timeout_seconds=recipe.timeout_seconds,
                     )
+                    self._set_runtime_phase(execution_id, "started")
                 result = self.inspect(job, execution_id, locked=True)
                 if result is None:
                     raise RemoteRunnerError("remote job state is unavailable")
                 return result
+            if self._active_job_count() >= MAX_CONCURRENT_REMOTE_JOBS:
+                raise RemoteRunnerError("remote runner capacity is exhausted")
             submitted_at = self.clock()
             try:
                 timeout_at = (
@@ -1048,15 +1350,6 @@ class RemoteRunner:
                     shutil.rmtree(initializing)
                 initializing.mkdir(mode=0o700)
                 (initializing / "artifacts").mkdir(mode=0o700)
-                upload_descriptor = os.open(
-                    initializing / "artifact-upload.tar.gz",
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o666,
-                )
-                os.close(upload_descriptor)
-                # The enclosing per-job directory is 0700. The bind-mounted
-                # upload itself must remain writable by a non-root image user.
-                os.chmod(initializing / "artifact-upload.tar.gz", 0o666)  # noqa: S103
                 self._atomic_json(initializing / "job.json", job.to_dict())
                 self._atomic_json(
                     initializing / "source.json",
@@ -1069,6 +1362,7 @@ class RemoteRunner:
                     initializing / "runtime.json",
                     {
                         "container_name": self._container_name(execution_id),
+                        "phase": "intent",
                         "submitted_at": submitted_at,
                         "timeout_at": timeout_at,
                     },
@@ -1080,10 +1374,12 @@ class RemoteRunner:
                 )
                 self._materialize_candidate(execution_id, candidate_archive)
                 self._create_container(execution_id, recipe)
+                self._set_runtime_phase(execution_id, "start_dispatched")
                 self.docker.start(
                     self._container_name(execution_id),
                     timeout_seconds=recipe.timeout_seconds,
                 )
+                self._set_runtime_phase(execution_id, "started")
             except Exception as exc:
                 if initializing.exists():
                     shutil.rmtree(initializing, ignore_errors=True)
@@ -1123,11 +1419,10 @@ class RemoteRunner:
         if not directory.exists():
             return None
         self._assert_job(job, execution_id)
-        runtime = _exact(
-            self._read_json(directory / "runtime.json"),
-            fields={"container_name", "submitted_at", "timeout_at"},
-            subject="remote job runtime",
-        )
+        terminal = self._terminal_status(execution_id)
+        if terminal is not None:
+            return terminal
+        runtime = self._runtime(execution_id)
         if runtime["container_name"] != self._container_name(execution_id):
             raise RemoteRunnerError("remote job runtime is invalid")
         try:
@@ -1151,16 +1446,21 @@ class RemoteRunner:
             raise RemoteRunnerError("remote job runtime is invalid") from exc
         state = self.docker.inspect(self._container_name(execution_id))
         if state is None:
-            return None
-        if state.status in {"created", "running", "restarting", "paused"} and (
-            observed_at >= timeout_at
-        ):
+            if runtime["phase"] == "intent":
+                return None
+            raise RemoteRunnerError("remote execution outcome is unavailable")
+        active_states = {"created", "running", "restarting", "paused"}
+        if state.status in active_states and observed_at >= timeout_at:
             marker = directory / "timeout-requested"
             if not marker.exists():
                 descriptor = os.open(
                     marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
                 )
                 os.close(descriptor)
+        cancelled = (directory / "cancel-requested").exists()
+        timed_out = (directory / "timeout-requested").exists()
+        stopped_before_start = state.status == "created" and (cancelled or timed_out)
+        if state.status in active_states and (cancelled or timed_out):
             recipe = self._recipe(job)
             self.docker.cancel(
                 self._container_name(execution_id),
@@ -1170,9 +1470,14 @@ class RemoteRunner:
             state = self.docker.inspect(self._container_name(execution_id))
             if state is None:
                 raise RemoteRunnerError("remote timeout outcome is unavailable")
-        cancelled = (directory / "cancel-requested").exists()
-        timed_out = (directory / "timeout-requested").exists()
-        if state.status == "created":
+        if stopped_before_start:
+            lifecycle = (
+                "cancelled",
+                None,
+                observed_at.astimezone(UTC).isoformat(timespec="microseconds"),
+                None,
+            )
+        elif state.status == "created":
             lifecycle = ("queued", None, None, None)
         elif state.status in {"running", "restarting", "paused"}:
             lifecycle = ("running", state.started_at, None, None)
@@ -1209,7 +1514,7 @@ class RemoteRunner:
             fields={"bytes", "sha256"},
             subject="remote candidate source",
         )
-        return ExecutionStatusResult.from_mapping(
+        result = ExecutionStatusResult.from_mapping(
             {
                 "schema_version": 1,
                 "execution_id": execution_id,
@@ -1227,11 +1532,13 @@ class RemoteRunner:
                 "exit_code": lifecycle[3],
             }
         )
+        if result.state in {"succeeded", "failed", "cancelled"}:
+            self._persist_terminal_status(execution_id, result)
+        return result
 
     def cancel(
         self, job: ExecutionJobSpec, execution_id: str
     ) -> ExecutionStatusResult | None:
-        recipe = self._recipe(job)
         with self._lock():
             current = self.inspect(job, execution_id, locked=True)
             if current is None:
@@ -1244,11 +1551,6 @@ class RemoteRunner:
                     marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
                 )
                 os.close(descriptor)
-            self.docker.cancel(
-                self._container_name(execution_id),
-                stop_seconds=recipe.stop_seconds,
-                timeout_seconds=recipe.timeout_seconds,
-            )
             result = self.inspect(job, execution_id, locked=True)
             if result is None:
                 raise RemoteRunnerError("remote cancellation outcome is unavailable")
@@ -1257,7 +1559,6 @@ class RemoteRunner:
     def reconcile_cancellation(
         self, job: ExecutionJobSpec, execution_id: str
     ) -> ExecutionStatusResult | None:
-        recipe = self._recipe(job)
         with self._lock():
             directory = self._job_directory(execution_id)
             if not directory.exists():
@@ -1272,11 +1573,6 @@ class RemoteRunner:
                 return current
             if current.state not in {"queued", "running"}:
                 raise RemoteRunnerError("remote cancellation outcome is inconsistent")
-            self.docker.cancel(
-                self._container_name(execution_id),
-                stop_seconds=recipe.stop_seconds,
-                timeout_seconds=recipe.timeout_seconds,
-            )
             result = self.inspect(job, execution_id, locked=True)
             if result is None:
                 raise RemoteRunnerError("remote cancellation outcome is unavailable")
@@ -1316,33 +1612,14 @@ class RemoteRunner:
         return result
 
     def _read_artifact_upload(self, execution_id: str, recipe: RemoteRecipe) -> bytes:
-        path = self.artifact_upload_path(execution_id)
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(path, flags)
-            with os.fdopen(descriptor, "rb") as source:
-                initial = os.fstat(source.fileno())
-                if initial.st_size > recipe.max_artifact_bytes:
-                    raise RemoteRunnerError("remote artifact upload is oversized")
-                raw = source.read(recipe.max_artifact_bytes + 1)
-                final = os.fstat(source.fileno())
-        except OSError as exc:
+            return self.docker.artifacts(
+                self._container_name(execution_id),
+                timeout_seconds=recipe.timeout_seconds,
+                output_limit=recipe.max_artifact_bytes,
+            )
+        except (OSError, RemoteRunnerError) as exc:
             raise RemoteRunnerError("remote artifact upload cannot be read") from exc
-        identity = (
-            initial.st_dev,
-            initial.st_ino,
-            initial.st_size,
-            initial.st_mtime_ns,
-        )
-        final_identity = (
-            final.st_dev,
-            final.st_ino,
-            final.st_size,
-            final.st_mtime_ns,
-        )
-        if identity != final_identity or len(raw) != initial.st_size:
-            raise RemoteRunnerError("remote artifact upload changed while being read")
-        return raw
 
     def collect(
         self, job: ExecutionJobSpec, execution_id: str

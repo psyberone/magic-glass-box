@@ -111,7 +111,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         )
 
     def test_schema_twenty_four_registers_immutable_redacted_authority(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 43)
+        self.assertEqual(SCHEMA_VERSION, 45)
         self.assertIn("CREATE TABLE service_sidecars", SERVICE_SIDECAR_SCHEMA)
         self.assertIn(
             "CREATE TABLE project_capability_bindings", CAPABILITY_BINDING_SCHEMA
@@ -320,7 +320,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         second = legacy.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 43)
+        self.assertEqual(first["schema_version"], 45)
         migrated = legacy.get_service_operation(operation_id)
         self.assertEqual(migrated["spec"], operation.to_dict())
         with closing(legacy.connect()) as connection:
@@ -623,6 +623,104 @@ class ServiceSidecarStorageTests(unittest.TestCase):
             [attempt["phase"] for attempt in replay["operation"]["attempts"]],
             ["invoke", "reconcile", "invoke"],
         )
+
+    def test_failed_reconciliation_never_restores_fresh_invoke_authority(self) -> None:
+        self.register()
+        operation = self.create_operation()
+        invoked = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="supervisor-one",
+            expected_version=1,
+            lease_seconds=30,
+        )
+        uncertain = self.database.fail_service_operation_attempt(
+            invoked["attempt"]["id"],
+            owner_id="supervisor-one",
+            expected_operation_version=2,
+            outcome="ambiguous",
+            error_code="response_lost",
+        )
+        reconciliation = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="reconcile",
+            owner_id="supervisor-two",
+            expected_version=uncertain["version"],
+            lease_seconds=30,
+        )
+
+        retained = self.database.fail_service_operation_attempt(
+            reconciliation["attempt"]["id"],
+            owner_id="supervisor-two",
+            expected_operation_version=reconciliation["operation"]["version"],
+            outcome="unavailable",
+            error_code="connector_unavailable",
+        )
+
+        self.assertEqual(retained["state"], "uncertain")
+        with self.assertRaisesRegex(ConflictError, "cannot be invoked"):
+            self.database.begin_service_operation_attempt(
+                operation["id"],
+                phase="invoke",
+                owner_id="supervisor-three",
+                expected_version=retained["version"],
+                lease_seconds=30,
+            )
+        resumed = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="reconcile",
+            owner_id="supervisor-three",
+            expected_version=retained["version"],
+            lease_seconds=30,
+        )
+        self.assertEqual(resumed["attempt"]["phase"], "reconcile")
+
+    def test_retryable_reconciliation_response_remains_uncertain(self) -> None:
+        self.register()
+        operation = self.create_operation()
+        invoked = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="supervisor-one",
+            expected_version=1,
+            lease_seconds=30,
+        )
+        uncertain = self.database.fail_service_operation_attempt(
+            invoked["attempt"]["id"],
+            owner_id="supervisor-one",
+            expected_operation_version=2,
+            outcome="ambiguous",
+            error_code="response_lost",
+        )
+        reconciliation = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="reconcile",
+            owner_id="supervisor-two",
+            expected_version=uncertain["version"],
+            lease_seconds=30,
+        )
+        request = ServiceOperationRequest.from_mapping(reconciliation["request"])
+        response_value = request.correlation_dict()
+        response_value.update(
+            {
+                "outcome": "retryable",
+                "provider_status": 503,
+                "request_bytes": 128,
+                "response_bytes": 64,
+                "error_code": "upstream_unavailable",
+                "retry_after_seconds": 5,
+                "receipt": None,
+            }
+        )
+
+        retained = self.database.complete_service_operation_attempt(
+            reconciliation["attempt"]["id"],
+            owner_id="supervisor-two",
+            expected_operation_version=reconciliation["operation"]["version"],
+            response=ServiceOperationResponse.from_mapping(response_value),
+        )
+
+        self.assertEqual(retained["state"], "uncertain")
 
     def test_concurrency_version_and_revocation_fail_before_dispatch(self) -> None:
         sidecar = self.register()
@@ -964,6 +1062,36 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         self.assertEqual(expired["version"], 3)
         self.assertEqual(expired["attempts"][0]["outcome"], "abandoned")
         self.assertEqual(claimed["operation"]["state"], "dispatching")
+
+    def test_target_expiry_commits_before_reporting_the_new_version(self) -> None:
+        self.register()
+        operation = self.create_operation(operation_spec(timeout_ms=100))
+        started_at = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+        with mock.patch(
+            "magic_glass_box.storage.service_sidecars.datetime", wraps=datetime
+        ) as clock:
+            clock.now.return_value = started_at
+            dispatch = self.database.begin_service_operation_attempt(
+                operation["id"],
+                phase="invoke",
+                owner_id="supervisor-one",
+                expected_version=1,
+                lease_seconds=5,
+            )
+            clock.now.return_value = started_at + timedelta(seconds=6)
+            with self.assertRaises(ConcurrentUpdateError):
+                self.database.begin_service_operation_attempt(
+                    operation["id"],
+                    phase="reconcile",
+                    owner_id="supervisor-two",
+                    expected_version=dispatch["operation"]["version"],
+                    lease_seconds=5,
+                )
+
+        expired = self.database.get_service_operation(operation["id"])
+        self.assertEqual(expired["state"], "uncertain")
+        self.assertEqual(expired["version"], 3)
+        self.assertEqual(expired["attempts"][0]["outcome"], "abandoned")
 
     def test_expired_read_lease_becomes_retryable_before_lane_reuse(self) -> None:
         self.register()

@@ -21,6 +21,7 @@ from magic_glass_box.candidates import (
     CandidateManifest,
     GitCandidateStore,
     MaterializedCandidate,
+    load_candidate_store_identity,
 )
 from magic_glass_box.db import (
     CANDIDATE_SCHEMA,
@@ -72,10 +73,36 @@ class CandidateManifestTests(unittest.TestCase):
 
     def test_round_trip_is_canonical_and_content_addressed(self) -> None:
         manifest = self.manifest()
+        expected = (
+            '{"attempt_id":"att_'
+            + "1" * 32
+            + '","attempt_result_id":"rsl_'
+            + "2" * 32
+            + '","base_revision":"'
+            + "a" * 40
+            + '","context_version_id":"ctx_'
+            + "5" * 32
+            + '","head_revision":"'
+            + "c" * 40
+            + '","object_format":"sha1","producer_run_id":"run_'
+            + "3" * 32
+            + '","project_id":"boxp_'
+            + "4" * 32
+            + '","result_content_sha256":"'
+            + "b" * 64
+            + '","schema_version":1,"tree_revision":"'
+            + "d" * 40
+            + '","work_thread_id":"wth_'
+            + "6" * 32
+            + '"}'
+        )
 
         self.assertEqual(CandidateManifest.from_mapping(manifest.to_dict()), manifest)
-        self.assertEqual(len(manifest.digest), 64)
-        self.assertEqual(manifest.canonical, manifest.canonical)
+        self.assertEqual(manifest.canonical, expected)
+        self.assertEqual(
+            manifest.digest,
+            hashlib.sha256(expected.encode("utf-8")).hexdigest(),
+        )
 
     def test_rejects_invalid_shape_identity_and_object_ids(self) -> None:
         manifest = self.manifest()
@@ -1090,6 +1117,9 @@ class CandidateServiceTests(unittest.TestCase):
             self.database.list_candidates(work_thread_id=created["work_thread_id"]),
             [created],
         )
+        identity = load_candidate_store_identity(self.store.root, created["id"])
+        self.assertEqual(identity.candidate_id, created["id"])
+        self.assertEqual(identity.object_format, created["object_format"])
         self.assertEqual(self.database.list_candidates(project_id="missing"), [])
 
     def test_show_and_idempotent_create_inspect_a_healthy_cache_first(self) -> None:

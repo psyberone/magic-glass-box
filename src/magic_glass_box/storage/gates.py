@@ -17,6 +17,7 @@ from ..domain import (
 from ..gates import (
     GateError,
     GateEvidence,
+    GateOutcome,
     GatePolicyManifest,
     MaintainerReview,
     ReviewEvidence,
@@ -698,6 +699,34 @@ class GateStorage:
                     ):
                         raise ConflictError(
                             "review evidence was not produced from the exact head"
+                        )
+                    verdict = connection.execute(
+                        "SELECT policy_id, candidate_id, head_revision, outcome, "
+                        "reviewer_run_id, reviewer_attempt_id "
+                        "FROM integration_review_verdicts "
+                        "WHERE reviewer_attempt_id = ?",
+                        (reviewer.attempt_id,),
+                    ).fetchone()
+                    if verdict is None:
+                        raise ConflictError(
+                            "review evidence requires the reviewer's typed review "
+                            "verdict"
+                        )
+                    expected_outcome = (
+                        GateOutcome.PASSED.value
+                        if verdict["outcome"] == "approved"
+                        else GateOutcome.FAILED.value
+                    )
+                    if (
+                        verdict["policy_id"] != evidence.inputs.policy_id
+                        or verdict["candidate_id"] != policy.candidate_id
+                        or verdict["head_revision"] != policy.head_revision
+                        or verdict["reviewer_run_id"] != reviewer.run_id
+                        or verdict["reviewer_attempt_id"] != reviewer.attempt_id
+                        or evidence.outcome.value != expected_outcome
+                    ):
+                        raise ConflictError(
+                            "review evidence does not match the typed verdict"
                         )
                     reviewer_run_id = reviewer.run_id
                     reviewer_attempt_id = reviewer.attempt_id

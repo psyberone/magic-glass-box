@@ -87,11 +87,15 @@ snapshot ceiling plus the 64 MiB change allowance.
 These are capture and retention bounds, not a portable hard disk quota on the
 live workspace. A copy-on-write workspace is currently a host bind mount, and
 Docker cannot apply an aggregate size limit to that mount consistently across
-supported hosts. A worker can therefore consume more host disk while it is
-running before capture rejects its output. Deployments that require a hard
-runtime storage ceiling must place the workspace root on an operator-managed
-quota-limited filesystem. Magic Glass Box does not claim to provide that
-ceiling itself yet.
+supported hosts. The executor therefore refuses to launch a worker with a
+writable workspace or gateway carrier unless a trusted embedding supplies a
+positive storage-admission decision. The CLI has no quota-backed admission
+provider yet. Its `--allow-unenforced-worker-storage` option is an explicit
+operator acceptance that a worker can consume more host bytes or inodes while
+it is running before capture rejects its output; the option does not enforce a
+limit. Deployments using that escape must place the workspace and gateway roots
+on an operator-managed quota-limited filesystem when a hard runtime ceiling is
+required. Magic Glass Box does not claim to provide that ceiling itself yet.
 
 Captured paths use the shared repository-path contract: UTF-8 relative POSIX
 paths, at most 4,096 bytes and 128 components, with no empty, `.`/`..`,

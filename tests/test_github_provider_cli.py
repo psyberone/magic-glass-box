@@ -141,6 +141,33 @@ class GitHubProviderCLITests(unittest.TestCase):
             runner=runner,
         )
 
+    def candidate_repository(
+        self,
+        candidate_root: Path,
+        *,
+        candidate_id: str = "cnd_" + "3" * 32,
+        project_key: str = "3" * 64,
+    ) -> Path:
+        repository = (
+            candidate_root / "projects" / project_key / "sha1" / "repository.git"
+        )
+        repository.mkdir(parents=True)
+        identities = candidate_root / "identities"
+        identities.mkdir(exist_ok=True)
+        (identities / f"{candidate_id}.json").write_text(
+            canonical_json(
+                {
+                    "schema_version": 1,
+                    "candidate_id": candidate_id,
+                    "object_format": "sha1",
+                    "project_key": project_key,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return repository
+
     def test_include_parser_accepts_error_status_and_strict_bounded_json(self) -> None:
         raw = included(404, {"message": "missing"}, headers={"Retry-After": "7"})
 
@@ -580,8 +607,25 @@ class GitHubProviderCLITests(unittest.TestCase):
         self,
     ) -> None:
         candidate_root = self.root / "candidates"
-        repository = candidate_root / "projects" / "project" / "sha1" / "repository.git"
+        project_key = "3" * 64
+        repository = (
+            candidate_root / "projects" / project_key / "sha1" / "repository.git"
+        )
         repository.mkdir(parents=True)
+        identities = candidate_root / "identities"
+        identities.mkdir()
+        (identities / ("cnd_" + "3" * 32 + ".json")).write_text(
+            canonical_json(
+                {
+                    "schema_version": 1,
+                    "candidate_id": "cnd_" + "3" * 32,
+                    "object_format": "sha1",
+                    "project_key": project_key,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         source_ref = f"refs/mgb/candidates/{MERGED}"
         target_ref = "refs/heads/mgb/candidate-42"
         runner = FakeRunner(
@@ -599,8 +643,7 @@ class GitHubProviderCLITests(unittest.TestCase):
         )
 
         publisher.publish(
-            source_repository=str(repository),
-            source_ref=source_ref,
+            candidate_id="cnd_" + "3" * 32,
             desired_revision=MERGED,
             host="github.com",
             repository="acme/widgets",
@@ -673,8 +716,6 @@ class GitHubProviderCLITests(unittest.TestCase):
     ) -> None:
         candidate_root = self.root / "candidates"
         candidate_root.mkdir()
-        outside = self.root / "outside.git"
-        outside.mkdir()
         publisher = GitHubGitPublisher(
             gh_bin=self.gh_bin,
             git_bin=self.git_bin,
@@ -684,8 +725,7 @@ class GitHubProviderCLITests(unittest.TestCase):
         )
         with self.assertRaises(GitHubProviderError):
             publisher.publish(
-                source_repository=str(outside),
-                source_ref=f"refs/mgb/candidates/{MERGED}",
+                candidate_id="cnd_" + "3" * 32,
                 desired_revision=MERGED,
                 host="github.com",
                 repository="acme/widgets",
@@ -693,8 +733,7 @@ class GitHubProviderCLITests(unittest.TestCase):
                 deadline="2099-01-01T00:00:00.000000+00:00",
             )
 
-        inside = candidate_root / "repository.git"
-        inside.mkdir()
+        self.candidate_repository(candidate_root)
         runner = FakeRunner([GitHubCommandResult(0, f"{'f' * 40}\n".encode(), b"")])
         publisher = GitHubGitPublisher(
             gh_bin=self.gh_bin,
@@ -705,8 +744,7 @@ class GitHubProviderCLITests(unittest.TestCase):
         )
         with self.assertRaises(GitHubProviderError):
             publisher.publish(
-                source_repository=str(inside),
-                source_ref=f"refs/mgb/candidates/{MERGED}",
+                candidate_id="cnd_" + "3" * 32,
                 desired_revision=MERGED,
                 host="github.com",
                 repository="acme/widgets",
@@ -717,8 +755,7 @@ class GitHubProviderCLITests(unittest.TestCase):
 
     def test_git_push_failure_is_ambiguous_without_exposing_diagnostics(self) -> None:
         candidate_root = self.root / "candidates"
-        repository = candidate_root / "repository.git"
-        repository.mkdir(parents=True)
+        self.candidate_repository(candidate_root)
         runner = FakeRunner(
             [
                 GitHubCommandResult(0, f"{MERGED}\n".encode(), b""),
@@ -735,8 +772,7 @@ class GitHubProviderCLITests(unittest.TestCase):
 
         with self.assertRaises(GitHubTransportError) as captured:
             publisher.publish(
-                source_repository=str(repository),
-                source_ref=f"refs/mgb/candidates/{MERGED}",
+                candidate_id="cnd_" + "3" * 32,
                 desired_revision=MERGED,
                 host="github.com",
                 repository="acme/widgets",
@@ -749,8 +785,7 @@ class GitHubProviderCLITests(unittest.TestCase):
 
     def test_git_publisher_rejects_invalid_authority_and_runner_failures(self) -> None:
         candidate_root = self.root / "candidates"
-        repository = candidate_root / "repository.git"
-        repository.mkdir(parents=True)
+        self.candidate_repository(candidate_root)
 
         publisher = GitHubGitPublisher(
             gh_bin=self.gh_bin,
@@ -760,8 +795,7 @@ class GitHubProviderCLITests(unittest.TestCase):
             runner=FakeRunner([]),
         )
         common = {
-            "source_repository": str(repository),
-            "source_ref": f"refs/mgb/candidates/{MERGED}",
+            "candidate_id": "cnd_" + "3" * 32,
             "desired_revision": MERGED,
             "host": "github.com",
             "repository": "acme/widgets",
@@ -770,8 +804,8 @@ class GitHubProviderCLITests(unittest.TestCase):
         }
         for changes in (
             {"desired_revision": "bad"},
-            {"source_ref": "refs/heads/main"},
-            {"source_repository": "relative.git"},
+            {"candidate_id": "bad"},
+            {"candidate_id": "cnd_" + "4" * 32},
         ):
             with self.subTest(changes=changes), self.assertRaises(GitHubProviderError):
                 publisher.publish(**{**common, **changes})

@@ -343,6 +343,7 @@ def serve_unix(
             handle,
             recoverable_errors=(ChatGPTConnectorError, ValidationError, OSError),
             client_timeout=client_timeout,
+            max_concurrency=16,
         )
     except UnixSidecarError as exc:
         raise ChatGPTAuthenticationError(str(exc)) from exc

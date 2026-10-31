@@ -4,11 +4,13 @@ import json
 import threading
 import unittest
 from typing import Any
+from unittest import mock
 
 from magic_glass_box.domain import ProviderGrantSpec, ValidationError
 from magic_glass_box.provider import (
     BufferedHTTPProviderAdapter,
     JSONHTTPProviderAdapter,
+    ProviderAmbiguousError,
     ProviderBroker,
     ProviderBusyError,
     ProviderError,
@@ -248,6 +250,7 @@ class FakeConnection:
         self.requests: list[tuple[str, str, bytes, dict[str, str]]] = []
         self.closed = False
         self.failure: Exception | None = None
+        self.response_failure: Exception | None = None
 
     def request(
         self, method: str, target: str, *, body: bytes, headers: dict[str, str]
@@ -257,6 +260,8 @@ class FakeConnection:
         self.requests.append((method, target, body, headers))
 
     def getresponse(self) -> FakeResponse:
+        if self.response_failure is not None:
+            raise self.response_failure
         return self.response
 
     def close(self) -> None:
@@ -346,6 +351,39 @@ class JSONHTTPProviderAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderUpstreamError, "unavailable") as raised:
             adapter.invoke(policy(), "secret", {"input": "x"})
         self.assertNotIn("SECRET", str(raised.exception))
+        self.assertTrue(connection.closed)
+
+    def test_post_dispatch_failures_are_ambiguous_and_not_replayable(self) -> None:
+        adapter, connection, _ = self.adapter(FakeResponse())
+        connection.response_failure = TimeoutError("reply was lost")
+
+        with self.assertRaises(ProviderAmbiguousError):
+            adapter.invoke(policy(), "secret", {"input": "x"})
+
+        self.assertEqual(len(connection.requests), 1)
+        self.assertTrue(connection.closed)
+
+        malformed, _, _ = self.adapter(FakeResponse(body=b"not-json"))
+        with self.assertRaises(ProviderAmbiguousError):
+            malformed.invoke(policy(), "secret", {"input": "x"})
+
+    def test_provider_timeout_is_one_total_monotonic_deadline(self) -> None:
+        adapter, connection, _ = self.adapter(FakeResponse())
+        ticks = iter((10.0, 10.01, 10.05, 10.11))
+        with (
+            mock.patch(
+                "magic_glass_box.provider.time.monotonic",
+                side_effect=lambda: next(ticks),
+            ),
+            self.assertRaises(ProviderAmbiguousError),
+        ):
+            adapter.invoke(
+                policy(timeout_ms=100),
+                "secret",
+                {"input": "x"},
+            )
+
+        self.assertEqual(len(connection.requests), 1)
         self.assertTrue(connection.closed)
 
 

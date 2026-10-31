@@ -710,7 +710,7 @@ class GateLedgerTests(unittest.TestCase):
                     review_run["id"],
                     WorkLogEntry.from_mapping(
                         {
-                            "schema_version": 1,
+                            "schema_version": 2,
                             "kind": "review",
                             "summary": summary,
                             "details": (
@@ -725,6 +725,7 @@ class GateLedgerTests(unittest.TestCase):
                             "related_interaction_ids": [],
                             "candidate_revision": candidate_revision
                             or self.candidate["head_revision"],
+                            "review_outcome": "changes_requested",
                         }
                     ),
                     idempotency_key="review-changes-requested",
@@ -826,7 +827,7 @@ class GateLedgerTests(unittest.TestCase):
         )
 
     def reviewer_attempt(
-        self, policy: dict[str, object]
+        self, policy: dict[str, object], *, digit: str = "5"
     ) -> tuple[dict[str, object], RunProvenance]:
         run = self.control.create_review_run(
             policy["id"],
@@ -834,11 +835,31 @@ class GateLedgerTests(unittest.TestCase):
             requested_by_handle="operator",
             expected_policy_revision=policy["policy_revision"],
         )
+
+        def approve(_attempt: dict[str, object]) -> None:
+            self.control.append_work_log(
+                run["id"],
+                WorkLogEntry.from_mapping(
+                    {
+                        "schema_version": 2,
+                        "kind": "review",
+                        "summary": "The exact candidate satisfies the gate.",
+                        "details": [],
+                        "artifacts": [],
+                        "related_interaction_ids": [],
+                        "candidate_revision": self.candidate["head_revision"],
+                        "review_outcome": "approved",
+                    }
+                ),
+                idempotency_key="review-approved",
+            )
+
         attempt = self._succeed_attempt(
             run,
             source_revision=self.candidate["head_revision"],
             changed=False,
-            digit="5",
+            digit=digit,
+            while_running=approve,
         )
         return attempt, self.provenance(
             run_id=run["id"],
@@ -1142,6 +1163,80 @@ class GateLedgerTests(unittest.TestCase):
                 recorded_by_handle="operator",
                 expected_policy_revision="f" * 64,
             )
+
+    def test_review_evidence_requires_and_matches_the_typed_verdict(self) -> None:
+        policy = self.create_policy()
+        untyped_run = self.control.create_review_run(
+            policy["id"],
+            profile_name="Reviewer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        untyped_attempt = self._succeed_attempt(
+            untyped_run,
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit="6",
+        )
+
+        with self.assertRaisesRegex(ConflictError, "typed review verdict"):
+            self.control.record_review_evidence(
+                policy["id"],
+                reviewer_attempt_id=untyped_attempt["id"],
+                outcome="passed",
+                recorded_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+
+        typed_run = self.control.create_review_run(
+            policy["id"],
+            profile_name="Reviewer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        def record_changes(_attempt: dict[str, object]) -> None:
+            self.control.append_work_log(
+                typed_run["id"],
+                WorkLogEntry.from_mapping(
+                    {
+                        "schema_version": 2,
+                        "kind": "review",
+                        "summary": "The candidate needs one bounded correction.",
+                        "details": ["Keep the exact timeout under test."],
+                        "artifacts": [],
+                        "related_interaction_ids": [],
+                        "candidate_revision": self.candidate["head_revision"],
+                        "review_outcome": "changes_requested",
+                    }
+                ),
+                idempotency_key="typed-review-required",
+            )
+
+        typed_attempt = self._succeed_attempt(
+            typed_run,
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit="7",
+            while_running=record_changes,
+        )
+
+        with self.assertRaisesRegex(ConflictError, "does not match"):
+            self.control.record_review_evidence(
+                policy["id"],
+                reviewer_attempt_id=typed_attempt["id"],
+                outcome="passed",
+                recorded_by_handle="operator",
+                expected_policy_revision=policy["policy_revision"],
+            )
+        evidence = self.control.record_review_evidence(
+            policy["id"],
+            reviewer_attempt_id=typed_attempt["id"],
+            outcome="failed",
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        self.assertEqual(evidence["outcome"], "failed")
 
     def test_maintainer_changes_requested_is_durable_and_returns_to_developer(
         self,
@@ -1855,10 +1950,10 @@ class GateLedgerTests(unittest.TestCase):
     def test_changes_run_requires_the_current_failed_review(self) -> None:
         policy = self.create_policy()
         failed, review_entry = self.rejected_review(policy)
-
+        approved_attempt, _ = self.reviewer_attempt(policy, digit="6")
         passed = self.control.record_review_evidence(
             policy["id"],
-            reviewer_attempt_id=failed["reviewer_attempt_id"],
+            reviewer_attempt_id=approved_attempt["id"],
             outcome="passed",
             recorded_by_handle="operator",
             expected_policy_revision=policy["policy_revision"],
@@ -2041,7 +2136,9 @@ class GateLedgerTests(unittest.TestCase):
             self.database.get_typed_review_verdict(policy["id"], reviewer["id"])
         )
 
-    def test_changes_run_requires_an_actionable_changes_requested_note(self) -> None:
+    def test_changes_run_uses_typed_outcome_and_requires_actionable_details(
+        self,
+    ) -> None:
         policy = self.create_policy()
         failed, approved_entry = self.rejected_review(
             policy,
@@ -2049,44 +2146,27 @@ class GateLedgerTests(unittest.TestCase):
             details=["No changes are required."],
         )
 
-        with self.assertRaisesRegex(ConflictError, "changes-requested note"):
-            self.control.create_changes_run(
-                policy["id"],
-                review_evidence_id=failed["id"],
-                review_entry_id=approved_entry["id"],
-                profile_name="Producer",
-                requested_by_handle="operator",
-                expected_policy_revision=policy["policy_revision"],
-            )
+        correction = self.control.create_changes_run(
+            policy["id"],
+            review_evidence_id=failed["id"],
+            review_entry_id=approved_entry["id"],
+            profile_name="Producer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        self.assertEqual(correction["change_review_entry_id"], approved_entry["id"])
 
         policy = self.create_policy()
-        failed, empty_entry = self.rejected_review(policy, details=[], digit="7")
-        with self.assertRaisesRegex(ConflictError, "actionable"):
-            self.control.create_changes_run(
-                policy["id"],
-                review_evidence_id=failed["id"],
-                review_entry_id=empty_entry["id"],
-                profile_name="Producer",
-                requested_by_handle="operator",
-                expected_policy_revision=policy["policy_revision"],
-            )
+        with self.assertRaisesRegex(ValidationError, "actionable"):
+            self.rejected_review(policy, details=[], digit="7")
 
     def test_changes_run_requires_feedback_pinned_to_the_rejected_candidate(
         self,
     ) -> None:
         policy = self.create_policy()
-        failed, review_entry = self.rejected_review(
-            policy, candidate_revision=self.candidate["base_revision"]
-        )
-
         with self.assertRaisesRegex(ConflictError, "exact candidate"):
-            self.control.create_changes_run(
-                policy["id"],
-                review_evidence_id=failed["id"],
-                review_entry_id=review_entry["id"],
-                profile_name="Producer",
-                requested_by_handle="operator",
-                expected_policy_revision=policy["policy_revision"],
+            self.rejected_review(
+                policy, candidate_revision=self.candidate["base_revision"]
             )
 
     def test_review_evidence_rejects_an_unbound_same_head_run(self) -> None:
@@ -2156,6 +2236,22 @@ class GateLedgerTests(unittest.TestCase):
                 )
                 assert before_start is not None
                 before_start(plan, "7" * 64)
+                self.control.append_work_log(
+                    run["id"],
+                    WorkLogEntry.from_mapping(
+                        {
+                            "schema_version": 2,
+                            "kind": "review",
+                            "summary": "The recovered exact candidate is approved.",
+                            "details": [],
+                            "artifacts": [],
+                            "related_interaction_ids": [],
+                            "candidate_revision": self.candidate["head_revision"],
+                            "review_outcome": "approved",
+                        }
+                    ),
+                    idempotency_key="recovered-review-approved",
+                )
                 return SandboxResult(
                     "7" * 64,
                     plan.container_name,

@@ -311,11 +311,13 @@ The manual whole-tree checkpoint review found that the proofs had bypassed the
 missing operator half of the interaction loop. The product now exposes
 versioned answer actions in both the CLI and loopback control room; live Krab
 evidence crosses that public boundary and confirms its receipt is metadata
-only. Automatic response polling remains deliberately out of scope until Krab
-can bind a response to its request with trusted reply metadata. The same
-remediation added recursive symlink-graph containment at capture, archive, and
-pre-apply boundaries, full supervisor retry spacing with independent lease
-heartbeats, and privacy-safe daemon diagnostics.
+only. Krab schema v8 subsequently added trusted `in_reply_to_item_id` metadata.
+MGB accepts the nullable field during rolling compatibility and requires exact
+request equality whenever it is present. Automatic inbox polling still waits
+for a durable supervised cursor and acknowledgement loop. The same remediation
+added recursive symlink-graph containment at capture, archive, and pre-apply
+boundaries, full supervisor retry spacing with independent lease heartbeats,
+and privacy-safe daemon diagnostics.
 
 ## Milestone 7A: trusted candidate kernel
 
@@ -1996,7 +1998,7 @@ each retry, not rewritten evidence.
 
 ## Gate 15→16: whole-product audit and remediation
 
-**Status: next**
+**Status: complete**
 
 Freeze one exact clean post-M15 commit, then assess the same source through a
 whole-repository Panopticon scan and two independent blind reviews. Reconcile
@@ -2013,9 +2015,27 @@ repo-specific defenses are evidence, not automatic workflow requirements.
 **Exit:** one remediated clean commit, a finding-by-finding disposition report,
 the accepted quality and mutation evidence, and no unresolved blocking finding.
 
+The gate reconciled three independent blind reviews with the whole-repository
+Panopticon report against MGB's declared trust boundary. Reproduced defects in
+remote confinement and recovery, exact-head review, provider uncertainty,
+answered-interaction finalization, sidecar deadlines and drain, supervisor
+shutdown, replacement bindings, local-worker storage admission, and proof
+truthfulness were corrected RED-first. False or stale premises were retained
+as rejected dispositions rather than converted into speculative defenses;
+non-blocking scale and refactor observations remain explicit backlog.
+
+The final accepted gate passed 1,445 tests with 87% aggregate branch-aware
+coverage, Ruff format and lint clean, and the live supervisor proof. The
+whole-tree mutation ledger classified 66,571 mutants and killed 56,366 for a
+conservative 84.67% score; segfault, timeout, and no-test outcomes counted as
+non-kills. A post-campaign rolling-Krab compatibility correction then killed
+240/296 focused `_inbox_event` mutants (81.08%), including the concrete
+receipt-policy survivor that prompted the regression. The internal disposition
+report retains every review finding, ruling, limitation, and evidence pointer.
+
 ## Milestone 16: controlled dogfood and operating evidence
 
-**Status: planned after the Gate 15→16 freeze**
+**Status: ready; execution begins from the frozen Gate 15→16 commit**
 
 Run the frozen MGB build as coordinator against a separate isolated MGB
 checkout and one small, real work item. Avoid a first-run schema or bootstrap
@@ -2117,6 +2137,11 @@ commands on the host.
   and evidence contracts. Add deployment inspection for controller image,
   configuration, state identity, protocol version, engine mode, and recipe
   authority.
+- Replace the interim local-executor storage escape with a quota-backed worker
+  storage transport or admission controller that enforces aggregate byte and
+  inode ceilings for copy-on-write workspaces and gateway request files. Keep
+  `--allow-unenforced-worker-storage` visibly exceptional and never report it
+  as quota enforcement.
 - Prove fail-closed behavior for a missing or substituted controller,
   restart/reconciliation without duplication, job-to-job isolation, absence of
   host prerequisites beyond Docker/OpenSSH, and continued credential and
@@ -2157,6 +2182,66 @@ namesakes.
 - Provider breadth does not weaken the rule that no binding means no
   capability. MGB never guesses a controller or exposes a provider-native
   escape hatch to an agent.
+
+### Eventual work-system conformance targets
+
+Work-provider breadth is selected by semantic coverage rather than vendor
+count. Repository presence alone does not prove the corresponding work
+system: GitLab Issues and Azure Boards remain distinct adapters and live
+conformance targets even though MGB already has owned GitLab and Azure DevOps
+repositories.
+
+The eventual candidate order is:
+
+1. **Azure Boards and GitLab Issues.** Investigate these first because owned
+   cloud projects already exist. Azure's configurable work-item processes are
+   a particularly useful test that MGB's normalized work surface does not
+   assume Jira fields or GitHub issue states.
+2. **Linear and YouTrack.** These are the leading additional engineering-native
+   commercial candidates. Linear represents a modern cloud and GraphQL
+   surface; YouTrack represents a mature REST surface available in both cloud
+   and self-hosted deployments. Neither is scheduled until the operator has
+   investigated account, licensing, and least-privilege test-fixture options.
+3. **Plane.** Treat Plane as the first modern open-source standalone tracker
+   candidate, subject to confirming API-version stability and a reproducible
+   disposable cloud or self-hosted fixture.
+4. **Gitea and Forgejo.** Use one or both as self-hosted forge-plus-issues
+   conformance targets. Shared ancestry is not evidence of interchangeable
+   behavior; each implementation must pass the same contract before MGB claims
+   support.
+5. **OpenProject and Redmine.** Retain these as established open-source and
+   legacy compatibility candidates. Begin with captured contract fixtures;
+   promote either to the continuous live matrix only when a real deployment or
+   user need justifies its operating cost.
+
+Shortcut remains on the watch list while its current API generation is alpha.
+Bitbucket's built-in issue tracker is lower priority than Jira-backed Bitbucket
+workflows because it is unavailable in some current workspace models. Asana,
+monday.com, and ClickUp are large general work-management systems whose
+arbitrary board and field models require an explicit configurable mapping
+contract before they can truthfully implement MGB's work surface. ServiceNow
+incidents, problems, and changes belong to a later service-management domain,
+not a Jira-shaped adapter. Bugzilla, Mantis, Taiga, Trac, and similar systems
+remain demand-driven or community-provider candidates.
+
+Before any candidate becomes a milestone, its investigation must record:
+
+- whether the test targets cloud, self-hosted, or both, and how a disposable
+  fixture can be reproduced;
+- stable API and pagination contracts, versioning policy, rate limits, and
+  least-privilege credential scopes;
+- an exact project boundary and bounded mappings for `work.list`, `work.get`,
+  and only the semantic state effects the provider can honestly support;
+- provider-private treatment of query languages, custom-field identifiers,
+  workflow/status identifiers, credentials, and raw response bodies;
+- idempotency and lost-response reconciliation for every effect; and
+- the maintenance cost of deterministic fixtures, optional live smoke tests,
+  and a continuously operated live conformance target.
+
+An initial eventual matrix may therefore cover Jira Cloud, GitHub Issues,
+GitLab Issues, Azure Boards, Linear, YouTrack, Plane, and one Gitea/Forgejo
+deployment. This is a research backlog, not an instruction to implement all
+eight or a condition on M16 through M19.
 
 ## Optional provider-auth track: Anthropic Console OAuth connector
 

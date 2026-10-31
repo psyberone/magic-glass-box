@@ -86,13 +86,16 @@ magic-glass-box-github-provider serve \
 ```
 
 `--candidate-root` is required when the registration advertises
-`refs.publish`. The provider accepts a source repository only beneath that
-root, resolves the immutable `refs/mgb/candidates/<sha>` ref, verifies it equals
-the authorized SHA-1 commit, and pushes that SHA to an explicitly named new
-branch. When the provider is separately containerized, mount this root
-read-only. The provider constructs the Git and GitHub commands itself; neither
-the agent nor an operation document supplies argv, a remote URL, a credential
-helper, or a token.
+`refs.publish`. The operation names a durable `cnd_...` candidate ID and a
+destination branch, never a filesystem path. MGB binds that ID to its private
+project repository, verifies that the requested revision belongs to the same
+project/candidate, and writes the provider-readable identity record. The
+provider resolves the repository from that trusted record, verifies the
+immutable `refs/mgb/candidates/<sha>` ref, and pushes that SHA to the explicitly
+named new branch. When the provider is separately containerized, mount this
+root read-only. The provider constructs the Git and GitHub commands itself;
+neither the agent nor an operation document supplies argv, a source path, a
+remote URL, a credential helper, or a token.
 
 The reference operation templates are:
 
@@ -105,7 +108,7 @@ The reference operation templates are:
 - [`github-checks-read.json`](../examples/github-checks-read.json)
 
 They are structural examples, not ready-made authority: replace every mapping,
-revision, ID, branch, candidate-store path, and idempotency key with values from
+revision, ID, branch, and idempotency key with values from
 the exact project/candidate decision. Project-routed creation must pass the
 corresponding `cpb_...` binding ID so the operation and route are pinned in the
 same transaction.

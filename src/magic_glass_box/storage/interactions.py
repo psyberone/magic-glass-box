@@ -1062,7 +1062,7 @@ class InteractionStorage:
                     raise ConflictError(
                         "provider invocation authority does not match its grant"
                     )
-                if outcome == "dispatching":
+                if outcome == "dispatching" or dispatch_kind == "direct":
                     consumed = connection.execute(
                         "UPDATE run_provider_invocation_allowances "
                         "SET invocation_count = invocation_count + 1, "

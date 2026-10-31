@@ -25,6 +25,7 @@ from magic_glass_box.domain import AgentProfileSpec, ProjectContext, WorkItemEnv
 from magic_glass_box.execution_operations import ExecutionRecipeAuthority
 from magic_glass_box.execution_provider_cli import load_config
 from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.remote_runner import ArtifactArchiveMaterializer, RemoteRunnerError
 from magic_glass_box.results import WorkspaceResultStore
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.service_sidecar import ServiceSidecarSpec
@@ -57,6 +58,41 @@ CAPABILITIES = (
     ("execution.cancel", "effect"),
     ("execution.collect", "read"),
 )
+QUALITY_TEST_MODULES = (
+    "tests.test_execution_operations",
+    "tests.test_execution_provider",
+    "tests.test_execution_provider_cli",
+    "tests.test_remote_runner",
+)
+QUALITY_BOUNDARY_FIELDS = {
+    "docker_authority",
+    "network_interfaces",
+    "network_routes",
+    "root_filesystem",
+    "runtime_user",
+    "workspace",
+}
+QUALITY_EVIDENCE_FIELDS = {
+    "boundary",
+    "python",
+    "schema_version",
+    "status",
+    "test_count",
+    "test_modules",
+}
+QUALITY_NETWORK_INTERFACES = {
+    "erspan0",
+    "gre0",
+    "gretap0",
+    "ip6gre0",
+    "ip6tnl0",
+    "ip6_vti0",
+    "ip_vti0",
+    "lo",
+    "sit0",
+    "tunl0",
+}
+PYTHON_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 class LiveProofError(RuntimeError):
@@ -616,7 +652,73 @@ def _assert_evidence(
         or (not expect_artifact and artifact_count != 0)
     ):
         raise LiveProofError("remote evidence artifact identity is inconsistent")
+    if expect_artifact:
+        _assert_quality_artifact(raw_bundle)
     return dict(execution)
+
+
+def _assert_quality_artifact(bundle: bytes) -> None:
+    with tempfile.TemporaryDirectory(prefix="mgb15-evidence-") as raw:
+        destination = Path(raw)
+        destination.chmod(0o700)
+        try:
+            ArtifactArchiveMaterializer().materialize(
+                bundle,
+                destination,
+                max_bytes=1024 * 1024,
+                max_paths=1,
+            )
+        except RemoteRunnerError as exc:
+            raise LiveProofError("remote quality artifact is invalid") from exc
+        evidence_path = destination / "m15-proof.json"
+        try:
+            payload = evidence_path.read_bytes()
+        except OSError as exc:
+            raise LiveProofError("remote quality artifact is invalid") from exc
+        if not payload or len(payload) > 64 * 1024:
+            raise LiveProofError("remote quality artifact is invalid")
+    try:
+        document = json.loads(payload.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise LiveProofError("remote quality artifact is invalid") from exc
+    evidence = _exact_object(
+        document, QUALITY_EVIDENCE_FIELDS, "remote quality artifact"
+    )
+    boundary = _exact_object(
+        evidence["boundary"], QUALITY_BOUNDARY_FIELDS, "remote quality artifact"
+    )
+    interfaces = boundary["network_interfaces"]
+    if (
+        isinstance(evidence["schema_version"], bool)
+        or evidence["schema_version"] != 1
+        or evidence["status"] != "passed"
+        or evidence["test_modules"] != list(QUALITY_TEST_MODULES)
+        or isinstance(evidence["test_count"], bool)
+        or not isinstance(evidence["test_count"], int)
+        or evidence["test_count"] < len(QUALITY_TEST_MODULES)
+        or not isinstance(evidence["python"], str)
+        or PYTHON_VERSION_RE.fullmatch(evidence["python"]) is None
+        or not isinstance(interfaces, list)
+        or not interfaces
+        or "lo" not in interfaces
+        or any(
+            not isinstance(interface, str)
+            or interface not in QUALITY_NETWORK_INTERFACES
+            for interface in interfaces
+        )
+        or len(interfaces) != len(set(interfaces))
+        or {
+            key: value for key, value in boundary.items() if key != "network_interfaces"
+        }
+        != {
+            "docker_authority": "absent",
+            "network_routes": "loopback-only",
+            "root_filesystem": "read-only",
+            "runtime_user": "non-root",
+            "workspace": "read-only",
+        }
+    ):
+        raise LiveProofError("remote quality artifact is invalid")
 
 
 def _proof_report(

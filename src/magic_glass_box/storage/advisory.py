@@ -428,7 +428,7 @@ class AdvisoryStorage:
             "run.version, run.created_at, run.finished_at "
             "FROM advisory_run_bindings binding JOIN runs run "
             "ON run.id = binding.run_id WHERE binding.execution_id = ? "
-            "ORDER BY binding.stage, binding.role",
+            "ORDER BY binding.stage, binding.role, binding.generation",
             (execution_id,),
         ).fetchall()
         runs: dict[str, dict[str, Any]] = {}
@@ -931,6 +931,11 @@ class AdvisoryStorage:
                 "AND artifact.reviewer_role = binding.role "
                 "AND artifact.run_id = binding.run_id "
                 "WHERE binding.execution_id = ? AND binding.stage = ? "
+                "AND binding.generation = (SELECT MAX(latest.generation) "
+                "FROM advisory_run_bindings latest "
+                "WHERE latest.execution_id = binding.execution_id "
+                "AND latest.stage = binding.stage "
+                "AND latest.role = binding.role) "
                 "ORDER BY binding.role",
                 (execution_id, stage),
             ).fetchall()
@@ -946,6 +951,11 @@ class AdvisoryStorage:
                 "AND artifact.reviewer_role = binding.role "
                 "AND artifact.run_id = binding.run_id "
                 "WHERE binding.execution_id = ? AND binding.stage = ? "
+                "AND binding.generation = (SELECT MAX(latest.generation) "
+                "FROM advisory_run_bindings latest "
+                "WHERE latest.execution_id = binding.execution_id "
+                "AND latest.stage = binding.stage "
+                "AND latest.role = binding.role) "
                 "ORDER BY binding.role",
                 (execution_id, stage),
             ).fetchall()
@@ -960,7 +970,12 @@ class AdvisoryStorage:
                 "ON artifact.execution_id = binding.execution_id "
                 "AND artifact.run_id = binding.run_id "
                 "WHERE binding.execution_id = ? AND binding.stage = 'triangulate' "
-                "AND binding.role = 'coordinator'",
+                "AND binding.role = 'coordinator' "
+                "AND binding.generation = (SELECT MAX(latest.generation) "
+                "FROM advisory_run_bindings latest "
+                "WHERE latest.execution_id = binding.execution_id "
+                "AND latest.stage = binding.stage "
+                "AND latest.role = binding.role)",
                 (execution_id,),
             ).fetchall()
             if len(rows) != 1:

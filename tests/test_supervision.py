@@ -1424,6 +1424,37 @@ class SupervisionDatabaseTests(unittest.TestCase):
 
         self.assertTrue(supervisor.close())
 
+    def test_run_forever_drains_inflight_work_after_an_ordinary_stop(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        self.create_run(self.automatic_policy())
+        coordinator = FakeCoordinator()
+        coordinator.started = threading.Event()
+        coordinator.release = threading.Event()
+        supervisor = Supervisor(
+            self.database,
+            coordinator,
+            FakeEscalationTransport(),
+            supervisor_id="supervisor-service-shutdown",
+            poll_interval=0.05,
+            shutdown_timeout=1,
+        )
+        self.addCleanup(coordinator.release.set)
+        self.addCleanup(supervisor.close, wait=False)
+
+        runner = threading.Thread(target=supervisor.run_forever)
+        runner.start()
+        self.assertTrue(coordinator.started.wait(timeout=1))
+
+        supervisor.stop()
+        runner.join(timeout=0.05)
+        self.assertTrue(runner.is_alive())
+
+        coordinator.release.set()
+        runner.join(timeout=1)
+        self.assertFalse(runner.is_alive())
+        self.assertTrue(supervisor.drain(timeout=0))
+
     def test_run_forever_honors_backoff_and_heartbeats_between_retries(self) -> None:
         from magic_glass_box.supervision import Supervisor
 

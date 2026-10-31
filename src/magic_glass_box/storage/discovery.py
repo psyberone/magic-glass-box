@@ -458,7 +458,8 @@ class DiscoveryStorage:
             "SELECT binding.role, binding.run_id, run.state, run.version, "
             "run.created_at, run.finished_at FROM discovery_run_bindings binding "
             "JOIN runs run ON run.id = binding.run_id "
-            "WHERE binding.execution_id = ? ORDER BY binding.role",
+            "WHERE binding.execution_id = ? "
+            "ORDER BY binding.role, binding.generation",
             (execution_id,),
         ).fetchall()
         result = {
@@ -928,7 +929,8 @@ class DiscoveryStorage:
                 run = connection.execute(
                     "SELECT run.id, run.state FROM discovery_run_bindings binding "
                     "JOIN runs run ON run.id = binding.run_id "
-                    "WHERE binding.execution_id = ? AND binding.role = ?",
+                    "WHERE binding.execution_id = ? AND binding.role = ? "
+                    "ORDER BY binding.generation DESC LIMIT 1",
                     (execution_id, role),
                 ).fetchone()
                 if run is None or run["state"] != "succeeded":

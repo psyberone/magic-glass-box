@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from .candidates import CandidateError, load_candidate_store_identity
 from .domain import (
     ValidationError,
     canonical_json,
@@ -609,10 +610,20 @@ class GitHubGitPublisher:
             "PATH": os.environ.get("PATH", os.defpath),
         }
 
-    def _source_repository(self, value: str) -> Path:
-        candidate = Path(value)
-        if not candidate.is_absolute():
-            raise GitHubProviderError("candidate repository must be absolute")
+    def _candidate_repository(self, candidate_id: str) -> Path:
+        try:
+            identity = load_candidate_store_identity(self.candidate_root, candidate_id)
+        except CandidateError as exc:
+            raise GitHubProviderError("candidate identity is unavailable") from exc
+        if identity.object_format != "sha1":
+            raise GitHubProviderError("candidate object format is unsupported")
+        candidate = (
+            self.candidate_root
+            / "projects"
+            / identity.project_key
+            / identity.object_format
+            / "repository.git"
+        )
         try:
             original = candidate.lstat()
             resolved = candidate.resolve(strict=True)
@@ -627,8 +638,7 @@ class GitHubGitPublisher:
     def publish(
         self,
         *,
-        source_repository: str,
-        source_ref: str,
+        candidate_id: str,
         desired_revision: str,
         host: str,
         repository: str,
@@ -637,9 +647,8 @@ class GitHubGitPublisher:
     ) -> None:
         if re.fullmatch(r"[0-9a-f]{40}", desired_revision) is None:
             raise GitHubProviderError("candidate revision is invalid")
-        if source_ref != f"refs/mgb/candidates/{desired_revision}":
-            raise GitHubProviderError("candidate source ref is invalid")
-        source = self._source_repository(source_repository)
+        source_ref = f"refs/mgb/candidates/{desired_revision}"
+        source = self._candidate_repository(candidate_id)
         verify = [
             str(self.git_bin),
             f"--git-dir={source}",
@@ -890,6 +899,7 @@ def serve_unix(
                 OSError,
             ),
             client_timeout=min(300.0, provider.spec.timeout_ms / 1000 + 1.0),
+            max_concurrency=provider.spec.max_concurrency,
         )
     except UnixSidecarError as exc:
         raise GitHubProviderCLIError(str(exc)) from exc

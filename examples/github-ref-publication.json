@@ -16,7 +16,7 @@
     "service": "github"
   },
   "parameters": {
-    "source_repository": "/private/mgb/candidates/projects/project/sha1/repository.git"
+    "target_ref": "refs/heads/mgb/candidate-11111111111111111111111111111111"
   },
   "request_bytes": 131072,
   "response_bytes": 524288,
@@ -26,7 +26,7 @@
     "expected_revision": null,
     "object_format": "sha1",
     "repository": "owner/repository",
-    "resource_id": "refs/heads/mgb/candidate-11111111111111111111111111111111"
+    "resource_id": "cnd_11111111111111111111111111111111"
   },
   "timeout_ms": 30000
 }

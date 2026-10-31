@@ -18,7 +18,7 @@ development = [
     "jsonschema[format]",
     "mutmut==3.6.0",
     "PyJWT[crypto]>=2.10,<3",
-    "pytest",
+    "pytest>=8,<9",
     "rfc3339-validator>=0.1.4,<0.2",
     "ruff",
 ]

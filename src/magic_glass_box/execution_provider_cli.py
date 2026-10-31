@@ -127,6 +127,7 @@ class CommandRunner(Protocol):
         timeout: float,
         stdout_limit: int,
         environment: dict[str, str],
+        stderr_limit: int = MAX_REMOTE_STDERR_BYTES,
     ) -> BoundedCommandResult: ...
 
 
@@ -423,6 +424,7 @@ class BoundedCommandRunner:
         timeout: float,
         stdout_limit: int,
         environment: dict[str, str],
+        stderr_limit: int = MAX_REMOTE_STDERR_BYTES,
     ) -> BoundedCommandResult:
         if (
             not command
@@ -433,6 +435,7 @@ class BoundedCommandRunner:
             or not math.isfinite(timeout)
             or timeout <= 0
             or not 1 <= stdout_limit <= MAX_COMMAND_STDOUT_BYTES
+            or not 1 <= stderr_limit <= MAX_COMMAND_STDOUT_BYTES
         ):
             raise ExecutionProviderCLIError("SSH command request is invalid")
         process = subprocess.Popen(  # noqa: S603 - absolute configured SSH binary.
@@ -482,11 +485,7 @@ class BoundedCommandRunner:
                             selector.unregister(key.fileobj)
                             key.fileobj.close()
                             continue
-                        ceiling = (
-                            stdout_limit
-                            if name == "stdout"
-                            else MAX_REMOTE_STDERR_BYTES
-                        )
+                        ceiling = stdout_limit if name == "stdout" else stderr_limit
                         if len(buffers[name]) + len(chunk) > ceiling:
                             raise ExecutionProviderCLIError(
                                 "SSH command output exceeds its limit"
@@ -719,15 +718,17 @@ class SSHExecutionBackend:
         effect: bool,
         evidence: bool = False,
     ) -> ExecutionStatusResult | ExecutionEvidenceResult | None:
-        try:
-            archive = self.candidate_source.archive(job)
-        except (ExecutionProviderCLIError, OSError, TimeoutError) as exc:
-            raise ExecutionBackendUnavailable(
-                "candidate source is unavailable before dispatch"
-            ) from exc
-        archive_sha256 = hashlib.sha256(archive).hexdigest()
+        archive: bytes | None = None
+        archive_sha256: str | None = None
         candidate_archive: dict[str, object] | None = None
         if action in {"submit", "reconcile_submit"}:
+            try:
+                archive = self.candidate_source.archive(job)
+            except (ExecutionProviderCLIError, OSError, TimeoutError) as exc:
+                raise ExecutionBackendUnavailable(
+                    "candidate source is unavailable before dispatch"
+                ) from exc
+            archive_sha256 = hashlib.sha256(archive).hexdigest()
             candidate_archive = {
                 "bundle": base64.b64encode(archive).decode("ascii"),
                 "bytes": len(archive),
@@ -784,8 +785,11 @@ class SSHExecutionBackend:
             else:
                 parsed_status = ExecutionStatusResult.from_mapping(response["result"])
                 result = parsed_status
-            if parsed_status.source_bytes != len(archive) or not hmac.compare_digest(
-                parsed_status.source_sha256, archive_sha256
+            if action in {"submit", "reconcile_submit"} and (
+                archive is None
+                or archive_sha256 is None
+                or parsed_status.source_bytes != len(archive)
+                or not hmac.compare_digest(parsed_status.source_sha256, archive_sha256)
             ):
                 raise ExecutionProviderCLIError(
                     "remote execution source does not match the candidate"
@@ -955,6 +959,7 @@ def serve_unix(
                 OSError,
             ),
             client_timeout=min(300.0, provider.spec.timeout_ms / 1000 + 1.0),
+            max_concurrency=provider.spec.max_concurrency,
         )
     except UnixSidecarError as exc:
         raise ExecutionProviderCLIError(str(exc)) from exc

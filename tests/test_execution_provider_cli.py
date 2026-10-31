@@ -670,6 +670,43 @@ class ExecutionProviderCLITests(unittest.TestCase):
         with self.assertRaises(ExecutionBackendUnavailable):
             backend.submit(job(), deadline=DEADLINE)
 
+    def test_followup_actions_do_not_reexport_the_local_candidate(self) -> None:
+        runner = FakeCommandRunner(
+            {
+                "schema_version": 1,
+                "outcome": "found",
+                "result": status_document(),
+            }
+        )
+        backend = SSHExecutionBackend(
+            load_config(self.config_file),
+            runner=runner,
+            candidate_source=FailingCandidateSource(),
+        )
+
+        self.assertIsNotNone(backend.inspect(job(), EXECUTION_ID, deadline=DEADLINE))
+        self.assertIsNotNone(backend.cancel(job(), EXECUTION_ID, deadline=DEADLINE))
+        self.assertIsNotNone(
+            backend.reconcile_cancel(job(), EXECUTION_ID, deadline=DEADLINE)
+        )
+        runner.response = {
+            "schema_version": 1,
+            "outcome": "found",
+            "result": evidence_document(),
+        }
+        self.assertIsNotNone(backend.collect(job(), EXECUTION_ID, deadline=DEADLINE))
+
+        self.assertEqual(
+            [json.loads(call["input"])["action"] for call in runner.calls],
+            ["inspect", "cancel", "reconcile_cancel", "collect"],
+        )
+        self.assertTrue(
+            all(
+                json.loads(call["input"])["candidate_archive"] is None
+                for call in runner.calls
+            )
+        )
+
     def test_remote_response_is_exact_and_bounded(self) -> None:
         config = load_config(self.config_file)
         runner = FakeCommandRunner(

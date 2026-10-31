@@ -13,25 +13,22 @@ from types import FrameType
 
 DEFAULT_CLIENT_TIMEOUT_SECONDS = 30.0
 MAX_CLIENT_TIMEOUT_SECONDS = 5 * 60
+MAX_SIDECAR_CONCURRENCY = 16
 
 
 class UnixSidecarError(ValueError):
     """A local sidecar listener configuration is unsafe or invalid."""
 
 
-class _TerminationRequested(BaseException):
-    """Unwind a sidecar listener so its private socket can be removed."""
-
-
 @contextmanager
-def _handle_sigterm() -> Iterator[None]:
+def _handle_sigterm(stop_event: threading.Event) -> Iterator[None]:
     if threading.current_thread() is not threading.main_thread():
         yield
         return
     previous = signal.getsignal(signal.SIGTERM)
 
     def terminate(_signum: int, _frame: FrameType | None) -> None:
-        raise _TerminationRequested
+        stop_event.set()
 
     signal.signal(signal.SIGTERM, terminate)
     try:
@@ -44,6 +41,7 @@ def _validate_listener(
     socket_path: Path,
     max_invocations: int,
     client_timeout: float,
+    max_concurrency: int,
 ) -> Path:
     path = Path(socket_path)
     if not path.is_absolute():
@@ -61,6 +59,12 @@ def _validate_listener(
         or not 0 < client_timeout <= MAX_CLIENT_TIMEOUT_SECONDS
     ):
         raise UnixSidecarError("client timeout is invalid")
+    if (
+        isinstance(max_concurrency, bool)
+        or not isinstance(max_concurrency, int)
+        or not 1 <= max_concurrency <= MAX_SIDECAR_CONCURRENCY
+    ):
+        raise UnixSidecarError("max concurrency is invalid")
     try:
         path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         parent = path.parent.lstat()
@@ -85,33 +89,99 @@ def serve_unix_socket(
     *,
     recoverable_errors: tuple[type[BaseException], ...],
     client_timeout: float = DEFAULT_CLIENT_TIMEOUT_SECONDS,
+    max_concurrency: int = 1,
 ) -> int:
     """Serve successful frames while isolating malformed or abandoned clients."""
 
-    path = _validate_listener(socket_path, max_invocations, client_timeout)
+    path = _validate_listener(
+        socket_path,
+        max_invocations,
+        client_timeout,
+        max_concurrency,
+    )
     completed = 0
+    active = 0
     bound = False
-    try:
+    stop_event = threading.Event()
+    condition = threading.Condition()
+    fatal: list[BaseException] = []
+    workers: list[threading.Thread] = []
+
+    def serve_connection(connection: socket.socket) -> None:
+        nonlocal active, completed
+        succeeded = False
         try:
-            with (
-                _handle_sigterm(),
-                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
-            ):
+            with connection:
+                connection.settimeout(float(client_timeout))
+                handler(connection)
+                succeeded = True
+        except recoverable_errors:
+            pass
+        except BaseException as exc:
+            with condition:
+                if not fatal:
+                    fatal.append(exc)
+            stop_event.set()
+        finally:
+            with condition:
+                active -= 1
+                if succeeded:
+                    completed += 1
+                condition.notify_all()
+
+    try:
+        with _handle_sigterm(stop_event):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
                 listener.bind(str(path))
                 bound = True
                 os.chmod(path, 0o600)
-                listener.listen(1)
-                while completed < max_invocations:
-                    connection, _ = listener.accept()
-                    with connection:
-                        connection.settimeout(float(client_timeout))
-                        try:
-                            handler(connection)
-                        except recoverable_errors:
+                listener.listen(max_concurrency)
+                listener.settimeout(0.1)
+                while True:
+                    with condition:
+                        while (
+                            not stop_event.is_set()
+                            and not fatal
+                            and completed < max_invocations
+                            and (
+                                active >= max_concurrency
+                                or completed + active >= max_invocations
+                            )
+                        ):
+                            condition.wait(timeout=0.1)
+                        if stop_event.is_set() or fatal or completed >= max_invocations:
+                            break
+                    try:
+                        connection, _ = listener.accept()
+                    except TimeoutError:
+                        continue
+                    with condition:
+                        if (
+                            stop_event.is_set()
+                            or fatal
+                            or completed + active >= max_invocations
+                        ):
+                            connection.close()
                             continue
-                        completed += 1
-        except _TerminationRequested:
-            pass
+                        active += 1
+                    worker = threading.Thread(
+                        target=serve_connection,
+                        args=(connection,),
+                        name="magic-glass-box-sidecar-client",
+                    )
+                    workers.append(worker)
+                    try:
+                        worker.start()
+                    except BaseException:
+                        connection.close()
+                        with condition:
+                            active -= 1
+                            condition.notify_all()
+                        raise
+            for worker in workers:
+                worker.join()
+            if fatal:
+                raise fatal[0]
     finally:
         if bound:
             path.unlink(missing_ok=True)

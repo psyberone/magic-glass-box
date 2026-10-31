@@ -36,6 +36,7 @@ from magic_glass_box.gateway import (
     GATEWAY_RESPONSE_NAME,
     GATEWAY_RESPONSE_READY_NAME,
     MAX_GATEWAY_REQUEST_BYTES,
+    MAX_GATEWAY_RESPONSE_BYTES,
     FileGatewayManager,
     GatewayError,
     RunGateway,
@@ -1762,6 +1763,36 @@ class FileGatewayManagerTests(unittest.TestCase):
                 response = self.exchange(endpoint.directory, raw)
                 self.assertFalse(response["ok"])
                 self.assertEqual(response["error"]["code"], "invalid_request")
+
+    def test_maximum_provider_response_survives_the_gateway_envelope(self) -> None:
+        endpoint = self.manager.open(
+            RUN_ID,
+            capabilities=(GatewayCapability.PROVIDER_INVOKE,),
+            credential_names=("openai-main",),
+        )
+        maximum_provider_body = "\x00" * (4 * 1024 * 1024)
+        self.control.provider_response_text = maximum_provider_body
+        raw = (
+            canonical_json(
+                request(
+                    "provider.invoke",
+                    {"grant": "openai-main", "request": {"input": "bounded"}},
+                )
+            )
+            + "\n"
+        ).encode()
+
+        response = self.exchange(endpoint.directory, raw)
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            response["result"]["untrusted_response"]["output_text"],
+            maximum_provider_body,
+        )
+        self.assertLessEqual(
+            len((endpoint.directory / GATEWAY_RESPONSE_NAME).read_bytes()),
+            MAX_GATEWAY_RESPONSE_BYTES,
+        )
 
     def test_commit_mismatch_and_replayed_sequence_fail_closed(self) -> None:
         endpoint = self.manager.open(

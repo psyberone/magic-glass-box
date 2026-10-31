@@ -26,6 +26,7 @@ BASE = "a" * 40
 HEAD = "b" * 40
 MERGED = "c" * 40
 CONNECTOR_ID = "ssc_" + "1" * 32
+CANDIDATE_ID = "cnd_" + "3" * 32
 DEPLOYMENT = "d" * 64
 SCOPE = "e" * 64
 DEADLINE = "2099-01-01T00:00:00.000000+00:00"
@@ -220,8 +221,7 @@ class FakeGitPublisher:
     def publish(
         self,
         *,
-        source_repository: str,
-        source_ref: str,
+        candidate_id: str,
         desired_revision: str,
         host: str,
         repository: str,
@@ -230,12 +230,11 @@ class FakeGitPublisher:
     ) -> None:
         self.calls.append(
             {
+                "candidate_id": candidate_id,
                 "deadline": deadline,
                 "desired_revision": desired_revision,
                 "host": host,
                 "repository": repository,
-                "source_ref": source_ref,
-                "source_repository": source_repository,
                 "target_ref": target_ref,
             }
         )
@@ -723,8 +722,6 @@ class GitHubProviderTests(unittest.TestCase):
                 self.assertEqual(response.outcome, "denied")
 
     def test_ref_publication_pushes_only_an_absent_exact_candidate_ref(self) -> None:
-        source = "/private/mgb/candidates/projects/boxp_test/repository.git"
-        source_ref = f"refs/mgb/candidates/{HEAD}"
         target_ref = "refs/heads/mgb/cnd-" + "3" * 32
         api = FakeGitHubAPI(
             [
@@ -740,9 +737,9 @@ class GitHubProviderTests(unittest.TestCase):
             request(
                 self.socket_path,
                 "refs.publish",
-                resource_id=target_ref,
+                resource_id=CANDIDATE_ID,
                 expected_revision=None,
-                parameters={"source_repository": source},
+                parameters={"target_ref": target_ref},
             )
         )
 
@@ -753,11 +750,10 @@ class GitHubProviderTests(unittest.TestCase):
             [
                 {
                     "deadline": DEADLINE,
+                    "candidate_id": CANDIDATE_ID,
                     "desired_revision": HEAD,
                     "host": "github.com",
                     "repository": "acme/widgets",
-                    "source_ref": source_ref,
-                    "source_repository": source,
                     "target_ref": target_ref,
                 }
             ],
@@ -777,11 +773,9 @@ class GitHubProviderTests(unittest.TestCase):
                 self.socket_path,
                 "refs.publish",
                 phase="reconcile",
-                resource_id=target_ref,
+                resource_id=CANDIDATE_ID,
                 expected_revision=None,
-                parameters={
-                    "source_repository": "/private/mgb/candidates/repository.git",
-                },
+                parameters={"target_ref": target_ref},
             )
         )
 
@@ -792,7 +786,6 @@ class GitHubProviderTests(unittest.TestCase):
         self,
     ) -> None:
         target_ref = "refs/heads/mgb/cnd-" + "3" * 32
-        source = "/private/mgb/candidates/repository.git"
         failed_publisher = FakeGitPublisher(
             GitHubTransportError("private push diagnostic", ambiguous=True)
         )
@@ -804,9 +797,9 @@ class GitHubProviderTests(unittest.TestCase):
             request(
                 self.socket_path,
                 "refs.publish",
-                resource_id=target_ref,
+                resource_id=CANDIDATE_ID,
                 expected_revision=None,
-                parameters={"source_repository": source},
+                parameters={"target_ref": target_ref},
             )
         )
 
@@ -825,9 +818,9 @@ class GitHubProviderTests(unittest.TestCase):
                 self.socket_path,
                 "refs.publish",
                 phase="reconcile",
-                resource_id=target_ref,
+                resource_id=CANDIDATE_ID,
                 expected_revision=None,
-                parameters={"source_repository": source},
+                parameters={"target_ref": target_ref},
             )
         )
 
@@ -852,9 +845,9 @@ class GitHubProviderTests(unittest.TestCase):
             request(
                 self.socket_path,
                 "refs.publish",
-                resource_id=target_ref,
+                resource_id=CANDIDATE_ID,
                 expected_revision=None,
-                parameters={"source_repository": "/private/candidates/repository.git"},
+                parameters={"target_ref": target_ref},
             )
         )
         self.assertEqual(conflict.outcome, "conflict")
@@ -868,9 +861,9 @@ class GitHubProviderTests(unittest.TestCase):
                 self.socket_path,
                 "refs.publish",
                 phase="reconcile",
-                resource_id=target_ref,
+                resource_id=CANDIDATE_ID,
                 expected_revision=None,
-                parameters={"source_repository": "/private/candidates/repository.git"},
+                parameters={"target_ref": target_ref},
             )
         )
         self.assertEqual(missing.outcome, "not_found")
@@ -1119,6 +1112,7 @@ class GitHubProviderTests(unittest.TestCase):
                     200,
                     [
                         {
+                            "commit_id": HEAD,
                             "id": 1,
                             "state": "APPROVED",
                             "submitted_at": "2098-12-31T23:00:00Z",
@@ -1322,6 +1316,7 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(len(change_api.calls), 2)
 
         review = {
+            "commit_id": HEAD,
             "id": 1,
             "state": "COMMENTED",
             "submitted_at": "2098-12-31T23:00:00Z",
@@ -1386,12 +1381,14 @@ class GitHubProviderTests(unittest.TestCase):
                     200,
                     [
                         {
+                            "commit_id": HEAD,
                             "id": 1,
                             "state": "APPROVED",
                             "submitted_at": "2098-12-31T22:00:00Z",
                             "user": {"login": "reviewer"},
                         },
                         {
+                            "commit_id": HEAD,
                             "id": 2,
                             "state": "COMMENTED",
                             "submitted_at": "2098-12-31T23:00:00Z",
@@ -1417,6 +1414,38 @@ class GitHubProviderTests(unittest.TestCase):
 
         self.assertEqual(response.outcome, "succeeded")
 
+    def test_approval_for_an_older_commit_never_satisfies_exact_head(self) -> None:
+        api = FakeGitHubAPI(
+            [
+                api_response(200, pull()),
+                api_response(200, {"total_count": 0, "check_runs": []}),
+                api_response(200, {"state": "pending", "statuses": []}),
+                api_response(
+                    200,
+                    [
+                        {
+                            "commit_id": BASE,
+                            "id": 1,
+                            "state": "APPROVED",
+                            "submitted_at": "2098-12-31T23:00:00Z",
+                            "user": {"login": "reviewer"},
+                        }
+                    ],
+                ),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "checks.read",
+                parameters={"required_approvals": 1, "required_checks": []},
+            )
+        )
+
+        self.assertEqual(response.outcome, "retryable")
+        self.assertEqual(response.error_code, "github-checks-pending")
+
     def test_named_failed_check_or_latest_change_request_denies_readiness(self) -> None:
         for check_conclusion, reviews in (
             ("failure", []),
@@ -1424,6 +1453,7 @@ class GitHubProviderTests(unittest.TestCase):
                 "success",
                 [
                     {
+                        "commit_id": HEAD,
                         "id": 1,
                         "state": "CHANGES_REQUESTED",
                         "submitted_at": "2098-12-31T23:00:00Z",
@@ -1667,6 +1697,7 @@ class GitHubProviderTests(unittest.TestCase):
                     200,
                     [
                         {
+                            "commit_id": HEAD,
                             "id": True,
                             "state": "APPROVED",
                             "submitted_at": "2098-12-31T23:00:00Z",
@@ -1755,24 +1786,28 @@ class GitHubProviderTests(unittest.TestCase):
             GitHubProvider._normalize_reviews(
                 [
                     {
+                        "commit_id": HEAD,
                         "id": 4,
                         "state": "CHANGES_REQUESTED",
                         "submitted_at": "2098-12-31T23:00:00Z",
                         "user": {"login": "later"},
                     },
                     {
+                        "commit_id": HEAD,
                         "id": 2,
                         "state": "COMMENTED",
                         "submitted_at": "2098-12-31T22:00:00Z",
                         "user": {"login": "commenter"},
                     },
                     {
+                        "commit_id": HEAD,
                         "id": 1,
                         "state": "APPROVED",
                         "submitted_at": "2098-12-31T22:00:00Z",
                         "user": {"login": "reviewer"},
                     },
                     {
+                        "commit_id": HEAD,
                         "id": 3,
                         "state": "DISMISSED",
                         "submitted_at": "2098-12-31T22:30:00Z",
@@ -1788,24 +1823,28 @@ class GitHubProviderTests(unittest.TestCase):
             ),
             [
                 {
+                    "commit_id": HEAD,
                     "id": 1,
                     "login": "reviewer",
                     "state": "APPROVED",
                     "submitted_at": "2098-12-31T22:00:00.000000Z",
                 },
                 {
+                    "commit_id": HEAD,
                     "id": 2,
                     "login": "commenter",
                     "state": "COMMENTED",
                     "submitted_at": "2098-12-31T22:00:00.000000Z",
                 },
                 {
+                    "commit_id": HEAD,
                     "id": 3,
                     "login": "dismissed",
                     "state": "DISMISSED",
                     "submitted_at": "2098-12-31T22:30:00.000000Z",
                 },
                 {
+                    "commit_id": HEAD,
                     "id": 4,
                     "login": "later",
                     "state": "CHANGES_REQUESTED",
@@ -1819,12 +1858,14 @@ class GitHubProviderTests(unittest.TestCase):
             GitHubProvider._normalize_reviews(
                 [
                     {
+                        "commit_id": HEAD,
                         "id": 2,
                         "state": "CHANGES_REQUESTED",
                         "submitted_at": "2099-01-01T00:30:00+02:00",
                         "user": {"login": "reviewer"},
                     },
                     {
+                        "commit_id": HEAD,
                         "id": 1,
                         "state": "APPROVED",
                         "submitted_at": "2098-12-31T23:00:00Z",
@@ -1834,12 +1875,14 @@ class GitHubProviderTests(unittest.TestCase):
             ),
             [
                 {
+                    "commit_id": HEAD,
                     "id": 2,
                     "login": "reviewer",
                     "state": "CHANGES_REQUESTED",
                     "submitted_at": "2098-12-31T22:30:00.000000Z",
                 },
                 {
+                    "commit_id": HEAD,
                     "id": 1,
                     "login": "reviewer",
                     "state": "APPROVED",
@@ -1851,6 +1894,7 @@ class GitHubProviderTests(unittest.TestCase):
             GitHubProvider._normalize_reviews(
                 [
                     {
+                        "commit_id": HEAD,
                         "id": 1,
                         "state": "APPROVED",
                         "submitted_at": "not-a-timestamp",
@@ -1861,6 +1905,7 @@ class GitHubProviderTests(unittest.TestCase):
 
     def test_review_normalizer_enforces_exact_bounds_and_submitted_shape(self) -> None:
         valid_review = {
+            "commit_id": HEAD,
             "id": 1,
             "state": "APPROVED",
             "submitted_at": "2098-12-31T23:00:00Z",
@@ -1911,6 +1956,7 @@ class GitHubProviderTests(unittest.TestCase):
             ),
             [
                 {
+                    "commit_id": HEAD,
                     "id": 1,
                     "login": "reviewer",
                     "state": "APPROVED",

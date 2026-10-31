@@ -37,6 +37,21 @@ class LiveSupervisorProofContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "escalation thresholds"):
             _assert_proof(missing_reminder)
 
+        for field in ("automatic_run_state", "answered_run_state"):
+            for state in (None, "queued", "preparing", "running", "succeeded"):
+                with (
+                    self.subTest(field=field, state=state),
+                    self.assertRaisesRegex(RuntimeError, "terminal failure"),
+                ):
+                    _assert_proof({**evidence, field: state})
+
+        for action_states in ([], ["succeeded"], ["succeeded"] * 4):
+            with (
+                self.subTest(action_states=action_states),
+                self.assertRaisesRegex(RuntimeError, "action ledger"),
+            ):
+                _assert_proof({**evidence, "action_states": action_states})
+
 
 if __name__ == "__main__":
     unittest.main()

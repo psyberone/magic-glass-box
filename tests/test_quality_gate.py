@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts" / "check_mutation_score.py"
 MAKEFILE = ROOT / "Makefile"
+MUTMUT_RUNNER = ROOT / "scripts" / "run_mutmut.py"
+PYPROJECT = ROOT / "pyproject.toml"
 
 
 class MutationScoreGateTests(unittest.TestCase):
@@ -18,7 +23,23 @@ class MutationScoreGateTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.stats = Path(self.temporary.name) / "stats.json"
 
-    def run_checker(self, payload: object) -> subprocess.CompletedProcess[str]:
+    @staticmethod
+    def complete_stats(*, killed: int, survived: int) -> dict[str, int]:
+        return {
+            "check_was_interrupted_by_user": 0,
+            "killed": killed,
+            "no_tests": 0,
+            "segfault": 0,
+            "skipped": 0,
+            "suspicious": 0,
+            "survived": survived,
+            "timeout": 0,
+            "total": killed + survived,
+        }
+
+    def run_checker(
+        self, payload: object, *, minimum: str = "80"
+    ) -> subprocess.CompletedProcess[str]:
         self.stats.write_text(json.dumps(payload), encoding="utf-8")
         return subprocess.run(  # noqa: S603 - fixed interpreter and local script
             [
@@ -27,44 +48,100 @@ class MutationScoreGateTests(unittest.TestCase):
                 "--stats",
                 str(self.stats),
                 "--minimum",
-                "80",
+                minimum,
             ],
             check=False,
             capture_output=True,
             text=True,
+            timeout=10,
         )
 
     def test_accepts_score_at_floor(self) -> None:
-        result = self.run_checker({"killed": 8, "total": 10})
+        result = self.run_checker(self.complete_stats(killed=8, survived=2))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("80.00%", result.stdout)
 
     def test_rejects_score_below_floor(self) -> None:
-        result = self.run_checker({"killed": 7, "total": 10})
+        result = self.run_checker(self.complete_stats(killed=7, survived=3))
         self.assertEqual(result.returncode, 1)
         self.assertIn("below required 80.00%", result.stderr)
 
     def test_rejects_malformed_or_empty_stats(self) -> None:
-        for payload in ({"killed": True, "total": 10}, {"killed": 0, "total": 0}):
+        for payload in (
+            {"killed": True, "total": 10},
+            {"killed": 0, "total": 0},
+            {"killed": 8, "total": 10},
+            {
+                **self.complete_stats(killed=8, survived=2),
+                "total": 11,
+            },
+        ):
             with self.subTest(payload=payload):
                 result = self.run_checker(payload)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("invalid mutation stats", result.stderr)
+
+    def test_uses_exact_arithmetic_at_the_percentage_boundary(self) -> None:
+        killed = 18_014_398_509_481_984
+        result = self.run_checker(
+            self.complete_stats(killed=killed, survived=1),
+            minimum="100",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("below required 100.00%", result.stderr)
 
     def test_makefile_quotes_configurable_python_executable(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")
 
         self.assertNotIn("PYTHONPATH=src $(PYTHON)", makefile)
         self.assertNotIn("\n\t$(PYTHON) scripts/check_mutation_score.py", makefile)
-        self.assertNotIn("MUTMUT ?= $(PYTHON)", makefile)
-        self.assertNotIn("\n\t$(MUTMUT) ", makefile)
+        self.assertIn('MUTMUT ?= "$(PYTHON)" scripts/run_mutmut.py', makefile)
+        self.assertIn("MUTMUT_RUN_ARGS ?= --max-children 4", makefile)
         self.assertIn('PYTHONPATH=src "$(PYTHON)"', makefile)
         self.assertIn('\n\t"$(PYTHON)" scripts/check_mutation_score.py', makefile)
         self.assertIn(
-            '\n\tPYTHONDONTWRITEBYTECODE=1 "$(PYTHON)" -m mutmut run',
+            "\n\tPYTHONDONTWRITEBYTECODE=1 $(MUTMUT) run",
             makefile,
         )
-        self.assertIn('\n\t"$(PYTHON)" -m mutmut export-cicd-stats', makefile)
+        self.assertIn("\n\t$(MUTMUT) export-cicd-stats", makefile)
+
+    def test_mutmut_runner_pins_pyjwt_crypto_before_entering_mutmut(self) -> None:
+        spec = importlib.util.spec_from_file_location("mgb_run_mutmut", MUTMUT_RUNNER)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        events: list[str] = []
+        fake_main = types.ModuleType("mutmut.__main__")
+        fake_main.cli = lambda: events.append("cli")
+
+        with (
+            mock.patch.object(
+                runner,
+                "_pin_pyjwt_crypto",
+                side_effect=lambda: events.append("pin"),
+            ),
+            mock.patch.dict(sys.modules, {"mutmut.__main__": fake_main}),
+        ):
+            runner.main()
+
+        self.assertEqual(events, ["pin", "cli"])
+
+    def test_mutation_dependencies_pin_a_compatible_pytest_major(self) -> None:
+        pyproject = PYPROJECT.read_text(encoding="utf-8")
+
+        self.assertIn('"pytest>=8,<9"', pyproject)
+
+    def test_official_code_gates_fail_when_git_is_unavailable(self) -> None:
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+
+        self.assertIn(".PHONY: require-git", makefile)
+        self.assertIn("test: require-git", makefile)
+        self.assertIn("coverage: require-git", makefile)
+        self.assertIn("candidate-test: require-git", makefile)
+        self.assertIn("gate-test: require-git", makefile)
+        self.assertIn("integration-test: require-git", makefile)
 
 
 if __name__ == "__main__":

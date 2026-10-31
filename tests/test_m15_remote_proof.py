@@ -5,7 +5,9 @@ import io
 import json
 import tarfile
 import unittest
+from errno import EACCES, EEXIST
 from pathlib import Path
+from unittest import mock
 
 PROOF_PATH = Path(__file__).resolve().parent.parent / "docker" / "m15_remote_proof.py"
 
@@ -113,6 +115,47 @@ class M15RemoteProofImageTests(unittest.TestCase):
                 "-v",
             ),
         )
+
+    def test_unwritable_probe_rejects_collisions_but_accepts_permission_denial(
+        self,
+    ) -> None:
+        proof = load_proof_module()
+        directory = Path("/workspace")
+
+        with (
+            mock.patch.object(
+                proof.os,
+                "open",
+                side_effect=FileExistsError(EEXIST, "already exists"),
+            ),
+            self.assertRaisesRegex(proof.ProofError, "probe failed"),
+        ):
+            proof._assert_unwritable(directory, ".probe")
+
+        with mock.patch.object(
+            proof.os,
+            "open",
+            side_effect=PermissionError(EACCES, "permission denied"),
+        ):
+            proof._assert_unwritable(directory, ".probe")
+
+    def test_test_count_requires_one_unambiguous_nonzero_summary(self) -> None:
+        proof = load_proof_module()
+
+        self.assertEqual(
+            proof.test_count_from_output("", "Ran 79 tests in 1.234s\n\nOK\n"),
+            79,
+        )
+        for output in (
+            "Ran 0 tests in 0.000s\n\nOK\n",
+            "OK\n",
+            "Ran 1 test in 0.001s\nRan 2 tests in 0.002s\n",
+        ):
+            with (
+                self.subTest(output=output),
+                self.assertRaisesRegex(proof.ProofError, "test count"),
+            ):
+                proof.test_count_from_output("", output)
 
 
 if __name__ == "__main__":

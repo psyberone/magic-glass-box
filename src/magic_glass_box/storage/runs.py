@@ -721,8 +721,8 @@ class RunStorage:
                 if workflow_execution_id is not None:
                     connection.execute(
                         "INSERT INTO workflow_run_bindings "
-                        "(run_id, execution_id, correction_round, role, created_at) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        "(run_id, execution_id, correction_round, role, generation, "
+                        "created_at) VALUES (?, ?, ?, ?, 1, ?)",
                         (
                             run_id,
                             workflow_execution_id,
@@ -734,8 +734,8 @@ class RunStorage:
                 if discovery_execution_id is not None:
                     connection.execute(
                         "INSERT INTO discovery_run_bindings "
-                        "(run_id, execution_id, role, created_at) "
-                        "VALUES (?, ?, ?, ?)",
+                        "(run_id, execution_id, role, generation, created_at) "
+                        "VALUES (?, ?, ?, 1, ?)",
                         (
                             run_id,
                             discovery_execution_id,
@@ -746,8 +746,8 @@ class RunStorage:
                 if advisory_execution_id is not None:
                     connection.execute(
                         "INSERT INTO advisory_run_bindings "
-                        "(run_id, execution_id, stage, role, created_at) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        "(run_id, execution_id, stage, role, generation, created_at) "
+                        "VALUES (?, ?, ?, ?, 1, ?)",
                         (
                             run_id,
                             advisory_execution_id,
@@ -970,6 +970,36 @@ class RunStorage:
                         "run already has an active successor: " + active_successor["id"]
                     )
 
+                workflow_binding = connection.execute(
+                    "SELECT execution_id, correction_round, role, generation "
+                    "FROM workflow_run_bindings WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                discovery_binding = connection.execute(
+                    "SELECT execution_id, role, generation "
+                    "FROM discovery_run_bindings WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                advisory_binding = connection.execute(
+                    "SELECT execution_id, stage, role, generation "
+                    "FROM advisory_run_bindings WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if (
+                    sum(
+                        binding is not None
+                        for binding in (
+                            workflow_binding,
+                            discovery_binding,
+                            advisory_binding,
+                        )
+                    )
+                    > 1
+                ):
+                    raise StorageError(
+                        "run has conflicting directed-execution bindings"
+                    )
+
                 review_target = connection.execute(
                     "SELECT grr.policy_id, grr.candidate_id, "
                     "gp.review_separation, producer_profile.profile_id "
@@ -1182,6 +1212,47 @@ class RunStorage:
                         replacement_kind,
                     ),
                 )
+                if workflow_binding is not None:
+                    connection.execute(
+                        "INSERT INTO workflow_run_bindings "
+                        "(run_id, execution_id, correction_round, role, generation, "
+                        "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            replacement_run_id,
+                            workflow_binding["execution_id"],
+                            workflow_binding["correction_round"],
+                            workflow_binding["role"],
+                            workflow_binding["generation"] + 1,
+                            now,
+                        ),
+                    )
+                if discovery_binding is not None:
+                    connection.execute(
+                        "INSERT INTO discovery_run_bindings "
+                        "(run_id, execution_id, role, generation, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            replacement_run_id,
+                            discovery_binding["execution_id"],
+                            discovery_binding["role"],
+                            discovery_binding["generation"] + 1,
+                            now,
+                        ),
+                    )
+                if advisory_binding is not None:
+                    connection.execute(
+                        "INSERT INTO advisory_run_bindings "
+                        "(run_id, execution_id, stage, role, generation, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            replacement_run_id,
+                            advisory_binding["execution_id"],
+                            advisory_binding["stage"],
+                            advisory_binding["role"],
+                            advisory_binding["generation"] + 1,
+                            now,
+                        ),
+                    )
                 if review_target is not None:
                     connection.execute(
                         "INSERT INTO integration_gate_review_runs "

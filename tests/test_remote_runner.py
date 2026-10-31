@@ -89,6 +89,9 @@ class FakeDocker:
         self.stderr = b""
         self.artifact_bundle = artifact_archive([])
 
+    def image_user(self, image_id: str) -> str:
+        return "65532:65532"
+
     def create(self, **values: object) -> None:
         self.created.append(dict(values))
         self.state = DockerState(
@@ -143,6 +146,15 @@ class FailsOnceStartDocker(FakeDocker):
             self.failed = True
             raise RemoteRunnerError("simulated start reply loss")
         super().start(container_name, timeout_seconds=timeout_seconds)
+
+
+class CreatedStateCancelDocker(FailsOnceStartDocker):
+    """Model Docker leaving an unstarted container in the created state."""
+
+    def cancel(
+        self, container_name: str, *, stop_seconds: int, timeout_seconds: int
+    ) -> None:
+        self.cancelled.append(container_name)
 
 
 class FailsOnceCancelDocker(FakeDocker):
@@ -397,7 +409,6 @@ class RemoteRunnerTests(unittest.TestCase):
         self.assertEqual(
             created,
             {
-                "artifact_upload": directory / "artifact-upload.tar.gz",
                 "command": ("make", "quality"),
                 "container_name": "mgb-" + execution_id.removeprefix("rex_"),
                 "cpu_millis": 2000,
@@ -408,9 +419,11 @@ class RemoteRunnerTests(unittest.TestCase):
                 "pids_limit": 256,
                 "read_only_root": True,
                 "timeout_seconds": 1800,
+                "user": "65532:65532",
                 "workspace": directory / "workspace",
             },
         )
+        self.assertFalse((directory / "artifact-upload.tar.gz").exists())
         self.assertEqual(len(self.docker.started), 1)
 
     def test_runner_rejects_ungranted_jobs_and_invalid_submission_inputs(self) -> None:
@@ -461,7 +474,9 @@ class RemoteRunnerTests(unittest.TestCase):
         self.assertEqual(failed.exit_code, 7)
 
         self.docker.state = None
-        self.assertIsNone(self.runner.inspect(self.job(), submitted.execution_id))
+        self.assertEqual(
+            self.runner.inspect(self.job(), submitted.execution_id), failed
+        )
 
     def test_submit_is_idempotent_and_changed_job_is_rejected(self) -> None:
         first = self.runner.submit(self.job(), self.candidate_archive)
@@ -479,6 +494,21 @@ class RemoteRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RemoteRunnerError, "archive"):
             self.runner.submit(self.job(), b"different archive")
+
+    def test_new_submissions_stop_at_the_runner_capacity_boundary(self) -> None:
+        for digit in "1234":
+            self.runner.submit(
+                self.job(operation_id="sop_" + digit * 32),
+                self.candidate_archive,
+            )
+
+        with self.assertRaisesRegex(RemoteRunnerError, "capacity"):
+            self.runner.submit(
+                self.job(operation_id="sop_" + "5" * 32),
+                self.candidate_archive,
+            )
+
+        self.assertEqual(len(self.docker.created), 4)
 
     def test_safe_pre_effect_submission_failure_can_resume_exactly_once(self) -> None:
         materializer = FailsOnceMaterializer()
@@ -541,6 +571,67 @@ class RemoteRunnerTests(unittest.TestCase):
         self.assertEqual(reconciled.state, "running")
         self.assertIsNone(absent)
         self.assertEqual(len(docker.created), 1)
+
+    def test_replay_never_starts_a_created_container_after_stop_intent(self) -> None:
+        for marker in ("cancel-requested", "timeout-requested"):
+            with self.subTest(marker=marker):
+                docker = CreatedStateCancelDocker()
+                runner = RemoteRunner(
+                    self.config,
+                    docker=docker,
+                    materializer=FakeMaterializer(),
+                    clock=lambda: "2026-10-28T12:00:00.000000+00:00",
+                )
+                selected = self.job(
+                    operation_id=(
+                        "sop_" + ("7" if marker == "cancel-requested" else "8") * 32
+                    )
+                )
+                with self.assertRaisesRegex(RemoteRunnerError, "submission"):
+                    runner.submit(selected, self.candidate_archive)
+                execution_id = runner._execution_id(selected)
+                (runner._job_directory(execution_id) / marker).touch(mode=0o600)
+
+                replayed = runner.submit(selected, self.candidate_archive)
+
+                self.assertEqual(replayed.state, "cancelled")
+                self.assertEqual(docker.started, [])
+                self.assertEqual(
+                    docker.cancelled, [runner._container_name(execution_id)]
+                )
+
+    def test_reconcile_never_recreates_a_missing_dispatched_container(self) -> None:
+        submitted = self.runner.submit(self.job(), self.candidate_archive)
+        self.docker.state = None
+
+        with self.assertRaisesRegex(RemoteRunnerError, "outcome is unavailable"):
+            self.runner.reconcile_submission(self.job(), self.candidate_archive)
+
+        self.assertEqual(submitted.state, "running")
+        self.assertEqual(len(self.docker.created), 1)
+        self.assertEqual(len(self.docker.started), 1)
+
+    def test_terminal_status_survives_container_removal_without_reexecution(
+        self,
+    ) -> None:
+        submitted = self.runner.submit(self.job(), self.candidate_archive)
+        self.docker.state = DockerState(
+            status="exited",
+            started_at="2026-10-28T12:00:01.000000+00:00",
+            finished_at="2026-10-28T12:00:05.000000+00:00",
+            exit_code=0,
+        )
+        terminal = self.runner.inspect(self.job(), submitted.execution_id)
+        self.docker.state = None
+
+        reconciled = self.runner.reconcile_submission(
+            self.job(), self.candidate_archive
+        )
+
+        self.assertEqual(reconciled, terminal)
+        self.assertEqual(reconciled.state, "succeeded")
+        self.assertEqual(len(self.docker.created), 1)
+        self.assertEqual(len(self.docker.started), 1)
 
     def test_cancel_is_idempotent_and_inspect_reports_cancelled(self) -> None:
         submitted = self.runner.submit(self.job(), self.candidate_archive)
@@ -609,8 +700,8 @@ class RemoteRunnerTests(unittest.TestCase):
 
     def test_collect_captures_hostile_artifacts_through_result_boundary(self) -> None:
         submitted = self.runner.submit(self.job(), self.candidate_archive)
-        self.runner.artifact_upload_path(submitted.execution_id).write_bytes(
-            artifact_archive([("coverage.json", b"{}", "file")])
+        self.docker.artifact_bundle = artifact_archive(
+            [("coverage.json", b"{}", "file")]
         )
         self.docker.state = DockerState(
             status="exited",
@@ -630,8 +721,8 @@ class RemoteRunnerTests(unittest.TestCase):
 
     def test_collect_rejects_unsafe_worker_artifacts(self) -> None:
         submitted = self.runner.submit(self.job(), self.candidate_archive)
-        self.runner.artifact_upload_path(submitted.execution_id).write_bytes(
-            artifact_archive([("escape", "../outside", "symlink")])
+        self.docker.artifact_bundle = artifact_archive(
+            [("escape", "../outside", "symlink")]
         )
         self.docker.state = DockerState(
             status="exited",
@@ -879,6 +970,34 @@ class CandidateArchiveBoundaryTests(unittest.TestCase):
                     max_paths=1,
                 )
 
+    def test_pax_metadata_counts_toward_the_expanded_archive_budget(self) -> None:
+        output = io.BytesIO()
+        with (
+            gzip.GzipFile(fileobj=output, mode="wb", mtime=0) as compressed,
+            tarfile.open(
+                fileobj=compressed,
+                mode="w",
+                format=tarfile.PAX_FORMAT,
+                pax_headers={"comment": "x" * (2 * 1024 * 1024)},
+            ) as archive,
+        ):
+            info = tarfile.TarInfo("result.json")
+            info.size = 0
+            archive.addfile(info, io.BytesIO())
+        payload = output.getvalue()
+        self.assertLess(len(payload), 1024 * 1024)
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            self.assertRaisesRegex(RemoteRunnerError, "expanded.*oversized"),
+        ):
+            ArtifactArchiveMaterializer().materialize(
+                payload,
+                Path(raw),
+                max_bytes=1024 * 1024,
+                max_paths=1,
+            )
+
 
 class DockerCommandBoundaryTests(unittest.TestCase):
     def test_create_uses_no_network_pinned_image_and_read_only_source(self) -> None:
@@ -887,7 +1006,6 @@ class DockerCommandBoundaryTests(unittest.TestCase):
         docker.runner = runner
 
         docker.create(
-            artifact_upload=Path("/private/tmp/artifact-upload.tar.gz"),
             command=("make", "quality"),
             container_name="mgb-test",
             cpu_millis=2000,
@@ -898,6 +1016,7 @@ class DockerCommandBoundaryTests(unittest.TestCase):
             pids_limit=256,
             read_only_root=True,
             timeout_seconds=1800,
+            user="65532:65532",
             workspace=Path("/private/tmp/workspace"),
         )
 
@@ -925,17 +1044,16 @@ class DockerCommandBoundaryTests(unittest.TestCase):
                 "2147483648",
                 "--cpus",
                 "2.000",
+                "--user",
+                "65532:65532",
                 "--workdir",
                 "/workspace",
                 "--mount",
                 "type=bind,src=/private/tmp/workspace,dst=/workspace,readonly",
-                "--mount",
-                "type=bind,src=/private/tmp/artifact-upload.tar.gz,"
-                "dst=/mgb-artifacts.tar.gz",
+                "--tmpfs",
+                "/mgb-artifacts:rw,noexec,nosuid,nodev,size=1048576",
                 "--env",
-                "MGB_ARTIFACT_PATH=/mgb-artifacts.tar.gz",
-                "--ulimit",
-                "fsize=1048576:1048576",
+                "MGB_ARTIFACT_PATH=/mgb-artifacts/result.tar.gz",
                 "--log-driver",
                 "local",
                 "--log-opt",
@@ -962,10 +1080,38 @@ class DockerCommandBoundaryTests(unittest.TestCase):
                     "PATH": os.defpath,
                 },
                 "input_bytes": b"",
+                "stderr_limit": 1024 * 1024,
                 "stdout_limit": 1024 * 1024,
                 "timeout": 30.0,
             },
         )
+
+    def test_image_policy_rejects_root_and_declared_volumes(self) -> None:
+        runner = CapturingCommandRunner(
+            BoundedCommandResult(
+                0,
+                json.dumps({"User": "65532:65532", "Volumes": None}).encode(),
+                b"",
+            )
+        )
+        docker = DockerCLI(Path("/usr/bin/docker"), Path("/private/tmp/docker-client"))
+        docker.runner = runner
+
+        self.assertEqual(docker.image_user(IMAGE_ID), "65532:65532")
+
+        for config in (
+            {"User": "", "Volumes": None},
+            {"User": "0:0", "Volumes": None},
+            {"User": "65532:65532", "Volumes": {"/data": {}}},
+        ):
+            runner.result = BoundedCommandResult(
+                0, json.dumps(config).encode("utf-8"), b""
+            )
+            with (
+                self.subTest(config=config),
+                self.assertRaisesRegex(RemoteRunnerError, "image"),
+            ):
+                docker.image_user(IMAGE_ID)
 
     def test_docker_lifecycle_commands_parse_only_bounded_state(self) -> None:
         state = {
@@ -986,8 +1132,14 @@ class DockerCommandBoundaryTests(unittest.TestCase):
         self.assertEqual(observed.exit_code, 7)
         self.assertEqual(observed.started_at, "2026-10-28T12:00:01.000000+00:00")
 
-        runner.result = BoundedCommandResult(1, b"", b"not found")
+        runner.result = BoundedCommandResult(
+            1, b"", b"Error: No such object: mgb-missing\n"
+        )
         self.assertIsNone(docker.inspect("mgb-missing"))
+
+        runner.result = BoundedCommandResult(1, b"", b"permission denied\n")
+        with self.assertRaisesRegex(RemoteRunnerError, "command failed"):
+            docker.inspect("mgb-denied")
 
         runner.result = BoundedCommandResult(0, b"stdout", b"stderr")
         docker.start("mgb-test", timeout_seconds=1800)

@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from .domain import (
+    MAX_PROVIDER_REQUEST_BYTES,
+    MAX_PROVIDER_RESPONSE_BYTES,
     ValidationError,
     canonical_json,
     content_sha256,
@@ -143,7 +145,7 @@ def _request_bytes(value: object, *, field: str = "request_bytes") -> int:
         value,
         field=field,
         minimum=1,
-        maximum=2 * 1024 * 1024,
+        maximum=MAX_PROVIDER_REQUEST_BYTES,
     )
 
 
@@ -152,7 +154,7 @@ def _response_bytes(value: object, *, field: str = "response_bytes") -> int:
         value,
         field=field,
         minimum=1,
-        maximum=4 * 1024 * 1024,
+        maximum=MAX_PROVIDER_RESPONSE_BYTES,
     )
 
 

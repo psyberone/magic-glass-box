@@ -249,7 +249,7 @@ class Supervisor:
                     delay = self.poll_interval
                 self._wait_with_lease_renewal(delay)
         finally:
-            self.stop()
+            self.close()
 
     def _wait_with_lease_renewal(self, delay: float) -> None:
         deadline = time.monotonic() + delay

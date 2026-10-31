@@ -3475,6 +3475,7 @@ class CLITests(unittest.TestCase):
                     "run_" + "1" * 32,
                     "--runtime-adapter",
                     "codex",
+                    "--allow-unenforced-worker-storage",
                 ],
                 (
                     "execute",
@@ -3506,6 +3507,7 @@ class CLITests(unittest.TestCase):
                 {"operation": "run.show", "run_id": "run_" + "2" * 32},
             ),
         )
+        build_calls: list[Any] = []
         for arguments, expected_call, expected_output in cases:
             with self.subTest(arguments=arguments):
                 stdout = io.StringIO()
@@ -3516,7 +3518,7 @@ class CLITests(unittest.TestCase):
                     mock.patch(
                         "magic_glass_box.cli._build_run_coordinator",
                         return_value=coordinator,
-                    ),
+                    ) as build,
                     mock.patch(
                         "magic_glass_box.cli._build_result_store",
                         return_value=result_store,
@@ -3524,6 +3526,7 @@ class CLITests(unittest.TestCase):
                     redirect_stdout(stdout),
                 ):
                     status = main(["--db", str(self.database), *arguments])
+                build_calls.extend(build.mock_calls)
                 self.assertEqual(status, 0)
                 self.assertEqual(coordinator.calls[-1], expected_call)
                 self.assertEqual(json.loads(stdout.getvalue()), expected_output)
@@ -3540,6 +3543,11 @@ class CLITests(unittest.TestCase):
                 },
             ),
         )
+
+        execute_build = next(
+            call for call in build_calls if call.kwargs.get("run_timeout") is not None
+        )
+        self.assertTrue(execute_build.kwargs["allow_unenforced_worker_storage"])
 
     def test_queued_run_cancellation_does_not_construct_docker_runtime(self) -> None:
         class QueuedRunControl(FakeControlPlane):
@@ -3655,12 +3663,17 @@ class CLITests(unittest.TestCase):
                     "0",
                     "--history-limit",
                     "3",
+                    "--allow-unenforced-worker-storage",
                 ]
             )
 
         self.assertEqual(status, 0)
         result_store.assert_called_once_with(control)
-        build.assert_called_once()
+        build.assert_called_once_with(
+            control,
+            result_store=result_store.return_value,
+            allow_unenforced_worker_storage=True,
+        )
         serve.assert_called_once()
         served_args = serve.call_args.args[0]
         self.assertEqual(served_args.port, 0)
@@ -3784,6 +3797,7 @@ class CLITests(unittest.TestCase):
                     "90",
                     "--action-timeout",
                     "120",
+                    "--allow-unenforced-worker-storage",
                 ]
             )
 
@@ -3793,6 +3807,7 @@ class CLITests(unittest.TestCase):
             control,
             run_timeout=90.0,
             result_store=result_store.return_value,
+            allow_unenforced_worker_storage=True,
         )
         serve.assert_called_once_with(mock.ANY, control, coordinator)
         self.assertEqual(serve.call_args.args[0].action_timeout, 120.0)
@@ -4838,7 +4853,10 @@ class CLITests(unittest.TestCase):
             ) as coordinator_type,
         ):
             result = _build_run_coordinator(
-                control, run_timeout=90, result_store=result_store
+                control,
+                run_timeout=90,
+                result_store=result_store,
+                allow_unenforced_worker_storage=True,
             )
 
         self.assertIs(result, coordinator)
@@ -4846,7 +4864,9 @@ class CLITests(unittest.TestCase):
             self.database.parent / "workspaces", "git"
         )
         docker_type.assert_called_once_with(run_timeout=90)
-        executor_type.assert_called_once_with("docker")
+        executor_type.assert_called_once_with(
+            "docker", allow_unenforced_worker_storage=True
+        )
         gateway_root.assert_called_once_with(self.database)
         gateway_type.assert_called_once_with(runtime_root, control)
         candidate_store_builder.assert_called_once_with(control)

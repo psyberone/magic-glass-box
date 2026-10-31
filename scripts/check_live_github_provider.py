@@ -51,6 +51,7 @@ PROVIDER_STOP_SECONDS = 10.0
 
 @dataclass(frozen=True)
 class CandidateArtifact:
+    candidate_id: str
     repository: Path
     revision: str
     proof_path: str
@@ -277,7 +278,11 @@ def _build_candidate(
     git_bin: Path,
 ) -> CandidateArtifact:
     root = Path(candidate_root).resolve(strict=True)
-    repository = root / "projects" / proof_id / "repository.git"
+    project_key = hashlib.sha256(f"live-github-proof:{proof_id}".encode()).hexdigest()
+    candidate_id = (
+        "cnd_" + hashlib.sha256(f"candidate:{proof_id}".encode()).hexdigest()[:32]
+    )
+    repository = root / "projects" / project_key / "sha1" / "repository.git"
     repository.parent.mkdir(mode=0o700, parents=True)
     repository.parent.chmod(0o700)
     _run_git(git_bin, ("init", "--bare", str(repository)))
@@ -378,7 +383,21 @@ def _build_candidate(
     ).decode("ascii")
     if verified != revision:
         raise RuntimeError("candidate ref could not be verified")
-    return CandidateArtifact(repository.resolve(), revision, proof_path)
+    identities = root / "identities"
+    identities.mkdir(mode=0o700)
+    (identities / f"{candidate_id}.json").write_text(
+        canonical_json(
+            {
+                "schema_version": 1,
+                "candidate_id": candidate_id,
+                "object_format": "sha1",
+                "project_key": project_key,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return CandidateArtifact(candidate_id, repository.resolve(), revision, proof_path)
 
 
 def _deployment_sha256(source_root: Path) -> str:
@@ -831,11 +850,11 @@ def run_proof(args: argparse.Namespace) -> dict[str, Any]:
                     proof_id=args.proof_id,
                     capability="refs.publish",
                     phase="invoke",
-                    resource_id=branch_ref,
+                    resource_id=candidate.candidate_id,
                     object_format="sha1",
                     expected_revision=None,
                     desired_revision=candidate.revision,
-                    parameters={"source_repository": str(candidate.repository)},
+                    parameters={"target_ref": branch_ref},
                 ),
             )
             outcomes["refs.publish"] = published.outcome

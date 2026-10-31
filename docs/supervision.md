@@ -195,9 +195,12 @@ the normal `run.execute` action. Cancellation settles the recovery as
 
 The supervisor advances an interaction only after durable state says it is
 answered. It sends age-based reminders but does not scan Krab activity and
-guess which message is a response. Until the transport exposes trusted
-reply-to correlation, an operator explicitly binds the response item through
-the CLI or loopback control room.
+guess which message is a response. An operator explicitly binds the response
+item through the CLI or loopback control room. For Krab schema-v8 metadata,
+MGB requires its trusted `in_reply_to_item_id` to equal the exact request; the
+legacy absent-field form remains accepted during rolling compatibility.
+Automated inbox consumption requires a later durable cursor and acknowledgement
+loop rather than an ad hoc background poller.
 
 ## Escalation and privacy
 

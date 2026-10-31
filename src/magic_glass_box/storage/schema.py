@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 45
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -5829,6 +5829,197 @@ BEGIN
 END;
 """
 
+DIRECTED_RUN_REPLACEMENT_SCHEMA = """
+DROP TRIGGER workflow_run_binding_immutable_update;
+DROP TRIGGER workflow_run_binding_immutable_delete;
+ALTER TABLE workflow_run_bindings RENAME TO workflow_run_bindings_v43;
+CREATE TABLE workflow_run_bindings (
+    run_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    role TEXT NOT NULL CHECK (role IN ('producer', 'reviewer')),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, correction_round, role, generation),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_id) REFERENCES workflow_executions(id) ON DELETE RESTRICT
+) STRICT;
+INSERT INTO workflow_run_bindings (
+    run_id, execution_id, correction_round, role, generation, created_at
+)
+SELECT run_id, execution_id, correction_round, role, 1, created_at
+FROM workflow_run_bindings_v43;
+DROP TABLE workflow_run_bindings_v43;
+CREATE TRIGGER workflow_run_binding_immutable_update
+BEFORE UPDATE ON workflow_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow run bindings are immutable');
+END;
+CREATE TRIGGER workflow_run_binding_immutable_delete
+BEFORE DELETE ON workflow_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow run bindings cannot be deleted');
+END;
+
+DROP TRIGGER discovery_run_binding_immutable_update;
+DROP TRIGGER discovery_run_binding_immutable_delete;
+ALTER TABLE discovery_run_bindings RENAME TO discovery_run_bindings_v43;
+CREATE TABLE discovery_run_bindings (
+    run_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('investigator', 'coordinator')),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, role, generation),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_id)
+        REFERENCES discovery_executions(id) ON DELETE RESTRICT
+) STRICT;
+INSERT INTO discovery_run_bindings (
+    run_id, execution_id, role, generation, created_at
+)
+SELECT run_id, execution_id, role, 1, created_at
+FROM discovery_run_bindings_v43;
+DROP TABLE discovery_run_bindings_v43;
+CREATE TRIGGER discovery_run_binding_immutable_update
+BEFORE UPDATE ON discovery_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'discovery run bindings are immutable');
+END;
+CREATE TRIGGER discovery_run_binding_immutable_delete
+BEFORE DELETE ON discovery_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'discovery run bindings cannot be deleted');
+END;
+
+DROP TRIGGER advisory_run_binding_immutable_update;
+DROP TRIGGER advisory_run_binding_immutable_delete;
+ALTER TABLE advisory_run_bindings RENAME TO advisory_run_bindings_v43;
+CREATE TABLE advisory_run_bindings (
+    run_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (
+        stage IN ('blind_review', 'challenge', 'triangulate')
+    ),
+    role TEXT NOT NULL CHECK (
+        role IN ('reviewer_one', 'reviewer_two', 'reviewer_three', 'coordinator')
+    ),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    created_at TEXT NOT NULL,
+    UNIQUE (execution_id, stage, role, generation),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_id)
+        REFERENCES advisory_executions(id) ON DELETE RESTRICT,
+    CHECK (
+        (stage IN ('blind_review', 'challenge')
+            AND role IN ('reviewer_one', 'reviewer_two', 'reviewer_three'))
+        OR (stage = 'triangulate' AND role = 'coordinator')
+    )
+) STRICT;
+INSERT INTO advisory_run_bindings (
+    run_id, execution_id, stage, role, generation, created_at
+)
+SELECT run_id, execution_id, stage, role, 1, created_at
+FROM advisory_run_bindings_v43;
+DROP TABLE advisory_run_bindings_v43;
+CREATE TRIGGER advisory_run_binding_immutable_update
+BEFORE UPDATE ON advisory_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'advisory run bindings are immutable');
+END;
+CREATE TRIGGER advisory_run_binding_immutable_delete
+BEFORE DELETE ON advisory_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'advisory run bindings cannot be deleted');
+END;
+"""
+
+WORKFLOW_REFOLD_RULING_SCHEMA = """
+DROP TRIGGER workflow_ruling_identity_immutable;
+DROP TRIGGER workflow_ruling_immutable_delete;
+DROP INDEX workflow_ruling_one_open;
+ALTER TABLE workflow_rulings RENAME TO workflow_rulings_v44;
+CREATE TABLE workflow_rulings (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    execution_version INTEGER NOT NULL CHECK (execution_version >= 1),
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'correction_limit', 'producer_failed', 'reviewer_failed',
+            'review_verdict_missing', 'validation_failed',
+            'landing_failed', 'landing_authority_mismatch', 'landing_cancelled',
+            'landing_refold_required'
+        )
+    ),
+    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    policy_id TEXT,
+    run_id TEXT,
+    gate_name TEXT,
+    provider_landing_id TEXT,
+    landing_plan_id TEXT,
+    resolved_by TEXT,
+    decision TEXT CHECK (decision IS NULL OR decision IN ('continue', 'cancel')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (execution_id, execution_version, kind),
+    FOREIGN KEY (execution_id) REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_landing_id)
+        REFERENCES integration_provider_landings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_plan_id)
+        REFERENCES integration_landing_plans(id) ON DELETE RESTRICT,
+    FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'open' AND resolved_by IS NULL AND decision IS NULL
+            AND resolved_at IS NULL)
+        OR
+        (state = 'resolved' AND resolved_by IS NOT NULL AND decision IS NOT NULL
+            AND resolved_at IS NOT NULL)
+    ),
+    CHECK (
+        (kind = 'landing_failed' AND provider_landing_id IS NOT NULL
+            AND landing_plan_id IS NULL)
+        OR
+        (kind = 'landing_authority_mismatch'
+            AND (provider_landing_id IS NOT NULL) != (landing_plan_id IS NOT NULL))
+        OR
+        (kind NOT IN ('landing_failed', 'landing_authority_mismatch')
+            AND provider_landing_id IS NULL AND landing_plan_id IS NULL)
+    )
+) STRICT;
+INSERT INTO workflow_rulings (
+    id, execution_id, execution_version, correction_round, kind, state,
+    version, policy_id, run_id, gate_name, provider_landing_id,
+    landing_plan_id, resolved_by, decision, created_at, updated_at, resolved_at
+)
+SELECT
+    id, execution_id, execution_version, correction_round, kind, state,
+    version, policy_id, run_id, gate_name, provider_landing_id,
+    landing_plan_id, resolved_by, decision, created_at, updated_at, resolved_at
+FROM workflow_rulings_v44;
+DROP TABLE workflow_rulings_v44;
+CREATE UNIQUE INDEX workflow_ruling_one_open
+    ON workflow_rulings(execution_id) WHERE state = 'open';
+CREATE TRIGGER workflow_ruling_identity_immutable
+BEFORE UPDATE OF
+    id, execution_id, execution_version, correction_round, kind,
+    policy_id, run_id, gate_name, provider_landing_id, landing_plan_id, created_at
+ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow ruling identity is immutable');
+END;
+CREATE TRIGGER workflow_ruling_immutable_delete
+BEFORE DELETE ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow rulings cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -5875,7 +6066,12 @@ SCHEMA_V39 = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
 SCHEMA_V40 = SCHEMA_V39 + WORKFLOW_SCOPE_REVIEW_SCHEMA
 SCHEMA_V41 = SCHEMA_V40 + OPERABILITY_SCHEMA
 SCHEMA_V42 = SCHEMA_V41 + SERVICE_RESOURCE_SCHEMA
-SCHEMA = SCHEMA_V42 + WORK_INTAKE_SCHEMA
+SCHEMA = (
+    SCHEMA_V42
+    + WORK_INTAKE_SCHEMA
+    + DIRECTED_RUN_REPLACEMENT_SCHEMA
+    + WORKFLOW_REFOLD_RULING_SCHEMA
+)
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -5919,4 +6115,6 @@ MIGRATIONS = {
     40: OPERABILITY_SCHEMA,
     41: SERVICE_RESOURCE_SCHEMA,
     42: WORK_INTAKE_SCHEMA,
+    43: DIRECTED_RUN_REPLACEMENT_SCHEMA,
+    44: WORKFLOW_REFOLD_RULING_SCHEMA,
 }

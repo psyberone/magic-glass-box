@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from magic_glass_box.candidates import CandidateManifest, GitCandidateStore
+from magic_glass_box.candidates import GitCandidateStore
 from magic_glass_box.db import Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
@@ -1062,7 +1062,6 @@ def _publish_and_open(
     *,
     execution: Mapping[str, Any],
     candidate: Mapping[str, Any],
-    candidate_repository: Path,
     spec: ServiceSidecarSpec,
     bindings: Mapping[str, Mapping[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any], int]:
@@ -1075,11 +1074,11 @@ def _publish_and_open(
         mapping=mapping,
         deployment_sha256=deployment,
         idempotency_key=prefix + ":publish",
-        resource_id=SUGGESTED_BRANCH,
+        resource_id=candidate["id"],
         object_format=candidate["object_format"],
         expected_revision=None,
         desired_revision=candidate["head_revision"],
-        parameters={"source_repository": str(candidate_repository)},
+        parameters={"target_ref": SUGGESTED_BRANCH},
         connector_name=bindings["refs.publish"]["controller"]["sidecar_name"],
     )
     published = _find_completed_github_effect(control.database, publish_spec)
@@ -1514,10 +1513,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             gate = _current_gate(database, execution)
             candidate = database.get_candidate(gate["candidate_id"])
-            manifest = CandidateManifest.from_mapping(candidate["manifest"])
-            candidate_repository = candidate_store.repository_path(
-                manifest.project_id, manifest.object_format
-            )
 
             gh_config_dir = args.gh_config_dir.expanduser().resolve(strict=True)
             gh_bin_raw = shutil.which("gh")
@@ -1561,7 +1556,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 control,
                 execution=execution,
                 candidate=candidate,
-                candidate_repository=candidate_repository,
                 spec=github_spec,
                 bindings=bindings,
             )

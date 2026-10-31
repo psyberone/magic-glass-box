@@ -4,6 +4,7 @@ import http.client
 import json
 import re
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -147,6 +148,46 @@ class ProviderAdapter(Protocol):
 ConnectionFactory = Callable[[str, str, int | None, float], http.client.HTTPConnection]
 
 
+def _remaining_http_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("provider request deadline expired")
+    return remaining
+
+
+def _apply_http_deadline(connection: object, deadline: float) -> None:
+    remaining = _remaining_http_time(deadline)
+    sock = getattr(connection, "sock", None)
+    if sock is not None:
+        sock.settimeout(remaining)
+
+
+def _read_http_response(
+    response: object,
+    connection: object,
+    *,
+    deadline: float,
+    limit: int,
+) -> bytes:
+    read_one = getattr(response, "read1", None)
+    if not callable(read_one):
+        _apply_http_deadline(connection, deadline)
+        raw = response.read(limit + 1)
+        _remaining_http_time(deadline)
+        return raw
+    chunks: list[bytes] = []
+    total = 0
+    while total <= limit:
+        _apply_http_deadline(connection, deadline)
+        chunk = read_one(min(64 * 1024, limit + 1 - total))
+        _remaining_http_time(deadline)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _invoke_http(
     spec: ProviderGrantSpec,
     credential: str,
@@ -172,17 +213,37 @@ def _invoke_http(
         **dict(spec.static_headers),
         spec.credential_header: spec.credential_prefix + credential,
     }
+    timeout_seconds = spec.timeout_ms / 1000
+    deadline = time.monotonic() + timeout_seconds
     connection = connection_factory(
         parsed.scheme,
         parsed.hostname or "",
         parsed.port,
-        spec.timeout_ms / 1000,
+        timeout_seconds,
     )
     status: int | None = None
     raw = b""
     content_type: str | None = None
+    dispatched = False
+
+    def response_error(message: str) -> ProviderUpstreamError:
+        error_type: type[ProviderUpstreamError] = (
+            ProviderAmbiguousError
+            if status is not None and 200 <= status < 300
+            else ProviderUpstreamError
+        )
+        return error_type(
+            message,
+            status_code=status,
+            request_bytes=len(body),
+            response_bytes=len(raw),
+        )
+
     try:
+        _apply_http_deadline(connection, deadline)
+        dispatched = True
         connection.request(spec.method, target, body=body, headers=headers)
+        _apply_http_deadline(connection, deadline)
         response = connection.getresponse()
         status = response.status
         declared = response.getheader("Content-Length")
@@ -191,29 +252,26 @@ def _invoke_http(
             try:
                 declared_size = int(declared)
             except ValueError as exc:
-                raise ProviderUpstreamError(
-                    "provider returned an invalid response",
-                    status_code=status,
-                    request_bytes=len(body),
-                ) from exc
+                raise response_error("provider returned an invalid response") from exc
             if declared_size < 0 or declared_size > spec.response_bytes:
-                raise ProviderUpstreamError(
-                    "provider response exceeds its size limit",
-                    status_code=status,
-                    request_bytes=len(body),
-                )
-        raw = response.read(spec.response_bytes + 1)
+                raise response_error("provider response exceeds its size limit")
+        raw = _read_http_response(
+            response,
+            connection,
+            deadline=deadline,
+            limit=spec.response_bytes,
+        )
         if len(raw) > spec.response_bytes:
-            raise ProviderUpstreamError(
-                "provider response exceeds its size limit",
-                status_code=status,
-                request_bytes=len(body),
-                response_bytes=len(raw),
-            )
+            raise response_error("provider response exceeds its size limit")
     except ProviderError:
         raise
     except (OSError, TimeoutError, http.client.HTTPException) as exc:
-        raise ProviderUpstreamError(
+        error_type: type[ProviderUpstreamError] = (
+            ProviderAmbiguousError
+            if dispatched and (status is None or 200 <= status < 300)
+            else ProviderUpstreamError
+        )
+        raise error_type(
             "provider is unavailable",
             status_code=status,
             request_bytes=len(body),
@@ -301,7 +359,7 @@ class JSONHTTPProviderAdapter:
         try:
             value = _strict_response(response.body)
         except ProviderUpstreamError as exc:
-            raise ProviderUpstreamError(
+            raise ProviderAmbiguousError(
                 str(exc),
                 status_code=response.status_code,
                 request_bytes=len(body),
@@ -402,7 +460,7 @@ class BufferedHTTPProviderAdapter:
             not isinstance(content_type, str)
             or content_type.split(";", 1)[0].strip().lower() != "text/event-stream"
         ):
-            raise ProviderUpstreamError(
+            raise ProviderAmbiguousError(
                 "provider returned an invalid response",
                 status_code=response.status_code,
                 request_bytes=len(body),
@@ -411,14 +469,14 @@ class BufferedHTTPProviderAdapter:
         try:
             text = response.body.decode("utf-8", "strict")
         except UnicodeDecodeError as exc:
-            raise ProviderUpstreamError(
+            raise ProviderAmbiguousError(
                 "provider returned an invalid response",
                 status_code=response.status_code,
                 request_bytes=len(body),
                 response_bytes=len(response.body),
             ) from exc
         if not text:
-            raise ProviderUpstreamError(
+            raise ProviderAmbiguousError(
                 "provider returned an invalid response",
                 status_code=response.status_code,
                 request_bytes=len(body),

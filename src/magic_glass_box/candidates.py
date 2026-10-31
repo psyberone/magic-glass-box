@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import math
 import os
 import re
@@ -37,8 +38,10 @@ from .workspace import (
 )
 
 CANDIDATE_SCHEMA_VERSION = 1
+CANDIDATE_STORE_IDENTITY_SCHEMA_VERSION = 1
 OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+CANDIDATE_ID_RE = re.compile(r"^cnd_[0-9a-f]{32}$")
 CANDIDATE_ID_PATTERNS = {
     "attempt_id": re.compile(r"^att_[0-9a-f]{32}$"),
     "attempt_result_id": re.compile(r"^rsl_[0-9a-f]{32}$"),
@@ -66,6 +69,73 @@ PROCESS_STOP_SECONDS = 0.5
 
 class CandidateError(RuntimeError):
     """A retained result could not be represented as a trusted candidate."""
+
+
+@dataclass(frozen=True)
+class CandidateStoreIdentity:
+    schema_version: int
+    candidate_id: str
+    project_key: str
+    object_format: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != CANDIDATE_STORE_IDENTITY_SCHEMA_VERSION:
+            raise CandidateError("candidate store identity schema is invalid")
+        if CANDIDATE_ID_RE.fullmatch(self.candidate_id) is None:
+            raise CandidateError("candidate store identity ID is invalid")
+        if SHA256_RE.fullmatch(self.project_key) is None:
+            raise CandidateError("candidate store project key is invalid")
+        if self.object_format not in GIT_OBJECT_FORMATS:
+            raise CandidateError("candidate store object format is invalid")
+
+    @classmethod
+    def from_mapping(cls, value: object) -> CandidateStoreIdentity:
+        if not isinstance(value, dict) or set(value) != {
+            "schema_version",
+            "candidate_id",
+            "project_key",
+            "object_format",
+        }:
+            raise CandidateError("candidate store identity is invalid")
+        return cls(
+            schema_version=value["schema_version"],
+            candidate_id=value["candidate_id"],
+            project_key=value["project_key"],
+            object_format=value["object_format"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "candidate_id": self.candidate_id,
+            "project_key": self.project_key,
+            "object_format": self.object_format,
+        }
+
+
+def load_candidate_store_identity(
+    root: Path, candidate_id: str
+) -> CandidateStoreIdentity:
+    if (
+        not isinstance(candidate_id, str)
+        or CANDIDATE_ID_RE.fullmatch(candidate_id) is None
+    ):
+        raise CandidateError("candidate ID is invalid")
+    path = Path(root) / "identities" / f"{candidate_id}.json"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise CandidateError("candidate store identity is unavailable") from exc
+    if not raw or len(raw) > 4096:
+        raise CandidateError("candidate store identity is invalid")
+    try:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise CandidateError("candidate store identity is invalid") from exc
+    identity = CandidateStoreIdentity.from_mapping(value)
+    if identity.candidate_id != candidate_id:
+        raise CandidateError("candidate store identity does not match")
+    return identity
 
 
 @dataclass(frozen=True)
@@ -293,7 +363,7 @@ class GitCandidateStore:
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 raise CandidateError("candidate store must be a directory")
             os.chmod(self.root, 0o700)
-            for name in ("home", "tmp", "projects"):
+            for name in ("home", "tmp", "projects", "identities"):
                 path = self.root / name
                 path.mkdir(mode=0o700, exist_ok=True)
                 os.chmod(path, 0o700)
@@ -1650,6 +1720,66 @@ class GitCandidateStore:
             create=False,
         ) as directory:
             return self._repository(directory, object_format, operation, create=False)
+
+    def bind_candidate_identity(
+        self, candidate_id: str, manifest: CandidateManifest
+    ) -> CandidateStoreIdentity:
+        """Bind one durable candidate ID to its MGB-owned project repository."""
+
+        if (
+            not isinstance(candidate_id, str)
+            or CANDIDATE_ID_RE.fullmatch(candidate_id) is None
+        ):
+            raise CandidateError("candidate ID is invalid")
+        if not isinstance(manifest, CandidateManifest):
+            raise CandidateError("candidate manifest is invalid")
+        self.inspect(manifest)
+        identity = CandidateStoreIdentity(
+            schema_version=CANDIDATE_STORE_IDENTITY_SCHEMA_VERSION,
+            candidate_id=candidate_id,
+            project_key=self._project_key(manifest.project_id),
+            object_format=manifest.object_format,
+        )
+        self.ensure_root()
+        identities = self.root / "identities"
+        path = identities / f"{candidate_id}.json"
+        if path.exists():
+            if load_candidate_store_identity(self.root, candidate_id) != identity:
+                raise CandidateError("candidate store identity conflicts")
+            return identity
+        raw = (canonical_json(identity.to_dict()) + "\n").encode("utf-8")
+        temporary = identities / (
+            f".{candidate_id}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+        )
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except BaseException:
+                with suppress(OSError):
+                    os.close(descriptor)
+                raise
+            os.replace(temporary, path)
+            directory_descriptor = os.open(identities, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError as exc:
+            raise CandidateError(
+                "candidate store identity could not be written"
+            ) from exc
+        finally:
+            with suppress(OSError):
+                temporary.unlink()
+        return identity
 
     def inspect(self, manifest: CandidateManifest) -> MaterializedCandidate:
         if not isinstance(manifest, CandidateManifest):

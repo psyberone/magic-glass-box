@@ -4,7 +4,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC
-from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, urlencode
 
@@ -36,6 +35,8 @@ SUPPORTED_CAPABILITIES = frozenset(
     }
 )
 PULL_NUMBER_RE = re.compile(r"^[1-9][0-9]{0,9}$")
+GIT_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+CANDIDATE_ID_RE = re.compile(r"^cnd_[0-9a-f]{32}$")
 GITHUB_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 SUCCESSFUL_CHECK_CONCLUSIONS = frozenset({"neutral", "skipped", "success"})
 FAILED_CHECK_CONCLUSIONS = frozenset(
@@ -112,8 +113,7 @@ class GitPublisher(Protocol):
     def publish(
         self,
         *,
-        source_repository: str,
-        source_ref: str,
+        candidate_id: str,
         desired_revision: str,
         host: str,
         repository: str,
@@ -1071,7 +1071,10 @@ class GitHubProvider:
         )
         latest_reviews: dict[str, dict[str, Any]] = {}
         for review in reviews:
-            if review["state"] != "COMMENTED":
+            if (
+                review["commit_id"] == pull["head_sha"]
+                and review["state"] != "COMMENTED"
+            ):
                 latest_reviews[review["login"]] = review
         changes_requested = any(
             item["state"] == "CHANGES_REQUESTED" for item in latest_reviews.values()
@@ -1125,20 +1128,13 @@ class GitHubProvider:
     ) -> dict[str, str]:
         parameters = _exact_parameters(
             request.parameters,
-            fields={"source_repository"},
+            fields={"target_ref"},
             capability="refs.publish",
         )
-        try:
-            source_repository = require_string(
-                parameters["source_repository"],
-                field="source_repository",
-                max_bytes=4096,
-            )
-        except ValidationError as exc:
-            raise GitHubProviderError(str(exc)) from exc
-        if not Path(source_repository).is_absolute():
-            raise GitHubProviderError("source_repository must be absolute")
-        target_ref = _branch_ref(request.target.resource_id, field="target ref")
+        candidate_id = request.target.resource_id
+        if CANDIDATE_ID_RE.fullmatch(candidate_id) is None:
+            raise GitHubProviderError("refs.publish candidate ID is invalid")
+        target_ref = _branch_ref(parameters["target_ref"], field="target ref")
         if (
             request.target.expected_revision is not None
             or request.target.desired_revision is None
@@ -1147,7 +1143,7 @@ class GitHubProvider:
                 "refs.publish requires a new ref and exact desired revision"
             )
         return {
-            "source_repository": source_repository,
+            "candidate_id": candidate_id,
             "target_ref": target_ref,
         }
 
@@ -1178,8 +1174,7 @@ class GitHubProvider:
             )
         assert self.publisher is not None
         self.publisher.publish(
-            source_repository=parameters["source_repository"],
-            source_ref=f"refs/mgb/candidates/{desired}",
+            candidate_id=parameters["candidate_id"],
             desired_revision=desired,
             host=request.mapping.host,
             repository=request.mapping.repository,
@@ -1560,6 +1555,7 @@ class GitHubProvider:
             login = user.get("login")
             state = item.get("state")
             identifier = item.get("id")
+            commit_id = item.get("commit_id")
             submitted_at = item.get("submitted_at")
             if (
                 not isinstance(login, str)
@@ -1576,6 +1572,13 @@ class GitHubProvider:
                 or not isinstance(identifier, int)
                 or (state == "PENDING" and submitted_at is not None)
                 or (state != "PENDING" and not isinstance(submitted_at, str))
+                or (
+                    state != "PENDING"
+                    and (
+                        not isinstance(commit_id, str)
+                        or GIT_OBJECT_ID_RE.fullmatch(commit_id) is None
+                    )
+                )
             ):
                 raise GitHubProviderError("GitHub review response is invalid")
             if state == "PENDING":
@@ -1585,6 +1588,7 @@ class GitHubProvider:
             )
             result.append(
                 {
+                    "commit_id": commit_id,
                     "id": identifier,
                     "login": login,
                     "state": state,

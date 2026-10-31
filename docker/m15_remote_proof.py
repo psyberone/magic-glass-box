@@ -1,10 +1,12 @@
 #!/usr/local/bin/python
 from __future__ import annotations
 
+import errno
 import gzip
 import io
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -16,6 +18,7 @@ from pathlib import Path
 
 MAX_EVIDENCE_BYTES = 1024 * 1024
 MAX_PROC_NET_BYTES = 64 * 1024
+MAX_TEST_OUTPUT_BYTES = 4 * 1024 * 1024
 WORKSPACE = Path("/workspace")
 ARTIFACT_ENV = "MGB_ARTIFACT_PATH"
 INERT_NETWORK_INTERFACES = frozenset(
@@ -53,6 +56,7 @@ TEST_MODULES = (
     "tests.test_execution_provider_cli",
     "tests.test_remote_runner",
 )
+TEST_COUNT_RE = re.compile(r"^Ran ([0-9]+) tests? in [0-9.]+s$", re.MULTILINE)
 
 
 class ProofError(RuntimeError):
@@ -136,6 +140,23 @@ def test_command(workspace: Path) -> tuple[str, ...]:
     return (sys.executable, "-m", "unittest", *TEST_MODULES, "-v")
 
 
+def test_count_from_output(stdout: str, stderr: str) -> int:
+    if not isinstance(stdout, str) or not isinstance(stderr, str):
+        raise ProofError("focused test count is invalid")
+    if (
+        len(stdout.encode("utf-8")) + len(stderr.encode("utf-8"))
+        > MAX_TEST_OUTPUT_BYTES
+    ):
+        raise ProofError("focused test output is oversized")
+    matches = TEST_COUNT_RE.findall(stdout + "\n" + stderr)
+    if len(matches) != 1:
+        raise ProofError("focused test count is missing or ambiguous")
+    count = int(matches[0])
+    if count <= 0:
+        raise ProofError("focused test count must be positive")
+    return count
+
+
 def _read_text_bounded(source: Path, maximum: int) -> str:
     try:
         with source.open("rb") as stream:
@@ -157,8 +178,10 @@ def _assert_unwritable(directory: Path, name: str) -> None:
         flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(probe, flags, 0o600)
-    except OSError:
-        return
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
+            return
+        raise ProofError("protected container path write probe failed") from exc
     try:
         os.close(descriptor)
         probe.unlink(missing_ok=True)
@@ -236,11 +259,17 @@ def _run_proof() -> int:
         cwd=WORKSPACE,
         env=environment,
         stdin=subprocess.DEVNULL,
+        capture_output=True,
         check=False,
+        encoding="utf-8",
+        errors="strict",
         timeout=600,
     )
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
     if completed.returncode != 0:
         raise ProofError("focused M15 test suite failed")
+    test_count = test_count_from_output(completed.stdout, completed.stderr)
     artifact_value = os.environ.get(ARTIFACT_ENV)
     if artifact_value != "/mgb-artifacts.tar.gz":
         raise ProofError("artifact upload authority is invalid")
@@ -259,6 +288,7 @@ def _run_proof() -> int:
         "python": python_version,
         "schema_version": 1,
         "status": "passed",
+        "test_count": test_count,
         "test_modules": list(TEST_MODULES),
     }
     _write_artifact(Path(artifact_value), evidence_archive(summary))

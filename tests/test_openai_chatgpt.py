@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import stat
 import sys
 import tempfile
@@ -995,10 +994,6 @@ class ChatGPTOAuthTests(unittest.TestCase):
             http.requests[0]["headers"]["authorization"], "Bearer access-secret"
         )
 
-    @unittest.skipIf(
-        bool(os.environ.get("MUTANT_UNDER_TEST")),
-        "Mutmut reloads cryptography classes in-process; fake backend covers mutants",
-    )
     def test_real_rs256_id_token_validation_checks_signature_audience_and_nonce(
         self,
     ) -> None:
@@ -1024,10 +1019,6 @@ class ChatGPTOAuthTests(unittest.TestCase):
         with self.assertRaisesRegex(ChatGPTAuthenticationError, "nonce"):
             mismatch._validate_id_token(VALID_RSA_TOKEN, CLIENT_ID, "wrong-nonce")
 
-    @unittest.skipIf(
-        bool(os.environ.get("MUTANT_UNDER_TEST")),
-        "Mutmut reloads cryptography classes in-process; fake backend covers mutants",
-    )
     def test_real_id_token_validation_rejects_untrusted_keys_and_claims(self) -> None:
         cases = (
             (

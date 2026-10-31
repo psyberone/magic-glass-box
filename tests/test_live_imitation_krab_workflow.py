@@ -446,11 +446,11 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             mapping=mapping,
             deployment_sha256="c" * 64,
             idempotency_key="workflow:publish",
-            resource_id="refs/heads/mgb/receipt-policy",
+            resource_id="cnd_" + "1" * 32,
             object_format="sha1",
             expected_revision=None,
             desired_revision="d" * 40,
-            parameters={"source_repository": "/state/candidates/repository.git"},
+            parameters={"target_ref": "refs/heads/mgb/receipt-policy"},
         )
 
         self.assertEqual(spec.connector_name, GITHUB_SIDECAR_NAME)
@@ -458,8 +458,8 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
         self.assertEqual(spec.mapping.to_dict(), mapping)
         self.assertEqual(spec.target.desired_revision, "d" * 40)
         self.assertEqual(
-            spec.parameters["source_repository"],
-            "/state/candidates/repository.git",
+            spec.parameters["target_ref"],
+            "refs/heads/mgb/receipt-policy",
         )
         self.assertEqual(PROJECT_KEY, "imitation-krab-workflow")
 
@@ -671,7 +671,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             )
             bindings = _register_github_authority(control, spec=old_spec)
             operation = _github_operation_spec(
-                capability="refs.publish",
+                capability="change.open",
                 mode="effect",
                 mapping=old_spec.mappings[0].to_dict(),
                 deployment_sha256=old_spec.deployment_sha256,
@@ -680,12 +680,12 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
                 object_format="sha1",
                 expected_revision=None,
                 desired_revision="d" * 40,
-                parameters={"source_repository": "/private/candidate.git"},
+                parameters={},
             )
             control.create_service_operation(
                 spec=operation,
                 created_by_handle="operator",
-                project_capability_binding_id=bindings["refs.publish"]["id"],
+                project_capability_binding_id=bindings["change.open"]["id"],
             )
             new_spec = _service_sidecar_spec(
                 socket_path=root / "github.sock",
@@ -785,7 +785,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
     def test_completed_github_effect_is_reused_across_deployments(self) -> None:
         expected = _github_operation_spec(
             connector_name=GITHUB_SIDECAR_NAME + "-" + "1" * 48,
-            capability="refs.publish",
+            capability="change.open",
             mode="effect",
             mapping={
                 "name": "primary",
@@ -801,7 +801,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             object_format="sha1",
             expected_revision=None,
             desired_revision="d" * 40,
-            parameters={"source_repository": "/private/candidate.git"},
+            parameters={},
         )
         historical = expected.to_dict()
         historical["connector_name"] = GITHUB_SIDECAR_NAME
@@ -830,7 +830,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
 
     def test_changed_or_unresolved_github_effect_is_not_replayed(self) -> None:
         expected = _github_operation_spec(
-            capability="refs.publish",
+            capability="change.open",
             mode="effect",
             mapping={
                 "name": "primary",
@@ -846,7 +846,7 @@ class LiveImitationKrabWorkflowContractTests(unittest.TestCase):
             object_format="sha1",
             expected_revision=None,
             desired_revision="d" * 40,
-            parameters={"source_repository": "/private/candidate.git"},
+            parameters={},
         )
         historical = expected.to_dict()
         historical["deployment_sha256"] = "f" * 64

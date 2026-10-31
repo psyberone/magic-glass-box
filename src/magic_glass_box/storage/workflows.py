@@ -1700,7 +1700,8 @@ class WorkflowStorage:
         with self._read_snapshot() as connection:
             row = connection.execute(
                 "SELECT run_id FROM workflow_run_bindings "
-                "WHERE execution_id = ? AND correction_round = ? AND role = ?",
+                "WHERE execution_id = ? AND correction_round = ? AND role = ? "
+                "ORDER BY generation DESC LIMIT 1",
                 (execution_id, correction_round, role),
             ).fetchone()
         return None if row is None else self.get_run(row["run_id"])
@@ -1763,7 +1764,7 @@ class WorkflowStorage:
                 producer = connection.execute(
                     "SELECT run_id FROM workflow_run_bindings "
                     "WHERE execution_id = ? AND correction_round = ? "
-                    "AND role = 'producer'",
+                    "AND role = 'producer' ORDER BY generation DESC LIMIT 1",
                     (execution_id, correction_round),
                 ).fetchone()
                 if producer is None or producer["run_id"] != source["producer_run_id"]:
@@ -2533,6 +2534,7 @@ class WorkflowStorage:
             "landing_failed",
             "landing_authority_mismatch",
             "landing_cancelled",
+            "landing_refold_required",
         }
         if kind not in allowed:
             raise ValidationError("workflow ruling kind is invalid")
@@ -2568,7 +2570,7 @@ class WorkflowStorage:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 execution = connection.execute(
-                    "SELECT state, version, correction_round, requested_by "
+                    "SELECT state, stage, version, correction_round, requested_by "
                     "FROM workflow_executions WHERE id = ?",
                     (execution_id,),
                 ).fetchone()
@@ -2586,6 +2588,17 @@ class WorkflowStorage:
                     raise ConcurrentUpdateError("workflow execution version changed")
                 if execution["state"] != "active":
                     raise ConflictError("workflow execution is not active")
+                if kind == "landing_refold_required":
+                    refold = connection.execute(
+                        "SELECT 1 FROM workflow_landing_bindings b "
+                        "JOIN integration_queue_items q ON q.id = b.queue_item_id "
+                        "WHERE b.execution_id = ? AND q.state = 'refold_required'",
+                        (execution_id,),
+                    ).fetchone()
+                    if execution["stage"] != "landing" or refold is None:
+                        raise ConflictError(
+                            "workflow landing does not require a refold"
+                        )
                 if (
                     connection.execute(
                         "SELECT 1 FROM workflow_rulings WHERE execution_id = ? "
@@ -2606,8 +2619,19 @@ class WorkflowStorage:
                 if run_id is not None:
                     bound_run = connection.execute(
                         "SELECT 1 FROM workflow_run_bindings WHERE execution_id = ? "
-                        "AND correction_round = ? AND run_id = ?",
-                        (execution_id, execution["correction_round"], run_id),
+                        "AND correction_round = ? AND run_id = ? "
+                        "AND generation = (SELECT MAX(latest.generation) "
+                        "FROM workflow_run_bindings latest "
+                        "WHERE latest.execution_id = ? "
+                        "AND latest.correction_round = ? "
+                        "AND latest.role = workflow_run_bindings.role)",
+                        (
+                            execution_id,
+                            execution["correction_round"],
+                            run_id,
+                            execution_id,
+                            execution["correction_round"],
+                        ),
                     ).fetchone()
                     if bound_run is None:
                         raise ConflictError("workflow ruling run is not current")
@@ -2823,10 +2847,38 @@ class WorkflowStorage:
                             )
                         target_stage = "landing"
                         target_round = execution["correction_round"]
+                    elif ruling["kind"] == "landing_refold_required":
+                        if execution["stage"] != "landing":
+                            raise ConflictError(
+                                "refold ruling is outside the landing stage"
+                            )
+                        landing = connection.execute(
+                            "SELECT q.state, q.current_policy_id "
+                            "FROM workflow_landing_bindings b "
+                            "JOIN integration_queue_items q "
+                            "ON q.id = b.queue_item_id "
+                            "WHERE b.execution_id = ?",
+                            (ruling["execution_id"],),
+                        ).fetchone()
+                        if landing is None:
+                            raise StorageError("workflow landing queue is unavailable")
+                        if landing["state"] == "refold_required":
+                            raise ConflictError(
+                                "workflow landing still requires a refold"
+                            )
+                        if landing["state"] == "cancelled":
+                            raise ConflictError("workflow landing queue was cancelled")
+                        if not self._gate_readiness(
+                            connection, landing["current_policy_id"]
+                        )["ready"]:
+                            raise ConflictError("workflow refold gate is not ready")
+                        target_stage = "landing"
+                        target_round = execution["correction_round"]
                     else:
                         raise ConflictError(
-                            "only a correction-limit, validation-failed, or "
-                            "landing-failed ruling can continue the workflow"
+                            "only a correction-limit, validation-failed, "
+                            "landing-failed, or refold-required ruling can "
+                            "continue the workflow"
                         )
                     target_state = "active"
                     cancel_reason = None

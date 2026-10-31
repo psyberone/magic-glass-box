@@ -62,6 +62,14 @@ files as writable bind mounts, so the worker cannot add paths or replace the
 response files. This regular-file carrier works across native Linux and Docker
 Desktop, where host Unix sockets do not cross the VM-backed bind boundary.
 
+The request files are nevertheless writable host storage. The executor fails
+closed unless a trusted embedding admits the request under an external hard
+byte-and-inode quota. Until the CLI has such an admission provider, launching a
+gateway worker requires `--allow-unenforced-worker-storage`. That flag accepts
+the physical-storage risk; it does not turn the protocol's per-frame limits
+into a filesystem quota. See [results.md](results.md) for the matching
+copy-on-write workspace boundary.
+
 A commit is a newline-terminated, canonical JSON object:
 
 ```json

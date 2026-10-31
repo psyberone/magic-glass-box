@@ -94,6 +94,15 @@ transactions, immutable records, digests, atomic replacement, and file locks.
 It does not repeatedly defend against a hostile process with the operator's UID
 rewriting `.mgb` between system calls.
 
+"Safe" here means record integrity and provenance, never content trust.
+Validation and pinning prove that bytes are exactly what was admitted and who
+produced them; they do not make that content benign. A pinned source snapshot
+can still carry prompt injection, and an authenticated internal message, work
+log entry, or review can still carry content a worker derived from hostile
+input. Everywhere, inside or outside the boundary, content is data, not
+instructions: authority comes only from capabilities and pinned policy, never
+from what a file or message says.
+
 The host, container runtime, kernel, and operator account are part of the
 trusted computing base. If they are compromised, MGB cannot restore a reliable
 security boundary by adding application-level inode races, PID leases, or
@@ -311,13 +320,16 @@ project-activity projection.
   Terminal run transitions cancel any open interaction.
 - A response is accepted only when its project and session match the run and
   its route reverses the request route from the authorized human to the pinned
-  agent identity. Its title, body, and risk flags exist in memory only for the
-  caller to deliver onward; Magic Glass Box does not write them to SQLite.
+  agent identity. If trusted `in_reply_to_item_id` metadata is present, it must
+  name the exact request item. Its title, body, and risk flags exist in memory
+  only for the caller to deliver onward; Magic Glass Box does not write them to
+  SQLite.
 - An operator binds that response through the versioned `interaction answer`
   CLI command or the loopback control room. The receipt contains only IDs,
-  states, and versions. Automatic activity polling is intentionally absent
-  until Krab supplies a trusted reply-to item ID; same-session routing alone
-  is insufficient to distinguish an answer from unrelated conversation.
+  states, and versions. Automatic activity polling remains intentionally absent
+  until MGB has a durable supervised inbox cursor and acknowledgement loop;
+  same-session routing alone is insufficient to distinguish an answer from
+  unrelated conversation.
 
 The Krab POST and the local SQLite transition cannot be one transaction. The
 caller must retain and reuse its stable idempotency key until local correlation

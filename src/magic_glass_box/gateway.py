@@ -16,6 +16,7 @@ from .advisory import AdvisoryBlindReview, AdvisoryChallengeReview, AdvisoryRepo
 from .db import ConcurrentUpdateError, ConflictError, NotFoundError, StorageError
 from .discovery import DiscoveryRuling, DiscoveryTrace
 from .domain import (
+    MAX_PROVIDER_RESPONSE_BYTES,
     PROVIDER_NAME_RE,
     GatewayCapability,
     HandoffEnvelope,
@@ -36,6 +37,7 @@ from .gateway_contracts import (
     response_field_provenance,
     validate_result_shape,
 )
+from .inference import MAX_CONNECTOR_RESPONSE_EXPANSION
 from .krab import (
     IDEMPOTENCY_KEY_RE,
     KRAB_HANDLE_RE,
@@ -58,7 +60,11 @@ from .workflow_scope import WorkflowScopeReview
 
 GATEWAY_PROTOCOL_VERSION = 1
 MAX_GATEWAY_REQUEST_BYTES = 3 * 1024 * 1024
-MAX_GATEWAY_RESPONSE_BYTES = 9 * 1024 * 1024
+# The largest accepted provider body may expand sixfold when JSON escapes raw
+# control bytes. Keep a separate bounded allowance for the gateway envelope.
+MAX_GATEWAY_RESPONSE_BYTES = (
+    MAX_PROVIDER_RESPONSE_BYTES * MAX_CONNECTOR_RESPONSE_EXPANSION + 1024 * 1024
+)
 MAX_GATEWAY_MARKER_BYTES = 512
 MAX_GATEWAY_SEQUENCE = (1 << 53) - 1
 MAX_GATEWAY_INTERACTIONS = 128

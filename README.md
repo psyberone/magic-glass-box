@@ -282,9 +282,10 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --work-item wki_<id> --requested-by operator \
   --supervision-policy examples/supervision-policy.json
 PYTHONPATH=src python3.11 -m magic_glass_box \
-  supervisor run
+  supervisor run --allow-unenforced-worker-storage
 PYTHONPATH=src python3.11 -m magic_glass_box \
-  run execute run_<id> --runtime-adapter codex
+  run execute run_<id> --runtime-adapter codex \
+  --allow-unenforced-worker-storage
 PYTHONPATH=src python3.11 -m magic_glass_box \
   run cancel run_<id> --expected-version <version> \
   --requested-by operator --reason "Stop requested"
@@ -304,6 +305,13 @@ to the run timeout plus five minutes for setup, capture, and cleanup.
 escalation discovery (default 240; range 12 through 1,024), with fixed shares
 and durable cursors so a large category cannot starve the others across
 restarts.
+
+Worker launches fail closed by default because the current host-bind workspace
+and gateway carrier have no portable aggregate byte or inode quota. The
+`--allow-unenforced-worker-storage` examples above are a conscious operator
+risk acceptance, not an enforcement claim. A trusted embedding may instead
+provide quota-backed storage admission. Milestone 19 carries a native
+quota-backed transport forward.
 
 The supervision policy is optional. Omitting it keeps the run manual even when
 the supervisor service is running. Opted-in queued work, answered replacement
@@ -393,9 +401,12 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --expected-version <version>
 ```
 
-The operator selects the response item deliberately. Automatic Krab activity
-polling is deferred until the messaging protocol exposes a trusted reply-to
-item ID; a same-session message is not strong enough correlation.
+The operator still selects the response item deliberately. MGB accepts both
+legacy Krab item metadata and the schema-v8 `in_reply_to_item_id` field; when
+the field is present, a response is accepted only when it names the exact
+request item. Automatic inbox consumption remains deferred until MGB has a
+durable supervised cursor and acknowledgement loop. Same-session routing alone
+is never treated as reply authority.
 
 After an attempt exits, verify or explicitly apply its retained changes:
 

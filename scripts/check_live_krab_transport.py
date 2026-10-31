@@ -218,6 +218,7 @@ def main() -> int:
                 title="Live approval response",
                 body=response_body,
                 idempotency_key="mgb.live.response:0001",
+                in_reply_to_item_id=interaction["request_item_id"],
             )
             cli_stdout = io.StringIO()
             with redirect_stdout(cli_stdout):

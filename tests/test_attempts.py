@@ -435,6 +435,73 @@ class RunAttemptTests(unittest.TestCase):
             },
         )
 
+    def test_answered_active_attempt_failure_does_not_requeue(self) -> None:
+        run, running = self.running_attempt()
+        interaction = self.database.open_interaction(
+            run["id"],
+            kind=InteractionKind.QUESTION,
+            recipient_krab_identity_id=self.identity["id"],
+            request_item_id="itm_" + "a" * 32,
+            expected_run_version=running["run_version"],
+        )
+        self.database.answer_interaction(
+            interaction["id"],
+            response_item_id="itm_" + "b" * 32,
+            expected_version=interaction["version"],
+        )
+        self.record_result(running["id"])
+
+        completed = self.database.complete_run_attempt(
+            running["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=running["version"],
+            exit_code=17,
+            image_id=IMAGE_ID,
+        )
+
+        self.assertEqual(completed["state"], "failed")
+        self.assertEqual(completed["run_state"], "failed")
+        self.assertEqual(self.database.get_run(run["id"])["state"], "failed")
+
+    def test_answered_active_attempt_interruption_requeues_its_checkpoint(
+        self,
+    ) -> None:
+        run, running = self.running_attempt()
+        interaction = self.database.open_interaction(
+            run["id"],
+            kind=InteractionKind.QUESTION,
+            recipient_krab_identity_id=self.identity["id"],
+            request_item_id="itm_" + "c" * 32,
+            expected_run_version=running["run_version"],
+        )
+        self.database.answer_interaction(
+            interaction["id"],
+            response_item_id="itm_" + "d" * 32,
+            expected_version=interaction["version"],
+        )
+        result = self.record_result(running["id"])
+
+        interrupted = self.database.fail_run_attempt(
+            running["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=running["version"],
+            reason="worker process disappeared",
+            interrupted=True,
+        )
+
+        self.assertEqual(interrupted["state"], "interrupted")
+        self.assertEqual(interrupted["run_state"], "queued")
+        replacement = self.database.begin_run_attempt(
+            run["id"],
+            runtime_adapter="docker",
+            owner_id="replacement-owner",
+            expected_run_version=interrupted["run_version"],
+        )
+        self.assertEqual(
+            replacement["recovery_checkpoint"]["source_attempt_id"], running["id"]
+        )
+        self.assertEqual(replacement["recovery_checkpoint"]["result_id"], result["id"])
+
     def test_direct_attempt_failure_is_atomic_and_audited(self) -> None:
         run = self.create_run()
         attempt = self.database.begin_run_attempt(

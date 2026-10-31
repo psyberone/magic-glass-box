@@ -653,6 +653,31 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         return advanced, gate, reviewer
 
+    def test_retry_preserves_the_directed_workflow_role(self) -> None:
+        self.assertFalse(
+            self.director().advance(
+                self.execution["id"], expected_version=self.execution["version"]
+            )
+        )
+        producer = self.database.find_workflow_run(self.execution["id"], 0, "producer")
+        self.assertIsNotNone(producer)
+        failed = self.finish_run(
+            producer,
+            source_revision=self.base,
+            before="base\n",
+            after="partial\n",
+            exit_code=17,
+        )
+
+        replacement = self.database.retry_run(
+            producer["id"],
+            requested_by=self.user["id"],
+            expected_run_version=failed["run_version"],
+        )
+
+        bound = self.database.find_workflow_run(self.execution["id"], 0, "producer")
+        self.assertEqual(bound["id"], replacement["id"])
+
     def drive_approved_to_landing(
         self, execution: dict[str, object]
     ) -> tuple[dict[str, object], dict[str, object]]:
@@ -1259,6 +1284,7 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "created_at": finished["finished_at"],
             },
         )
+
         self.assertEqual(
             finished["completion"]["receipt_id"], recorded["receipt"]["id"]
         )
@@ -1332,6 +1358,57 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "workflow_execution_id": finished["id"],
             },
         )
+
+    def test_refold_required_opens_a_durable_operator_ruling(self) -> None:
+        landing, _gate = self.drive_approved_to_landing(self.execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(landing["id"])
+        issued = self.control.issue_workflow_manual_landing(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            remote="origin",
+            issued_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidates,
+        )
+        recorded = self.control.record_landing_receipt(
+            LandingReceiptRequest.from_mapping(
+                {
+                    "schema_version": 1,
+                    "plan_id": issued["id"],
+                    "request_sha256": issued["content_sha256"],
+                    "nonce": issued["nonce"],
+                    "outcome": "not_landed",
+                    "observed_revision": "f" * 40,
+                }
+            ).to_dict(),
+            recorded_by_handle="operator",
+        )
+        self.assertEqual(recorded["queue_item"]["state"], "refold_required")
+
+        self.assertTrue(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+
+        ruled = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(
+            [(ruling["kind"], ruling["state"]) for ruling in ruled["rulings"]],
+            [("landing_refold_required", "open")],
+        )
+        self.assertTrue(
+            self.director().advance(ruled["id"], expected_version=ruled["version"])
+        )
+        with self.assertRaisesRegex(ConflictError, "still requires a refold"):
+            self.control.resolve_workflow_ruling(
+                ruled["rulings"][0]["id"],
+                expected_version=ruled["rulings"][0]["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+            )
 
     def test_landing_binding_and_transition_are_one_restart_safe_transaction(
         self,
@@ -1769,9 +1846,46 @@ class WorkflowDirectorTests(unittest.TestCase):
         policy = self.database.get_gate_policy(gate["policy_id"])
         head_revision = policy["head_revision"]
         target_ref = "refs/heads/mgb/m14-" + gate["candidate_id"].removeprefix("cnd_")
-        candidate_repository = self.candidates.repository_path(
-            self.project["id"], policy["object_format"]
+        publication_spec = self.provider_operation_spec(
+            sidecar_name="github-main",
+            sidecar=github,
+            capability_name="refs.publish",
+            capability_mode="effect",
+            idempotency_key="m14-mixed-github-publish",
+            target={
+                "repository": "acme/widgets",
+                "resource_id": gate["candidate_id"],
+                "object_format": "sha1",
+                "expected_revision": None,
+                "desired_revision": head_revision,
+            },
+            parameters={"target_ref": target_ref},
         )
+
+        self.database.create_project(
+            instance_id=self.instance["id"],
+            krab_project_id="prj_" + "f" * 32,
+            krab_project_key="foreign-publication",
+            display_name="Foreign Publication",
+            context=ProjectContext.from_mapping(
+                {"purpose": "Prove candidate publication stays project-scoped"}
+            ),
+            created_by=self.user["id"],
+        )
+        foreign_binding = self.database.bind_project_capability(
+            project_key="foreign-publication",
+            capability_name="refs.publish",
+            capability_version=1,
+            sidecar_name="github-main",
+            mapping_name="primary",
+            bound_by=self.user["id"],
+        )
+        with self.assertRaisesRegex(ConflictError, "candidate.*project"):
+            self.database.create_service_operation(
+                spec=publication_spec,
+                created_by=self.user["id"],
+                project_capability_binding_id=foreign_binding["id"],
+            )
 
         publisher = FakeGitPublisher()
         publication_api = FakeGitHubAPI(
@@ -1787,21 +1901,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             ]
         )
         publication = self.complete_bound_provider_operation(
-            spec=self.provider_operation_spec(
-                sidecar_name="github-main",
-                sidecar=github,
-                capability_name="refs.publish",
-                capability_mode="effect",
-                idempotency_key="m14-mixed-github-publish",
-                target={
-                    "repository": "acme/widgets",
-                    "resource_id": target_ref,
-                    "object_format": "sha1",
-                    "expected_revision": None,
-                    "desired_revision": head_revision,
-                },
-                parameters={"source_repository": str(candidate_repository)},
-            ),
+            spec=publication_spec,
             binding_id=github_bindings["refs.publish"]["id"],
             owner_id="m14-github-publisher",
             invoke=GitHubProvider(github, publication_api, publisher=publisher).invoke,
@@ -1884,6 +1984,7 @@ class WorkflowDirectorTests(unittest.TestCase):
                     200,
                     [
                         {
+                            "commit_id": head_revision,
                             "id": 1,
                             "state": "APPROVED",
                             "submitted_at": "2098-12-31T23:00:00Z",

@@ -540,6 +540,21 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
             [execution],
         )
 
+    def test_retry_preserves_the_directed_advisory_role(self) -> None:
+        execution = self.start()
+        reviewer = self.create_role_run(execution, "blind_review", "reviewer_one")
+        failed = self.run_attempt(reviewer, exit_code=17)
+
+        replacement = self.database.retry_run(
+            reviewer["id"],
+            requested_by=self.user["id"],
+            expected_run_version=failed["run_version"],
+        )
+
+        current = self.database.get_advisory_execution(execution["id"])
+        bound = current["runs"]["blind_review"]["reviewer_one"]
+        self.assertEqual(bound["run_id"], replacement["id"])
+
     def test_start_rejects_stale_or_ambiguous_authority(self) -> None:
         execution = self.start()
 
@@ -1816,7 +1831,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 43)
+        self.assertEqual(SCHEMA_VERSION, 45)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

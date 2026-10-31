@@ -366,10 +366,10 @@ def run_proof() -> dict[str, Any]:
 
 
 def _assert_proof(evidence: Mapping[str, Any]) -> None:
-    if evidence.get("automatic_run_state") == "queued":
-        raise RuntimeError("automatic queued run did not advance")
-    if evidence.get("answered_run_state") == "queued":
-        raise RuntimeError("answered run did not resume")
+    if evidence.get("automatic_run_state") != "failed":
+        raise RuntimeError("automatic run did not reach its expected terminal failure")
+    if evidence.get("answered_run_state") != "failed":
+        raise RuntimeError("answered run did not reach its expected terminal failure")
     if evidence.get("manual_run_state") != "queued":
         raise RuntimeError("manual run advanced without explicit policy")
     if evidence.get("expired_attempt_state") != "interrupted":
@@ -386,8 +386,8 @@ def _assert_proof(evidence: Mapping[str, Any]) -> None:
         raise RuntimeError("lease recovery did not preserve live ownership")
     if evidence.get("duplicate_action_subjects") is not False:
         raise RuntimeError("duplicate durable action subjects were recorded")
-    if any(state != "succeeded" for state in evidence.get("action_states", [])):
-        raise RuntimeError("durable supervisor action did not settle")
+    if evidence.get("action_states") != ["succeeded", "succeeded", "succeeded"]:
+        raise RuntimeError("durable supervisor action ledger was incomplete")
     if evidence.get("reminder_count") != 2:
         raise RuntimeError("stalled interaction reminders were not deduplicated")
     if evidence.get("reminder_timeouts") != [30.0]:

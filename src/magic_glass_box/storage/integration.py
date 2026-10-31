@@ -736,6 +736,12 @@ class IntegrationStorage:
                     "ON producer.execution_id = g.execution_id "
                     "AND producer.correction_round = g.correction_round "
                     "AND producer.role = 'producer' "
+                    "AND producer.generation = ("
+                    "SELECT MAX(latest.generation) "
+                    "FROM workflow_run_bindings latest "
+                    "WHERE latest.execution_id = producer.execution_id "
+                    "AND latest.correction_round = producer.correction_round "
+                    "AND latest.role = producer.role) "
                     "WHERE g.execution_id = ? ORDER BY g.correction_round",
                     (execution_id,),
                 ).fetchall()

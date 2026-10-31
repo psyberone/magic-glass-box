@@ -304,6 +304,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=25,
         help="terminal runs to include in addition to every active run (0-500)",
     )
+    control_room_serve.add_argument(
+        "--allow-unenforced-worker-storage",
+        action="store_true",
+        help=(
+            "explicitly accept that writable worker bind mounts have no portable "
+            "hard byte or inode quota"
+        ),
+    )
 
     user = commands.add_parser("user", help="manage local users")
     user_commands = user.add_subparsers(dest="user_command", required=True)
@@ -972,6 +980,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--runtime-adapter",
         help="override the pinned profile's runtime adapter for this attempt",
     )
+    run_execute.add_argument(
+        "--allow-unenforced-worker-storage",
+        action="store_true",
+        help=(
+            "explicitly accept that writable worker bind mounts have no portable "
+            "hard byte or inode quota"
+        ),
+    )
     run_commands.add_parser(
         "reconcile", help="clean and fail runs interrupted by an orchestrator restart"
     )
@@ -1030,6 +1046,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
         default="WARNING",
         help="stderr diagnostic level (default: %(default)s)",
+    )
+    supervisor_run.add_argument(
+        "--allow-unenforced-worker-storage",
+        action="store_true",
+        help=(
+            "explicitly accept that writable worker bind mounts have no portable "
+            "hard byte or inode quota"
+        ),
     )
 
     result = commands.add_parser("result", help="inspect and apply retained work")
@@ -1365,6 +1389,7 @@ def _build_run_coordinator(
     *,
     run_timeout: float | None = DEFAULT_RUN_TIMEOUT_SECONDS,
     result_store: WorkspaceResultStore | None = None,
+    allow_unenforced_worker_storage: bool = False,
 ) -> RunCoordinator:
     workspaces = WorkspaceManager(
         control.database.path.parent / "workspaces",
@@ -1379,7 +1404,10 @@ def _build_run_coordinator(
     )
     return RunCoordinator(
         control.database,
-        DockerExecutor(DockerCLI(run_timeout=run_timeout)),
+        DockerExecutor(
+            DockerCLI(run_timeout=run_timeout),
+            allow_unenforced_worker_storage=allow_unenforced_worker_storage,
+        ),
         workspaces,
         FileGatewayManager(
             default_gateway_root(control.database.path),
@@ -2333,6 +2361,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.run_timeout if args.run_command == "execute" else None
                 ),
                 result_store=result_store,
+                allow_unenforced_worker_storage=getattr(
+                    args, "allow_unenforced_worker_storage", False
+                ),
             )
         elif args.command == "run" and args.run_command == "cancel":
 
@@ -2349,6 +2380,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             coordinator = _build_run_coordinator(
                 control,
                 result_store=result_store,
+                allow_unenforced_worker_storage=args.allow_unenforced_worker_storage,
             )
         elif args.command == "supervisor" and args.supervisor_command == "run":
             result_store = _build_result_store(control)
@@ -2356,6 +2388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 control,
                 run_timeout=args.run_timeout,
                 result_store=result_store,
+                allow_unenforced_worker_storage=args.allow_unenforced_worker_storage,
             )
         elif args.command == "result":
             result_store = _build_result_store(control)

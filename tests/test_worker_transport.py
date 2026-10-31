@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import http.client
 import io
@@ -207,6 +208,32 @@ class FileGatewayClientTests(unittest.TestCase):
 
             with self.assertRaisesRegex(WorkerTransportError, "ambiguous"):
                 client.exchange("run.describe", {})
+
+    def test_mailbox_lock_contention_obeys_the_exchange_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            client = FileGatewayClient(mailbox, timeout=0.1)
+            locked = os.open(mailbox / "request.json", os.O_RDWR)
+            fcntl.flock(locked, fcntl.LOCK_EX)
+
+            started = time.monotonic()
+            try:
+                with self.assertRaisesRegex(WorkerTransportError, "lock timed out"):
+                    client.exchange("run.describe", {})
+            finally:
+                fcntl.flock(locked, fcntl.LOCK_UN)
+                os.close(locked)
+
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertEqual((mailbox / "request.ready").read_bytes(), b"")
 
     def test_sequence_exhaustion_fails_before_overwriting_the_mailbox(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
@@ -469,6 +496,77 @@ class ProviderHTTPTransportTests(unittest.TestCase):
     def test_loopback_handler_has_a_bounded_idle_timeout(self) -> None:
         self.assertIsInstance(_TransportHandler.timeout, float)
         self.assertGreater(_TransportHandler.timeout, 0)
+
+    def test_loopback_server_rejects_excess_clients_without_dispatching(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingGateway(RecordingGateway):
+            def exchange(
+                self,
+                operation: str,
+                payload: dict[str, Any],
+                *,
+                timeout: float | None = None,
+            ) -> dict[str, Any]:
+                self.calls.append((operation, payload))
+                self.timeouts.append(timeout)
+                entered.set()
+                if not release.wait(2):  # pragma: no cover - asserted below
+                    raise AssertionError("test did not release gateway")
+                return self.response
+
+        gateway = BlockingGateway("openai-responses")
+        transport = ProviderHTTPTransport(
+            gateway, dialect="openai-responses", grant="provider-main"
+        )
+        server = _TransportServer(("127.0.0.1", 0), transport, max_concurrency=1)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
+        first_status: list[int] = []
+
+        def first_request() -> None:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=2
+            )
+            connection.request(
+                "POST",
+                "/v1/responses",
+                body='{"model":"x","stream":true}',
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            response.read()
+            first_status.append(response.status)
+            connection.close()
+
+        first = threading.Thread(target=first_request)
+        first.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            second = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=1
+            )
+            second.request(
+                "POST",
+                "/v1/responses",
+                body='{"model":"x","stream":true}',
+                headers={"Content-Type": "application/json"},
+            )
+            response = second.getresponse()
+            response.read()
+            second.close()
+
+            self.assertEqual(response.status, 503)
+            self.assertEqual(len(gateway.calls), 1)
+        finally:
+            release.set()
+            first.join(2)
+            server.shutdown()
+            server.server_close()
+            server_thread.join(2)
+
+        self.assertEqual(first_status, [200])
 
     def test_vendor_dialects_strip_model_and_forward_buffered_sse(self) -> None:
         cases = (

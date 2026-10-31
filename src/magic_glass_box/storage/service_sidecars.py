@@ -717,12 +717,17 @@ class ServiceSidecarStorage:
             sidecar_spec.validate_operation(spec.connector_name, spec)
         except ValidationError as exc:
             raise ConflictError(str(exc)) from exc
+        if (
+            spec.capability.name == "refs.publish"
+            and project_capability_binding_id is None
+        ):
+            raise ConflictError("candidate publication requires project authority")
         if project_capability_binding_id is not None:
             binding = connection.execute(
                 "SELECT b.state, b.capability_name, "
                 "b.capability_version, b.capability_mode, "
                 "b.service_sidecar_id, b.sidecar_content_sha256, "
-                "b.deployment_sha256, b.mapping_name, "
+                "b.deployment_sha256, b.mapping_name, b.project_id, "
                 "p.active AS project_active "
                 "FROM project_capability_bindings b "
                 "JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
@@ -747,6 +752,45 @@ class ServiceSidecarStorage:
                 raise ConflictError(
                     "project capability binding does not authorize operation"
                 )
+            if spec.capability.name == "refs.publish":
+                candidate = connection.execute(
+                    "SELECT project_id, head_revision, object_format "
+                    "FROM integration_candidates WHERE id = ?",
+                    (spec.target.resource_id,),
+                ).fetchone()
+                if candidate is None:
+                    raise ConflictError("publication candidate is unavailable")
+                if candidate["project_id"] != binding["project_id"]:
+                    raise ConflictError(
+                        "publication candidate belongs to another project"
+                    )
+                if (
+                    spec.target.expected_revision is not None
+                    or spec.target.desired_revision is None
+                    or spec.target.object_format != candidate["object_format"]
+                ):
+                    raise ConflictError("publication candidate identity is invalid")
+                revision_is_known = (
+                    spec.target.desired_revision == candidate["head_revision"]
+                )
+                if not revision_is_known:
+                    revision_is_known = (
+                        connection.execute(
+                            "SELECT 1 FROM integration_folds "
+                            "WHERE candidate_id = ? AND head_revision = ? "
+                            "AND object_format = ? LIMIT 1",
+                            (
+                                spec.target.resource_id,
+                                spec.target.desired_revision,
+                                spec.target.object_format,
+                            ),
+                        ).fetchone()
+                        is not None
+                    )
+                if not revision_is_known:
+                    raise ConflictError(
+                        "publication revision is not bound to the candidate"
+                    )
         existing = connection.execute(
             "SELECT o.id, o.content_sha256, ob.project_capability_binding_id "
             "FROM service_operations o "
@@ -911,6 +955,31 @@ class ServiceSidecarStorage:
                 ),
             )
 
+    def _commit_expired_service_operation_attempts(
+        self, operation_id: str, *, now: str
+    ) -> None:
+        """Commit lease recovery independently of the caller's stale version."""
+
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT service_sidecar_id FROM service_operations WHERE id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is not None:
+                    self._expire_service_operation_attempts(
+                        connection,
+                        sidecar_id=row["service_sidecar_id"],
+                        now=now,
+                    )
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "expired service operation attempts could not be recovered"
+                ) from exc
+
     def begin_service_operation_attempt(
         self,
         operation_id: str,
@@ -930,6 +999,7 @@ class ServiceSidecarStorage:
         now = now_dt.isoformat(timespec="microseconds")
         attempt_id = self.new_id("soa")
         request: ServiceOperationRequest | None = None
+        self._commit_expired_service_operation_attempts(operation_id, now=now)
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -949,24 +1019,6 @@ class ServiceSidecarStorage:
                 ).fetchone()
                 if row is None:
                     raise NotFoundError(f"service operation not found: {operation_id}")
-                self._expire_service_operation_attempts(
-                    connection, sidecar_id=row["sidecar_id"], now=now
-                )
-                row = connection.execute(
-                    "SELECT o.id, o.state, o.version, o.eligible_at, "
-                    "o.capability_mode, "
-                    "o.spec_json AS operation_spec_json, "
-                    "o.content_sha256 AS operation_content_sha256, o.input_sha256, "
-                    "s.id AS sidecar_id, s.state AS sidecar_state, "
-                    "s.connector_protocol_version, "
-                    "s.spec_json AS sidecar_spec_json, "
-                    "s.content_sha256 AS sidecar_content_sha256 "
-                    "FROM service_operations o "
-                    "JOIN service_sidecars s ON s.id = o.service_sidecar_id "
-                    "WHERE o.id = ?",
-                    (operation_id,),
-                ).fetchone()
-                assert row is not None
                 if row["version"] != expected_version:
                     raise ConcurrentUpdateError(
                         f"service operation version is {row['version']}, "
@@ -1181,6 +1233,9 @@ class ServiceSidecarStorage:
                     eligible_at = (now_dt + timedelta(seconds=delay)).isoformat(
                         timespec="microseconds"
                     )
+                    if row["phase"] == "reconcile":
+                        state = "uncertain"
+                        eligible_at = None
                 elif response.outcome in {"succeeded", "denied", "conflict"}:
                     completed_at = now
                 receipt_json = None
@@ -1274,8 +1329,9 @@ class ServiceSidecarStorage:
                     expected_operation_version=expected_operation_version,
                 )
                 operation_id = row["operation_id"]
-                retryable = outcome == "unavailable" or (
-                    outcome == "ambiguous" and row["capability_mode"] == "read"
+                retryable = row["phase"] != "reconcile" and (
+                    outcome == "unavailable"
+                    or (outcome == "ambiguous" and row["capability_mode"] == "read")
                 )
                 state = "retryable" if retryable else "uncertain"
                 retry_after = (

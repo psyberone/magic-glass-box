@@ -232,6 +232,8 @@ PYTHONPATH=src python3.11 -m magic_glass_box --db ./control-plane.db \
 ```
 
 The response item is an explicit operator choice. Magic Glass Box does not
-currently infer an answer from arbitrary session activity: Imitation Krab does
-not yet expose a trusted reply-to relationship, so automatic selection could
-mistake an unrelated human-to-agent message for the answer.
+currently infer an answer from arbitrary session activity. When Imitation Krab
+supplies schema-v8 reply metadata, MGB requires the response's trusted
+`in_reply_to_item_id` to name the exact request. Legacy absent-field metadata is
+accepted for rolling compatibility; automatic selection still requires a
+durable supervised inbox cursor and acknowledgement loop.

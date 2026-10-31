@@ -284,6 +284,7 @@ class ControlPlane:
             except CandidateError:
                 pass
             else:
+                candidate_store.bind_candidate_identity(existing["id"], recorded)
                 return existing
         repository_path = source["repository_path"]
         if repository_path is None:
@@ -363,8 +364,11 @@ class ControlPlane:
                 raise ConflictError(
                     "candidate materialization does not match durable record"
                 )
+            candidate_store.bind_candidate_identity(existing["id"], manifest)
             return existing
-        return self.database.create_candidate(manifest, created_by=creator["id"])
+        created = self.database.create_candidate(manifest, created_by=creator["id"])
+        candidate_store.bind_candidate_identity(created["id"], manifest)
+        return created
 
     def get_candidate(
         self,
@@ -387,6 +391,7 @@ class ControlPlane:
             manifest,
             Path(repository_path),
         )
+        candidate_store.bind_candidate_identity(candidate["id"], manifest)
         return candidate
 
     def list_candidates(
@@ -829,9 +834,23 @@ class ControlPlane:
         if manifest.policy.review_separation is None:
             raise ConflictError("gate policy does not require independent review")
         try:
-            gate_outcome = GateOutcome(outcome)
+            requested_outcome = GateOutcome(outcome)
         except (TypeError, ValueError) as exc:
             raise ValidationError("review outcome must be passed or failed") from exc
+        verdict = self.database.get_typed_review_verdict(
+            policy_id, provenance["reviewer"].run_id
+        )
+        if verdict is None or verdict["reviewer_attempt_id"] != reviewer_attempt_id:
+            raise ConflictError(
+                "review evidence requires the reviewer's typed review verdict"
+            )
+        gate_outcome = (
+            GateOutcome.PASSED
+            if verdict["outcome"] == "approved"
+            else GateOutcome.FAILED
+        )
+        if requested_outcome is not gate_outcome:
+            raise ConflictError("review evidence does not match the typed verdict")
         evidence = ReviewEvidence(
             schema_version=GATE_EVIDENCE_SCHEMA_VERSION,
             inputs=ExactGateInputs.from_policy(policy_id, manifest),
@@ -2820,6 +2839,7 @@ class ControlPlane:
             item_id=None,
             created=True,
         )
+        self._verify_interaction_reply_binding(item, expected_item_id=None)
         expected_claim_id = route["krab_claim_id"]
         actual_claim_id = (
             item.work_claim.claim_id if item.work_claim is not None else None
@@ -2927,6 +2947,7 @@ class ControlPlane:
             item_id=interaction["request_item_id"],
             created=False,
         )
+        self._verify_interaction_reply_binding(request_item, expected_item_id=None)
         item = client.get_session_item(
             route["project_key"], route["krab_session_id"], response_item_id
         )
@@ -2939,6 +2960,10 @@ class ControlPlane:
             item_id=response_item_id,
             created=False,
             answer_eligible=True,
+        )
+        self._verify_interaction_reply_binding(
+            item,
+            expected_item_id=interaction["request_item_id"],
         )
         request_sequence = self._interaction_item_creation_sequence(request_item)
         response_sequence = self._interaction_item_creation_sequence(item)
@@ -2993,6 +3018,10 @@ class ControlPlane:
             recipient_user_id=agent["krab_user_id"],
             item_id=response_item_id,
             created=False,
+        )
+        self._verify_interaction_reply_binding(
+            item,
+            expected_item_id=interaction["request_item_id"],
         )
         return AcceptedInteractionResponse(
             interaction_id=interaction["id"],
@@ -3237,6 +3266,13 @@ class ControlPlane:
         ):
             raise KrabError("interaction item has invalid creation history")
         return event.event_seq
+
+    @staticmethod
+    def _verify_interaction_reply_binding(
+        item: SessionItem, *, expected_item_id: str | None
+    ) -> None:
+        if item.reply_binding_present and item.in_reply_to_item_id != expected_item_id:
+            raise KrabError("interaction item has an unexpected reply binding")
 
 
 def activity_to_dict(page: ActivityPage) -> dict[str, Any]:

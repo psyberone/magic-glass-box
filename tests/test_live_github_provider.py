@@ -240,6 +240,7 @@ class LiveGitHubProviderProofTests(unittest.TestCase):
             deployment_sha256=DEPLOYMENT,
         )
         candidate = CandidateArtifact(
+            candidate_id="cnd_" + "1" * 32,
             repository=self.root / "candidates" / "repository.git",
             revision=HEAD,
             proof_path="docs/mgb-live-proof-proof.md",
@@ -249,11 +250,11 @@ class LiveGitHubProviderProofTests(unittest.TestCase):
             proof_id="proof",
             capability="refs.publish",
             phase="invoke",
-            resource_id="refs/heads/mgb/live-proof-proof",
+            resource_id=candidate.candidate_id,
             object_format="sha1",
             expected_revision=None,
             desired_revision=HEAD,
-            parameters={"source_repository": str(candidate.repository)},
+            parameters={"target_ref": "refs/heads/mgb/live-proof-proof"},
         )
 
         self.assertEqual(request.mapping.repository, "acme/widgets")

@@ -757,11 +757,25 @@ class AttemptStorage:
                             "result_id": result["id"],
                             "result_sha256": result["content_sha256"],
                         }
+                        target = (
+                            RunState.FAILED
+                            if outcome is AttemptState.FAILED
+                            else RunState.QUEUED
+                        )
+                        if reason is not None:
+                            run_metadata["reason"] = reason
+                        finished_at = now if target is RunState.FAILED else None
                         run_changed = connection.execute(
-                            "UPDATE runs SET state = 'queued', "
-                            "version = version + 1, updated_at = ?, "
-                            "finished_at = NULL WHERE id = ? AND version = ?",
-                            (now, attempt["run_id"], attempt["run_version"]),
+                            "UPDATE runs SET state = ?, version = version + 1, "
+                            "updated_at = ?, finished_at = ? "
+                            "WHERE id = ? AND version = ?",
+                            (
+                                target.value,
+                                now,
+                                finished_at,
+                                attempt["run_id"],
+                                attempt["run_version"],
+                            ),
                         ).rowcount
                         if run_changed != 1:
                             raise ConcurrentUpdateError("run changed concurrently")
@@ -769,10 +783,11 @@ class AttemptStorage:
                             "INSERT INTO run_events "
                             "(run_id, sequence, kind, from_state, to_state, "
                             "metadata_json, created_at) VALUES (?, ?, "
-                            "'run.transitioned', 'waiting_for_input', 'queued', ?, ?)",
+                            "'run.transitioned', 'waiting_for_input', ?, ?, ?)",
                             (
                                 attempt["run_id"],
                                 attempt["run_version"] + 1,
+                                target.value,
                                 canonical_json(run_metadata),
                                 now,
                             ),
@@ -965,9 +980,50 @@ class AttemptStorage:
                             now,
                         ),
                     )
+                elif run_state is RunState.WAITING_FOR_INPUT:
+                    open_interaction = connection.execute(
+                        "SELECT 1 FROM interactions WHERE run_id = ? "
+                        "AND state = 'open' LIMIT 1",
+                        (attempt["run_id"],),
+                    ).fetchone()
+                    if open_interaction is None:
+                        target = (
+                            RunState.QUEUED
+                            if outcome is AttemptState.INTERRUPTED
+                            else RunState.FAILED
+                        )
+                        run_metadata = {"reason": reason}
+                        if interrupted:
+                            run_metadata["reconciled"] = True
+                        changed = connection.execute(
+                            "UPDATE runs SET state = ?, version = version + 1, "
+                            "updated_at = ?, finished_at = ? "
+                            "WHERE id = ? AND version = ?",
+                            (
+                                target.value,
+                                now,
+                                now if target is RunState.FAILED else None,
+                                attempt["run_id"],
+                                attempt["run_version"],
+                            ),
+                        ).rowcount
+                        if changed != 1:
+                            raise ConcurrentUpdateError("run changed concurrently")
+                        connection.execute(
+                            "INSERT INTO run_events "
+                            "(run_id, sequence, kind, from_state, to_state, "
+                            "metadata_json, created_at) VALUES (?, ?, "
+                            "'run.transitioned', 'waiting_for_input', ?, ?, ?)",
+                            (
+                                attempt["run_id"],
+                                attempt["run_version"] + 1,
+                                target.value,
+                                canonical_json(run_metadata),
+                                now,
+                            ),
+                        )
                 elif run_state not in {
                     RunState.QUEUED,
-                    RunState.WAITING_FOR_INPUT,
                     RunState.PAUSED,
                     RunState.CANCELLED,
                 }:

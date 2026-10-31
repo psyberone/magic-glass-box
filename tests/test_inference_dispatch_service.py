@@ -1618,6 +1618,13 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         self.assertEqual(invocation["dispatch_kind"], "direct")
         self.assertEqual(invocation["outcome"], "denied")
         self.assertEqual(invocation["error_code"], "legacy_direct_denied")
+        allowance = next(
+            item
+            for item in self.database.get_run(run["id"])["provider_grants"]
+            if item["name"] == "legacy-direct"
+        )
+        self.assertEqual(allowance["invocation_count"], 1)
+        self.assertEqual(allowance["remaining_invocations"], 63)
 
     def test_schema_fifteen_migrates_historical_direct_invocations_once(self) -> None:
         run = self.create_run()
