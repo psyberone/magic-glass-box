@@ -1741,6 +1741,7 @@ class WorkflowDirectorTests(unittest.TestCase):
                 jira_api_response(
                     200,
                     jira_issue(
+                        issue_id="jira-private-issue-10042",
                         title="Exercise the mixed-provider delivery path",
                     ),
                 )
@@ -2164,7 +2165,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             "e" * 64,
             "Operator",
             "In Progress",
-            "10042",
+            "jira-private-issue-10042",
             "jql",
             "transitionId",
             "ghp_",

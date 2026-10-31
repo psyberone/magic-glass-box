@@ -131,6 +131,7 @@ _DEFAULT_DESCRIPTION = object()
 def issue(
     *,
     key: str = "ABC-42",
+    issue_id: str = "10042",
     title: str = "Bounded Jira issue",
     description: object = _DEFAULT_DESCRIPTION,
     assignee: object = ...,
@@ -140,7 +141,7 @@ def issue(
     if assignee is ...:
         assignee = {"accountId": "jira-account-123", "displayName": "Operator"}
     return {
-        "id": "10042",
+        "id": issue_id,
         "key": key,
         "fields": {
             "summary": title,
