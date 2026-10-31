@@ -61,6 +61,7 @@ class SandboxPlanTests(unittest.TestCase):
         credential_files: dict[str, Path] | None = None,
         gateway_capabilities: tuple[GatewayCapability, ...] = (),
         gateway_directory: Path | None = None,
+        validation_tmpfs: bool = False,
     ) -> SandboxRequest:
         profile = AgentProfileSpec.create(
             image="agent:local",
@@ -80,6 +81,7 @@ class SandboxPlanTests(unittest.TestCase):
             ),
             credential_files={} if credential_files is None else credential_files,
             gateway_directory=gateway_directory,
+            validation_tmpfs=validation_tmpfs,
         )
 
     def private_gateway_directory(self) -> Path:
@@ -196,6 +198,118 @@ class SandboxPlanTests(unittest.TestCase):
         self.assertNotIn(
             "KRAB_TOKEN_FILE=/run/secrets/magic-glass-box/krab", plan.create_args
         )
+
+    def test_validation_plan_gets_only_a_bounded_executable_scratch_tmpfs(self) -> None:
+        plan = build_sandbox_plan(
+            self.request(validation_tmpfs=True),
+            DockerImage(IMAGE_ID, ()),
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+
+        tmpfs_values = [
+            plan.create_args[index + 1]
+            for index, value in enumerate(plan.create_args)
+            if value == "--tmpfs"
+        ]
+        self.assertEqual(
+            tmpfs_values,
+            [
+                f"/tmp:rw,nosuid,nodev,noexec,size={256 * 1024 * 1024}",  # noqa: S108
+                (
+                    "/run/magic-glass-box-validation-tmp:"
+                    f"rw,nosuid,nodev,exec,size={256 * 1024 * 1024},"
+                    f"mode=0700,uid={os.getuid()},gid={os.getgid()}"
+                ),
+            ],
+        )
+        self.assertIn("TMPDIR=/run/magic-glass-box-validation-tmp", plan.create_args)
+        self.assertIn("--read-only", plan.create_args)
+        self.assertEqual(
+            plan.create_args[plan.create_args.index("--network") + 1], "none"
+        )
+
+    def test_validation_tmpfs_rejects_worker_authority_and_invalid_flags(self) -> None:
+        base = self.request(validation_tmpfs=True)
+        gateway_directory = self.private_gateway_directory()
+        legacy_profile = AgentProfileSpec(
+            image=base.profile.image,
+            command=base.profile.command,
+            workspace_mode=WorkspaceMode.READ_ONLY,
+            network_mode=NetworkMode.NONE,
+            credential_names=("krab",),
+        )
+        invalid_flag = SandboxRequest(
+            run_id=base.run_id,
+            profile=base.profile,
+            workspace=base.workspace,
+            launch=base.launch,
+            validation_tmpfs=1,  # type: ignore[arg-type]
+        )
+        cases = (
+            (
+                self.request(
+                    workspace_mode=WorkspaceMode.COPY_ON_WRITE,
+                    validation_tmpfs=True,
+                ),
+                "read-only workspace",
+            ),
+            (
+                self.request(
+                    network_mode=NetworkMode.GATEWAY_ONLY,
+                    credential_names=("krab",),
+                    gateway_capabilities=(GatewayCapability.INTERACTION_READ,),
+                    gateway_directory=gateway_directory,
+                    validation_tmpfs=True,
+                ),
+                "networkless",
+            ),
+            (
+                SandboxRequest(
+                    run_id=base.run_id,
+                    profile=base.profile,
+                    workspace=base.workspace,
+                    launch=base.launch,
+                    credential_files={"krab": self.token},
+                    validation_tmpfs=True,
+                ),
+                "credentials or gateway",
+            ),
+            (
+                SandboxRequest(
+                    run_id=base.run_id,
+                    profile=legacy_profile,
+                    workspace=base.workspace,
+                    launch=base.launch,
+                    validation_tmpfs=True,
+                ),
+                "credentials or gateway",
+            ),
+            (
+                SandboxRequest(
+                    run_id=base.run_id,
+                    profile=base.profile,
+                    workspace=base.workspace,
+                    launch=base.launch,
+                    gateway_directory=gateway_directory,
+                    validation_tmpfs=True,
+                ),
+                "credentials or gateway",
+            ),
+            (invalid_flag, "boolean"),
+        )
+
+        for request, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ExecutionError, message),
+            ):
+                build_sandbox_plan(
+                    request,
+                    DockerImage(IMAGE_ID, ()),
+                    uid=os.getuid(),
+                    gid=os.getgid(),
+                )
 
     def test_gateway_only_plan_mounts_only_the_mailbox_and_no_credentials(
         self,
@@ -322,22 +436,26 @@ class SandboxPlanTests(unittest.TestCase):
             )
 
     def test_runtime_environment_cannot_override_sandbox_policy(self) -> None:
-        request = self.request(credential_names=(), credential_files={})
-        request = SandboxRequest(
-            run_id=request.run_id,
-            profile=request.profile,
-            workspace=request.workspace,
-            launch=RuntimeLaunch(("worker",), (("HOME", "/workspace"),)),
-            credential_files={},
-        )
-
-        with self.assertRaisesRegex(ExecutionError, "reserved environment"):
-            build_sandbox_plan(
-                request,
-                DockerImage(IMAGE_ID, ()),
-                uid=os.getuid(),
-                gid=os.getgid(),
+        base = self.request(credential_names=(), credential_files={})
+        for name in ("HOME", "TMPDIR"):
+            request = SandboxRequest(
+                run_id=base.run_id,
+                profile=base.profile,
+                workspace=base.workspace,
+                launch=RuntimeLaunch(("worker",), ((name, "/workspace"),)),
+                credential_files={},
             )
+
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(ExecutionError, "reserved environment"),
+            ):
+                build_sandbox_plan(
+                    request,
+                    DockerImage(IMAGE_ID, ()),
+                    uid=os.getuid(),
+                    gid=os.getgid(),
+                )
 
     def test_gateway_mailbox_rejects_unsafe_filesystem_shapes(self) -> None:
         def request_for(path: Path) -> SandboxRequest:

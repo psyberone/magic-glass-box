@@ -212,8 +212,11 @@ project-activity projection.
   integration ref, expected base, head/tree, object format, and policy
   revision. Independent-review runs are durably bound to that exact candidate
   and receive its private snapshot; local validation runs networkless and
-  credentialless against a read-only snapshot. Append-only bounded evidence
-  derives readiness without retaining review transcripts or command output.
+  credentialless against a read-only snapshot. A separately mounted,
+  size-bounded ephemeral scratch filesystem may execute repository-owned test
+  helpers; it carries no gateway or reusable authority and disappears with the
+  validation container. Append-only bounded evidence derives readiness without
+  retaining review transcripts or command output.
 - Schema v26 adds immutable changes-requested run bindings. A correction run
   requires the current failed independent-review evidence plus an exact-head
   review work-log entry from that reviewer attempt, receives the prior

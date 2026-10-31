@@ -980,7 +980,7 @@ class ControlPlane:
         candidate_store: GitCandidateStore,
         executor: DockerExecutor,
     ) -> dict[str, Any]:
-        """Run one policy-pinned check in an isolated read-only candidate tree."""
+        """Run a policy-pinned check with bounded validation-only scratch space."""
 
         from .executor import SandboxRequest
 
@@ -1050,6 +1050,7 @@ class ControlPlane:
                         ),
                     ),
                 ),
+                validation_tmpfs=True,
             )
             started = time.monotonic()
             result = executor.execute(request)

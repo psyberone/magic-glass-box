@@ -33,6 +33,7 @@ MIN_MEMORY_BYTES = 64 * 1024 * 1024
 MAX_MEMORY_BYTES = 64 * 1024 * 1024 * 1024
 MIN_TMPFS_BYTES = 16 * 1024 * 1024
 MAX_TMPFS_BYTES = 4 * 1024 * 1024 * 1024
+VALIDATION_TMPFS_ROOT = "/run/magic-glass-box-validation-tmp"
 MANAGED_LABEL = "io.magicglassbox.managed"
 RUN_ID_LABEL = "io.magicglassbox.run-id"
 LEGACY_MANAGED_LABEL = "io.hexadecapus.managed"
@@ -44,6 +45,7 @@ RESERVED_RUNTIME_ENVIRONMENT = {
     "MAGIC_GLASS_BOX_CREDENTIAL_DIR",
     "MAGIC_GLASS_BOX_GATEWAY_DIR",
     "MAGIC_GLASS_BOX_RUN_ID",
+    "TMPDIR",
 }
 
 
@@ -110,6 +112,7 @@ class SandboxRequest:
     launch: RuntimeLaunch
     credential_files: Mapping[str, Path] = field(default_factory=dict)
     gateway_directory: Path | None = None
+    validation_tmpfs: bool = False
 
 
 @dataclass(frozen=True)
@@ -209,6 +212,21 @@ def build_sandbox_plan(
         raise ExecutionError(
             "krab_only networking is retired; use the run-scoped gateway"
         )
+    if not isinstance(request.validation_tmpfs, bool):
+        raise ExecutionError("validation tmpfs flag must be boolean")
+    if request.validation_tmpfs:
+        if request.profile.workspace_mode is not WorkspaceMode.READ_ONLY:
+            raise ExecutionError("validation tmpfs requires a read-only workspace")
+        if request.profile.network_mode is not NetworkMode.NONE:
+            raise ExecutionError("validation tmpfs requires a networkless sandbox")
+        if (
+            request.credential_files
+            or request.profile.credential_names
+            or request.gateway_directory is not None
+        ):
+            raise ExecutionError(
+                "validation tmpfs cannot accompany credentials or gateway authority"
+            )
     if (
         not isinstance(image.image_id, str)
         or IMAGE_ID_RE.fullmatch(image.image_id) is None
@@ -253,6 +271,21 @@ def build_sandbox_plan(
     if request.profile.workspace_mode is WorkspaceMode.READ_ONLY:
         workspace_mount += ",readonly"
 
+    tmpfs_args = [
+        "--tmpfs",
+        f"/tmp:rw,nosuid,nodev,noexec,size={policy.tmpfs_bytes}",  # noqa: S108
+    ]
+    if request.validation_tmpfs:
+        tmpfs_args.extend(
+            (
+                "--tmpfs",
+                (
+                    f"{VALIDATION_TMPFS_ROOT}:rw,nosuid,nodev,exec,"
+                    f"size={policy.tmpfs_bytes},mode=0700,uid={uid},gid={gid}"
+                ),
+            )
+        )
+
     args = [
         "container",
         "create",
@@ -290,8 +323,7 @@ def build_sandbox_plan(
         "magic-glass-box-agent",
         "--workdir",
         "/workspace",
-        "--tmpfs",
-        f"/tmp:rw,nosuid,nodev,noexec,size={policy.tmpfs_bytes}",  # noqa: S108
+        *tmpfs_args,
         "--log-driver",
         "local",
         "--log-opt",
@@ -306,6 +338,8 @@ def build_sandbox_plan(
         "--env",
         f"MAGIC_GLASS_BOX_RUN_ID={request.run_id}",
     ]
+    if request.validation_tmpfs:
+        args.extend(("--env", f"TMPDIR={VALIDATION_TMPFS_ROOT}"))
     for name in sorted(runtime_environment):
         args.extend(("--env", f"{name}={runtime_environment[name]}"))
     if gateway is not None:

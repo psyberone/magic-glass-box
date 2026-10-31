@@ -2357,6 +2357,7 @@ class GateLedgerTests(unittest.TestCase):
                 self.assertEqual(request.profile.network_mode, NetworkMode.NONE)
                 self.assertEqual(request.credential_files, {})
                 self.assertIsNone(request.gateway_directory)
+                self.assertIs(request.validation_tmpfs, True)
                 self.assertEqual(
                     request.launch.environment,
                     (

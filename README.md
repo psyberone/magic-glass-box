@@ -87,9 +87,10 @@ This repository currently contains the first executable vertical slice:
 - immutable exact-input gate policies that bind repository/ref/base/head/tree
   identity, candidate-backed independent-review runs with an explicit profile
   and/or identity separation policy, networkless read-only local validation,
-  an optional operator-recorded maintainer product disposition, append-only
-  bounded evidence, and derived readiness without agent transcripts or command
-  output;
+  a bounded executable scratch filesystem for repository-owned validation
+  helpers but no credentials or gateway authority, an optional
+  operator-recorded maintainer product disposition, append-only bounded
+  evidence, and derived readiness without agent transcripts or command output;
 - hard work-item landing dependencies, immutable deterministic refolds, one
   leased integration lane per ref, exact argv-only manual Git plans, and
   reissuable nonce-bound receipts that either confirm the unchanged base or
