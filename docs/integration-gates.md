@@ -88,6 +88,16 @@ Review profiles are required to use `workspace_mode: read_only`. That check is
 performed when review runs and replacements are created and again when review
 evidence is accepted; it is not merely a reviewer prompt convention.
 
+`run.describe` gives that reviewer two distinct bounded inputs. The
+control-plane-attested `change_set` binds the exact base, head, tree, result
+digest, total path and byte counts, and up to 64 sorted path operations with
+before/post-image metadata; `changes_truncated` says when the path list is not
+complete. The authoritative `validation_plan` separately identifies the
+immutable checks MGB will execute only after review approval. The review
+verdict is product and candidate judgment, not validation evidence, and does
+not itself establish gate readiness. Missing reviewer-side tooling for that
+later validation is therefore not an actionable producer defect.
+
 A reviewer records one typed v2 `review` work-log verdict before its attempt
 exits, with `review_outcome` set to `approved` or `changes_requested` and
 `candidate_revision` set to the exact reviewed head. Changes requested require
@@ -139,6 +149,10 @@ ledger retains exit status, duration, image and command identities, and a hash
 and byte count of output; output itself is discarded. A folded policy resolves
 the derived base/head/tree for both validation and independent-review
 workspaces, including deterministic recovery after private-cache loss.
+
+For `implementation-v1`, this validation stage begins only after a successful
+independent-review verdict. Review approval supplies one required evidence
+class; validation supplies another. Neither substitutes for the other.
 
 Some checks described as “post-landing-only” can be reproduced against a folded
 tree before landing; those are readiness gates. A check that truly cannot run

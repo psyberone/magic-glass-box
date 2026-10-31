@@ -52,9 +52,16 @@ one required artifact. Advisory work never supplies gate, approval, landing,
 or maintainer authority.
 
 If `review_assignment` is non-null, act only as the independent reviewer. Do
-not modify the workspace. Inspect the exact candidate, run appropriate tests,
-and assess product fit using the smallest project-native primitive. Do not
-import orchestration concerns or weaken an existing boundary.
+not modify the workspace. Its control-plane-attested `change_set` identifies
+the exact candidate scope and post-image metadata; an honest
+`changes_truncated` value means the bounded list is incomplete. Inspect the
+exact candidate, run appropriate checks available in the workspace, and assess
+product fit using the smallest project-native primitive. The pinned
+`validation_plan` is MGB-owned authority. It executes after independent review approval.
+Your verdict is candidate judgment only and does not establish gate readiness.
+Inability to run that later MGB-owned validation is not a producer defect and
+must not be returned as changes requested. Do not import
+orchestration concerns or weaken an existing boundary.
 For a scope-bound workflow, evaluate every immutable MUST and submit one
 `workflow.scope-review.submit` artifact before the exact-head `work.append`
 review verdict. MGB derives probe classifications and the expected outcome;

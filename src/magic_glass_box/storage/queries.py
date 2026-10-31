@@ -12,10 +12,14 @@ from ..domain import (
     ValidationError,
     WorkItemEnvelope,
 )
+from ..gates import GateError, GatePolicyManifest
+from ..results import ResultError, ResultManifest
 from .errors import (
     NotFoundError,
     StorageError,
 )
+
+MAX_REVIEW_CHANGE_SET_ENTRIES = 64
 
 
 class QueryStorage:
@@ -49,6 +53,18 @@ class QueryStorage:
                 "review_policy.head_revision AS review_head_revision, "
                 "review_policy.policy_revision AS review_policy_revision, "
                 "review_policy.review_separation AS review_separation, "
+                "review_policy.manifest_json AS review_policy_manifest_json, "
+                "review_candidate.producer_attempt_id "
+                "AS review_producer_attempt_id, "
+                "review_candidate.base_revision AS review_base_revision, "
+                "review_candidate.head_revision AS review_candidate_head_revision, "
+                "review_candidate.tree_revision AS review_tree_revision, "
+                "review_candidate.result_content_sha256 "
+                "AS review_result_content_sha256, "
+                "review_result.manifest_json AS review_result_manifest_json, "
+                "review_result.content_sha256 AS review_result_record_sha256, "
+                "review_result.changed_paths AS review_changed_paths, "
+                "review_result.changed_bytes AS review_changed_bytes, "
                 "gcr.policy_id AS change_policy_id, "
                 "gcr.candidate_id AS change_candidate_id, "
                 "gcr.review_evidence_id AS change_review_evidence_id, "
@@ -87,6 +103,10 @@ class QueryStorage:
                 "LEFT JOIN integration_gate_review_runs grr ON grr.run_id = r.id "
                 "LEFT JOIN integration_gate_policies review_policy "
                 "ON review_policy.id = grr.policy_id "
+                "LEFT JOIN integration_candidates review_candidate "
+                "ON review_candidate.id = grr.candidate_id "
+                "LEFT JOIN attempt_results review_result "
+                "ON review_result.id = review_candidate.attempt_result_id "
                 "LEFT JOIN integration_gate_change_runs gcr ON gcr.run_id = r.id "
                 "LEFT JOIN integration_gate_maintainer_change_runs gmcr "
                 "ON gmcr.run_id = r.id "
@@ -314,17 +334,7 @@ class QueryStorage:
             after_sequence=None,
             limit=16,
         )
-        result["review_assignment"] = (
-            None
-            if result["review_candidate_id"] is None
-            else {
-                "policy_id": result["gate_policy_id"],
-                "candidate_id": result["review_candidate_id"],
-                "head_revision": result["review_head_revision"],
-                "policy_revision": result["review_policy_revision"],
-                "review_separation": result["review_separation"],
-            }
-        )
+        result["review_assignment"] = self._review_assignment_record(result)
         change_entry_id = result["change_review_entry_id"]
         maintainer_review_id = result["change_maintainer_review_id"]
         if change_entry_id is not None and maintainer_review_id is not None:
@@ -356,6 +366,81 @@ class QueryStorage:
         else:
             result["changes_requested"] = None
         return result
+
+    @staticmethod
+    def _review_assignment_record(result: dict[str, Any]) -> dict[str, Any] | None:
+        policy_id = result["gate_policy_id"]
+        candidate_id = result["review_candidate_id"]
+        head_revision = result["review_head_revision"]
+        policy_revision = result["review_policy_revision"]
+        review_separation = result["review_separation"]
+        policy_json = result.pop("review_policy_manifest_json")
+        producer_attempt_id = result.pop("review_producer_attempt_id")
+        base_revision = result.pop("review_base_revision")
+        candidate_head_revision = result.pop("review_candidate_head_revision")
+        tree_revision = result.pop("review_tree_revision")
+        result_content_sha256 = result.pop("review_result_content_sha256")
+        result_json = result.pop("review_result_manifest_json")
+        result_record_sha256 = result.pop("review_result_record_sha256")
+        changed_paths = result.pop("review_changed_paths")
+        changed_bytes = result.pop("review_changed_bytes")
+        if candidate_id is None:
+            return None
+        try:
+            policy = GatePolicyManifest.from_mapping(json.loads(policy_json))
+            manifest = ResultManifest.from_mapping(json.loads(result_json))
+        except (GateError, ResultError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageError("stored review assignment is invalid") from exc
+        if (
+            policy_id is None
+            or policy.candidate_id != candidate_id
+            or policy.head_revision != head_revision
+            or policy.head_revision != candidate_head_revision
+            or policy.expected_base_revision != base_revision
+            or policy.tree_revision != tree_revision
+            or policy.policy_revision != policy_revision
+            or policy.policy.review_separation is None
+            or policy.policy.review_separation.value != review_separation
+            or manifest.attempt_id != producer_attempt_id
+            or manifest.source_revision != base_revision
+            or manifest.digest != result_content_sha256
+            or manifest.digest != result_record_sha256
+            or manifest.changed_paths != changed_paths
+            or manifest.changed_bytes != changed_bytes
+        ):
+            raise StorageError("stored review assignment evidence does not match")
+        changes = manifest.changes[:MAX_REVIEW_CHANGE_SET_ENTRIES]
+        return {
+            "policy_id": policy_id,
+            "candidate_id": candidate_id,
+            "head_revision": head_revision,
+            "policy_revision": policy_revision,
+            "review_separation": review_separation,
+            "change_set": {
+                "schema_version": manifest.schema_version,
+                "candidate_id": candidate_id,
+                "base_revision": base_revision,
+                "head_revision": candidate_head_revision,
+                "tree_revision": tree_revision,
+                "result_content_sha256": result_content_sha256,
+                "changed_paths": changed_paths,
+                "changed_bytes": changed_bytes,
+                "changes": [change.to_dict() for change in changes],
+                "changes_truncated": len(changes) != manifest.changed_paths,
+            },
+            "validation_plan": {
+                "execution_order": "after_independent_review_approval",
+                "review_verdict_scope": "candidate_judgment_only",
+                "review_approval_establishes_gate_readiness": False,
+                "validations": [
+                    {
+                        **validation.to_dict(),
+                        "command_sha256": validation.command_sha256,
+                    }
+                    for validation in policy.policy.validations
+                ],
+            },
+        }
 
     def get_run_transport(self, run_id: str) -> dict[str, Any]:
         """Load trusted Krab routing metadata pinned by a run."""

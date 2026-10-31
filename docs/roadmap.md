@@ -2035,7 +2035,7 @@ report retains every review finding, ruling, limitation, and evidence pointer.
 
 ## Milestone 16: controlled dogfood and operating evidence
 
-**Status: ready; execution begins from the frozen Gate 15→16 commit**
+**Status: in progress; retained dogfood rounds are driving bounded remediation**
 
 Run the frozen MGB build as coordinator against a separate isolated MGB
 checkout and one small, real work item. Avoid a first-run schema or bootstrap
@@ -2048,6 +2048,17 @@ A genuine changes-requested verdict must return to the original producer and
 complete through a fresh candidate if it occurs; the proof must not manufacture
 a rejection. Failed or stalled dogfood is retained and remediated rather than
 rewritten into a ceremonial pass.
+
+The first retained round exposed a no-change correction retry loop; MGB now
+stops that exact condition at one durable producer-failed ruling. The second
+round proved restart recovery and reached a genuine independent-review
+changes-requested verdict, then stopped honestly when the reviewer requested
+exact-diff and validation evidence that its minimal workspace could not
+produce. The bounded remediation gives reviewers host-captured exact-candidate
+change metadata, states that configured validation is separate MGB-owned work
+after approval, and equips the next dogfood's project profiles with the
+repository toolchain. Neither stopped workflow is rewritten or resolved by the
+remediation.
 
 Before the run, the Panopticon coordinator helps define the bounded observation
 rubric in

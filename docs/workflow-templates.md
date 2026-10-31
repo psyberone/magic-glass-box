@@ -270,6 +270,10 @@ integration ledger remains truthful.
 - Passing review runs every configured immutable validation in the existing
   networkless read-only sandbox. Failed validation, failed workers, and missing
   verdicts open durable rulings rather than inventing success.
+- Reviewer assignments expose a bounded control-plane-attested candidate change
+  set and separately label the post-review validation plan as MGB-owned
+  authority. Review approval remains candidate judgment and never claims that
+  those later validations have passed.
 - Reviewer or maintainer changes return their exact evidence to the configured
   producer. The next result becomes one child candidate with a fresh gate,
   reviewer, validation set, and optional maintainer disposition.

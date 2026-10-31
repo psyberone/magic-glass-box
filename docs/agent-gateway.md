@@ -168,6 +168,23 @@ The response also advertises `gateway_catalog.operation` and
 `gateway_catalog.catalog_version`; it does not inline contracts into every run
 description.
 
+An exact-candidate reviewer receives a bounded `review_assignment.change_set`
+derived from the host-captured result manifest. It binds the candidate's base,
+head, tree, and result digest to total changed-path and byte counts, then
+includes at most the first 64 sorted path operations with before/post-image
+metadata. `changes_truncated` is explicit. The change set is control-plane
+metadata, not a file body or permission grant; the read-only candidate
+workspace remains the review subject.
+
+The same assignment carries the pinned `validation_plan` as authority. It
+states that the reviewer supplies candidate judgment only, that approval does
+not establish gate readiness, and that MGB executes the configured immutable
+validations after independent review approval. A worker therefore must not
+turn its inability to execute a later MGB-owned validation into changes
+requested from the producer. More-specific field-provenance labels on the
+change set and validation plan override the assignment's general untrusted
+content label.
+
 A Discovery-bound run also receives `discovery_assignment`: its execution ID,
 fixed role and stage, the immutable configured output ceilings, pinned human
 decision-owner handle, accepted trace when present, and prior typed rulings.

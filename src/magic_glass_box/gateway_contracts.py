@@ -216,6 +216,16 @@ _CONTRACTS = {
                 "review_assignment",
             ),
             FieldProvenance(
+                "/result/review_assignment/change_set",
+                TrustClass.CONTROL_METADATA,
+                "candidate_result_capture",
+            ),
+            FieldProvenance(
+                "/result/review_assignment/validation_plan",
+                TrustClass.AUTHORITY,
+                "gate_policy",
+            ),
+            FieldProvenance(
                 "/result/workflow_assignment",
                 TrustClass.UNTRUSTED_CONTENT,
                 "workflow_assignment",

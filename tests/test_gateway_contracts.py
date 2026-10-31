@@ -190,6 +190,12 @@ class GatewayContractTests(unittest.TestCase):
             "context": {"purpose": "Untrusted project purpose"},
             "work_item": None,
             "handoff": None,
+            "review_assignment": {
+                "change_set": {"candidate_id": "cnd_" + "2" * 32},
+                "validation_plan": {
+                    "execution_order": "after_independent_review_approval"
+                },
+            },
         }
 
         labels = response_field_provenance(
@@ -211,6 +217,22 @@ class GatewayContractTests(unittest.TestCase):
             },
         )
         self.assertNotIn("/result/changes_requested", by_path)
+        self.assertEqual(
+            by_path["/result/review_assignment/change_set"],
+            {
+                "path": "/result/review_assignment/change_set",
+                "source": "candidate_result_capture",
+                "trust_class": TrustClass.CONTROL_METADATA.value,
+            },
+        )
+        self.assertEqual(
+            by_path["/result/review_assignment/validation_plan"],
+            {
+                "path": "/result/review_assignment/validation_plan",
+                "source": "gate_policy",
+                "trust_class": TrustClass.AUTHORITY.value,
+            },
+        )
 
     def test_result_shape_validation_uses_the_published_contract(self) -> None:
         validate_result_shape(

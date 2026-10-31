@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -23,6 +24,7 @@ from magic_glass_box.db import (
     ConflictError,
     Database,
     NotFoundError,
+    StorageError,
 )
 from magic_glass_box.domain import (
     AgentProfileSpec,
@@ -647,6 +649,7 @@ class GateLedgerTests(unittest.TestCase):
         source_revision: str,
         changed: bool,
         digit: str,
+        mutate_workspace: Callable[[Path], None] | None = None,
         while_running: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
         preparing = self.database.begin_run_attempt(
@@ -675,6 +678,8 @@ class GateLedgerTests(unittest.TestCase):
         result_store.stage(attempt["id"], workspace, source_revision)
         if changed:
             (workspace / "file.txt").write_text("after\n", encoding="utf-8")
+        if mutate_workspace is not None:
+            mutate_workspace(workspace)
         captured = result_store.capture(attempt["id"], workspace)
         self.database.record_attempt_result(attempt["id"], captured.manifest)
         if while_running is not None:
@@ -2210,14 +2215,40 @@ class GateLedgerTests(unittest.TestCase):
             expected_policy_revision=policy["policy_revision"],
         )
         review_execution = self.database.get_run_execution(run["id"])
+        result = self.database.get_attempt_result(self.producer_attempt["id"])
+        expected_change = result["manifest"]["changes"][0]
+        validation = self.policy_spec().validations[0]
         self.assertEqual(
             review_execution["review_assignment"],
             {
                 "candidate_id": self.candidate["id"],
+                "change_set": {
+                    "base_revision": self.candidate["base_revision"],
+                    "candidate_id": self.candidate["id"],
+                    "changed_bytes": result["changed_bytes"],
+                    "changed_paths": result["changed_paths"],
+                    "changes": [expected_change],
+                    "changes_truncated": False,
+                    "head_revision": self.candidate["head_revision"],
+                    "result_content_sha256": result["content_sha256"],
+                    "schema_version": 1,
+                    "tree_revision": self.candidate["tree_revision"],
+                },
                 "head_revision": self.candidate["head_revision"],
                 "policy_id": policy["id"],
                 "policy_revision": policy["policy_revision"],
                 "review_separation": "different_profile_and_identity",
+                "validation_plan": {
+                    "execution_order": "after_independent_review_approval",
+                    "review_approval_establishes_gate_readiness": False,
+                    "review_verdict_scope": "candidate_judgment_only",
+                    "validations": [
+                        {
+                            **validation.to_dict(),
+                            "command_sha256": validation.command_sha256,
+                        }
+                    ],
+                },
             },
         )
         shutil.rmtree(self.root / "candidates")
@@ -2300,6 +2331,115 @@ class GateLedgerTests(unittest.TestCase):
             expected_policy_revision=policy["policy_revision"],
         )
         self.assertEqual(evidence["outcome"], "passed")
+
+    def test_reviewer_change_set_is_bounded_and_honestly_truncated(self) -> None:
+        producer_run = self.database.create_run(
+            project_key="project",
+            profile_name="Producer",
+            work_item_id=self.work_item["id"],
+            requested_by=self.user["id"],
+            source_revision=self.base,
+        )
+
+        def add_many_files(workspace: Path) -> None:
+            generated = workspace / "generated"
+            generated.mkdir()
+            for index in range(65):
+                (generated / f"{index:03d}.txt").write_text(
+                    f"item {index}\n", encoding="utf-8"
+                )
+
+        attempt = self._succeed_attempt(
+            producer_run,
+            source_revision=self.base,
+            changed=False,
+            digit="8",
+            mutate_workspace=add_many_files,
+        )
+        candidate = self.control.create_candidate(
+            attempt["id"],
+            created_by_handle="operator",
+            result_store=self.results,
+            candidate_store=self.candidate_store,
+        )
+        policy = self.database.create_gate_policy(
+            GatePolicyManifest.bind(
+                candidate,
+                default_branch="main",
+                policy=self.policy_spec(),
+            ),
+            created_by=self.user["id"],
+        )
+        review_run = self.control.create_review_run(
+            policy["id"],
+            profile_name="Reviewer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        change_set = self.database.get_run_execution(review_run["id"])[
+            "review_assignment"
+        ]["change_set"]
+
+        self.assertEqual(change_set["changed_paths"], 65)
+        self.assertEqual(len(change_set["changes"]), 64)
+        self.assertTrue(change_set["changes_truncated"])
+        self.assertEqual(change_set["changes"][0]["path"], "generated/000.txt")
+        self.assertEqual(change_set["changes"][-1]["path"], "generated/063.txt")
+
+    def test_reviewer_change_set_requires_matching_persisted_evidence(self) -> None:
+        policy = self.create_policy()
+        result = self.database.get_attempt_result(self.producer_attempt["id"])
+        inputs = {
+            "gate_policy_id": policy["id"],
+            "review_candidate_id": self.candidate["id"],
+            "review_head_revision": self.candidate["head_revision"],
+            "review_policy_revision": policy["policy_revision"],
+            "review_separation": "different_profile_and_identity",
+            "review_policy_manifest_json": self.policy_manifest().canonical,
+            "review_producer_attempt_id": self.producer_attempt["id"],
+            "review_base_revision": self.candidate["base_revision"],
+            "review_candidate_head_revision": self.candidate["head_revision"],
+            "review_tree_revision": self.candidate["tree_revision"],
+            "review_result_content_sha256": result["content_sha256"],
+            "review_result_manifest_json": json.dumps(
+                result["manifest"], separators=(",", ":"), sort_keys=True
+            ),
+            "review_result_record_sha256": result["content_sha256"],
+            "review_changed_paths": result["changed_paths"],
+            "review_changed_bytes": result["changed_bytes"],
+        }
+        mismatches = {
+            "gate_policy_id": None,
+            "review_candidate_id": "cnd_" + "0" * 32,
+            "review_head_revision": "0" * 40,
+            "review_policy_revision": "0" * 64,
+            "review_separation": "different_profile",
+            "review_producer_attempt_id": "att_" + "0" * 32,
+            "review_base_revision": "0" * 40,
+            "review_candidate_head_revision": "0" * 40,
+            "review_tree_revision": "0" * 40,
+            "review_result_content_sha256": "0" * 64,
+            "review_result_record_sha256": "0" * 64,
+            "review_changed_paths": result["changed_paths"] + 1,
+            "review_changed_bytes": result["changed_bytes"] + 1,
+        }
+        for field, value in mismatches.items():
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(StorageError, "evidence does not match"),
+            ):
+                self.database._review_assignment_record({**inputs, field: value})
+
+        for field, value in (
+            ("review_policy_manifest_json", "{}"),
+            ("review_result_manifest_json", "{}"),
+        ):
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(StorageError, "assignment is invalid"),
+            ):
+                self.database._review_assignment_record({**inputs, field: value})
 
     def test_candidate_backed_review_fails_closed_without_workspace_provider(
         self,
