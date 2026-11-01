@@ -1,7 +1,7 @@
 # Practice-informed reusable workflow templates
 
-**Status: Milestone 17 contract design and Milestone 18 first delivery, after
-the post-M15 audit and controlled M16 dogfood run.**
+**Status: Milestone 17 ready to begin after the completed M16 dogfood and
+coordinator-reconciled postmortem; Milestone 18 remains the first delivery.**
 
 MGB already implements fixed, versioned `discovery-v1`, `implementation-v1`,
 and `advisory-review-v1` prescriptions. The next template work is not a request
@@ -12,8 +12,16 @@ Panopticon-specific and must stay outside MGB.
 
 The Panopticon coordinator has already supplied a durable practice memo drawn
 from running a large producer/reviewer/landing operation by hand. That memo is
-an evidence source, not an automatic specification. MGB's own dogfood run must
-provide the second evidence source before design decisions are frozen.
+an evidence source, not an automatic specification. MGB's completed dogfood and
+coordinator-reconciled postmortem now provide the second evidence source.
+
+Three retained M16 rounds exposed and remediated a deterministic no-change
+retry and a review-verification deadlock, then completed exact-candidate review,
+immutable validation, maintainer approval, provider landing, and receipt-gated
+closeout. The debrief also retained two post-approval harness failures, manual
+dead-driver detection, one provider-native metadata correction, and the limits
+of a one-file proof. These observations are inputs to consultation, not an
+implicit template design.
 
 ## Engagement sequence
 
@@ -80,6 +88,18 @@ or deferred status. The initial agenda comes from the existing practice memo:
 9. What is the smallest reusable unit that can move between projects without
    carrying profile IDs, credentials, provider mappings, repository paths, or
    Panopticon-specific test machinery?
+10. What exact tuple does maintainer approval bind, and which later proposal,
+    provider-target, or landed-commit metadata changes invalidate it?
+11. Who detects a dead coordinator, how long may it remain silent, and which
+    durable event wakes a replacement? Recovery alone is insufficient.
+12. May review depth scale with trusted risk and change shape? Which authority
+    selects it, and how is producer influence excluded?
+13. Does a reviewer approve code-as-read, code-as-run, or a typed combination,
+    and which project-local toolchain evidence may it rely on?
+14. How are provider-shaped return records and imported helper assumptions
+    enumerated, translated, and tested at the portable/local boundary?
+15. Does `landed` mean one provider receipt, independently observed default
+    branch state, every configured mirror, or distinct typed states?
 
 No schema or implementation is authorized merely because the consultation
 records a useful idea. The contract milestone ends with a bounded decision

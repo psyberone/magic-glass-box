@@ -2035,7 +2035,7 @@ report retains every review finding, ruling, limitation, and evidence pointer.
 
 ## Milestone 16: controlled dogfood and operating evidence
 
-**Status: in progress; retained dogfood rounds are driving bounded remediation**
+**Status: complete with explicit carryovers (2026-11-01)**
 
 Run the frozen MGB build as coordinator against a separate isolated MGB
 checkout and one small, real work item. Avoid a first-run schema or bootstrap
@@ -2060,6 +2060,44 @@ after approval, and equips the next dogfood's project profiles with the
 repository toolchain. Neither stopped workflow is rewritten or resolved by the
 remediation.
 
+The third round ran the remediated control plane at `e685ab0`, gave the
+reviewer a bounded attested exact-candidate change set, and made validation
+ordering explicit. The reviewer approved candidate `6d86d8d7`; the immutable
+validation sandbox passed 1,455 tests at 87% branch-aware coverage; the
+seven-run advisory prescription completed with no finding; and explicit
+maintainer approval released provider landing. GitHub PR #1 squash-merged as
+`3cd1429`, whose tree exactly equals the gated candidate tree. The work thread
+and workflow closed only after a head-enforced landing receipt. GitHub,
+GitLab, Bitbucket, Azure DevOps, and the local checkout then agreed on the
+merged revision.
+
+The landing also produced two retained harness findings. A private driver
+mistook the provider-target return from landing configuration for a workflow
+execution after branch publication and PR creation. Durable effect receipts
+allowed an operator-observed restart to reconcile those effects without
+duplication, but automatic dead-driver detection was not proved: durable
+progress paused for about 89 seconds while an already-present operator
+diagnosed the failure. Separately, an imported Imitation Krab helper leaked
+its hard-coded title into the MGB PR. One logged host-side title correction
+fixed the proposal, while the landed squash subject remained the generic
+`Magic Glass Box candidate (#1)`. The run therefore proved exact-tree landing,
+not a resolved authority contract for proposal and commit metadata.
+
+Across three retained live rounds, 21 agent runs and 152 provider invocations
+accounted an estimated 1,150,629 microusd on a subscription/quota basis. The
+final seven-seat advisory stage consumed about 56% of that round's estimate on
+a one-file license change. This is evidence for a risk/topology policy question,
+not permission to weaken review by prompt or producer choice.
+
+The postmortem was reconciled with the Panopticon coordinator through the
+existing Krab project. M16 does not claim a successful live revised-candidate
+correction through landing, mid-task worker continuation, quota recovery,
+unattended failure detection and aging, multi-human authority, hard local
+storage quotas, non-GitHub provider landing, Jira mutation, proposal-metadata
+correction, review/validation defect sensitivity, or complete durable counting
+of every operator read-only status check. Those limits remain explicit M17,
+M18, provider-roadmap, or M19 inputs.
+
 Before the run, the Panopticon coordinator helps define the bounded observation
 rubric in
 [reusable-workflow-template-program.md](reusable-workflow-template-program.md).
@@ -2069,14 +2107,15 @@ report is frozen, they join a structured debrief that classifies mechanical
 work, judgment, missing authority, provider leakage, and project-specific
 practice without selecting an implementation shape.
 
-**Exit:** exact-head and credential-containment evidence, a clean target
-checkout, complete audit provenance, honest cost/time accounting, a durable
-friction and intervention log, and a frozen dogfood report suitable as design
-input.
+**Exit accepted with the disclosed observation-coverage limitation:** exact-head
+and credential-containment evidence, clean isolated targets, honest estimated
+cost/time accounting, retained failed and stopped states, durable core audit
+provenance, a friction/intervention log, a frozen dogfood report, and a
+coordinator-reconciled postmortem suitable as M17 design input.
 
 ## Milestone 17: reusable workflow-template contract
 
-**Status: planned design milestone after M16 evidence**
+**Status: ready to begin; M16 evidence and debrief are frozen**
 
 Bring the Panopticon coordinator in formally as the practice-domain
 co-designer. Use a living, decision-tracked consultation to reconcile three
@@ -2090,6 +2129,24 @@ mechanical delta-review policy, budgets, review-round ceilings, lifecycle
 hooks, wake-channel behavior, and follow-up semantics. Separate portable
 contract from project configuration and Panopticon-specific test mechanics.
 No production schema or runtime behavior is authorized inside this milestone.
+
+The M16 debrief sharpens that agenda without selecting an implementation:
+
+- define exactly what maintainer approval binds across candidate tree,
+  proposal metadata, landed commit metadata, and provider target, including
+  invalidation by later changes;
+- distinguish recovery from detection by assigning dead-coordinator detection,
+  maximum silent interval, wake channel, and escalation authority;
+- decide whether and how review topology may scale with trusted risk and change
+  shape without producer influence or user-authored workflow graphs;
+- define whether each review artifact means code-as-read, code-as-run, or an
+  explicit combination, and keep project toolchains in local bindings;
+- enumerate every provider-shaped record translated into workflow state and
+  the audit rule for imported helpers that may carry project assumptions;
+- define `landed` for one authoritative provider, independently observed
+  default branch, and optional mirrors; and
+- preserve the unproved contested-candidate, moved-base, simultaneous-candidate,
+  and successful revised-candidate paths as explicit later acceptance work.
 
 The coordinator supplies domain fidelity and evidence; the product owner rules
 scope and authority. A separate reviewer later supplies independent technical
