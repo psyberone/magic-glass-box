@@ -496,6 +496,18 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM workflow_provider_landing_proofs",
                 ),
                 (
+                    "workflow_closeout_declarations",
+                    "SELECT COUNT(*) FROM workflow_closeout_declarations",
+                ),
+                (
+                    "workflow_closeout_obligations",
+                    "SELECT COUNT(*) FROM workflow_closeout_obligations",
+                ),
+                (
+                    "workflow_closeout_proofs",
+                    "SELECT COUNT(*) FROM workflow_closeout_proofs",
+                ),
+                (
                     "workflow_provider_intents",
                     "SELECT COUNT(*) FROM workflow_provider_intents",
                 ),

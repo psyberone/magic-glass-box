@@ -561,6 +561,7 @@ def _render_control_room(
                 or None,
                 row.get("landing_mode"),
                 queue_summary,
+                row.get("closeout_summary"),
                 row.get("open_ruling_kind"),
             )
         )
@@ -1004,6 +1005,7 @@ def _render_control_room(
                     "Scope review",
                     "Landing mode",
                     "Landing queue / authority",
+                    "Closeout",
                     "Open ruling",
                 ),
                 workflow_rows,

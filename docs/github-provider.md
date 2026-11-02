@@ -165,6 +165,13 @@ and that commit is reachable from the observed primary ref. Missing or
 mismatched observation holds the integration target and cannot complete the
 workflow.
 
+The final landing observation also retains the normalized head ref, title,
+body, draft flag, and closed proposal state. Schema-v49 closeout compares these
+fields with both the original intent and the authoritative open-change fact;
+the landing receipt must close exactly the same normalized pull-request
+identity. This proves proposal metadata and closure independently of the Git
+tree proof, without retaining a provider response envelope or URL.
+
 ## Live exit proof
 
 The destructive proof harness requires an exact clean clone, base revision,

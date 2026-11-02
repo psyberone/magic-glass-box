@@ -1,7 +1,7 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C and M13A-M13D complete; M18 portable-policy delivery in
-progress**
+**Status: M12A-M12C and M13A-M13D complete; M18 portable-policy delivery
+implemented through schema v49 with final quality gates in progress**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -111,6 +111,33 @@ and rebase remain truthfully unproved in this bounded slice.
 Pre-policy workflow histories retain the earlier `workflow provider-target`
 operation as a compatibility path. Activated workflows reject that manual
 target and derive it only from the confirmed effect chain.
+
+Schema v49 makes closeout an owner-authored, separately proved boundary. Once
+an activated workflow has a conformant landing proof, its activation owner must
+record one immutable closeout declaration before completion. The declaration
+may contain at most 32 named `deferred_validation` obligations. Each name must
+exist in the portable policy and activation, must point to already-passing
+immutable baseline gate evidence, and must carry a future deadline and bounded
+reason. This permits scheduled follow-up; it never converts missing or failed
+validation into success.
+
+The completion transaction independently proves that the normalized
+change-open fact matched the intent, the final landing read-back retained the
+same base/head/title/body/draft fields and reports the proposal closed, the
+exact squash landing remains conformant, no secondary effect was introduced,
+and the service receipt closed exactly its landed remote identity. It then
+stores an immutable closeout proof and derives either `closed` or
+`closed, N open`. Open obligations return responsibility to the activation
+owner after technical delivery; overdue deadlines are control-room attention,
+and resolving one obligation cannot rewrite the landing or closeout proof.
+
+The M18 portability proof uses one policy record and digest for Magic Glass Box
+and Imitation Krab while binding different repositories, profiles, validation
+commands, resource ceilings, provider mappings, and capability records. Each
+project loses one provider-effect receipt after dispatch and is reconciled by
+a fresh database process from authoritative observation. The proof also opens
+holds on both integration targets simultaneously, lifts one exact hold, and
+asserts that the other project's hold is neither returned nor changed.
 
 Schema v32 makes those role pins prescription-generic. A configuration version
 owns an immutable set of named role bindings rather than fixed producer and

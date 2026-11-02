@@ -374,7 +374,30 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   workflow provider-target wfx_<id> --expected-version <version> \
   --resource-id <pull-number> --merge-method squash \
   --configured-by operator
+
+# Activated completion: declare exact closeout and any bounded follow-ups.
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow closeout-declare wfx_<id> --expected-version <version> \
+  --spec examples/workflow-closeout-declaration.json \
+  --declared-by operator
+
+# Follow-up obligations remain visible after delivery and close independently.
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow obligation-list --execution wfx_<id> --open-only
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow obligation-resolve wco_<id> --expected-version 1 \
+  --resolution-file /absolute/resolution.md --resolved-by operator
 ```
+
+Activated provider completion requires the activation owner to declare
+closeout explicitly. The final provider observation must prove the original
+proposal metadata, closed proposal state, exact squash landing, absence of
+secondary effects, and the matching remote closure receipt. A declared
+`deferred_validation` obligation names one policy validation, retains its
+already-passing immutable baseline evidence, and adds a future deadline; it is
+never a waiver for a missing or failed gate. Delivery may therefore become
+truthfully `closed, N open`, while overdue follow-up remains owner attention
+until it is resolved.
 
 The control-room attention queue names a missing target, capability, manual
 plan or receipt, required refold, and manual retry. A failed provider attempt

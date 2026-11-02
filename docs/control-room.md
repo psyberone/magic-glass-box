@@ -51,7 +51,8 @@ contains:
   action state, landing mode, queue/policy/candidate identity, provider target
   and availability, activated provider intent and effect states, latest
   manual/provider authority, landing-proof disposition, open target hold,
-  landed receipt, completion outcome, and any open ruling ID/kind/version.
+  landed receipt, closeout disposition and summary, bounded open/overdue
+  obligation metadata, completion outcome, and any open ruling ID/kind/version.
   Discovery-scoped
   workflows additionally expose only their source execution/ruling IDs and the
   latest scope-review ID, round, candidate, policy, run/attempt provenance,
@@ -85,6 +86,7 @@ contains:
   still need binding, unresolved provider effects, integration-target holds,
   manual plans, receipts, or retries that need operator action, pending
   provider landings, expired integration claims, exhausted supervisor work,
+  overdue workflow closeout obligations,
   failed Discovery or advisory executions, completed advisory reports that
   request routine or urgent attention, and open workflow rulings. Advisory
   attention is explicitly informational and never represents gate or landing
@@ -125,6 +127,7 @@ The projection intentionally excludes:
 - interaction titles, questions, answers, and message history;
 - handoff summaries and agent transcripts;
 - maintainer-disposition summaries and actionable details;
+- closeout-obligation reasons and resolution prose;
 - retained result manifests, file paths, and file content;
 - agent command arguments;
 - landing-plan argv, private candidate-repository paths, remotes, and raw

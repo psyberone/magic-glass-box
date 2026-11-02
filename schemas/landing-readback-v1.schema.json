@@ -5,14 +5,16 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "base_ref", "candidate_revision", "change_id", "landing_revision",
+    "base_ref", "body", "candidate_revision", "change_id", "draft", "head_ref",
+    "landing_revision",
     "landing_revision_reachable", "landing_tree", "merge_method", "primary_ref",
-    "primary_revision", "schema_version", "secondary_effects"
+    "primary_revision", "schema_version", "secondary_effects", "state", "title"
   ],
   "properties": {
     "schema_version": { "const": 1 },
     "change_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
     "base_ref": { "$ref": "#/$defs/branchRef" },
+    "head_ref": { "$ref": "#/$defs/branchRef" },
     "candidate_revision": { "$ref": "#/$defs/objectId" },
     "landing_revision": { "$ref": "#/$defs/objectId" },
     "landing_tree": { "$ref": "#/$defs/objectId" },
@@ -20,6 +22,10 @@
     "primary_revision": { "$ref": "#/$defs/objectId" },
     "landing_revision_reachable": { "type": "boolean" },
     "merge_method": { "enum": ["merge", "rebase", "squash"] },
+    "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "body": { "type": "string", "maxLength": 32768 },
+    "draft": { "type": "boolean" },
+    "state": { "enum": ["open", "closed"] },
     "secondary_effects": { "type": "array", "maxItems": 0 }
   },
   "$defs": {

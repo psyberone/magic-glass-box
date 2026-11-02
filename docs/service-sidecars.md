@@ -167,6 +167,12 @@ secondary effects are outside the contract. An activated workflow derives a
 change target only from the confirmed `change.open` fact; missing read-back is
 retained as uncertainty, not reconstructed from a generic receipt.
 
+Landing read-back also carries the final normalized proposal metadata and
+state. The control plane keeps that fact separate from the squash tree and
+reachability proof, then schema-v49 closeout proves that the same proposal was
+closed with no undeclared secondary effects. A connector success response alone
+cannot establish either delivery closeout or completion.
+
 Every registration pins request and response byte limits, timeout, concurrency,
 and attempts per minute. Each operation may narrow but never expand those
 limits. Exact duplicate idempotency keys resolve to the existing operation;

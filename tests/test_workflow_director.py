@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import unittest
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -42,6 +44,7 @@ from magic_glass_box.service_sidecar import (
 )
 from magic_glass_box.storage.errors import ConcurrentUpdateError, ConflictError
 from magic_glass_box.supervision import Supervisor
+from magic_glass_box.workflow_closeout import WorkflowCloseoutDeclaration
 from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION, WorkflowDirector
 from magic_glass_box.workflow_policy import (
     WorkflowActivationSpec,
@@ -1316,6 +1319,208 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         return execution, activation, bindings
 
+    def start_imitation_krab_activated_execution(
+        self,
+        *,
+        policy_name: str,
+        policy_sha256: str,
+        external_id: str,
+    ) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, dict[str, object]],
+    ]:
+        repository = self.root / "imitation-krab"
+        repository.mkdir()
+        git(self.git_binary, "init", "--quiet", cwd=repository)
+        (repository / "feature.txt").write_text("base\n", encoding="utf-8")
+        (repository / "krab.py").write_text(
+            "def coordinate() -> str:\n    return 'krab'\n", encoding="utf-8"
+        )
+        git(self.git_binary, "add", ".", cwd=repository)
+        git(
+            self.git_binary,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "imitation krab base",
+            cwd=repository,
+        )
+        base = git(self.git_binary, "rev-parse", "HEAD", cwd=repository)
+        project = self.database.create_project(
+            instance_id=self.instance["id"],
+            krab_project_id="prj_" + "4" * 32,
+            krab_project_key="imitation-krab",
+            display_name="Imitation Krab",
+            context=ProjectContext.from_mapping(
+                {
+                    "purpose": "Keep coordination small, bounded, and loopback-first",
+                    "repository_path": str(repository),
+                    "default_branch": "main",
+                }
+            ),
+            created_by=self.user["id"],
+        )
+        producer_identity = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "a" * 32, "ik-producer", 1),
+            "file:/private/ik-producer",
+        )
+        reviewer_identity = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "b" * 32, "ik-reviewer", 1),
+            "file:/private/ik-reviewer",
+        )
+        self.database.create_agent_profile(
+            name="IK Producer",
+            spec=AgentProfileSpec.create(
+                image="ik-producer@sha256:abc",
+                command=["ik-producer", "run"],
+                network_mode="gateway_only",
+                workspace_mode="copy_on_write",
+                gateway_capabilities=["run.describe"],
+            ),
+            krab_identity_id=producer_identity["id"],
+            created_by=self.user["id"],
+        )
+        self.database.create_agent_profile(
+            name="IK Reviewer",
+            spec=AgentProfileSpec.create(
+                image="ik-reviewer@sha256:def",
+                command=["ik-reviewer", "run"],
+                network_mode="gateway_only",
+                workspace_mode="read_only",
+                gateway_capabilities=["run.describe", "work.append"],
+            ),
+            krab_identity_id=reviewer_identity["id"],
+            created_by=self.user["id"],
+        )
+        configuration = self.database.create_workflow_configuration(
+            project_key="imitation-krab",
+            name="implementation",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [
+                        {
+                            "name": "unit",
+                            "image_id": "sha256:" + "9" * 64,
+                            "command": ["python", "-m", "unittest"],
+                        }
+                    ],
+                    "max_correction_rounds": 1,
+                    "landing_mode": "provider",
+                }
+            ),
+            producer_profile_name="IK Producer",
+            reviewer_profile_name="IK Reviewer",
+            created_by=self.user["id"],
+        )
+        sidecar_document = github_sidecar_spec(
+            self.root / "imitation-krab-github.sock"
+        ).to_dict()
+        sidecar_document["deployment_sha256"] = "4" * 64
+        sidecar_document["mappings"][0]["repository"] = "psyberone/imitation-krab"
+        sidecar_document["mappings"][0]["account"] = "ik-bot"
+        sidecar_document["capabilities"].append(
+            {"name": "refs.publish", "version": 1, "mode": "effect"}
+        )
+        sidecar = ServiceSidecarSpec.from_mapping(sidecar_document)
+        self.database.register_service_sidecar(
+            name="imitation-krab-github",
+            spec=sidecar,
+            created_by=self.user["id"],
+        )
+        bindings = {
+            name: self.database.bind_project_capability(
+                project_key="imitation-krab",
+                capability_name=name,
+                capability_version=1,
+                sidecar_name="imitation-krab-github",
+                mapping_name="primary",
+                bound_by=self.user["id"],
+            )
+            for name in ("change.open", "landing.invoke", "refs.publish")
+        }
+        activation = self.database.create_workflow_activation(
+            project_key="imitation-krab",
+            policy_name=policy_name,
+            expected_policy_version=1,
+            spec=WorkflowActivationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "policy_sha256": policy_sha256,
+                    "workflow_configuration_version_id": configuration[
+                        "workflow_configuration_version_id"
+                    ],
+                    "validation_bindings": [
+                        {"obligation": "tests", "validation": "unit"}
+                    ],
+                    "capability_bindings": [
+                        {
+                            "binding_id": bindings[name]["id"],
+                            "mode": "effect",
+                            "name": name,
+                            "version": 1,
+                        }
+                        for name in (
+                            "change.open",
+                            "landing.invoke",
+                            "refs.publish",
+                        )
+                    ],
+                    "resources": {
+                        "review_rounds": 1,
+                        "seat_count": 2,
+                        "shared_host_concurrency": 1,
+                        "wall_time_seconds": 7200,
+                    },
+                    "wake_bindings": [
+                        {"role": "producer", "wake_class": "human_turn_only"},
+                        {"role": "reviewer", "wake_class": "human_turn_only"},
+                    ],
+                    "merge_method": "squash",
+                    "retired_rules": [],
+                }
+            ),
+            acknowledged_by=self.user["id"],
+        )
+        item = self.database.import_work_item(
+            project_key="imitation-krab",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "jira",
+                    "external_id": external_id,
+                    "source_updated_at": "2026-11-02T16:00:00Z",
+                    "title": "Keep the health probe contract exact",
+                    "brief": "Exercise the same policy with Krab-local bindings.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        execution = self.database.start_workflow_execution(
+            project_key="imitation-krab",
+            configuration_name=configuration["name"],
+            work_item_id=item["id"],
+            source_revision=base,
+            expected_configuration_version=1,
+            expected_context_version_id=project["context_version_id"],
+            expected_work_item_version_id=item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            expected_activation_version=1,
+            idempotency_key=f"activated-{external_id}",
+            requested_by=self.user["id"],
+        )
+        return execution, activation, bindings
+
     def activated_provider_landing(
         self, *, external_id: str
     ) -> tuple[
@@ -1344,20 +1549,13 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.drive_activated_provider_effects(enqueued, bindings=bindings)
         return enqueued, gate, activation, bindings
 
-    def complete_activated_provider_effect(
-        self, effect: dict[str, object], *, include_result: bool = True
-    ) -> None:
-        operation = self.database.get_service_operation(
-            str(effect["service_operation_id"])
-        )
-        dispatch = self.database.begin_service_operation_attempt(
-            operation["id"],
-            phase="invoke",
-            owner_id="activated-provider-effect",
-            expected_version=operation["version"],
-            lease_seconds=60,
-        )
-        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+    @staticmethod
+    def activated_effect_response(
+        request: ServiceOperationRequest,
+        *,
+        change_id: str = "42",
+        include_result: bool = True,
+    ) -> ServiceOperationResponse:
         observed_revision = request.target.desired_revision
         assert observed_revision is not None
         if request.capability.name == "refs.publish":
@@ -1368,11 +1566,15 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "published_revision": observed_revision,
                 "secondary_effects": [],
             }
-            identity = "github:github.com/acme/widgets/ref/mgb-candidate"
+            published_ref = str(request.parameters["target_ref"])
+            identity = (
+                f"github:{request.mapping.host}/{request.mapping.repository}/ref/"
+                + published_ref.removeprefix("refs/heads/").replace("/", "-")
+            )
         else:
             result = {
                 "schema_version": 1,
-                "change_id": "42",
+                "change_id": change_id,
                 "base_ref": request.parameters["base_ref"],
                 "head_ref": request.parameters["head_ref"],
                 "base_revision": request.target.expected_revision,
@@ -1383,8 +1585,11 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "state": "open",
                 "secondary_effects": [],
             }
-            identity = "github:github.com/acme/widgets/pull/42"
-        response = ServiceOperationResponse.from_mapping(
+            identity = (
+                f"github:{request.mapping.host}/{request.mapping.repository}/pull/"
+                f"{change_id}"
+            )
+        return ServiceOperationResponse.from_mapping(
             {
                 **request.correlation_dict(),
                 "outcome": "succeeded",
@@ -1397,10 +1602,34 @@ class WorkflowDirectorTests(unittest.TestCase):
                     "remote_identity": identity,
                     "observed_revision": observed_revision,
                     "evidence_sha256": "3" * 64,
-                    "closed_references": [identity],
+                    "closed_references": [],
                     **({"result": result} if include_result else {}),
                 },
             }
+        )
+
+    def complete_activated_provider_effect(
+        self,
+        effect: dict[str, object],
+        *,
+        include_result: bool = True,
+        change_id: str = "42",
+    ) -> None:
+        operation = self.database.get_service_operation(
+            str(effect["service_operation_id"])
+        )
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="activated-provider-effect",
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        response = self.activated_effect_response(
+            request,
+            change_id=change_id,
+            include_result=include_result,
         )
         response.validate_correlation(request)
         self.database.complete_service_operation_attempt(
@@ -1409,6 +1638,60 @@ class WorkflowDirectorTests(unittest.TestCase):
             expected_operation_version=dispatch["operation"]["version"],
             response=response,
         )
+
+    def interrupt_and_reconcile_activated_effect(
+        self,
+        effect: dict[str, object],
+        *,
+        change_id: str,
+        owner_suffix: str,
+    ) -> dict[str, object]:
+        operation = self.database.get_service_operation(
+            str(effect["service_operation_id"])
+        )
+        lost_owner = f"lost-{owner_suffix}"
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id=lost_owner,
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        self.database.fail_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id=lost_owner,
+            expected_operation_version=dispatch["operation"]["version"],
+            outcome="ambiguous",
+            error_code="receipt_lost",
+        )
+        uncertain = self.database.get_service_operation(operation["id"])
+        self.assertEqual(uncertain["state"], "uncertain")
+        self.assertIsNone(uncertain["attempts"][-1]["receipt"])
+
+        replacement = Database(self.database.path)
+        reconcile_owner = f"replacement-{owner_suffix}"
+        reconciliation = replacement.begin_service_operation_attempt(
+            operation["id"],
+            phase="reconcile",
+            owner_id=reconcile_owner,
+            expected_version=uncertain["version"],
+            lease_seconds=60,
+        )
+        request = ServiceOperationRequest.from_mapping(reconciliation["request"])
+        response = self.activated_effect_response(request, change_id=change_id)
+        response.validate_correlation(request)
+        settled = replacement.complete_service_operation_attempt(
+            reconciliation["attempt"]["id"],
+            owner_id=reconcile_owner,
+            expected_operation_version=reconciliation["operation"]["version"],
+            response=response,
+        )
+        self.assertEqual(settled["state"], "succeeded")
+        self.assertEqual(
+            [(attempt["phase"], attempt["outcome"]) for attempt in settled["attempts"]],
+            [("invoke", "ambiguous"), ("reconcile", "succeeded")],
+        )
+        return settled
 
     def drive_activated_provider_effects(
         self,
@@ -1449,6 +1732,55 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         current = self.database.get_workflow_execution(current["id"])
         self.assertEqual(current["landing"]["provider_target"]["resource_id"], "42")
+        return current
+
+    def drive_activated_provider_effects_with_interruption(
+        self,
+        execution: dict[str, object],
+        *,
+        bindings: dict[str, dict[str, object]],
+        change_id: str,
+        owner_suffix: str,
+    ) -> dict[str, object]:
+        current = self.database.get_workflow_execution(str(execution["id"]))
+        for capability_name in ("refs.publish", "change.open"):
+            self.assertFalse(
+                self.director().advance(
+                    current["id"], expected_version=current["version"]
+                )
+            )
+            current = self.database.get_workflow_execution(current["id"])
+            effect = current["landing"]["provider_intent"]["effects"][capability_name]
+            self.assertEqual(
+                effect["capability_binding_id"], bindings[capability_name]["id"]
+            )
+            if capability_name == "change.open":
+                self.interrupt_and_reconcile_activated_effect(
+                    effect,
+                    change_id=change_id,
+                    owner_suffix=owner_suffix,
+                )
+            else:
+                self.complete_activated_provider_effect(effect, change_id=change_id)
+            self.assertFalse(
+                self.director().advance(
+                    current["id"], expected_version=current["version"]
+                )
+            )
+            current = self.database.get_workflow_execution(current["id"])
+            self.assertEqual(
+                current["landing"]["provider_intent"]["effects"][capability_name][
+                    "state"
+                ],
+                "confirmed",
+            )
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+        current = self.database.get_workflow_execution(current["id"])
+        self.assertEqual(
+            current["landing"]["provider_target"]["resource_id"], change_id
+        )
         return current
 
     def complete_provider_operation(
@@ -1501,6 +1833,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         *,
         expected_tree: str,
         observed_tree: str,
+        readback_overrides: dict[str, object] | None = None,
     ) -> None:
         operation = issued["operation"]
         dispatch = self.database.begin_service_operation_attempt(
@@ -1512,7 +1845,40 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         request = ServiceOperationRequest.from_mapping(dispatch["request"])
         observed_revision = "f" * 40
-        identity = "github:github.com/acme/widgets/pull/42"
+        change_id = str(request.target.resource_id)
+        identity = (
+            f"github:{request.mapping.host}/{request.mapping.repository}/pull/"
+            f"{change_id}"
+        )
+        with self.database.connect() as connection:
+            intent_row = connection.execute(
+                "SELECT intent.intent_json FROM workflow_provider_intents intent "
+                "JOIN workflow_landing_bindings landing "
+                "ON landing.execution_id = intent.workflow_execution_id "
+                "WHERE landing.queue_item_id = ?",
+                (issued["provider_landing"]["queue_item_id"],),
+            ).fetchone()
+        assert intent_row is not None
+        intent = json.loads(intent_row["intent_json"])
+        readback: dict[str, object] = {
+            "schema_version": 1,
+            "change_id": change_id,
+            "base_ref": str(request.parameters["integration_ref"]),
+            "head_ref": intent["head_ref"],
+            "candidate_revision": request.target.desired_revision,
+            "landing_revision": observed_revision,
+            "landing_tree": observed_tree,
+            "primary_ref": str(request.parameters["integration_ref"]),
+            "primary_revision": observed_revision,
+            "landing_revision_reachable": True,
+            "merge_method": "squash",
+            "title": intent["title"],
+            "body": intent["body"],
+            "draft": intent["draft"],
+            "state": "closed",
+            "secondary_effects": [],
+        }
+        readback.update(readback_overrides or {})
         response = ServiceOperationResponse.from_mapping(
             {
                 **request.correlation_dict(),
@@ -1527,19 +1893,7 @@ class WorkflowDirectorTests(unittest.TestCase):
                     "observed_revision": observed_revision,
                     "evidence_sha256": "3" * 64,
                     "closed_references": [identity],
-                    "result": {
-                        "schema_version": 1,
-                        "change_id": "42",
-                        "base_ref": "refs/heads/main",
-                        "candidate_revision": request.target.desired_revision,
-                        "landing_revision": observed_revision,
-                        "landing_tree": observed_tree,
-                        "primary_ref": "refs/heads/main",
-                        "primary_revision": observed_revision,
-                        "landing_revision_reachable": True,
-                        "merge_method": "squash",
-                        "secondary_effects": [],
-                    },
+                    "result": readback,
                 },
             }
         )
@@ -1554,6 +1908,50 @@ class WorkflowDirectorTests(unittest.TestCase):
             expected_tree,
             issued["provider_landing"]["request"]["tree_revision"],
         )
+
+    def complete_activated_to_closeout(
+        self,
+        *,
+        external_id: str,
+        readback_overrides: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id=external_id
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+            readback_overrides=readback_overrides,
+        )
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertTrue(
+            self.director().advance(landed["id"], expected_version=landed["version"])
+        )
+        completion = self.database.get_workflow_execution(landed["id"])
+        self.assertEqual(completion["stage"], "completion")
+        return completion
 
     def test_activated_provider_landing_never_falls_back_to_a_rebound_capability(
         self,
@@ -2002,6 +2400,258 @@ class WorkflowDirectorTests(unittest.TestCase):
             self.director().advance(landed["id"], expected_version=landed["version"])
         )
 
+    def test_activated_closeout_retains_and_ages_one_deferred_obligation(
+        self,
+    ) -> None:
+        completion = self.complete_activated_to_closeout(
+            external_id="activated-closeout-obligation"
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        waiting = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(waiting["responsibility"]["reason"], "closeout_declaration")
+        self.assertIsNone(waiting["closeout"])
+
+        deadline = (
+            datetime.fromisoformat(self.database.now()) + timedelta(days=2)
+        ).isoformat()
+        declaration = WorkflowCloseoutDeclaration.from_mapping(
+            {
+                "schema_version": 1,
+                "obligations": [
+                    {
+                        "kind": "deferred_validation",
+                        "obligation": "tests",
+                        "deadline": deadline,
+                        "reason": (
+                            "Run the longer cross-platform validation after the "
+                            "primary delivery closes."
+                        ),
+                    }
+                ],
+            }
+        )
+        self.database.create_user("other-owner", "Other Owner")
+        with self.assertRaisesRegex(ConflictError, "activation owner"):
+            self.control.declare_workflow_closeout(
+                waiting["id"],
+                expected_version=waiting["version"],
+                declaration=declaration,
+                declared_by_handle="other-owner",
+            )
+
+        recorded = self.control.declare_workflow_closeout(
+            waiting["id"],
+            expected_version=waiting["version"],
+            declaration=declaration,
+            declared_by_handle="operator",
+        )
+        repeated = self.control.declare_workflow_closeout(
+            waiting["id"],
+            expected_version=waiting["version"],
+            declaration=declaration,
+            declared_by_handle="operator",
+        )
+        self.assertEqual(repeated, recorded)
+        self.assertEqual(recorded["content_sha256"], declaration.digest)
+        self.assertEqual(recorded["obligations"][0]["state"], "open")
+        self.assertEqual(recorded["obligations"][0]["deadline_state"], "pending")
+        self.assertEqual(recorded["obligations"][0]["baseline_gate"], "validation:unit")
+        self.assertIsNotNone(recorded["obligations"][0]["baseline_evidence_id"])
+        self.assertEqual(
+            self.control.list_workflow_closeout_obligations(
+                execution_id=waiting["id"], open_only=True, limit=1
+            ),
+            recorded["obligations"],
+        )
+        with self.assertRaisesRegex(ValidationError, "limit"):
+            self.database.list_workflow_closeout_obligations(limit=0)
+        with self.assertRaisesRegex(ValidationError, "open_only"):
+            self.database.list_workflow_closeout_obligations(  # type: ignore[arg-type]
+                open_only="yes"
+            )
+
+        self.assertTrue(
+            self.director().advance(waiting["id"], expected_version=waiting["version"])
+        )
+        finished = self.database.get_workflow_execution(waiting["id"])
+        self.assertEqual(finished["state"], "completed")
+        self.assertEqual(finished["closeout"]["summary"], "closed, 1 open")
+        self.assertEqual(finished["closeout"]["closed_at"], finished["finished_at"])
+        self.assertEqual(finished["closeout"]["open_obligation_count"], 1)
+        self.assertEqual(finished["closeout"]["overdue_obligation_count"], 0)
+        self.assertEqual(finished["closeout"]["facts"]["primary_landing"], "conformant")
+        self.assertEqual(
+            finished["closeout"]["facts"]["proposal_metadata"], "conformant"
+        )
+        self.assertEqual(finished["closeout"]["facts"]["proposal_closure"], "closed")
+        self.assertEqual(finished["closeout"]["facts"]["replication"], "not_required")
+        self.assertEqual(finished["closeout"]["facts"]["tracker"], "not_required")
+        self.assertEqual(finished["responsibility"]["holder"], "owner")
+        self.assertEqual(finished["responsibility"]["reason"], "closeout_obligation")
+
+        obligation = finished["closeout"]["obligations"][0]
+        self.assertEqual(
+            self.control.get_workflow_closeout_obligation(obligation["id"]),
+            obligation,
+        )
+        after_deadline = (
+            datetime.fromisoformat(obligation["deadline"].replace("Z", "+00:00"))
+            + timedelta(seconds=1)
+        ).isoformat()
+        with mock.patch.object(self.database, "now", return_value=after_deadline):
+            overdue = self.database.get_workflow_execution(finished["id"])
+            self.assertEqual(overdue["closeout"]["overdue_obligation_count"], 1)
+            self.assertEqual(
+                overdue["closeout"]["obligations"][0]["deadline_state"], "overdue"
+            )
+            snapshot = ControlRoom(self.database).snapshot()
+            attention = snapshot["attention"]
+        self.assertTrue(
+            any(
+                item["kind"] == "workflow.closeout_obligation_overdue"
+                and item["subject_id"] == obligation["id"]
+                for item in attention
+            )
+        )
+        self.assertNotIn(declaration.obligations[0].reason, canonical_json(snapshot))
+
+        with self.assertRaisesRegex(ConflictError, "activation owner"):
+            self.control.resolve_workflow_closeout_obligation(
+                obligation["id"],
+                expected_version=obligation["version"],
+                resolution="The bounded follow-up completed.",
+                resolved_by_handle="other-owner",
+            )
+        with self.assertRaisesRegex(ValidationError, "must not be blank"):
+            self.control.resolve_workflow_closeout_obligation(
+                obligation["id"],
+                expected_version=obligation["version"],
+                resolution=" \n ",
+                resolved_by_handle="operator",
+            )
+        resolved = self.control.resolve_workflow_closeout_obligation(
+            obligation["id"],
+            expected_version=obligation["version"],
+            resolution="The bounded follow-up completed.",
+            resolved_by_handle="operator",
+        )
+        self.assertEqual(resolved["state"], "resolved")
+        self.assertEqual(resolved["resolution"], "The bounded follow-up completed.")
+        closed = self.database.get_workflow_execution(finished["id"])
+        self.assertEqual(closed["closeout"]["summary"], "closed")
+        self.assertEqual(closed["closeout"]["open_obligation_count"], 0)
+        self.assertEqual(closed["responsibility"]["status"], "terminal")
+
+    def test_closeout_declaration_rejects_waiver_or_past_deadline(self) -> None:
+        completion = self.complete_activated_to_closeout(
+            external_id="activated-closeout-invalid"
+        )
+        now = datetime.fromisoformat(self.database.now())
+        cases = (
+            (
+                "policy obligation",
+                {
+                    "kind": "deferred_validation",
+                    "obligation": "mutation",
+                    "deadline": (now + timedelta(days=1)).isoformat(),
+                    "reason": "This obligation is not in the portable policy.",
+                },
+            ),
+            (
+                "future",
+                {
+                    "kind": "deferred_validation",
+                    "obligation": "tests",
+                    "deadline": (now - timedelta(seconds=1)).isoformat(),
+                    "reason": "A past deadline cannot be declared.",
+                },
+            ),
+        )
+        for message, obligation in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ConflictError, message),
+            ):
+                self.control.declare_workflow_closeout(
+                    completion["id"],
+                    expected_version=completion["version"],
+                    declaration=WorkflowCloseoutDeclaration.from_mapping(
+                        {"schema_version": 1, "obligations": [obligation]}
+                    ),
+                    declared_by_handle="operator",
+                )
+
+        unchanged = self.database.get_workflow_execution(completion["id"])
+        self.assertIsNone(unchanged["closeout"])
+
+    def test_activated_closeout_with_no_obligations_is_plain_closed(self) -> None:
+        completion = self.complete_activated_to_closeout(
+            external_id="activated-closeout-empty"
+        )
+        declaration = WorkflowCloseoutDeclaration.from_mapping(
+            {"schema_version": 1, "obligations": []}
+        )
+        self.control.declare_workflow_closeout(
+            completion["id"],
+            expected_version=completion["version"],
+            declaration=declaration,
+            declared_by_handle="operator",
+        )
+
+        self.assertTrue(
+            self.director().advance(
+                completion["id"], expected_version=completion["version"]
+            )
+        )
+        finished = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(finished["closeout"]["summary"], "closed")
+        self.assertEqual(finished["closeout"]["open_obligation_count"], 0)
+        self.assertEqual(finished["responsibility"]["status"], "terminal")
+
+    def test_closeout_rejects_provider_metadata_drift_without_partial_completion(
+        self,
+    ) -> None:
+        completion = self.complete_activated_to_closeout(
+            external_id="activated-closeout-metadata-drift",
+            readback_overrides={"title": "Provider-mutated title"},
+        )
+        declaration = WorkflowCloseoutDeclaration.from_mapping(
+            {"schema_version": 1, "obligations": []}
+        )
+        self.control.declare_workflow_closeout(
+            completion["id"],
+            expected_version=completion["version"],
+            declaration=declaration,
+            declared_by_handle="operator",
+        )
+
+        with self.assertRaisesRegex(ConflictError, "readback differs from its intent"):
+            self.database.complete_workflow_execution(
+                completion["id"], expected_version=completion["version"]
+            )
+
+        unchanged = self.database.get_workflow_execution(completion["id"])
+        self.assertEqual(unchanged["state"], "active")
+        self.assertEqual(unchanged["stage"], "completion")
+        self.assertEqual(unchanged["closeout"]["status"], "declared")
+        self.assertIsNone(unchanged["closeout"].get("proof_id"))
+        self.assertEqual(
+            unchanged["landing"]["proof"]["readback"]["title"],
+            "Provider-mutated title",
+        )
+        with self.database.connect() as connection:
+            thread = connection.execute(
+                "SELECT state FROM work_threads WHERE id = ?",
+                (unchanged["work_thread_id"],),
+            ).fetchone()
+        self.assertIsNotNone(thread)
+        self.assertEqual(thread["state"], "active")
+
     def test_wrong_landed_tree_is_retained_and_holds_the_target(self) -> None:
         enqueued, gate, _activation, _bindings = self.activated_provider_landing(
             external_id="activated-landing-mismatch"
@@ -2080,6 +2730,166 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertEqual(lifted["state"], "lifted")
         self.assertEqual(lifted["lifted_by"], "operator")
         self.assertEqual(self.control.list_integration_target_holds(open_only=True), [])
+
+    def test_two_projects_reconcile_lost_receipts_and_isolate_target_holds(
+        self,
+    ) -> None:
+        mgb_execution, mgb_activation, mgb_bindings = (
+            self.start_activated_provider_execution(external_id="m18-portable-mgb")
+        )
+        ik_execution, ik_activation, ik_bindings = (
+            self.start_imitation_krab_activated_execution(
+                policy_name=mgb_activation["policy"]["name"],
+                policy_sha256=mgb_activation["policy"]["content_sha256"],
+                external_id="IK-PORTABLE-1",
+            )
+        )
+        self.assertEqual(mgb_activation["policy"]["id"], ik_activation["policy"]["id"])
+        self.assertEqual(
+            mgb_activation["policy"]["content_sha256"],
+            ik_activation["policy"]["content_sha256"],
+        )
+        self.assertNotEqual(
+            mgb_activation["workflow_configuration_version_id"],
+            ik_activation["workflow_configuration_version_id"],
+        )
+        self.assertNotEqual(
+            mgb_activation["content_sha256"], ik_activation["content_sha256"]
+        )
+        self.assertEqual(mgb_activation["spec"]["resources"]["review_rounds"], 2)
+        self.assertEqual(ik_activation["spec"]["resources"]["review_rounds"], 1)
+        self.assertTrue(
+            {binding["id"] for binding in mgb_bindings.values()}.isdisjoint(
+                {binding["id"] for binding in ik_bindings.values()}
+            )
+        )
+
+        mgb_landing, mgb_gate = self.drive_approved_to_landing(mgb_execution)
+        ik_landing, ik_gate = self.drive_approved_to_landing(ik_execution)
+        project_cases = (
+            (
+                "mgb",
+                mgb_landing,
+                mgb_gate,
+                mgb_bindings,
+                "refs/heads/mgb/m18-portable-mgb",
+                "Prove activated provider authority",
+                "42",
+                "0" * 40,
+            ),
+            (
+                "ik",
+                ik_landing,
+                ik_gate,
+                ik_bindings,
+                "refs/heads/ik/m18-portable-ik",
+                "Keep the health probe contract exact",
+                "84",
+                "1" * 40,
+            ),
+        )
+        targets: list[tuple[str, dict[str, object], dict[str, object], str]] = []
+        for (
+            label,
+            landing,
+            gate,
+            bindings,
+            head_ref,
+            title,
+            change_id,
+            wrong_tree,
+        ) in project_cases:
+            with self.subTest(project=label, phase="provider-effects"):
+                self.assertTrue(
+                    self.director().advance(
+                        landing["id"], expected_version=landing["version"]
+                    )
+                )
+                enqueued = self.database.get_workflow_execution(landing["id"])
+                self.control.configure_workflow_provider_intent(
+                    enqueued["id"],
+                    expected_version=enqueued["version"],
+                    head_ref=head_ref,
+                    title=title,
+                    body=f"Exact {label} project-local proposal.",
+                    draft=False,
+                    configured_by_handle="operator",
+                )
+                targeted = self.drive_activated_provider_effects_with_interruption(
+                    enqueued,
+                    bindings=bindings,
+                    change_id=change_id,
+                    owner_suffix=label,
+                )
+                targets.append((label, targeted, gate, wrong_tree))
+
+        held: dict[str, dict[str, object]] = {}
+        for label, targeted, gate, wrong_tree in targets:
+            with self.subTest(project=label, phase="landing-hold"):
+                self.assertFalse(
+                    self.director().advance(
+                        targeted["id"], expected_version=targeted["version"]
+                    )
+                )
+                claimed = self.database.get_workflow_execution(targeted["id"])
+                self.assertFalse(
+                    self.director().advance(
+                        claimed["id"], expected_version=claimed["version"]
+                    )
+                )
+                awaiting = self.database.get_workflow_execution(targeted["id"])
+                issued = self.control.get_provider_landing(
+                    awaiting["landing"]["provider_landing_id"]
+                )
+                expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+                    "tree_revision"
+                ]
+                self.complete_activated_landing_operation(
+                    issued,
+                    expected_tree=expected_tree,
+                    observed_tree=wrong_tree,
+                )
+                self.assertFalse(
+                    self.director().advance(
+                        awaiting["id"], expected_version=awaiting["version"]
+                    )
+                )
+                landed = self.database.get_workflow_execution(awaiting["id"])
+                self.assertEqual(landed["landing"]["proof"]["status"], "mismatch")
+                self.assertEqual(landed["landing"]["target_hold"]["state"], "open")
+                held[label] = landed["landing"]["target_hold"]
+
+        self.assertNotEqual(
+            held["mgb"]["integration_ref_id"], held["ik"]["integration_ref_id"]
+        )
+        open_holds = self.control.list_integration_target_holds(open_only=True)
+        self.assertEqual(
+            {hold["id"] for hold in open_holds},
+            {held["mgb"]["id"], held["ik"]["id"]},
+        )
+        ik_before = dict(held["ik"])
+        lifted = self.control.lift_integration_target_hold(
+            held["mgb"]["id"],
+            expected_version=held["mgb"]["version"],
+            lifted_by_handle="operator",
+        )
+        self.assertEqual(lifted["state"], "lifted")
+        remaining = self.control.list_integration_target_holds(open_only=True)
+        self.assertEqual(remaining, [ik_before])
+        all_holds = {
+            hold["id"]: hold
+            for hold in self.control.list_integration_target_holds(open_only=False)
+        }
+        self.assertEqual(all_holds[held["mgb"]["id"]]["state"], "lifted")
+        self.assertEqual(all_holds[held["ik"]["id"]], ik_before)
+
+        snapshot = ControlRoom(self.database).snapshot()
+        held_workflows = {
+            item["workflow_execution_id"]
+            for item in snapshot["attention"]
+            if item["kind"] == "workflow.landing_target_held"
+        }
+        self.assertEqual(held_workflows, {ik_execution["id"]})
 
     def test_missing_authoritative_landing_readback_is_uncertain_and_held(self) -> None:
         enqueued, _gate, _activation, _bindings = self.activated_provider_landing(

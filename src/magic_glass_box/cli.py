@@ -66,6 +66,7 @@ from .service_sidecar import (
 )
 from .supervision import Supervisor, SupervisorError
 from .worker_transport import WorkerTransportError
+from .workflow_closeout import WorkflowCloseoutDeclaration
 from .workflow_director import WorkflowDirector
 from .workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
 from .workflows import WorkflowConfigurationSpec
@@ -645,6 +646,37 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_seconds,
         default=DEFAULT_GIT_TIMEOUT_SECONDS,
     )
+    workflow_closeout_declare = workflow_commands.add_parser(
+        "closeout-declare",
+        help="declare owner-authored closeout and bounded follow-up obligations",
+    )
+    workflow_closeout_declare.add_argument("execution_id")
+    workflow_closeout_declare.add_argument(
+        "--expected-version", required=True, type=int
+    )
+    workflow_closeout_declare.add_argument("--spec", required=True, type=Path)
+    workflow_closeout_declare.add_argument("--declared-by", required=True)
+    workflow_obligation_show = workflow_commands.add_parser(
+        "obligation-show", help="show one workflow closeout obligation"
+    )
+    workflow_obligation_show.add_argument("obligation_id")
+    workflow_obligation_list = workflow_commands.add_parser(
+        "obligation-list", help="list workflow closeout obligations"
+    )
+    workflow_obligation_list.add_argument("--execution")
+    workflow_obligation_list.add_argument("--open-only", action="store_true")
+    workflow_obligation_list.add_argument("--limit", type=_candidate_limit, default=100)
+    workflow_obligation_resolve = workflow_commands.add_parser(
+        "obligation-resolve", help="resolve one workflow closeout obligation"
+    )
+    workflow_obligation_resolve.add_argument("obligation_id")
+    workflow_obligation_resolve.add_argument(
+        "--expected-version", required=True, type=int
+    )
+    workflow_obligation_resolve.add_argument(
+        "--resolution-file", required=True, type=Path
+    )
+    workflow_obligation_resolve.add_argument("--resolved-by", required=True)
 
     discovery = commands.add_parser(
         "discovery", help="manage bounded Discovery prescriptions"
@@ -1914,6 +1946,34 @@ def _dispatch(
                 issued_by_handle=args.issued_by,
                 result_store=result_store,
                 candidate_store=candidate_store,
+            )
+        if args.workflow_command == "closeout-declare":
+            return control.declare_workflow_closeout(
+                args.execution_id,
+                expected_version=args.expected_version,
+                declaration=WorkflowCloseoutDeclaration.from_mapping(
+                    _json_file(args.spec)
+                ),
+                declared_by_handle=args.declared_by,
+            )
+        if args.workflow_command == "obligation-show":
+            return control.get_workflow_closeout_obligation(args.obligation_id)
+        if args.workflow_command == "obligation-list":
+            return control.list_workflow_closeout_obligations(
+                execution_id=args.execution,
+                open_only=args.open_only,
+                limit=args.limit,
+            )
+        if args.workflow_command == "obligation-resolve":
+            return control.resolve_workflow_closeout_obligation(
+                args.obligation_id,
+                expected_version=args.expected_version,
+                resolution=_text_file(
+                    args.resolution_file,
+                    maximum=4096,
+                    label="workflow closeout resolution",
+                ),
+                resolved_by_handle=args.resolved_by,
             )
     if args.command == "discovery":
         if args.discovery_command in {"config-create", "config-revise"}:

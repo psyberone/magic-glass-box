@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime
 from typing import Any
 
 from ..advisory import AdvisoryConfigurationSpec
@@ -29,6 +30,7 @@ from ..gates import ReviewSeparation
 from ..krab import IDEMPOTENCY_KEY_RE
 from ..provider_effects import (
     ChangeOpenReadback,
+    LandingReadback,
     RefPublicationReadback,
     WorkflowProviderIntent,
 )
@@ -37,7 +39,11 @@ from ..service_sidecar import (
     ServiceOperationSpec,
     core_service_capability,
 )
-from ..workflow_policy import WorkflowActivationSpec
+from ..workflow_closeout import (
+    WorkflowCloseoutDeclaration,
+    validate_delivery_closeout,
+)
+from ..workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
 from ..workflow_scope import WorkflowScopeReview
 from ..workflows import (
     ADVISORY_REVIEW_TEMPLATE_ID,
@@ -1385,6 +1391,7 @@ class WorkflowStorage:
             mode=configuration["spec"]["landing_mode"],
         )
         completion = self._workflow_completion_record(connection, execution_id)
+        closeout = self._workflow_closeout_record(connection, execution_id)
         scope_binding = self._workflow_scope_binding_record(connection, execution_id)
         portable_policy: dict[str, Any] = {"status": "pre_policy"}
         if row["workflow_activation_version_id"] is not None:
@@ -1421,6 +1428,7 @@ class WorkflowStorage:
             "rulings": [dict(ruling) for ruling in rulings],
             "landing": landing,
             "completion": completion,
+            "closeout": closeout,
             "scope_binding": scope_binding,
             "portable_policy": portable_policy,
             "responsibility": self._workflow_responsibility(connection, execution_id),
@@ -1459,6 +1467,24 @@ class WorkflowStorage:
                 "basis": {} if basis is None else basis,
             }
 
+        if execution["state"] == "completed":
+            obligation = connection.execute(
+                "SELECT id, version, deadline FROM workflow_closeout_obligations "
+                "WHERE workflow_execution_id = ? AND state = 'open' "
+                "ORDER BY deadline, id LIMIT 1",
+                (execution_id,),
+            ).fetchone()
+            if obligation is not None:
+                return fact(
+                    "action_required",
+                    "owner",
+                    "closeout_obligation",
+                    {
+                        "obligation_id": obligation["id"],
+                        "obligation_version": obligation["version"],
+                        "deadline": obligation["deadline"],
+                    },
+                )
         if execution["state"] != "active":
             return fact(
                 "terminal",
@@ -1684,6 +1710,17 @@ class WorkflowStorage:
                 {**basis, "queue_state": landing["queue_state"]},
             )
         if stage == "completion":
+            declaration = connection.execute(
+                "SELECT id FROM workflow_closeout_declarations "
+                "WHERE workflow_execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            if declaration is None:
+                return fact(
+                    "action_required",
+                    "owner",
+                    "closeout_declaration",
+                )
             return fact(
                 "action_required",
                 "control_plane",
@@ -2179,6 +2216,195 @@ class WorkflowStorage:
             (execution_id,),
         ).fetchone()
         return None if row is None else dict(row)
+
+    @staticmethod
+    def _workflow_closeout_declaration_row(
+        connection: sqlite3.Connection, execution_id: str
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT declaration.id, declaration.workflow_execution_id, "
+            "declaration.workflow_activation_version_id, "
+            "declaration.workflow_policy_id, declaration.landing_proof_id, "
+            "declaration.schema_version, declaration.declaration_json, "
+            "declaration.content_sha256, declaration.declared_by, "
+            "declarer.handle AS declared_by_handle, declaration.created_at "
+            "FROM workflow_closeout_declarations declaration "
+            "JOIN users declarer ON declarer.id = declaration.declared_by "
+            "WHERE declaration.workflow_execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _workflow_closeout_obligation_record(
+        row: sqlite3.Row, *, observed_at: str
+    ) -> dict[str, Any]:
+        if row["state"] == "resolved":
+            deadline_state = "resolved"
+        else:
+            try:
+                deadline = datetime.fromisoformat(
+                    row["deadline"].replace("Z", "+00:00")
+                )
+                observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise StorageError(
+                    "stored workflow closeout obligation deadline is invalid"
+                ) from exc
+            if deadline.tzinfo is None or observed.tzinfo is None:
+                raise StorageError(
+                    "stored workflow closeout obligation deadline is invalid"
+                )
+            deadline_state = "overdue" if deadline <= observed else "pending"
+        return {
+            "id": row["id"],
+            "declaration_id": row["declaration_id"],
+            "workflow_execution_id": row["workflow_execution_id"],
+            "kind": row["kind"],
+            "obligation": row["policy_obligation"],
+            "validation": row["validation_name"],
+            "baseline_gate": "validation:" + row["validation_name"],
+            "baseline_evidence_id": row["baseline_evidence_id"],
+            "deadline": row["deadline"],
+            "deadline_state": deadline_state,
+            "reason": row["reason"],
+            "state": row["state"],
+            "version": row["version"],
+            "resolved_by": row["resolved_by_handle"],
+            "resolution": row["resolution"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    @classmethod
+    def _workflow_closeout_declaration_record(
+        cls,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        observed_at: str,
+    ) -> dict[str, Any]:
+        try:
+            declaration = WorkflowCloseoutDeclaration.from_mapping(
+                json.loads(row["declaration_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError(
+                "stored workflow closeout declaration is invalid"
+            ) from exc
+        if (
+            declaration.digest != row["content_sha256"]
+            or declaration.schema_version != row["schema_version"]
+        ):
+            raise StorageError(
+                "stored workflow closeout declaration digest does not match"
+            )
+        obligation_rows = connection.execute(
+            "SELECT obligation.id, obligation.declaration_id, "
+            "obligation.workflow_execution_id, obligation.kind, "
+            "obligation.policy_obligation, obligation.validation_name, "
+            "obligation.baseline_evidence_id, obligation.deadline, "
+            "obligation.reason, obligation.state, obligation.version, "
+            "resolver.handle AS resolved_by_handle, obligation.resolution, "
+            "obligation.created_at, obligation.updated_at, obligation.resolved_at "
+            "FROM workflow_closeout_obligations obligation "
+            "LEFT JOIN users resolver ON resolver.id = obligation.resolved_by "
+            "WHERE obligation.declaration_id = ? "
+            "ORDER BY obligation.policy_obligation",
+            (row["id"],),
+        ).fetchall()
+        obligations = [
+            cls._workflow_closeout_obligation_record(
+                obligation, observed_at=observed_at
+            )
+            for obligation in obligation_rows
+        ]
+        declared = {item.obligation: item for item in declaration.obligations}
+        if len(obligations) != len(declared) or any(
+            obligation["obligation"] not in declared
+            or obligation["kind"] != declared[obligation["obligation"]].kind
+            or obligation["deadline"] != declared[obligation["obligation"]].deadline
+            or obligation["reason"] != declared[obligation["obligation"]].reason
+            or obligation["workflow_execution_id"] != row["workflow_execution_id"]
+            for obligation in obligations
+        ):
+            raise StorageError(
+                "stored workflow closeout obligations differ from their declaration"
+            )
+        return {
+            "id": row["id"],
+            "workflow_execution_id": row["workflow_execution_id"],
+            "workflow_activation_version_id": row["workflow_activation_version_id"],
+            "workflow_policy_id": row["workflow_policy_id"],
+            "landing_proof_id": row["landing_proof_id"],
+            "declaration": declaration.to_dict(),
+            "content_sha256": row["content_sha256"],
+            "declared_by": row["declared_by_handle"],
+            "created_at": row["created_at"],
+            "obligations": obligations,
+        }
+
+    def _workflow_closeout_record(
+        self, connection: sqlite3.Connection, execution_id: str
+    ) -> dict[str, Any] | None:
+        observed_at = self.now()
+        declaration_row = self._workflow_closeout_declaration_row(
+            connection, execution_id
+        )
+        if declaration_row is None:
+            return None
+        declaration = self._workflow_closeout_declaration_record(
+            connection, declaration_row, observed_at=observed_at
+        )
+        proof_row = connection.execute(
+            "SELECT id, workflow_execution_id, declaration_id, "
+            "workflow_activation_version_id, workflow_policy_id, "
+            "landing_proof_id, schema_version, proof_json, content_sha256, "
+            "status, created_at FROM workflow_closeout_proofs "
+            "WHERE workflow_execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        obligations = declaration["obligations"]
+        open_count = sum(item["state"] == "open" for item in obligations)
+        overdue_count = sum(item["deadline_state"] == "overdue" for item in obligations)
+        if proof_row is None:
+            return {
+                **declaration,
+                "status": "declared",
+                "facts": None,
+                "summary": "pending closeout",
+                "open_obligation_count": open_count,
+                "overdue_obligation_count": overdue_count,
+            }
+        try:
+            proof = json.loads(proof_row["proof_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise StorageError("stored workflow closeout proof is invalid") from exc
+        if (
+            not isinstance(proof, dict)
+            or content_sha256(canonical_json(proof)) != proof_row["content_sha256"]
+            or proof.get("schema_version") != proof_row["schema_version"]
+            or proof.get("workflow_execution_id") != proof_row["workflow_execution_id"]
+            or proof.get("declaration_id") != proof_row["declaration_id"]
+            or proof.get("workflow_activation_version_id")
+            != proof_row["workflow_activation_version_id"]
+            or proof.get("workflow_policy_id") != proof_row["workflow_policy_id"]
+            or proof.get("landing_proof_id") != proof_row["landing_proof_id"]
+            or proof.get("status") != proof_row["status"]
+            or proof_row["declaration_id"] != declaration["id"]
+        ):
+            raise StorageError("stored workflow closeout proof digest does not match")
+        return {
+            **declaration,
+            "proof_id": proof_row["id"],
+            "proof_sha256": proof_row["content_sha256"],
+            "status": proof["status"],
+            "facts": proof["facts"],
+            "closed_at": proof_row["created_at"],
+            "summary": "closed" if open_count == 0 else f"closed, {open_count} open",
+            "open_obligation_count": open_count,
+            "overdue_obligation_count": overdue_count,
+        }
 
     def find_workflow_run(
         self, execution_id: str, correction_round: int, role: str
@@ -3484,6 +3710,487 @@ class WorkflowStorage:
                 raise ConflictError("workflow execution could not advance") from exc
         return self.get_workflow_execution(execution_id)
 
+    def declare_workflow_closeout(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        declaration: WorkflowCloseoutDeclaration,
+        declared_by: str,
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        if not isinstance(declaration, WorkflowCloseoutDeclaration):
+            raise ValidationError("declaration must be a WorkflowCloseoutDeclaration")
+        declared_by = require_string(declared_by, field="declared_by", max_bytes=64)
+        declaration_id = self.new_id("wcd")
+        now = self.now()
+        try:
+            observed = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise StorageError("control-plane closeout time is invalid") from exc
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, declared_by, role="workflow closeout declarer"
+                )
+                source = connection.execute(
+                    "SELECT execution.state, execution.stage, execution.version, "
+                    "execution.workflow_activation_version_id, "
+                    "activation.acknowledged_by, activation.policy_id, "
+                    "activation.spec_json AS activation_spec_json, "
+                    "policy.spec_json AS policy_spec_json, "
+                    "landing.policy_id AS gate_policy_id, "
+                    "proof.id AS landing_proof_id, "
+                    "proof.status AS landing_proof_status "
+                    "FROM workflow_executions execution "
+                    "JOIN workflow_activation_versions activation "
+                    "ON activation.id = execution.workflow_activation_version_id "
+                    "JOIN workflow_policies policy ON policy.id = activation.policy_id "
+                    "JOIN workflow_landing_bindings landing "
+                    "ON landing.execution_id = execution.id "
+                    "JOIN workflow_provider_landing_proofs proof "
+                    "ON proof.workflow_execution_id = execution.id "
+                    "WHERE execution.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if source is None:
+                    raise ConflictError(
+                        "activated workflow closeout authority is unavailable"
+                    )
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if source["state"] != "active" or source["stage"] != "completion":
+                    raise ConflictError("workflow is not awaiting closeout")
+                if source["acknowledged_by"] != declared_by:
+                    raise ConflictError(
+                        "workflow closeout declaration requires the activation owner"
+                    )
+                if source["landing_proof_status"] != "conformant":
+                    raise ConflictError(
+                        "workflow closeout requires a conformant landing proof"
+                    )
+                try:
+                    activation = WorkflowActivationSpec.from_mapping(
+                        json.loads(source["activation_spec_json"])
+                    )
+                    policy = WorkflowPolicySpec.from_mapping(
+                        json.loads(source["policy_spec_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored workflow closeout authority is invalid"
+                    ) from exc
+                if declaration.obligations and not policy.allow_deferred_validation:
+                    raise ConflictError(
+                        "workflow policy does not permit deferred validation"
+                    )
+                validation_bindings = {
+                    binding.obligation: binding.validation
+                    for binding in activation.validation_bindings
+                }
+                evidence: dict[str, tuple[str, str]] = {}
+                for obligation in declaration.obligations:
+                    if obligation.obligation not in policy.validation_obligations:
+                        raise ConflictError(
+                            "workflow closeout names an unknown policy obligation"
+                        )
+                    validation_name = validation_bindings.get(obligation.obligation)
+                    if validation_name is None:
+                        raise ConflictError(
+                            "workflow closeout policy obligation has no activation "
+                            "binding"
+                        )
+                    deadline = datetime.fromisoformat(
+                        obligation.deadline.replace("Z", "+00:00")
+                    )
+                    if deadline <= observed:
+                        raise ConflictError(
+                            "workflow closeout obligation deadline must be future"
+                        )
+                    gate_name = "validation:" + validation_name
+                    baseline = connection.execute(
+                        "SELECT id, outcome FROM integration_gate_evidence "
+                        "WHERE policy_id = ? AND gate_name = ? "
+                        "ORDER BY sequence DESC LIMIT 1",
+                        (source["gate_policy_id"], gate_name),
+                    ).fetchone()
+                    if baseline is None or baseline["outcome"] != "passed":
+                        raise ConflictError(
+                            "workflow closeout cannot defer missing immutable "
+                            "validation"
+                        )
+                    evidence[obligation.obligation] = (
+                        validation_name,
+                        baseline["id"],
+                    )
+                existing = self._workflow_closeout_declaration_row(
+                    connection, execution_id
+                )
+                if existing is not None:
+                    if (
+                        existing["content_sha256"] != declaration.digest
+                        or existing["declared_by"] != declared_by
+                    ):
+                        raise ConflictError(
+                            "workflow already has another closeout declaration"
+                        )
+                    result = self._workflow_closeout_declaration_record(
+                        connection, existing, observed_at=now
+                    )
+                    connection.commit()
+                    return result
+                connection.execute(
+                    "INSERT INTO workflow_closeout_declarations "
+                    "(id, workflow_execution_id, workflow_activation_version_id, "
+                    "workflow_policy_id, landing_proof_id, schema_version, "
+                    "declaration_json, content_sha256, declared_by, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        declaration_id,
+                        execution_id,
+                        source["workflow_activation_version_id"],
+                        source["policy_id"],
+                        source["landing_proof_id"],
+                        declaration.schema_version,
+                        declaration.canonical,
+                        declaration.digest,
+                        declared_by,
+                        now,
+                    ),
+                )
+                for obligation in declaration.obligations:
+                    validation_name, baseline_evidence_id = evidence[
+                        obligation.obligation
+                    ]
+                    connection.execute(
+                        "INSERT INTO workflow_closeout_obligations "
+                        "(id, declaration_id, workflow_execution_id, kind, "
+                        "policy_obligation, validation_name, baseline_evidence_id, "
+                        "deadline, reason, state, version, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, ?, ?)",
+                        (
+                            self.new_id("wco"),
+                            declaration_id,
+                            execution_id,
+                            obligation.kind,
+                            obligation.obligation,
+                            validation_name,
+                            baseline_evidence_id,
+                            obligation.deadline,
+                            obligation.reason,
+                            now,
+                            now,
+                        ),
+                    )
+                stored = self._workflow_closeout_declaration_row(
+                    connection, execution_id
+                )
+                assert stored is not None
+                result = self._workflow_closeout_declaration_record(
+                    connection, stored, observed_at=now
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except (ValueError, sqlite3.IntegrityError) as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow closeout declaration could not be stored"
+                ) from exc
+        return result
+
+    def get_workflow_closeout_obligation(self, obligation_id: str) -> dict[str, Any]:
+        obligation_id = require_string(
+            obligation_id, field="obligation_id", max_bytes=64
+        )
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT obligation.id, obligation.declaration_id, "
+                "obligation.workflow_execution_id, obligation.kind, "
+                "obligation.policy_obligation, obligation.validation_name, "
+                "obligation.baseline_evidence_id, obligation.deadline, "
+                "obligation.reason, obligation.state, obligation.version, "
+                "resolver.handle AS resolved_by_handle, obligation.resolution, "
+                "obligation.created_at, obligation.updated_at, "
+                "obligation.resolved_at FROM workflow_closeout_obligations "
+                "obligation LEFT JOIN users resolver "
+                "ON resolver.id = obligation.resolved_by WHERE obligation.id = ?",
+                (obligation_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(
+                    f"workflow closeout obligation not found: {obligation_id}"
+                )
+            return self._workflow_closeout_obligation_record(
+                row, observed_at=self.now()
+            )
+
+    def list_workflow_closeout_obligations(
+        self,
+        *,
+        execution_id: str | None = None,
+        open_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if execution_id is not None:
+            execution_id = require_string(
+                execution_id, field="execution_id", max_bytes=64
+            )
+        if not isinstance(open_only, bool):
+            raise ValidationError("open_only must be a boolean")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 500
+        ):
+            raise ValidationError("limit must be between 1 and 500")
+        with self._read_snapshot() as connection:
+            rows = connection.execute(
+                "SELECT obligation.id, obligation.declaration_id, "
+                "obligation.workflow_execution_id, obligation.kind, "
+                "obligation.policy_obligation, obligation.validation_name, "
+                "obligation.baseline_evidence_id, obligation.deadline, "
+                "obligation.reason, obligation.state, obligation.version, "
+                "resolver.handle AS resolved_by_handle, obligation.resolution, "
+                "obligation.created_at, obligation.updated_at, "
+                "obligation.resolved_at FROM workflow_closeout_obligations "
+                "obligation LEFT JOIN users resolver "
+                "ON resolver.id = obligation.resolved_by "
+                "WHERE (? IS NULL OR obligation.workflow_execution_id = ?) "
+                "AND (? = 0 OR obligation.state = 'open') "
+                "ORDER BY obligation.deadline, obligation.id LIMIT ?",
+                (execution_id, execution_id, 1 if open_only else 0, limit),
+            ).fetchall()
+            observed_at = self.now()
+            return [
+                self._workflow_closeout_obligation_record(row, observed_at=observed_at)
+                for row in rows
+            ]
+
+    def resolve_workflow_closeout_obligation(
+        self,
+        obligation_id: str,
+        *,
+        expected_version: int,
+        resolution: str,
+        resolved_by: str,
+    ) -> dict[str, Any]:
+        obligation_id = require_string(
+            obligation_id, field="obligation_id", max_bytes=64
+        )
+        self._positive_integer(expected_version, field="expected_version")
+        resolution = require_string(
+            resolution, field="workflow closeout resolution", max_bytes=4096
+        )
+        if not resolution.strip():
+            raise ValidationError("workflow closeout resolution must not be blank")
+        resolved_by = require_string(resolved_by, field="resolved_by", max_bytes=64)
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, resolved_by, role="workflow closeout resolver"
+                )
+                source = connection.execute(
+                    "SELECT obligation.state, obligation.version, "
+                    "activation.acknowledged_by FROM workflow_closeout_obligations "
+                    "obligation JOIN workflow_closeout_declarations declaration "
+                    "ON declaration.id = obligation.declaration_id "
+                    "JOIN workflow_activation_versions activation "
+                    "ON activation.id = declaration.workflow_activation_version_id "
+                    "WHERE obligation.id = ?",
+                    (obligation_id,),
+                ).fetchone()
+                if source is None:
+                    raise NotFoundError(
+                        f"workflow closeout obligation not found: {obligation_id}"
+                    )
+                if source["acknowledged_by"] != resolved_by:
+                    raise ConflictError(
+                        "workflow closeout resolution requires the activation owner"
+                    )
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        "workflow closeout obligation version changed"
+                    )
+                if source["state"] != "open":
+                    raise ConflictError(
+                        "workflow closeout obligation is already resolved"
+                    )
+                changed = connection.execute(
+                    "UPDATE workflow_closeout_obligations SET state = 'resolved', "
+                    "version = version + 1, resolved_by = ?, resolution = ?, "
+                    "updated_at = ?, resolved_at = ? WHERE id = ? "
+                    "AND version = ? AND state = 'open'",
+                    (
+                        resolved_by,
+                        resolution,
+                        now,
+                        now,
+                        obligation_id,
+                        expected_version,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "workflow closeout obligation changed concurrently"
+                    )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow closeout obligation could not be resolved"
+                ) from exc
+        return self.get_workflow_closeout_obligation(obligation_id)
+
+    def _record_workflow_closeout_proof(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        execution_id: str,
+        provider_landing_id: str,
+        landing_receipt_id: str,
+        now: str,
+    ) -> dict[str, Any]:
+        declaration_row = self._workflow_closeout_declaration_row(
+            connection, execution_id
+        )
+        if declaration_row is None:
+            raise ConflictError(
+                "activated workflow requires an owner closeout declaration"
+            )
+        declaration = self._workflow_closeout_declaration_record(
+            connection, declaration_row, observed_at=now
+        )
+        landing_proof_row = self._workflow_provider_landing_proof_row(
+            connection, execution_id=execution_id
+        )
+        if landing_proof_row is None:
+            raise ConflictError("workflow closeout landing proof is unavailable")
+        landing_proof = self._workflow_provider_landing_proof_record(landing_proof_row)
+        if (
+            landing_proof["status"] != "conformant"
+            or landing_proof["provider_landing_id"] != provider_landing_id
+            or landing_proof["landing_receipt_id"] != landing_receipt_id
+            or landing_proof["id"] != declaration["landing_proof_id"]
+        ):
+            raise ConflictError(
+                "workflow closeout does not match its conformant landing proof"
+            )
+        readback_value = landing_proof.get("readback")
+        if readback_value is None:
+            raise ConflictError("workflow closeout landing readback is unavailable")
+        try:
+            landing_readback = LandingReadback.from_mapping(readback_value)
+        except ValidationError as exc:
+            raise StorageError("stored workflow closeout readback is invalid") from exc
+        intent = self._workflow_provider_intent_for_execution(connection, execution_id)
+        if intent is None:
+            raise ConflictError("workflow closeout provider intent is unavailable")
+        change_effect = intent["effects"].get("change.open")
+        if (
+            change_effect is None
+            or change_effect["state"] != "confirmed"
+            or change_effect["fact"] is None
+        ):
+            raise ConflictError("workflow closeout change-open readback is unavailable")
+        try:
+            change_readback = ChangeOpenReadback.from_mapping(change_effect["fact"])
+            intent_value = WorkflowProviderIntent.from_mapping(intent["intent"])
+        except ValidationError as exc:
+            raise StorageError("stored workflow closeout metadata is invalid") from exc
+        landing_operation = connection.execute(
+            "SELECT service_operation_id FROM integration_provider_landings "
+            "WHERE id = ?",
+            (provider_landing_id,),
+        ).fetchone()
+        if landing_operation is None:
+            raise StorageError("workflow closeout provider landing is unavailable")
+        service_receipt = self._provider_service_receipt(
+            connection, landing_operation["service_operation_id"]
+        )
+        try:
+            facts = validate_delivery_closeout(
+                intent=intent_value,
+                change_readback=change_readback,
+                landing_readback=landing_readback,
+                remote_identity=service_receipt.remote_identity,
+                closed_references=service_receipt.closed_references,
+            )
+        except ValidationError as exc:
+            raise ConflictError(str(exc)) from exc
+        existing = connection.execute(
+            "SELECT id FROM workflow_closeout_proofs WHERE workflow_execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        if existing is not None:
+            raise ConflictError("workflow closeout proof already exists")
+        proof_id = self.new_id("wcp")
+        proof = {
+            "schema_version": 1,
+            "workflow_execution_id": execution_id,
+            "declaration_id": declaration["id"],
+            "workflow_activation_version_id": declaration[
+                "workflow_activation_version_id"
+            ],
+            "workflow_policy_id": declaration["workflow_policy_id"],
+            "landing_proof_id": landing_proof["id"],
+            "provider_intent_id": intent["id"],
+            "change_effect_id": change_effect["id"],
+            "provider_landing_id": provider_landing_id,
+            "landing_receipt_id": landing_receipt_id,
+            "status": "closed",
+            "facts": facts,
+        }
+        proof_json = canonical_json(proof)
+        proof_sha256 = content_sha256(proof_json)
+        connection.execute(
+            "INSERT INTO workflow_closeout_proofs "
+            "(id, workflow_execution_id, declaration_id, "
+            "workflow_activation_version_id, workflow_policy_id, "
+            "landing_proof_id, schema_version, proof_json, content_sha256, "
+            "status, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, "
+            "'closed', ?)",
+            (
+                proof_id,
+                execution_id,
+                declaration["id"],
+                declaration["workflow_activation_version_id"],
+                declaration["workflow_policy_id"],
+                landing_proof["id"],
+                proof_json,
+                proof_sha256,
+                now,
+            ),
+        )
+        open_count = sum(
+            obligation["state"] == "open" for obligation in declaration["obligations"]
+        )
+        return {
+            "id": proof_id,
+            "content_sha256": proof_sha256,
+            "facts": facts,
+            "summary": "closed" if open_count == 0 else f"closed, {open_count} open",
+        }
+
     def complete_workflow_execution(
         self, execution_id: str, *, expected_version: int
     ) -> dict[str, Any]:
@@ -3536,6 +4243,7 @@ class WorkflowStorage:
                     raise StorageError(
                         "stored workflow configuration is invalid"
                     ) from exc
+                closeout_proof: dict[str, Any] | None = None
                 if spec.landing_mode is WorkflowLandingMode.MANUAL:
                     if (
                         source["plan_id"] is None
@@ -3610,6 +4318,13 @@ class WorkflowStorage:
                             raise ConflictError(
                                 "workflow provider landing proof is not conformant"
                             )
+                        closeout_proof = self._record_workflow_closeout_proof(
+                            connection,
+                            execution_id=execution_id,
+                            provider_landing_id=source["provider_landing_id"],
+                            landing_receipt_id=source["receipt_id"],
+                            now=now,
+                        )
                 if not self._gate_readiness(connection, source["policy_id"])["ready"]:
                     raise ConflictError("workflow landing gate is no longer ready")
                 active_run = connection.execute(
@@ -3649,7 +4364,12 @@ class WorkflowStorage:
                             f"landing_receipt_id={source['receipt_id']}",
                             f"landing_assurance={source['assurance']}",
                             f"observed_revision={source['observed_revision']}",
-                        ],
+                        ]
+                        + (
+                            []
+                            if closeout_proof is None
+                            else [f"delivery_status={closeout_proof['summary']}"]
+                        ),
                         "artifacts": [],
                         "related_interaction_ids": [],
                         "candidate_revision": source["head_revision"],
@@ -3769,6 +4489,16 @@ class WorkflowStorage:
                                 "queue_item_id": source["queue_item_id"],
                                 "receipt_id": source["receipt_id"],
                                 "outcome_entry_id": outcome_entry_id,
+                                **(
+                                    {}
+                                    if closeout_proof is None
+                                    else {
+                                        "closeout_proof_id": closeout_proof["id"],
+                                        "closeout_proof_sha256": closeout_proof[
+                                            "content_sha256"
+                                        ],
+                                    }
+                                ),
                             }
                         ),
                         now,

@@ -864,6 +864,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 "rulings",
                 "landing",
                 "completion",
+                "closeout",
                 "scope_binding",
                 "portable_policy",
                 "responsibility",
@@ -871,6 +872,7 @@ class WorkflowStorageTests(unittest.TestCase):
         )
         self.assertIsNone(execution["landing"])
         self.assertIsNone(execution["completion"])
+        self.assertIsNone(execution["closeout"])
         self.assertIsNone(execution["scope_binding"])
         self.assertIsNone(execution["workflow_activation_version_id"])
         self.assertEqual(execution["portable_policy"], {"status": "pre_policy"})

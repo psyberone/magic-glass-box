@@ -41,6 +41,7 @@ from magic_glass_box.gateway import GatewayError
 from magic_glass_box.inference import InferenceConnectorError
 from magic_glass_box.krab import ActivityPage
 from magic_glass_box.worker_transport import WorkerTransportError
+from magic_glass_box.workflow_closeout import WorkflowCloseoutDeclaration
 from magic_glass_box.workflow_policy import (
     WorkflowActivationSpec,
     WorkflowPolicySpec,
@@ -208,6 +209,26 @@ class FakeControlPlane:
         self, wake_id: str, **kwargs: object
     ) -> dict[str, object]:
         return self._called("workflow.wake-ack", wake_id=wake_id, **kwargs)
+
+    def declare_workflow_closeout(
+        self, execution_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "workflow.closeout-declare", execution_id=execution_id, **kwargs
+        )
+
+    def get_workflow_closeout_obligation(self, obligation_id: str) -> dict[str, object]:
+        return self._called("workflow.obligation-show", obligation_id=obligation_id)
+
+    def list_workflow_closeout_obligations(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.obligation-list", **kwargs)
+
+    def resolve_workflow_closeout_obligation(
+        self, obligation_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "workflow.obligation-resolve", obligation_id=obligation_id, **kwargs
+        )
 
     def start_workflow_execution(self, **kwargs: object) -> dict[str, object]:
         return self._called("workflow.start", **kwargs)
@@ -795,6 +816,23 @@ class CLITests(unittest.TestCase):
                         "manual-plan",
                         "issue the workflow's exact manual landing plan",
                     ),
+                    (
+                        "closeout-declare",
+                        "declare owner-authored closeout and bounded follow-up "
+                        "obligations",
+                    ),
+                    (
+                        "obligation-show",
+                        "show one workflow closeout obligation",
+                    ),
+                    (
+                        "obligation-list",
+                        "list workflow closeout obligations",
+                    ),
+                    (
+                        "obligation-resolve",
+                        "resolve one workflow closeout obligation",
+                    ),
                 ),
             ),
             ("discovery",): (
@@ -1213,6 +1251,16 @@ class CLITests(unittest.TestCase):
                 ("workflow", "wake-ack"): (
                     "--expected-version",
                     "--acknowledged-by",
+                ),
+                ("workflow", "closeout-declare"): (
+                    "--expected-version",
+                    "--spec",
+                    "--declared-by",
+                ),
+                ("workflow", "obligation-resolve"): (
+                    "--expected-version",
+                    "--resolution-file",
+                    "--resolved-by",
                 ),
                 ("workflow", "config-create"): (
                     "--project",
@@ -2719,6 +2767,12 @@ class CLITests(unittest.TestCase):
                 ),
                 "provider-target": "bind a provider resource to a pre-policy workflow",
                 "manual-plan": "issue the workflow's exact manual landing plan",
+                "closeout-declare": (
+                    "declare owner-authored closeout and bounded follow-up obligations"
+                ),
+                "obligation-show": "show one workflow closeout obligation",
+                "obligation-list": "list workflow closeout obligations",
+                "obligation-resolve": "resolve one workflow closeout obligation",
             },
             "discovery": {
                 "config-create": "create a versioned Discovery configuration",
@@ -2883,6 +2937,25 @@ class CLITests(unittest.TestCase):
         policy_path.write_text(json.dumps(policy), encoding="utf-8")
         body_path = Path(self.temporary.name) / "provider-intent-body.md"
         body_path.write_text("Exact project-local proposal.\n", encoding="utf-8")
+        closeout_path = Path(self.temporary.name) / "workflow-closeout.json"
+        closeout_value = {
+            "schema_version": 1,
+            "obligations": [
+                {
+                    "kind": "deferred_validation",
+                    "obligation": "mutation",
+                    "deadline": "2026-11-03T12:00:00Z",
+                    "reason": "Repeat the bounded survivor audit.",
+                }
+            ],
+        }
+        closeout_path.write_text(json.dumps(closeout_value), encoding="utf-8")
+        expected_closeout = WorkflowCloseoutDeclaration.from_mapping(closeout_value)
+        resolution_path = Path(self.temporary.name) / "closeout-resolution.md"
+        resolution_path.write_text(
+            "Focused mutation rerun met the portable policy floor.\n",
+            encoding="utf-8",
+        )
         expected_spec = WorkflowConfigurationSpec.from_mapping(policy)
         fake = FakeControlPlane()
         cases = (
@@ -3144,6 +3217,76 @@ class CLITests(unittest.TestCase):
                         "resource_id": "42",
                         "merge_method": "squash",
                         "configured_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "closeout-declare",
+                    "wfx_" + "4" * 32,
+                    "--expected-version",
+                    "12",
+                    "--spec",
+                    str(closeout_path),
+                    "--declared-by",
+                    "operator",
+                ],
+                (
+                    "workflow.closeout-declare",
+                    {
+                        "execution_id": "wfx_" + "4" * 32,
+                        "expected_version": 12,
+                        "declaration": expected_closeout,
+                        "declared_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                ["workflow", "obligation-show", "wco_" + "5" * 32],
+                (
+                    "workflow.obligation-show",
+                    {"obligation_id": "wco_" + "5" * 32},
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "obligation-list",
+                    "--execution",
+                    "wfx_" + "4" * 32,
+                    "--open-only",
+                ],
+                (
+                    "workflow.obligation-list",
+                    {
+                        "execution_id": "wfx_" + "4" * 32,
+                        "open_only": True,
+                        "limit": 100,
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "obligation-resolve",
+                    "wco_" + "5" * 32,
+                    "--expected-version",
+                    "1",
+                    "--resolution-file",
+                    str(resolution_path),
+                    "--resolved-by",
+                    "operator",
+                ],
+                (
+                    "workflow.obligation-resolve",
+                    {
+                        "obligation_id": "wco_" + "5" * 32,
+                        "expected_version": 1,
+                        "resolution": (
+                            "Focused mutation rerun met the portable policy floor.\n"
+                        ),
+                        "resolved_by_handle": "operator",
                     },
                 ),
             ),

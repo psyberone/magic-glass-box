@@ -883,6 +883,34 @@ class ControlRoom:
             record["responsibility"] = self.database._workflow_responsibility(
                 connection, record["id"]
             )
+            closeout = self.database._workflow_closeout_record(connection, record["id"])
+            record["closeout_status"] = None if closeout is None else closeout["status"]
+            record["closeout_summary"] = (
+                None if closeout is None else closeout["summary"]
+            )
+            record["closeout_open_obligation_count"] = (
+                0 if closeout is None else closeout["open_obligation_count"]
+            )
+            record["closeout_overdue_obligation_count"] = (
+                0 if closeout is None else closeout["overdue_obligation_count"]
+            )
+            record["closeout_obligations"] = (
+                []
+                if closeout is None
+                else [
+                    {
+                        "id": obligation["id"],
+                        "obligation": obligation["obligation"],
+                        "validation": obligation["validation"],
+                        "baseline_evidence_id": obligation["baseline_evidence_id"],
+                        "deadline": obligation["deadline"],
+                        "deadline_state": obligation["deadline_state"],
+                        "state": obligation["state"],
+                        "version": obligation["version"],
+                    }
+                    for obligation in closeout["obligations"]
+                ]
+            )
             landing = self.database._workflow_landing_record(
                 connection, record["id"], mode=record["landing_mode"]
             )
@@ -2368,6 +2396,22 @@ class ControlRoom:
                         "ruling_version": workflow["open_ruling_version"],
                     },
                     workflow["open_ruling_created_at"],
+                )
+            for obligation in workflow["closeout_obligations"]:
+                if obligation["deadline_state"] != "overdue":
+                    continue
+                add(
+                    {
+                        "kind": "workflow.closeout_obligation_overdue",
+                        "severity": "action",
+                        "subject_type": "workflow_closeout_obligation",
+                        "subject_id": obligation["id"],
+                        "workflow_execution_id": workflow["id"],
+                        "obligation": obligation["obligation"],
+                        "deadline": obligation["deadline"],
+                        "obligation_version": obligation["version"],
+                    },
+                    obligation["deadline"],
                 )
             if workflow["state"] != "active" or workflow["stage"] != "landing":
                 continue

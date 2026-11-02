@@ -2742,6 +2742,11 @@ class ControlRoomTests(unittest.TestCase):
                 "landing_target_hold_id",
                 "landing_target_hold_reason",
                 "landing_target_hold_version",
+                "closeout_status",
+                "closeout_summary",
+                "closeout_open_obligation_count",
+                "closeout_overdue_obligation_count",
+                "closeout_obligations",
                 "completion_outcome_entry_id",
                 "responsibility",
                 "created_at",
@@ -2771,6 +2776,11 @@ class ControlRoomTests(unittest.TestCase):
         ):
             self.assertIsNone(projected[field])
         self.assertEqual(projected["landing_mode"], "manual")
+        self.assertIsNone(projected["closeout_status"])
+        self.assertIsNone(projected["closeout_summary"])
+        self.assertEqual(projected["closeout_open_obligation_count"], 0)
+        self.assertEqual(projected["closeout_overdue_obligation_count"], 0)
+        self.assertEqual(projected["closeout_obligations"], [])
         for field in (
             "landing_candidate_id",
             "landing_policy_id",

@@ -121,6 +121,7 @@ from .service_sidecar import (
     ServiceSidecarUnavailableError,
     UnixServiceSidecarClient,
 )
+from .workflow_closeout import WorkflowCloseoutDeclaration
 from .workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
 from .workflow_scope import WorkflowScopeReview
 from .workflows import WorkflowConfigurationSpec
@@ -2577,6 +2578,54 @@ class ControlPlane:
             body=body,
             draft=draft,
             created_by=configurator["id"],
+        )
+
+    def declare_workflow_closeout(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        declaration: WorkflowCloseoutDeclaration,
+        declared_by_handle: str,
+    ) -> dict[str, Any]:
+        declarer = self.database.get_user(declared_by_handle)
+        return self.database.declare_workflow_closeout(
+            execution_id,
+            expected_version=expected_version,
+            declaration=declaration,
+            declared_by=declarer["id"],
+        )
+
+    def get_workflow_closeout_obligation(self, obligation_id: str) -> dict[str, Any]:
+        return self.database.get_workflow_closeout_obligation(obligation_id)
+
+    def list_workflow_closeout_obligations(
+        self,
+        *,
+        execution_id: str | None = None,
+        open_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.database.list_workflow_closeout_obligations(
+            execution_id=execution_id,
+            open_only=open_only,
+            limit=limit,
+        )
+
+    def resolve_workflow_closeout_obligation(
+        self,
+        obligation_id: str,
+        *,
+        expected_version: int,
+        resolution: str,
+        resolved_by_handle: str,
+    ) -> dict[str, Any]:
+        resolver = self.database.get_user(resolved_by_handle)
+        return self.database.resolve_workflow_closeout_obligation(
+            obligation_id,
+            expected_version=expected_version,
+            resolution=resolution,
+            resolved_by=resolver["id"],
         )
 
     def issue_workflow_provider_effect(

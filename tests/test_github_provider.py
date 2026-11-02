@@ -951,6 +951,7 @@ class GitHubProviderTests(unittest.TestCase):
                 "schema_version": 1,
                 "change_id": "42",
                 "base_ref": "refs/heads/main",
+                "head_ref": "refs/heads/mgb/op-42",
                 "candidate_revision": HEAD,
                 "landing_revision": MERGED,
                 "landing_tree": HEAD_TREE,
@@ -958,6 +959,10 @@ class GitHubProviderTests(unittest.TestCase):
                 "primary_revision": MERGED,
                 "landing_revision_reachable": True,
                 "merge_method": "squash",
+                "title": "Candidate 42",
+                "body": "Bounded summary.",
+                "draft": False,
+                "state": "closed",
                 "secondary_effects": [],
             },
         )

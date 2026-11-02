@@ -1,7 +1,10 @@
 {
   "base_ref": "refs/heads/main",
+  "body": "Exact project-local proposal body.",
   "candidate_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "change_id": "42",
+  "draft": false,
+  "head_ref": "refs/heads/mgb/candidate-1",
   "landing_revision": "cccccccccccccccccccccccccccccccccccccccc",
   "landing_revision_reachable": true,
   "landing_tree": "dddddddddddddddddddddddddddddddddddddddd",
@@ -9,5 +12,7 @@
   "primary_ref": "refs/heads/main",
   "primary_revision": "cccccccccccccccccccccccccccccccccccccccc",
   "schema_version": 1,
-  "secondary_effects": []
+  "secondary_effects": [],
+  "state": "closed",
+  "title": "Add the bounded health probe"
 }

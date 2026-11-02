@@ -17,6 +17,7 @@ from magic_glass_box.db import (
     SCHEMA_V45,
     SCHEMA_V46,
     SCHEMA_V47,
+    SCHEMA_V48,
     SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
@@ -351,6 +352,8 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
         provider_intent: bool = False,
         provider_effects: tuple[tuple[str, str], ...] = (),
         provider_target: bool = False,
+        closeout_declared: bool = False,
+        open_closeout_obligation: bool = False,
     ) -> dict[str, object]:
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
@@ -414,6 +417,17 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     capability_name TEXT NOT NULL,
                     state TEXT NOT NULL,
                     service_operation_id TEXT NOT NULL
+                );
+                CREATE TABLE workflow_closeout_declarations (
+                    id TEXT PRIMARY KEY,
+                    workflow_execution_id TEXT NOT NULL
+                );
+                CREATE TABLE workflow_closeout_obligations (
+                    id TEXT PRIMARY KEY,
+                    workflow_execution_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    deadline TEXT NOT NULL
                 );
                 """
             )
@@ -490,6 +504,22 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                         "INSERT INTO workflow_provider_targets VALUES (?, ?)",
                         ("wpt_1", "wfx_1"),
                     )
+            if closeout_declared:
+                connection.execute(
+                    "INSERT INTO workflow_closeout_declarations VALUES (?, ?)",
+                    ("wcd_1", "wfx_1"),
+                )
+            if open_closeout_obligation:
+                connection.execute(
+                    "INSERT INTO workflow_closeout_obligations VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "wco_1",
+                        "wfx_1",
+                        "open",
+                        2,
+                        "2026-11-05T06:00:00.000000Z",
+                    ),
+                )
             return Database._workflow_responsibility(connection, "wfx_1")
         finally:
             connection.close()
@@ -867,13 +897,43 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                 ),
             ),
             (
-                "completion",
+                "completion declaration",
                 {"stage": "completion"},
+                self.expected(
+                    "completion",
+                    "action_required",
+                    "owner",
+                    "closeout_declaration",
+                ),
+            ),
+            (
+                "completion",
+                {"stage": "completion", "closeout_declared": True},
                 self.expected(
                     "completion",
                     "action_required",
                     "control_plane",
                     "workflow_completion",
+                ),
+            ),
+            (
+                "completed with open closeout obligation",
+                {
+                    "stage": "completion",
+                    "execution_state": "completed",
+                    "closeout_declared": True,
+                    "open_closeout_obligation": True,
+                },
+                self.expected(
+                    "completion",
+                    "action_required",
+                    "owner",
+                    "closeout_obligation",
+                    {
+                        "obligation_id": "wco_1",
+                        "obligation_version": 2,
+                        "deadline": "2026-11-05T06:00:00.000000Z",
+                    },
                 ),
             ),
             (
@@ -1435,6 +1495,23 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(status["counts"]["workflow_provider_landing_proofs"], 0)
         self.assertEqual(status["counts"]["integration_target_holds"], 0)
         self.assertEqual(migrated.list_integration_target_holds(), [])
+
+    def test_schema_migrates_v48_without_synthesizing_closeout_authority(self) -> None:
+        path = self.root / "v48.db"
+        with sqlite3.connect(path) as connection:
+            Database._execute_statements(connection, SCHEMA_V48)
+            connection.execute("PRAGMA user_version = 48")
+            connection.commit()
+        path.chmod(0o600)
+        migrated = Database(path)
+
+        status = migrated.initialize()
+
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(status["counts"]["workflow_closeout_declarations"], 0)
+        self.assertEqual(status["counts"]["workflow_closeout_obligations"], 0)
+        self.assertEqual(status["counts"]["workflow_closeout_proofs"], 0)
+        self.assertEqual(migrated.list_workflow_closeout_obligations(), [])
 
     def test_attempt_admission_bypasses_only_pre_workflow_schema_versions(
         self,

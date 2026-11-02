@@ -112,7 +112,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         )
 
     def test_schema_twenty_four_registers_immutable_redacted_authority(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 48)
+        self.assertEqual(SCHEMA_VERSION, 49)
         self.assertIn("CREATE TABLE service_sidecars", SERVICE_SIDECAR_SCHEMA)
         self.assertIn(
             "CREATE TABLE project_capability_bindings", CAPABILITY_BINDING_SCHEMA
@@ -322,7 +322,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         second = legacy.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 48)
+        self.assertEqual(first["schema_version"], 49)
         migrated = legacy.get_service_operation(operation_id)
         self.assertEqual(migrated["spec"], operation.to_dict())
         with closing(legacy.connect()) as connection:

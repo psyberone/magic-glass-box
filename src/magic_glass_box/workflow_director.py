@@ -63,6 +63,11 @@ class WorkflowDirector:
         if execution["stage"] == "landing":
             return self._advance_landing(execution)
         if execution["stage"] == "completion":
+            if (
+                execution["portable_policy"]["status"] == "activated"
+                and execution["closeout"] is None
+            ):
+                return False
             self.database.complete_workflow_execution(
                 execution["id"], expected_version=execution["version"]
             )

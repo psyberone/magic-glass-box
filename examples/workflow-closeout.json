@@ -1,0 +1,58 @@
+{
+  "closed_at": "2026-11-02T18:01:00+00:00",
+  "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "created_at": "2026-11-02T18:00:00+00:00",
+  "declaration": {
+    "obligations": [
+      {
+        "deadline": "2026-11-05T06:00:00.000000Z",
+        "kind": "deferred_validation",
+        "obligation": "tests",
+        "reason": "Run the longer cross-platform validation after primary closeout."
+      }
+    ],
+    "schema_version": 1
+  },
+  "declared_by": "operator",
+  "facts": {
+    "primary_landing": "conformant",
+    "proposal_closure": "closed",
+    "proposal_metadata": "conformant",
+    "replication": "not_required",
+    "secondary_effects": "none",
+    "tracker": "not_required"
+  },
+  "id": "wcd_22222222222222222222222222222222",
+  "landing_proof_id": "wlp_55555555555555555555555555555555",
+  "obligations": [
+    {
+      "baseline_evidence_id": "gev_11111111111111111111111111111111",
+      "baseline_gate": "validation:unit",
+      "created_at": "2026-11-02T18:00:00+00:00",
+      "deadline": "2026-11-05T06:00:00.000000Z",
+      "deadline_state": "pending",
+      "declaration_id": "wcd_22222222222222222222222222222222",
+      "id": "wco_33333333333333333333333333333333",
+      "kind": "deferred_validation",
+      "obligation": "tests",
+      "reason": "Run the longer cross-platform validation after primary closeout.",
+      "resolution": null,
+      "resolved_at": null,
+      "resolved_by": null,
+      "state": "open",
+      "updated_at": "2026-11-02T18:00:00+00:00",
+      "validation": "unit",
+      "version": 1,
+      "workflow_execution_id": "wfx_44444444444444444444444444444444"
+    }
+  ],
+  "open_obligation_count": 1,
+  "overdue_obligation_count": 0,
+  "proof_id": "wcp_66666666666666666666666666666666",
+  "proof_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "status": "closed",
+  "summary": "closed, 1 open",
+  "workflow_activation_version_id": "wav_77777777777777777777777777777777",
+  "workflow_execution_id": "wfx_44444444444444444444444444444444",
+  "workflow_policy_id": "wfp_88888888888888888888888888888888"
+}

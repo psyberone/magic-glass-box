@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 48
+SCHEMA_VERSION = 49
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -6525,6 +6525,136 @@ BEGIN
 END;
 """
 
+WORKFLOW_CLOSEOUT_SCHEMA = """
+CREATE TABLE workflow_closeout_declarations (
+    id TEXT PRIMARY KEY,
+    workflow_execution_id TEXT NOT NULL UNIQUE,
+    workflow_activation_version_id TEXT NOT NULL,
+    workflow_policy_id TEXT NOT NULL,
+    landing_proof_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    declaration_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    declared_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_policy_id)
+        REFERENCES workflow_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_proof_id)
+        REFERENCES workflow_provider_landing_proofs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (declared_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_closeout_obligations (
+    id TEXT PRIMARY KEY,
+    declaration_id TEXT NOT NULL,
+    workflow_execution_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind = 'deferred_validation'),
+    policy_obligation TEXT NOT NULL,
+    validation_name TEXT NOT NULL,
+    baseline_evidence_id TEXT NOT NULL,
+    deadline TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    resolved_by TEXT,
+    resolution TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (declaration_id, policy_obligation),
+    FOREIGN KEY (declaration_id)
+        REFERENCES workflow_closeout_declarations(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (baseline_evidence_id)
+        REFERENCES integration_gate_evidence(id) ON DELETE RESTRICT,
+    FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'open' AND resolved_by IS NULL AND resolution IS NULL
+            AND resolved_at IS NULL)
+        OR
+        (state = 'resolved' AND resolved_by IS NOT NULL
+            AND resolution IS NOT NULL AND resolved_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE INDEX workflow_closeout_obligation_state_deadline
+    ON workflow_closeout_obligations(state, deadline, id);
+CREATE INDEX workflow_closeout_obligation_execution
+    ON workflow_closeout_obligations(workflow_execution_id, deadline, id);
+
+CREATE TABLE workflow_closeout_proofs (
+    id TEXT PRIMARY KEY,
+    workflow_execution_id TEXT NOT NULL UNIQUE,
+    declaration_id TEXT NOT NULL UNIQUE,
+    workflow_activation_version_id TEXT NOT NULL,
+    workflow_policy_id TEXT NOT NULL,
+    landing_proof_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    proof_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status = 'closed'),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (declaration_id)
+        REFERENCES workflow_closeout_declarations(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_policy_id)
+        REFERENCES workflow_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_proof_id)
+        REFERENCES workflow_provider_landing_proofs(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TRIGGER workflow_closeout_declaration_immutable_update
+BEFORE UPDATE ON workflow_closeout_declarations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow closeout declarations are immutable');
+END;
+CREATE TRIGGER workflow_closeout_declaration_immutable_delete
+BEFORE DELETE ON workflow_closeout_declarations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow closeout declarations cannot be deleted');
+END;
+CREATE TRIGGER workflow_closeout_obligation_identity_immutable
+BEFORE UPDATE OF
+    id, declaration_id, workflow_execution_id, kind, policy_obligation,
+    validation_name, baseline_evidence_id, deadline, reason, created_at
+ON workflow_closeout_obligations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow closeout obligation identity is immutable');
+END;
+CREATE TRIGGER workflow_closeout_obligation_transition
+BEFORE UPDATE ON workflow_closeout_obligations
+WHEN
+    OLD.state != 'open'
+    OR NEW.state != 'resolved'
+    OR NEW.version != OLD.version + 1
+BEGIN
+    SELECT RAISE(ABORT, 'workflow closeout obligation transition is invalid');
+END;
+CREATE TRIGGER workflow_closeout_obligation_immutable_delete
+BEFORE DELETE ON workflow_closeout_obligations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow closeout obligations cannot be deleted');
+END;
+CREATE TRIGGER workflow_closeout_proof_immutable_update
+BEFORE UPDATE ON workflow_closeout_proofs
+BEGIN
+    SELECT RAISE(ABORT, 'workflow closeout proofs are immutable');
+END;
+CREATE TRIGGER workflow_closeout_proof_immutable_delete
+BEFORE DELETE ON workflow_closeout_proofs
+BEGIN
+    SELECT RAISE(ABORT, 'workflow closeout proofs cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -6579,7 +6709,8 @@ SCHEMA_V45 = (
 )
 SCHEMA_V46 = SCHEMA_V45 + WORKFLOW_POLICY_ACTIVATION_SCHEMA
 SCHEMA_V47 = SCHEMA_V46 + WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA
-SCHEMA = SCHEMA_V47 + WORKFLOW_LANDING_PROOF_SCHEMA
+SCHEMA_V48 = SCHEMA_V47 + WORKFLOW_LANDING_PROOF_SCHEMA
+SCHEMA = SCHEMA_V48 + WORKFLOW_CLOSEOUT_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -6628,4 +6759,5 @@ MIGRATIONS = {
     45: WORKFLOW_POLICY_ACTIVATION_SCHEMA,
     46: WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA,
     47: WORKFLOW_LANDING_PROOF_SCHEMA,
+    48: WORKFLOW_CLOSEOUT_SCHEMA,
 }

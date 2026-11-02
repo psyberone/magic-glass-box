@@ -12,6 +12,18 @@ def downgrade_workflow_policy_activation(connection: sqlite3.Connection) -> None
     connection.executescript(
         """
         PRAGMA foreign_keys = OFF;
+        DROP TRIGGER IF EXISTS workflow_closeout_proof_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_closeout_proof_immutable_update;
+        DROP TRIGGER IF EXISTS workflow_closeout_obligation_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_closeout_obligation_transition;
+        DROP TRIGGER IF EXISTS workflow_closeout_obligation_identity_immutable;
+        DROP TRIGGER IF EXISTS workflow_closeout_declaration_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_closeout_declaration_immutable_update;
+        DROP INDEX IF EXISTS workflow_closeout_obligation_execution;
+        DROP INDEX IF EXISTS workflow_closeout_obligation_state_deadline;
+        DROP TABLE IF EXISTS workflow_closeout_proofs;
+        DROP TABLE IF EXISTS workflow_closeout_obligations;
+        DROP TABLE IF EXISTS workflow_closeout_declarations;
         DROP TRIGGER IF EXISTS workflow_provider_target_origin_immutable_delete;
         DROP TRIGGER IF EXISTS workflow_provider_target_origin_immutable_update;
         DROP TRIGGER IF EXISTS workflow_provider_effect_immutable_delete;

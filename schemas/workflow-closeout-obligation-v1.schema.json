@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-closeout-obligation:v1",
+  "title": "Magic Glass Box Workflow Closeout Obligation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "baseline_evidence_id", "baseline_gate", "created_at", "deadline",
+    "deadline_state", "declaration_id", "id", "kind", "obligation", "reason",
+    "resolution", "resolved_at", "resolved_by", "state", "updated_at",
+    "validation", "version", "workflow_execution_id"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^wco_[0-9a-f]{32}$" },
+    "declaration_id": { "type": "string", "pattern": "^wcd_[0-9a-f]{32}$" },
+    "workflow_execution_id": { "type": "string", "pattern": "^wfx_[0-9a-f]{32}$" },
+    "kind": { "const": "deferred_validation" },
+    "obligation": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" },
+    "validation": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$" },
+    "baseline_gate": { "type": "string", "pattern": "^validation:.{1,64}$" },
+    "baseline_evidence_id": { "type": "string", "pattern": "^gev_[0-9a-f]{32}$" },
+    "deadline": { "type": "string", "format": "date-time" },
+    "deadline_state": { "enum": ["pending", "overdue", "resolved"] },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "state": { "enum": ["open", "resolved"] },
+    "version": { "type": "integer", "minimum": 1 },
+    "resolved_by": { "type": ["string", "null"], "maxLength": 128 },
+    "resolution": { "type": ["string", "null"], "maxLength": 4096 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "resolved_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-closeout-declaration:v1",
+  "title": "Magic Glass Box Workflow Closeout Declaration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["obligations", "schema_version"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "obligations": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/obligation" }
+    }
+  },
+  "$defs": {
+    "obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deadline", "kind", "obligation", "reason"],
+      "properties": {
+        "kind": { "const": "deferred_validation" },
+        "obligation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+        },
+        "deadline": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    }
+  }
+}

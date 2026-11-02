@@ -185,6 +185,7 @@ class ProviderEffectReadbackTests(unittest.TestCase):
             "schema_version": 1,
             "change_id": "42",
             "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/mgb/candidate-1",
             "candidate_revision": "b" * 40,
             "landing_revision": "c" * 40,
             "landing_tree": "d" * 40,
@@ -192,6 +193,10 @@ class ProviderEffectReadbackTests(unittest.TestCase):
             "primary_revision": "e" * 40,
             "landing_revision_reachable": True,
             "merge_method": "squash",
+            "title": "Add the bounded health probe",
+            "body": "Exact project-local proposal body.",
+            "draft": False,
+            "state": "closed",
             "secondary_effects": [],
         }
 
@@ -199,6 +204,7 @@ class ProviderEffectReadbackTests(unittest.TestCase):
 
         self.assertEqual(readback.to_dict(), value)
         self.assertNotEqual(readback.landing_revision, readback.primary_revision)
+        self.assertEqual(readback.state, "closed")
 
     def test_readbacks_reject_ambiguous_or_provider_shaped_extras(self) -> None:
         valid_change = {

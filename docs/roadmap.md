@@ -2201,8 +2201,8 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 
 ## Milestone 18: first reusable-template delivery
 
-**Status: in progress; provider translation/read-back and exact squash landing
-proof implemented through schema v48**
+**Status: bounded implementation and internal quality gates complete through
+schema v49; independent review pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2311,6 +2311,40 @@ dependency, target, and owner mutations on direct replay, for an effective
 2,173/2,471 (87.94%). Diagnostic-label, equivalent SQL-casing, and impossible-
 state mutations were not promoted into contractual behavior. The remaining
 multi-record hold-return seam is pinned as an explicit M18D two-project proof.
+
+M18D adds an explicit activation-owner closeout declaration and an immutable
+delivery closeout proof. A deadline-bearing `deferred_validation` obligation
+must name a portable-policy obligation, resolve through the activation to one
+local validation, and retain already-passing immutable baseline evidence. It
+cannot waive a missing or failed gate. Activated completion independently
+proves exact proposal metadata, final closed proposal state, conformant primary
+landing, exact remote closure, and absence of secondary effects before the
+ordinary atomic outcome/thread seal. Delivered work is therefore reported as
+`closed` or truthfully `closed, N open`; open and overdue follow-ups return
+responsibility and attention to the activation owner without reopening or
+rewriting the landing proof.
+
+The deterministic portability proof runs Magic Glass Box and Imitation Krab
+against the same policy record and digest with different repositories,
+profile/configuration pins, validation commands, resource ceilings, provider
+mappings, deployments, and capability bindings. Each project loses one effect
+receipt after dispatch; a fresh database process reconciles the uncertain
+operation from authoritative observation. Both integration targets are then
+held simultaneously on deliberately wrong landing trees. Lifting MGB's exact
+hold leaves Imitation Krab's hold unchanged in state, version, identity, and
+return set. A separate closeout proof carries one real deferred obligation
+through pending, overdue attention, resolution, and `closed` without weakening
+its immutable passing baseline.
+
+M18D's checkpoint gate passes 1,520 tests at 87% aggregate statement-plus-
+branch coverage. A two-worker focused final-code mutation pass over closeout,
+provider landing read-back, storage completion, director advancement, and
+control-room projection killed 191/220 selected mutants (86.82%), with no
+timeout, uncovered, suspicious, interrupted, or crash outcome. Survivor-driven
+tests added exact public `closed_at` projection and direct retrieval of an open
+obligation. The remaining survivors alter diagnostic prose, pre-existing
+broad-function behavior outside M18D, or trusted-state corruption paths that
+cannot arise through the control-plane API.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

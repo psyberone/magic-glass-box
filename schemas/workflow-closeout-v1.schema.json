@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-closeout:v1",
+  "title": "Magic Glass Box Workflow Closeout v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "closed_at", "content_sha256", "created_at", "declaration", "declared_by",
+    "facts", "id", "landing_proof_id", "obligations", "open_obligation_count",
+    "overdue_obligation_count", "proof_id", "proof_sha256", "status", "summary",
+    "workflow_activation_version_id", "workflow_execution_id", "workflow_policy_id"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^wcd_[0-9a-f]{32}$" },
+    "workflow_execution_id": { "type": "string", "pattern": "^wfx_[0-9a-f]{32}$" },
+    "workflow_activation_version_id": { "type": "string", "pattern": "^wav_[0-9a-f]{32}$" },
+    "workflow_policy_id": { "type": "string", "pattern": "^wfp_[0-9a-f]{32}$" },
+    "landing_proof_id": { "type": "string", "pattern": "^wlp_[0-9a-f]{32}$" },
+    "declaration": { "$ref": "#/$defs/declaration" },
+    "content_sha256": { "$ref": "#/$defs/sha256" },
+    "declared_by": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "obligations": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/obligation" }
+    },
+    "proof_id": { "type": "string", "pattern": "^wcp_[0-9a-f]{32}$" },
+    "proof_sha256": { "$ref": "#/$defs/sha256" },
+    "status": { "const": "closed" },
+    "facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_landing", "proposal_closure", "proposal_metadata", "replication",
+        "secondary_effects", "tracker"
+      ],
+      "properties": {
+        "primary_landing": { "const": "conformant" },
+        "proposal_metadata": { "const": "conformant" },
+        "proposal_closure": { "const": "closed" },
+        "secondary_effects": { "const": "none" },
+        "replication": { "const": "not_required" },
+        "tracker": { "const": "not_required" }
+      }
+    },
+    "closed_at": { "type": "string", "format": "date-time" },
+    "summary": { "type": "string", "pattern": "^closed(?:, [1-9][0-9]* open)?$" },
+    "open_obligation_count": { "type": "integer", "minimum": 0, "maximum": 32 },
+    "overdue_obligation_count": { "type": "integer", "minimum": 0, "maximum": 32 }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["obligations", "schema_version"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "obligations": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/declarationObligation" }
+        }
+      }
+    },
+    "declarationObligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deadline", "kind", "obligation", "reason"],
+      "properties": {
+        "kind": { "const": "deferred_validation" },
+        "obligation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+        },
+        "deadline": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseline_evidence_id", "baseline_gate", "created_at", "deadline",
+        "deadline_state", "declaration_id", "id", "kind", "obligation",
+        "reason", "resolution", "resolved_at", "resolved_by", "state",
+        "updated_at", "validation", "version", "workflow_execution_id"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^wco_[0-9a-f]{32}$" },
+        "declaration_id": { "type": "string", "pattern": "^wcd_[0-9a-f]{32}$" },
+        "workflow_execution_id": { "type": "string", "pattern": "^wfx_[0-9a-f]{32}$" },
+        "kind": { "const": "deferred_validation" },
+        "obligation": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" },
+        "validation": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$" },
+        "baseline_gate": { "type": "string", "pattern": "^validation:.{1,64}$" },
+        "baseline_evidence_id": { "type": "string", "pattern": "^gev_[0-9a-f]{32}$" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "deadline_state": { "enum": ["pending", "overdue", "resolved"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "state": { "enum": ["open", "resolved"] },
+        "version": { "type": "integer", "minimum": 1 },
+        "resolved_by": { "type": ["string", "null"], "maxLength": 128 },
+        "resolution": { "type": ["string", "null"], "maxLength": 4096 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "resolved_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

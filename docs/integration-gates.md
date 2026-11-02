@@ -458,6 +458,15 @@ and receipt. Missing or mismatched facts open an integration-target hold and
 cannot advance the workflow. Only the activation owner may lift the hold; the
 immutable nonconformant proof remains nonconformant.
 
+A conformant landing proof is necessary but not sufficient for activated
+closeout. The activation owner must also declare closeout. The completion
+transaction rechecks the original open-change metadata against the final
+landing read-back, requires the same proposal to be closed, requires the
+service receipt to close exactly that remote identity, and rejects undeclared
+secondary effects. Deadline-bearing deferred validations remain distinct open
+obligations backed by already-passing baseline gate evidence; they cannot
+stand in for a missing validation result.
+
 ## Receipts
 
 A landing receipt is bounded, immutable metadata containing the request digest,

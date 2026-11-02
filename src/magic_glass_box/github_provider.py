@@ -1402,6 +1402,7 @@ class GitHubProvider:
                     "schema_version": 1,
                     "change_id": str(pull["number"]),
                     "base_ref": parameters["integration_ref"],
+                    "head_ref": "refs/heads/" + pull["head_ref"],
                     "candidate_revision": pull["head_sha"],
                     "landing_revision": landing_revision,
                     "landing_tree": landing_tree,
@@ -1409,6 +1410,10 @@ class GitHubProvider:
                     "primary_revision": observed_revision,
                     "landing_revision_reachable": reachable,
                     "merge_method": parameters["merge_method"],
+                    "title": pull["title"],
+                    "body": pull["body"],
+                    "draft": pull["draft"],
+                    "state": pull["state"],
                     "secondary_effects": [],
                 }
             ).to_dict()
@@ -1501,7 +1506,7 @@ class GitHubProvider:
                 response,
                 observation_after_effect=observation_after_effect,
             )
-        return self._normalize_pull(response.body), None
+        return self._normalize_change_effect(response.body, require_merged=True), None
 
     def _get_ref(
         self,
@@ -1611,9 +1616,13 @@ class GitHubProvider:
         }
 
     @staticmethod
-    def _normalize_change_effect(value: object) -> dict[str, Any]:
+    def _normalize_change_effect(
+        value: object, *, require_merged: bool = False
+    ) -> dict[str, Any]:
         document = _object(value, subject="pull request")
-        normalized = GitHubProvider._normalize_pull(document, require_merged=False)
+        normalized = GitHubProvider._normalize_pull(
+            document, require_merged=require_merged
+        )
         try:
             title = require_string(
                 document.get("title"), field="pull request title", max_bytes=512

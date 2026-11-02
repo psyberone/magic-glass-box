@@ -344,6 +344,26 @@ only from a confirmed `change.open` fact. In this bounded slice only squash
 landing can become conformant, by exact candidate-tree equality plus primary-ref
 reachability; other methods remain explicitly unproved.
 
+Control-plane schema v49 publishes the owner closeout surfaces:
+
+- `workflow-closeout-declaration-v1.schema.json` contains only an explicit
+  schema version and bounded deadline-bearing `deferred_validation`
+  obligations;
+- `workflow-closeout-obligation-v1.schema.json` projects the exact policy
+  obligation, local validation, immutable passing baseline evidence, deadline,
+  derived pending/overdue state, optimistic version, and optional resolution;
+  and
+- `workflow-closeout-v1.schema.json` projects the immutable declaration and
+  closeout proof, normalized delivery facts, open/overdue counts, and truthful
+  `closed` or `closed, N open` summary.
+
+Runtime acceptance additionally proves activation-owner authority, a future
+deadline, policy/activation membership, passing baseline evidence, exact
+proposal metadata and closure, the conformant landing proof and receipt, and
+the absence of undeclared secondary effects. These relational checks cannot be
+granted by the portable schemas. Schema v49 is future-only: existing and
+pre-policy histories receive no synthetic declaration, obligation, or proof.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

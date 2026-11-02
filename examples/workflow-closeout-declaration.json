@@ -1,0 +1,11 @@
+{
+  "obligations": [
+    {
+      "deadline": "2026-11-05T06:00:00.000000Z",
+      "kind": "deferred_validation",
+      "obligation": "tests",
+      "reason": "Run the longer cross-platform validation after primary closeout."
+    }
+  ],
+  "schema_version": 1
+}

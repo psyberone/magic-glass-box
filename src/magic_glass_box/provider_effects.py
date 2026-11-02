@@ -335,6 +335,7 @@ class LandingReadback:
     schema_version: int
     change_id: str
     base_ref: str
+    head_ref: str
     candidate_revision: str
     landing_revision: str
     landing_tree: str
@@ -342,6 +343,10 @@ class LandingReadback:
     primary_revision: str
     landing_revision_reachable: bool
     merge_method: str
+    title: str
+    body: str
+    draft: bool
+    state: str
     secondary_effects: tuple[str, ...]
 
     @classmethod
@@ -354,6 +359,7 @@ class LandingReadback:
                 "schema_version",
                 "change_id",
                 "base_ref",
+                "head_ref",
                 "candidate_revision",
                 "landing_revision",
                 "landing_tree",
@@ -361,6 +367,10 @@ class LandingReadback:
                 "primary_revision",
                 "landing_revision_reachable",
                 "merge_method",
+                "title",
+                "body",
+                "draft",
+                "state",
                 "secondary_effects",
             },
             subject=subject,
@@ -373,12 +383,19 @@ class LandingReadback:
         merge_method = document["merge_method"]
         if merge_method not in {"merge", "rebase", "squash"}:
             raise ValidationError("landing readback merge_method is invalid")
+        draft = document["draft"]
+        if not isinstance(draft, bool):
+            raise ValidationError("landing readback draft must be a boolean")
+        state = document["state"]
+        if state not in {"open", "closed"}:
+            raise ValidationError("landing readback state is invalid")
         return cls(
             schema_version=_schema_version(document["schema_version"], subject=subject),
             change_id=_identifier(
                 document["change_id"], field="landing change_id", pattern=_CHANGE_ID_RE
             ),
             base_ref=_branch_ref(document["base_ref"], field="landing base_ref"),
+            head_ref=_branch_ref(document["head_ref"], field="landing head_ref"),
             candidate_revision=_revision(
                 document["candidate_revision"],
                 field="landing candidate_revision",
@@ -397,6 +414,17 @@ class LandingReadback:
             ),
             landing_revision_reachable=reachable,
             merge_method=merge_method,
+            title=require_string(
+                document["title"], field="landing title", max_bytes=512
+            ),
+            body=require_string(
+                document["body"],
+                field="landing body",
+                max_bytes=32768,
+                allow_empty=True,
+            ),
+            draft=draft,
+            state=state,
             secondary_effects=_secondary_effects(document["secondary_effects"]),
         )
 
@@ -405,6 +433,7 @@ class LandingReadback:
             "schema_version": self.schema_version,
             "change_id": self.change_id,
             "base_ref": self.base_ref,
+            "head_ref": self.head_ref,
             "candidate_revision": self.candidate_revision,
             "landing_revision": self.landing_revision,
             "landing_tree": self.landing_tree,
@@ -412,5 +441,9 @@ class LandingReadback:
             "primary_revision": self.primary_revision,
             "landing_revision_reachable": self.landing_revision_reachable,
             "merge_method": self.merge_method,
+            "title": self.title,
+            "body": self.body,
+            "draft": self.draft,
+            "state": self.state,
             "secondary_effects": list(self.secondary_effects),
         }
