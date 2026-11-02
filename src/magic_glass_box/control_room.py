@@ -740,9 +740,8 @@ class ControlRoom:
             )
         return runs, terminal_total
 
-    @staticmethod
     def _workflows(
-        connection: sqlite3.Connection, history_limit: int
+        self, connection: sqlite3.Connection, history_limit: int
     ) -> list[dict[str, Any]]:
         rows = connection.execute(
             "WITH terminal AS (SELECT id FROM workflow_executions "
@@ -862,7 +861,12 @@ class ControlRoom:
             "ORDER BY visible.group_order, e.updated_at DESC, e.id",
             (history_limit,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        records = [dict(row) for row in rows]
+        for record in records:
+            record["responsibility"] = self.database._workflow_responsibility(
+                connection, record["id"]
+            )
+        return records
 
     @staticmethod
     def _discovery_executions(
@@ -2282,6 +2286,33 @@ class ControlRoom:
                     execution["updated_at"],
                 )
         for workflow in workflows or []:
+            responsibility = workflow["responsibility"]
+            if responsibility.get("reason") == "manual_wake_acknowledgement":
+                add(
+                    {
+                        "kind": "workflow.manual_wake_requested",
+                        "severity": "action",
+                        "subject_type": "workflow_manual_wake",
+                        "subject_id": responsibility["basis"]["wake_id"],
+                        "workflow_execution_id": workflow["id"],
+                        "run_id": responsibility["basis"]["run_id"],
+                        "wake_version": responsibility["basis"]["wake_version"],
+                    },
+                    workflow["updated_at"],
+                )
+            elif responsibility.get("status") == "attention":
+                add(
+                    {
+                        "kind": "workflow.responsibility_unresolved",
+                        "severity": "warning",
+                        "subject_type": "workflow_execution",
+                        "subject_id": workflow["id"],
+                        "workflow_execution_id": workflow["id"],
+                        "reason": responsibility["reason"],
+                        "basis": responsibility["basis"],
+                    },
+                    workflow["updated_at"],
+                )
             if workflow["open_ruling_id"] is not None:
                 add(
                     {

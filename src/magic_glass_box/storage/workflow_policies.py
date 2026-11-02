@@ -7,12 +7,18 @@ from typing import Any
 from ..domain import (
     ValidationError,
     canonical_json,
+    require_string,
     validate_name,
     validate_project_key,
 )
 from ..workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
 from ..workflows import IMPLEMENTATION_TEMPLATE_ID
-from .errors import ConflictError, NotFoundError, StorageError
+from .errors import (
+    ConcurrentUpdateError,
+    ConflictError,
+    NotFoundError,
+    StorageError,
+)
 
 
 class WorkflowPolicyStorage:
@@ -558,3 +564,219 @@ class WorkflowPolicyStorage:
                 )
                 for row in rows
             ]
+
+    def _create_workflow_manual_wake(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        execution_id: str,
+        correction_round: int,
+        role: str,
+        now: str,
+    ) -> str | None:
+        """Create the exact manual wake for an activated workflow role run."""
+
+        execution = connection.execute(
+            "SELECT execution.workflow_activation_version_id, "
+            "execution.version, execution.correction_round, "
+            "execution.requested_by, activation.spec_json "
+            "FROM workflow_executions execution "
+            "LEFT JOIN workflow_activation_versions activation "
+            "ON activation.id = execution.workflow_activation_version_id "
+            "WHERE execution.id = ?",
+            (execution_id,),
+        ).fetchone()
+        if execution is None:
+            raise NotFoundError(f"workflow execution not found: {execution_id}")
+        activation_version_id = execution["workflow_activation_version_id"]
+        if activation_version_id is None:
+            return None
+        if execution["correction_round"] != correction_round:
+            raise ConflictError("workflow correction round changed")
+        try:
+            activation = WorkflowActivationSpec.from_mapping(
+                json.loads(execution["spec_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow activation is invalid") from exc
+        wake_classes = {
+            binding.role: binding.wake_class for binding in activation.wake_bindings
+        }
+        wake_class = wake_classes.get(role)
+        if wake_class != "human_turn_only":
+            raise StorageError("workflow activation role wake binding is invalid")
+        wake_id = self.new_id("wwk")
+        connection.execute(
+            "INSERT INTO workflow_manual_wakes "
+            "(id, run_id, execution_id, workflow_activation_version_id, "
+            "execution_version, correction_round, role, wake_class, state, "
+            "version, recipient_id, requested_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'requested', 1, ?, ?, ?)",
+            (
+                wake_id,
+                run_id,
+                execution_id,
+                activation_version_id,
+                execution["version"],
+                correction_round,
+                role,
+                wake_class,
+                execution["requested_by"],
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO workflow_manual_wake_events "
+            "(wake_id, sequence, kind, from_state, to_state, actor_id, "
+            "created_at) VALUES (?, 1, 'wake.requested', NULL, 'requested', "
+            "NULL, ?)",
+            (wake_id, now),
+        )
+        return wake_id
+
+    @staticmethod
+    def _workflow_manual_wake_row(
+        connection: sqlite3.Connection, wake_id: str
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT wake.id, wake.run_id, wake.execution_id, "
+            "wake.workflow_activation_version_id, wake.execution_version, "
+            "wake.correction_round, wake.role, wake.wake_class, wake.state, "
+            "wake.version, recipient.handle AS recipient, "
+            "acknowledger.handle AS acknowledged_by, wake.requested_at, "
+            "wake.updated_at, wake.acknowledged_at "
+            "FROM workflow_manual_wakes wake "
+            "JOIN users recipient ON recipient.id = wake.recipient_id "
+            "LEFT JOIN users acknowledger ON acknowledger.id = wake.acknowledged_by "
+            "WHERE wake.id = ?",
+            (wake_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"workflow manual wake not found: {wake_id}")
+        return row
+
+    @staticmethod
+    def _workflow_manual_wake_record(
+        connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> dict[str, Any]:
+        events = connection.execute(
+            "SELECT event.sequence, event.kind, event.from_state, "
+            "event.to_state, actor.handle AS actor, event.created_at "
+            "FROM workflow_manual_wake_events event "
+            "LEFT JOIN users actor ON actor.id = event.actor_id "
+            "WHERE event.wake_id = ? ORDER BY event.sequence",
+            (row["id"],),
+        ).fetchall()
+        return {**dict(row), "events": [dict(event) for event in events]}
+
+    def get_workflow_manual_wake(self, wake_id: str) -> dict[str, Any]:
+        wake_id = require_string(wake_id, field="wake_id", max_bytes=64)
+        with self._connection() as connection:
+            return self._workflow_manual_wake_record(
+                connection,
+                self._workflow_manual_wake_row(connection, wake_id),
+            )
+
+    def list_workflow_manual_wakes(
+        self,
+        *,
+        execution_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if execution_id is not None:
+            execution_id = require_string(
+                execution_id, field="execution_id", max_bytes=64
+            )
+        if run_id is not None:
+            run_id = require_string(run_id, field="run_id", max_bytes=64)
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id FROM workflow_manual_wakes "
+                "WHERE (? IS NULL OR execution_id = ?) "
+                "AND (? IS NULL OR run_id = ?) "
+                "ORDER BY requested_at, id",
+                (execution_id, execution_id, run_id, run_id),
+            ).fetchall()
+            return [
+                self._workflow_manual_wake_record(
+                    connection,
+                    self._workflow_manual_wake_row(connection, row["id"]),
+                )
+                for row in rows
+            ]
+
+    def acknowledge_workflow_manual_wake(
+        self,
+        wake_id: str,
+        *,
+        expected_version: int,
+        acknowledged_by: str,
+    ) -> dict[str, Any]:
+        wake_id = require_string(wake_id, field="wake_id", max_bytes=64)
+        expected_version = self._workflow_policy_positive_version(
+            expected_version, field="expected wake version"
+        )
+        acknowledged_by = require_string(
+            acknowledged_by, field="acknowledged_by", max_bytes=64
+        )
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, acknowledged_by, role="workflow wake recipient"
+                )
+                wake = connection.execute(
+                    "SELECT state, version, recipient_id "
+                    "FROM workflow_manual_wakes WHERE id = ?",
+                    (wake_id,),
+                ).fetchone()
+                if wake is None:
+                    raise NotFoundError(f"workflow manual wake not found: {wake_id}")
+                if wake["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        f"workflow manual wake version is {wake['version']}, "
+                        f"expected {expected_version}"
+                    )
+                if wake["recipient_id"] != acknowledged_by:
+                    raise ConflictError(
+                        "workflow manual wake may only be acknowledged by its recipient"
+                    )
+                if wake["state"] != "requested":
+                    raise ConflictError(
+                        f"workflow manual wake is not requested: {wake['state']}"
+                    )
+                changed = connection.execute(
+                    "UPDATE workflow_manual_wakes SET state = 'acknowledged', "
+                    "version = version + 1, acknowledged_by = ?, updated_at = ?, "
+                    "acknowledged_at = ? WHERE id = ? AND version = ?",
+                    (acknowledged_by, now, now, wake_id, expected_version),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "workflow manual wake changed concurrently"
+                    )
+                connection.execute(
+                    "INSERT INTO workflow_manual_wake_events "
+                    "(wake_id, sequence, kind, from_state, to_state, actor_id, "
+                    "created_at) VALUES (?, ?, 'wake.acknowledged', 'requested', "
+                    "'acknowledged', ?, ?)",
+                    (wake_id, expected_version + 1, acknowledged_by, now),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow manual wake could not be acknowledged"
+                ) from exc
+        return self.get_workflow_manual_wake(wake_id)

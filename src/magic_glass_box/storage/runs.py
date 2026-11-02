@@ -731,6 +731,14 @@ class RunStorage:
                             now,
                         ),
                     )
+                    self._create_workflow_manual_wake(
+                        connection,
+                        run_id=run_id,
+                        execution_id=workflow_execution_id,
+                        correction_round=workflow_round,
+                        role=workflow_role,
+                        now=now,
+                    )
                 if discovery_execution_id is not None:
                     connection.execute(
                         "INSERT INTO discovery_run_bindings "
@@ -1225,6 +1233,14 @@ class RunStorage:
                             workflow_binding["generation"] + 1,
                             now,
                         ),
+                    )
+                    self._create_workflow_manual_wake(
+                        connection,
+                        run_id=replacement_run_id,
+                        execution_id=workflow_binding["execution_id"],
+                        correction_round=workflow_binding["correction_round"],
+                        role=workflow_binding["role"],
+                        now=now,
                     )
                 if discovery_binding is not None:
                     connection.execute(

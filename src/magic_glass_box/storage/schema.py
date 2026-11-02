@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -6149,6 +6149,182 @@ BEGIN
 END;
 """
 
+WORKFLOW_MANUAL_WAKE_SCHEMA = """
+CREATE TABLE workflow_manual_wakes (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    execution_id TEXT NOT NULL,
+    workflow_activation_version_id TEXT NOT NULL,
+    execution_version INTEGER NOT NULL CHECK (execution_version >= 1),
+    correction_round INTEGER NOT NULL CHECK (correction_round >= 0),
+    role TEXT NOT NULL CHECK (role IN ('producer', 'reviewer')),
+    wake_class TEXT NOT NULL CHECK (wake_class = 'human_turn_only'),
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'requested', 'delivered', 'acknowledged', 'expired', 'escalated'
+        )
+    ),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    recipient_id TEXT NOT NULL,
+    acknowledged_by TEXT,
+    requested_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    acknowledged_at TEXT,
+    CHECK (
+        (state = 'acknowledged' AND acknowledged_by IS NOT NULL
+            AND acknowledged_at IS NOT NULL)
+        OR
+        (state != 'acknowledged' AND acknowledged_by IS NULL
+            AND acknowledged_at IS NULL)
+    ),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (acknowledged_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_manual_wake_events (
+    wake_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('wake.requested', 'wake.acknowledged')
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL CHECK (
+        to_state IN (
+            'requested', 'delivered', 'acknowledged', 'expired', 'escalated'
+        )
+    ),
+    actor_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (wake_id, sequence),
+    FOREIGN KEY (wake_id)
+        REFERENCES workflow_manual_wakes(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_manual_wake_execution
+    ON workflow_manual_wakes(execution_id, requested_at, id);
+CREATE INDEX workflow_manual_wake_activation
+    ON workflow_manual_wakes(workflow_activation_version_id, requested_at);
+CREATE INDEX workflow_manual_wake_recipient_state
+    ON workflow_manual_wakes(recipient_id, state, requested_at);
+
+CREATE TRIGGER workflow_manual_wake_identity_immutable
+BEFORE UPDATE OF
+    id, run_id, execution_id, workflow_activation_version_id,
+    execution_version, correction_round, role, wake_class, recipient_id,
+    requested_at
+ON workflow_manual_wakes
+BEGIN
+    SELECT RAISE(ABORT, 'workflow manual wake identity is immutable');
+END;
+CREATE TRIGGER workflow_manual_wake_immutable_delete
+BEFORE DELETE ON workflow_manual_wakes
+BEGIN
+    SELECT RAISE(ABORT, 'workflow manual wakes cannot be deleted');
+END;
+CREATE TRIGGER workflow_manual_wake_event_immutable_update
+BEFORE UPDATE ON workflow_manual_wake_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow manual wake events are immutable');
+END;
+CREATE TRIGGER workflow_manual_wake_event_immutable_delete
+BEFORE DELETE ON workflow_manual_wake_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow manual wake events cannot be deleted');
+END;
+"""
+
+WORKFLOW_RESOURCE_RULING_SCHEMA = """
+DROP TRIGGER workflow_ruling_identity_immutable;
+DROP TRIGGER workflow_ruling_immutable_delete;
+DROP INDEX workflow_ruling_one_open;
+ALTER TABLE workflow_rulings RENAME TO workflow_rulings_v46;
+CREATE TABLE workflow_rulings (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    execution_version INTEGER NOT NULL CHECK (execution_version >= 1),
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'correction_limit', 'producer_failed', 'reviewer_failed',
+            'review_verdict_missing', 'validation_failed',
+            'landing_failed', 'landing_authority_mismatch', 'landing_cancelled',
+            'landing_refold_required', 'resource_exhausted'
+        )
+    ),
+    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    policy_id TEXT,
+    run_id TEXT,
+    gate_name TEXT,
+    provider_landing_id TEXT,
+    landing_plan_id TEXT,
+    resolved_by TEXT,
+    decision TEXT CHECK (decision IS NULL OR decision IN ('continue', 'cancel')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (execution_id, execution_version, kind),
+    FOREIGN KEY (execution_id) REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_landing_id)
+        REFERENCES integration_provider_landings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_plan_id)
+        REFERENCES integration_landing_plans(id) ON DELETE RESTRICT,
+    FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'open' AND resolved_by IS NULL AND decision IS NULL
+            AND resolved_at IS NULL)
+        OR
+        (state = 'resolved' AND resolved_by IS NOT NULL AND decision IS NOT NULL
+            AND resolved_at IS NOT NULL)
+    ),
+    CHECK (
+        (kind = 'landing_failed' AND provider_landing_id IS NOT NULL
+            AND landing_plan_id IS NULL)
+        OR
+        (kind = 'landing_authority_mismatch'
+            AND (provider_landing_id IS NOT NULL) != (landing_plan_id IS NOT NULL))
+        OR
+        (kind NOT IN ('landing_failed', 'landing_authority_mismatch')
+            AND provider_landing_id IS NULL AND landing_plan_id IS NULL)
+    )
+) STRICT;
+INSERT INTO workflow_rulings (
+    id, execution_id, execution_version, correction_round, kind, state,
+    version, policy_id, run_id, gate_name, provider_landing_id,
+    landing_plan_id, resolved_by, decision, created_at, updated_at, resolved_at
+)
+SELECT
+    id, execution_id, execution_version, correction_round, kind, state,
+    version, policy_id, run_id, gate_name, provider_landing_id,
+    landing_plan_id, resolved_by, decision, created_at, updated_at, resolved_at
+FROM workflow_rulings_v46;
+DROP TABLE workflow_rulings_v46;
+CREATE UNIQUE INDEX workflow_ruling_one_open
+    ON workflow_rulings(execution_id) WHERE state = 'open';
+CREATE TRIGGER workflow_ruling_identity_immutable
+BEFORE UPDATE OF
+    id, execution_id, execution_version, correction_round, kind,
+    policy_id, run_id, gate_name, provider_landing_id, landing_plan_id, created_at
+ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow ruling identity is immutable');
+END;
+CREATE TRIGGER workflow_ruling_immutable_delete
+BEFORE DELETE ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow rulings cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -6201,7 +6377,8 @@ SCHEMA_V45 = (
     + DIRECTED_RUN_REPLACEMENT_SCHEMA
     + WORKFLOW_REFOLD_RULING_SCHEMA
 )
-SCHEMA = SCHEMA_V45 + WORKFLOW_POLICY_ACTIVATION_SCHEMA
+SCHEMA_V46 = SCHEMA_V45 + WORKFLOW_POLICY_ACTIVATION_SCHEMA
+SCHEMA = SCHEMA_V46 + WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -6248,4 +6425,5 @@ MIGRATIONS = {
     43: DIRECTED_RUN_REPLACEMENT_SCHEMA,
     44: WORKFLOW_REFOLD_RULING_SCHEMA,
     45: WORKFLOW_POLICY_ACTIVATION_SCHEMA,
+    46: WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA,
 }

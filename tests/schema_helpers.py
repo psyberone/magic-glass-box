@@ -12,6 +12,15 @@ def downgrade_workflow_policy_activation(connection: sqlite3.Connection) -> None
     connection.executescript(
         """
         PRAGMA foreign_keys = OFF;
+        DROP TRIGGER IF EXISTS workflow_manual_wake_event_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_manual_wake_event_immutable_update;
+        DROP TRIGGER IF EXISTS workflow_manual_wake_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_manual_wake_identity_immutable;
+        DROP INDEX IF EXISTS workflow_manual_wake_recipient_state;
+        DROP INDEX IF EXISTS workflow_manual_wake_activation;
+        DROP INDEX IF EXISTS workflow_manual_wake_execution;
+        DROP TABLE IF EXISTS workflow_manual_wake_events;
+        DROP TABLE IF EXISTS workflow_manual_wakes;
         DROP TRIGGER IF EXISTS workflow_execution_activation_immutable;
         DROP INDEX IF EXISTS workflow_execution_activation;
         ALTER TABLE workflow_executions

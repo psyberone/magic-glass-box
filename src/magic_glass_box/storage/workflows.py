@@ -1411,7 +1411,233 @@ class WorkflowStorage:
             "completion": completion,
             "scope_binding": scope_binding,
             "portable_policy": portable_policy,
+            "responsibility": self._workflow_responsibility(connection, execution_id),
         }
+
+    @staticmethod
+    def _workflow_responsibility(
+        connection: sqlite3.Connection, execution_id: str
+    ) -> dict[str, Any]:
+        """Derive one total next-actor fact from durable workflow state."""
+
+        execution = connection.execute(
+            "SELECT state, stage, correction_round, version, "
+            "workflow_activation_version_id FROM workflow_executions "
+            "WHERE id = ?",
+            (execution_id,),
+        ).fetchone()
+        if execution is None:
+            raise NotFoundError(f"workflow execution not found: {execution_id}")
+        if execution["workflow_activation_version_id"] is None:
+            return {"status": "pre_policy"}
+
+        def fact(
+            status: str,
+            holder: str,
+            reason: str,
+            basis: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "status": status,
+                "holder": holder,
+                "reason": reason,
+                "execution_version": execution["version"],
+                "stage": execution["stage"],
+                "correction_round": execution["correction_round"],
+                "basis": {} if basis is None else basis,
+            }
+
+        if execution["state"] != "active":
+            return fact(
+                "terminal",
+                "none",
+                "execution_terminal",
+                {"execution_state": execution["state"]},
+            )
+        ruling = connection.execute(
+            "SELECT id, version, kind FROM workflow_rulings "
+            "WHERE execution_id = ? AND state = 'open' "
+            "ORDER BY created_at, id LIMIT 1",
+            (execution_id,),
+        ).fetchone()
+        if ruling is not None:
+            return fact(
+                "action_required",
+                "owner",
+                "ruling_resolution",
+                {
+                    "ruling_id": ruling["id"],
+                    "ruling_kind": ruling["kind"],
+                    "ruling_version": ruling["version"],
+                },
+            )
+
+        stage = execution["stage"]
+        if stage in {"build", "review"}:
+            role = "producer" if stage == "build" else "reviewer"
+            run = connection.execute(
+                "SELECT binding.run_id, binding.generation, run.state, "
+                "run.version, wake.id AS wake_id, wake.state AS wake_state, "
+                "wake.version AS wake_version FROM workflow_run_bindings binding "
+                "JOIN runs run ON run.id = binding.run_id "
+                "LEFT JOIN workflow_manual_wakes wake ON wake.run_id = run.id "
+                "WHERE binding.execution_id = ? "
+                "AND binding.correction_round = ? AND binding.role = ? "
+                "ORDER BY binding.generation DESC LIMIT 1",
+                (execution_id, execution["correction_round"], role),
+            ).fetchone()
+            if run is None:
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "role_admission",
+                )
+            run_basis = {
+                "run_id": run["run_id"],
+                "run_version": run["version"],
+                "run_generation": run["generation"],
+            }
+            if run["wake_id"] is None:
+                return fact(
+                    "attention",
+                    "control_room",
+                    "manual_wake_missing",
+                    run_basis,
+                )
+            wake_basis = {
+                "run_id": run["run_id"],
+                "wake_id": run["wake_id"],
+                "wake_version": run["wake_version"],
+            }
+            if run["wake_state"] != "acknowledged":
+                return fact(
+                    "action_required",
+                    "owner",
+                    "manual_wake_acknowledgement",
+                    wake_basis,
+                )
+            if run["state"] == "queued":
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "run_launch",
+                    wake_basis,
+                )
+            if run["state"] in {"preparing", "running"}:
+                return fact(
+                    "working",
+                    role,
+                    "run_execution",
+                    run_basis,
+                )
+            if run["state"] == "waiting_for_input":
+                return fact(
+                    "action_required",
+                    "owner",
+                    "run_interaction",
+                    run_basis,
+                )
+            if run["state"] == "paused":
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "run_resume",
+                    run_basis,
+                )
+            if run["state"] in {"succeeded", "failed", "cancelled"}:
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "stage_transition",
+                    run_basis,
+                )
+            return fact(
+                "attention",
+                "control_room",
+                "run_state_unresolved",
+                run_basis,
+            )
+
+        if stage == "maintainer":
+            return fact(
+                "action_required",
+                "owner",
+                "maintainer_disposition",
+            )
+        if stage == "landing":
+            landing = connection.execute(
+                "SELECT binding.queue_item_id, queue.state AS queue_state, "
+                "queue.version AS queue_version, target.id AS target_id "
+                "FROM workflow_landing_bindings binding "
+                "JOIN integration_queue_items queue "
+                "ON queue.id = binding.queue_item_id "
+                "LEFT JOIN workflow_provider_targets target "
+                "ON target.execution_id = binding.execution_id "
+                "WHERE binding.execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            if landing is None:
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "landing_admission",
+                )
+            basis = {
+                "queue_item_id": landing["queue_item_id"],
+                "queue_version": landing["queue_version"],
+            }
+            if landing["target_id"] is None:
+                return fact(
+                    "action_required",
+                    "owner",
+                    "provider_target",
+                    basis,
+                )
+            if landing["queue_state"] in {"queued", "claimed"}:
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "landing_dispatch",
+                    basis,
+                )
+            if landing["queue_state"] == "awaiting_receipt":
+                return fact(
+                    "waiting",
+                    "landing_actuator",
+                    "provider_receipt",
+                    basis,
+                )
+            if landing["queue_state"] == "landed":
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "stage_transition",
+                    basis,
+                )
+            if landing["queue_state"] == "refold_required":
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "landing_refold_resolution",
+                    basis,
+                )
+            return fact(
+                "attention",
+                "control_room",
+                "landing_state_unresolved",
+                {**basis, "queue_state": landing["queue_state"]},
+            )
+        if stage == "completion":
+            return fact(
+                "action_required",
+                "control_plane",
+                "workflow_completion",
+            )
+        return fact(
+            "attention",
+            "control_room",
+            "workflow_stage_unresolved",
+        )
 
     @staticmethod
     def _workflow_scope_binding_record(
@@ -2606,6 +2832,7 @@ class WorkflowStorage:
             "landing_authority_mismatch",
             "landing_cancelled",
             "landing_refold_required",
+            "resource_exhausted",
         }
         if kind not in allowed:
             raise ValidationError("workflow ruling kind is invalid")
@@ -2870,6 +3097,11 @@ class WorkflowStorage:
                     raise ConflictError("workflow execution changed after the ruling")
                 resolution_metadata: dict[str, Any] = {}
                 if decision == "continue":
+                    if ruling["kind"] == "resource_exhausted":
+                        raise ConflictError(
+                            "an exhausted workflow resource ceiling cannot be "
+                            "increased or continued"
+                        )
                     if ruling["kind"] == "correction_limit":
                         if execution["correction_round"] >= 8:
                             raise ConflictError(

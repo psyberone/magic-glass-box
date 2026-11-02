@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
@@ -12,6 +13,7 @@ from ..domain import (
     require_string,
     validate_provider_name,
 )
+from ..workflow_policy import WorkflowActivationSpec
 from .errors import (
     ConcurrentUpdateError,
     ConflictError,
@@ -110,7 +112,8 @@ class AttemptStorage:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 run = connection.execute(
-                    "SELECT state, version, profile_version_id, source_revision "
+                    "SELECT state, version, profile_version_id, source_revision, "
+                    "project_id "
                     "FROM runs WHERE id = ?",
                     (run_id,),
                 ).fetchone()
@@ -123,6 +126,11 @@ class AttemptStorage:
                     )
                 if run["state"] != RunState.QUEUED.value:
                     raise ConflictError(f"run is not queued: {run['state']}")
+                self._enforce_workflow_attempt_admission(
+                    connection,
+                    run_id=run_id,
+                    project_id=run["project_id"],
+                )
                 sequence = connection.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_attempts "
                     "WHERE run_id = ?",
@@ -223,6 +231,73 @@ class AttemptStorage:
                 connection.rollback()
                 raise ConflictError("run attempt could not be created") from exc
         return self.get_run_attempt(attempt_id)
+
+    @staticmethod
+    def _enforce_workflow_attempt_admission(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        project_id: str,
+    ) -> None:
+        if connection.execute("PRAGMA user_version").fetchone()[0] < 29:
+            # Historical migration fixtures predate the workflow ledger. A
+            # current database must have the tables queried below and fails
+            # closed if its schema is incomplete.
+            return
+        binding = connection.execute(
+            "SELECT execution.workflow_activation_version_id, "
+            "activation.spec_json, wake.state AS wake_state "
+            "FROM workflow_run_bindings binding "
+            "JOIN workflow_executions execution "
+            "ON execution.id = binding.execution_id "
+            "LEFT JOIN workflow_activation_versions activation "
+            "ON activation.id = execution.workflow_activation_version_id "
+            "LEFT JOIN workflow_manual_wakes wake ON wake.run_id = binding.run_id "
+            "WHERE binding.run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if binding is None or binding["workflow_activation_version_id"] is None:
+            return
+        if binding["wake_state"] is None:
+            raise ConflictError("activated workflow run has no manual wake")
+        if binding["wake_state"] != "acknowledged":
+            raise ConflictError("workflow manual wake is not acknowledged")
+        try:
+            activation = WorkflowActivationSpec.from_mapping(
+                json.loads(binding["spec_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow activation is invalid") from exc
+
+        active_rows = connection.execute(
+            "SELECT activation.spec_json FROM runs active_run "
+            "JOIN workflow_run_bindings active_binding "
+            "ON active_binding.run_id = active_run.id "
+            "JOIN workflow_executions active_execution "
+            "ON active_execution.id = active_binding.execution_id "
+            "JOIN workflow_activation_versions activation "
+            "ON activation.id = active_execution.workflow_activation_version_id "
+            "WHERE active_run.project_id = ? "
+            "AND active_run.state IN ('preparing', 'running')",
+            (project_id,),
+        ).fetchall()
+        ceilings = [activation.resources.shared_host_concurrency]
+        try:
+            ceilings.extend(
+                WorkflowActivationSpec.from_mapping(
+                    json.loads(row["spec_json"])
+                ).resources.shared_host_concurrency
+                for row in active_rows
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow activation is invalid") from exc
+        active_count = connection.execute(
+            "SELECT COUNT(*) FROM runs WHERE project_id = ? "
+            "AND state IN ('preparing', 'running')",
+            (project_id,),
+        ).fetchone()[0]
+        if active_count >= min(ceilings):
+            raise ConflictError("workflow shared-host concurrency is exhausted")
 
     @staticmethod
     def _attempt_lease_seconds(value: object) -> int:

@@ -303,6 +303,22 @@ Pre-v46 and explicitly unactivated compatibility histories remain visible as
 `pre_policy`; they are never represented as conforming and receive no synthetic
 backfill.
 
+Control-plane schema v47 publishes `workflow-manual-wake-v1.schema.json` and
+`workflow-responsibility-v1.schema.json`. Each activated producer or reviewer
+run receives one durable `human_turn_only` wake addressed to the execution's
+named owner. Attempt admission requires that exact wake revision to be
+acknowledged by that recipient; a replacement run receives a new wake and
+cannot inherit an earlier acknowledgement. Delivery is not acknowledgement,
+and unactivated histories receive no synthetic wake authority.
+
+Responsibility is a derived projection, not another mutable ownership ledger.
+Every activated stage resolves to one named holder and reason from exact
+execution, ruling, run, wake, queue, and target revisions. Missing required
+facts resolve to control-room attention instead of an empty or guessed owner.
+The same activation enforces its correction-round and seat bounds, atomically
+admits attempts under the applicable shared-host concurrency ceiling, and
+opens a non-extendable owner ruling when wall time is exhausted.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

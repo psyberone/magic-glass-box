@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from .candidates import GitCandidateStore, NoCandidateChangesError
@@ -51,6 +52,8 @@ class WorkflowDirector:
             return True
         if any(ruling["state"] == "open" for ruling in execution["rulings"]):
             return True
+        if self._wall_time_exhausted(execution):
+            return self._ruling(execution, "resource_exhausted")
         if execution["stage"] == "build":
             return self._advance_build(execution)
         if execution["stage"] == "review":
@@ -65,6 +68,18 @@ class WorkflowDirector:
             )
             return True
         return True
+
+    def _wall_time_exhausted(self, execution: dict[str, Any]) -> bool:
+        policy = execution["portable_policy"]
+        if policy["status"] != "activated":
+            return False
+        try:
+            created_at = datetime.fromisoformat(execution["created_at"])
+            observed_at = datetime.fromisoformat(self.database.now())
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("workflow wall-time timestamps are invalid") from exc
+        elapsed = (observed_at - created_at).total_seconds()
+        return elapsed >= policy["resources"]["wall_time_seconds"]
 
     def _advance_build(self, execution: dict[str, Any]) -> bool:
         correction_round = execution["correction_round"]

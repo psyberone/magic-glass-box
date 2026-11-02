@@ -516,6 +516,21 @@ def build_parser() -> argparse.ArgumentParser:
         "activation-list", help="list latest project workflow activations"
     )
     workflow_activation_list.add_argument("--project")
+    workflow_wake_show = workflow_commands.add_parser(
+        "wake-show", help="show one durable workflow manual wake"
+    )
+    workflow_wake_show.add_argument("wake_id")
+    workflow_wake_list = workflow_commands.add_parser(
+        "wake-list", help="list durable workflow manual wakes"
+    )
+    workflow_wake_list.add_argument("--execution")
+    workflow_wake_list.add_argument("--run")
+    workflow_wake_ack = workflow_commands.add_parser(
+        "wake-ack", help="acknowledge one exact workflow manual wake"
+    )
+    workflow_wake_ack.add_argument("wake_id")
+    workflow_wake_ack.add_argument("--expected-version", required=True, type=int)
+    workflow_wake_ack.add_argument("--acknowledged-by", required=True)
     for verb in ("config-create", "config-revise"):
         configuration = workflow_commands.add_parser(
             verb,
@@ -1778,6 +1793,19 @@ def _dispatch(
             )
         if args.workflow_command == "activation-list":
             return control.list_workflow_activations(project_key=args.project)
+        if args.workflow_command == "wake-show":
+            return control.get_workflow_manual_wake(args.wake_id)
+        if args.workflow_command == "wake-list":
+            return control.list_workflow_manual_wakes(
+                execution_id=args.execution,
+                run_id=args.run,
+            )
+        if args.workflow_command == "wake-ack":
+            return control.acknowledge_workflow_manual_wake(
+                args.wake_id,
+                expected_version=args.expected_version,
+                acknowledged_by_handle=args.acknowledged_by,
+            )
         if args.workflow_command in {"config-create", "config-revise"}:
             kwargs = {
                 "project_key": args.project,

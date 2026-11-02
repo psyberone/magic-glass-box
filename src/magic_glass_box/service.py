@@ -2143,6 +2143,34 @@ class ControlPlane:
     ) -> list[dict[str, Any]]:
         return self.database.list_workflow_activations(project_key=project_key)
 
+    def get_workflow_manual_wake(self, wake_id: str) -> dict[str, Any]:
+        return self.database.get_workflow_manual_wake(wake_id)
+
+    def list_workflow_manual_wakes(
+        self,
+        *,
+        execution_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.database.list_workflow_manual_wakes(
+            execution_id=execution_id,
+            run_id=run_id,
+        )
+
+    def acknowledge_workflow_manual_wake(
+        self,
+        wake_id: str,
+        *,
+        expected_version: int,
+        acknowledged_by_handle: str,
+    ) -> dict[str, Any]:
+        recipient = self.database.get_user(acknowledged_by_handle)
+        return self.database.acknowledge_workflow_manual_wake(
+            wake_id,
+            expected_version=expected_version,
+            acknowledged_by=recipient["id"],
+        )
+
     def revise_workflow_configuration(
         self,
         *,

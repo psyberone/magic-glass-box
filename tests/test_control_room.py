@@ -2735,12 +2735,14 @@ class ControlRoomTests(unittest.TestCase):
                 "landing_provider_landing_state",
                 "landing_receipt_id",
                 "completion_outcome_entry_id",
+                "responsibility",
                 "created_at",
                 "updated_at",
                 "finished_at",
             },
         )
         self.assertEqual(projected["id"], execution["id"])
+        self.assertEqual(projected["responsibility"], {"status": "pre_policy"})
         self.assertEqual(projected["correction_round"], 0)
         self.assertEqual(
             (projected["action_id"], projected["action_state"]),

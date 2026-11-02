@@ -1,0 +1,35 @@
+{
+  "acknowledged_at": "2026-11-02T15:01:00.000000+00:00",
+  "acknowledged_by": "owner",
+  "correction_round": 0,
+  "events": [
+    {
+      "actor": null,
+      "created_at": "2026-11-02T15:00:00.000000+00:00",
+      "from_state": null,
+      "kind": "wake.requested",
+      "sequence": 1,
+      "to_state": "requested"
+    },
+    {
+      "actor": "owner",
+      "created_at": "2026-11-02T15:01:00.000000+00:00",
+      "from_state": "requested",
+      "kind": "wake.acknowledged",
+      "sequence": 2,
+      "to_state": "acknowledged"
+    }
+  ],
+  "execution_id": "wfx_11111111111111111111111111111111",
+  "execution_version": 1,
+  "id": "wwk_22222222222222222222222222222222",
+  "recipient": "owner",
+  "requested_at": "2026-11-02T15:00:00.000000+00:00",
+  "role": "producer",
+  "run_id": "run_33333333333333333333333333333333",
+  "state": "acknowledged",
+  "updated_at": "2026-11-02T15:01:00.000000+00:00",
+  "version": 2,
+  "wake_class": "human_turn_only",
+  "workflow_activation_version_id": "wav_44444444444444444444444444444444"
+}

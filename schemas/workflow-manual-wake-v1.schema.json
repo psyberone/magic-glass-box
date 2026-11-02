@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-manual-wake:v1",
+  "title": "Magic Glass Box Workflow Manual Wake v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "acknowledged_at",
+    "acknowledged_by",
+    "correction_round",
+    "events",
+    "execution_id",
+    "execution_version",
+    "id",
+    "recipient",
+    "requested_at",
+    "role",
+    "run_id",
+    "state",
+    "updated_at",
+    "version",
+    "wake_class",
+    "workflow_activation_version_id"
+  ],
+  "properties": {
+    "acknowledged_at": {
+      "oneOf": [
+        { "type": "string", "format": "date-time" },
+        { "type": "null" }
+      ]
+    },
+    "acknowledged_by": {
+      "oneOf": [
+        { "$ref": "#/$defs/handle" },
+        { "type": "null" }
+      ]
+    },
+    "correction_round": { "type": "integer", "minimum": 0, "maximum": 8 },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "execution_id": { "type": "string", "pattern": "^wfx_[0-9a-f]{32}$" },
+    "execution_version": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string", "pattern": "^wwk_[0-9a-f]{32}$" },
+    "recipient": { "$ref": "#/$defs/handle" },
+    "requested_at": { "type": "string", "format": "date-time" },
+    "role": { "enum": ["producer", "reviewer"] },
+    "run_id": { "type": "string", "pattern": "^run_[0-9a-f]{32}$" },
+    "state": {
+      "enum": ["requested", "delivered", "acknowledged", "expired", "escalated"]
+    },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "version": { "type": "integer", "minimum": 1 },
+    "wake_class": { "const": "human_turn_only" },
+    "workflow_activation_version_id": {
+      "type": "string",
+      "pattern": "^wav_[0-9a-f]{32}$"
+    }
+  },
+  "$defs": {
+    "handle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor",
+        "created_at",
+        "from_state",
+        "kind",
+        "sequence",
+        "to_state"
+      ],
+      "properties": {
+        "actor": {
+          "oneOf": [
+            { "$ref": "#/$defs/handle" },
+            { "type": "null" }
+          ]
+        },
+        "created_at": { "type": "string", "format": "date-time" },
+        "from_state": {
+          "oneOf": [
+            {
+              "enum": [
+                "requested",
+                "delivered",
+                "acknowledged",
+                "expired",
+                "escalated"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "kind": { "enum": ["wake.requested", "wake.acknowledged"] },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "to_state": {
+          "enum": [
+            "requested",
+            "delivered",
+            "acknowledged",
+            "expired",
+            "escalated"
+          ]
+        }
+      }
+    }
+  }
+}

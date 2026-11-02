@@ -2201,8 +2201,8 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 
 ## Milestone 18: first reusable-template delivery
 
-**Status: in progress; portable policy and project-activation foundation
-implemented in schema v46**
+**Status: in progress; portable activation and manual-runtime authority
+implemented through schema v47**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2255,6 +2255,27 @@ branch coverage. The new policy domain and storage modules measure 91% in the
 focused branch-aware report. A clean, two-worker focused mutation wave over
 those modules killed 575/666 mutants (86.34%), with no timeout, crash, or
 uncovered outcome.
+
+M18B adds total derived responsibility, explicit manual role wakes, and runtime
+resource enforcement. Activated role admission atomically records one
+owner-addressed wake and blocks the worker attempt until the named recipient
+acknowledges that exact version. Replacement runs receive fresh wakes;
+pre-policy history remains unchanged. The control room projects pending wakes
+and unresolved derivation as attention. Correction rounds and seats retain
+their fixed bounds, shared-host concurrency is checked in the attempt-claim
+transaction, and elapsed wall time opens a non-extendable
+`resource_exhausted` ruling. Published wake and responsibility schemas make the
+new machine-readable surfaces explicit. Provider translation/read-back,
+landing proof, closeout obligations, and the two-project interruption proof
+remain in later M18 slices.
+
+M18B's checkpoint gate passes 1,478 tests at 87% aggregate statement-plus-
+branch coverage. A two-worker focused mutation wave over manual wake creation
+and acknowledgement, atomic attempt admission, total responsibility, and wall-
+time exhaustion killed 420/447 mutants (93.96%). The mutation-driven hardening
+added exact schema-cutoff, identifier/history, input-bound, equality-threshold,
+and every-state responsibility assertions; the remaining mutants affect only
+SQLite keyword casing or non-contractual diagnostic labels and wording.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

@@ -198,6 +198,17 @@ class FakeControlPlane:
     def list_workflow_activations(self, **kwargs: object) -> dict[str, object]:
         return self._called("workflow.activation-list", **kwargs)
 
+    def get_workflow_manual_wake(self, wake_id: str) -> dict[str, object]:
+        return self._called("workflow.wake-show", wake_id=wake_id)
+
+    def list_workflow_manual_wakes(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.wake-list", **kwargs)
+
+    def acknowledge_workflow_manual_wake(
+        self, wake_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("workflow.wake-ack", wake_id=wake_id, **kwargs)
+
     def start_workflow_execution(self, **kwargs: object) -> dict[str, object]:
         return self._called("workflow.start", **kwargs)
 
@@ -739,6 +750,12 @@ class CLITests(unittest.TestCase):
                         "activation-list",
                         "list latest project workflow activations",
                     ),
+                    ("wake-show", "show one durable workflow manual wake"),
+                    ("wake-list", "list durable workflow manual wakes"),
+                    (
+                        "wake-ack",
+                        "acknowledge one exact workflow manual wake",
+                    ),
                     (
                         "config-create",
                         "create a versioned workflow configuration",
@@ -1181,6 +1198,10 @@ class CLITests(unittest.TestCase):
                     "--acknowledged-by",
                 ),
                 ("workflow", "activation-show"): ("--project",),
+                ("workflow", "wake-ack"): (
+                    "--expected-version",
+                    "--acknowledged-by",
+                ),
                 ("workflow", "config-create"): (
                     "--project",
                     "--producer",
@@ -2661,6 +2682,9 @@ class CLITests(unittest.TestCase):
                 ),
                 "activation-show": ("show one project workflow activation revision"),
                 "activation-list": "list latest project workflow activations",
+                "wake-show": "show one durable workflow manual wake",
+                "wake-list": "list durable workflow manual wakes",
+                "wake-ack": "acknowledge one exact workflow manual wake",
                 "config-create": "create a versioned workflow configuration",
                 "config-revise": "append an immutable configuration revision",
                 "config-show": "show one workflow configuration revision",
@@ -3284,6 +3308,49 @@ class CLITests(unittest.TestCase):
                 (
                     "workflow.activation-list",
                     {"project_key": "box-project"},
+                ),
+            ),
+            (
+                ["workflow", "wake-show", "wwk_" + "1" * 32],
+                (
+                    "workflow.wake-show",
+                    {"wake_id": "wwk_" + "1" * 32},
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "wake-list",
+                    "--execution",
+                    "wfx_" + "2" * 32,
+                    "--run",
+                    "run_" + "3" * 32,
+                ],
+                (
+                    "workflow.wake-list",
+                    {
+                        "execution_id": "wfx_" + "2" * 32,
+                        "run_id": "run_" + "3" * 32,
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "wake-ack",
+                    "wwk_" + "1" * 32,
+                    "--expected-version",
+                    "1",
+                    "--acknowledged-by",
+                    "operator",
+                ],
+                (
+                    "workflow.wake-ack",
+                    {
+                        "wake_id": "wwk_" + "1" * 32,
+                        "expected_version": 1,
+                        "acknowledged_by_handle": "operator",
+                    },
                 ),
             ),
         )

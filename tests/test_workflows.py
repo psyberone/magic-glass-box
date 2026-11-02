@@ -866,6 +866,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 "completion",
                 "scope_binding",
                 "portable_policy",
+                "responsibility",
             },
         )
         self.assertIsNone(execution["landing"])
@@ -873,6 +874,7 @@ class WorkflowStorageTests(unittest.TestCase):
         self.assertIsNone(execution["scope_binding"])
         self.assertIsNone(execution["workflow_activation_version_id"])
         self.assertEqual(execution["portable_policy"], {"status": "pre_policy"})
+        self.assertEqual(execution["responsibility"], {"status": "pre_policy"})
         expected_request = {
             "schema_version": 1,
             "project_key": "workflow-project",

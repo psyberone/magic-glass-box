@@ -1,0 +1,13 @@
+{
+  "basis": {
+    "run_id": "run_33333333333333333333333333333333",
+    "wake_id": "wwk_22222222222222222222222222222222",
+    "wake_version": 1
+  },
+  "correction_round": 0,
+  "execution_version": 1,
+  "holder": "owner",
+  "reason": "manual_wake_acknowledgement",
+  "stage": "build",
+  "status": "action_required"
+}

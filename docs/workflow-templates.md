@@ -62,6 +62,24 @@ authority and are never described as conforming. Later M18 slices consume the
 pinned activation for responsibility, provider translation/read-back, landing
 proof, and truthful closeout obligations.
 
+Schema v47 consumes the activation's manual wake and resource bindings. Creating
+an activated role run atomically creates one owner-addressed wake; only the
+named active owner can acknowledge its exact version, and worker attempt
+admission remains closed until then. Retry and reassignment create fresh wakes.
+The control room projects pending wake acknowledgement as explicit attention.
+
+Activated execution reads also expose one total derived `responsibility` fact.
+It names the owner, producer, reviewer, control plane, landing actuator, or
+control room together with the exact durable basis for that conclusion. It is
+recomputed from the ledgers and never becomes a competing ownership register.
+Missing wake or unresolved stage state is attention, not inference. Pre-policy
+executions remain `{ "status": "pre_policy" }`.
+
+Resource declarations are enforceable: the two fixed roles must fit the seat
+ceiling, correction rounds use the configured hard limit, attempt claims share
+an atomic project host-concurrency limit, and elapsed wall time opens a
+`resource_exhausted` owner ruling that cannot be continued or enlarged.
+
 Schema v32 makes those role pins prescription-generic. A configuration version
 owns an immutable set of named role bindings rather than fixed producer and
 reviewer columns, and each binding still points to one exact agent-profile

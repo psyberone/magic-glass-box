@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-responsibility:v1",
+  "title": "Magic Glass Box Derived Workflow Responsibility v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "const": "pre_policy" } }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "correction_round",
+        "execution_version",
+        "holder",
+        "reason",
+        "stage",
+        "status"
+      ],
+      "properties": {
+        "basis": {
+          "type": "object",
+          "maxProperties": 8,
+          "additionalProperties": {
+            "type": ["string", "integer", "null"]
+          }
+        },
+        "correction_round": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "execution_version": { "type": "integer", "minimum": 1 },
+        "holder": {
+          "enum": [
+            "control_plane",
+            "control_room",
+            "landing_actuator",
+            "none",
+            "owner",
+            "producer",
+            "reviewer"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "execution_terminal",
+            "landing_admission",
+            "landing_dispatch",
+            "landing_refold_resolution",
+            "landing_state_unresolved",
+            "maintainer_disposition",
+            "manual_wake_acknowledgement",
+            "manual_wake_missing",
+            "provider_receipt",
+            "provider_target",
+            "role_admission",
+            "ruling_resolution",
+            "run_execution",
+            "run_interaction",
+            "run_launch",
+            "run_resume",
+            "run_state_unresolved",
+            "stage_transition",
+            "workflow_completion",
+            "workflow_stage_unresolved"
+          ]
+        },
+        "stage": {
+          "enum": ["build", "review", "maintainer", "landing", "completion"]
+        },
+        "status": {
+          "enum": ["action_required", "attention", "terminal", "waiting", "working"]
+        }
+      }
+    }
+  ]
+}
