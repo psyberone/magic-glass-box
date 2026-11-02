@@ -2115,7 +2115,7 @@ coordinator-reconciled postmortem suitable as M17 design input.
 
 ## Milestone 17: reusable workflow-template contract
 
-**Status: in progress; foundation consultation opened 2026-11-02**
+**Status: in progress; foundation resolved and review-shape consultation open**
 
 Bring the Panopticon coordinator in formally as the practice-domain
 co-designer. Use a living, decision-tracked consultation to reconcile three
@@ -2153,10 +2153,18 @@ scope and authority. A separate reviewer later supplies independent technical
 approval, so the principal co-designer is not the sole gate reviewer.
 
 The living decision ledger opened in Krab session
-`ses_22d2b04b61b448d15079370c68b727dd`. Consultation wave 1 is deliberately
-limited to the smallest reusable unit, lifecycle-record placement,
-mechanical-versus-judgment ownership, and maintainer-approval binding. No
-production schema or runtime work has begun.
+`ses_22d2b04b61b448d15079370c68b727dd`. On 2026-11-02 the owner accepted the
+coordinator-reconciled foundation: fixed prescriptions with exact artifact
+links and total derived responsibility, no meta-executor or work-item stage,
+policy-classified retries, and separate product-disposition, project-landing-
+policy, and derived-readiness facts. Mechanical landing does not require actor
+separation after independent review and owner disposition. No ceiling exception
+is pre-delegated, and ambiguous or claim-significant metadata changes require
+renewed disposition and independent review.
+
+Consultation wave 2 now covers Discovery topology, gate versus advisory review,
+delta re-review, budgets, and correction-round ceilings. No production schema
+or runtime work has begun.
 
 **Exit:** a resolved/deferred decision log, fixed topology and typed-artifact
 contract, authority and negative-case tables, migration ruling, bounded

@@ -1,7 +1,7 @@
 # Practice-informed reusable workflow templates
 
-**Status: Milestone 17 consultation in progress; Milestone 18 remains the first
-delivery.**
+**Status: Milestone 17 consultation in progress; foundation resolved and review
+shape under consultation; Milestone 18 remains the first delivery.**
 
 MGB already implements fixed, versioned `discovery-v1`, `implementation-v1`,
 and `advisory-review-v1` prescriptions. The next template work is not a request
@@ -109,10 +109,20 @@ and a deliberately small implementation recommendation.
 The consultation opened on 2026-11-02 in Krab session
 `ses_22d2b04b61b448d15079370c68b727dd`. Its living internal ledger freezes the
 practice memo, current fixed-prescription contract, M16 postmortem, and this
-program by content digest. The first bounded wave covers only the reusable
-unit, lifecycle-record placement, control-plane/judgment split, and
-maintainer-approval binding. Later questions remain open; starting the
-consultation did not authorize production changes.
+program by content digest. The owner accepted the reconciled foundation: keep
+fixed prescriptions rather than a meta-executor or work-item stage; derive one
+total current-responsibility fact from exact artifact revisions; retry only
+trusted policy-classified failures; and separate product disposition, project
+landing policy, and derived landing readiness. Mechanical landing need not use
+a different actor after independent review and owner disposition. No
+ceiling-exception class is pre-delegated. A typed cosmetic metadata amendment
+may remain maintainer-only, while ambiguous or claim-significant changes require
+renewed disposition and independent review.
+
+The second bounded wave now covers Discovery depth, gate versus advisory
+authority, delta re-review, budget ownership, and correction-round ceilings.
+Later questions remain open; no consultation decision has yet authorized a
+production change.
 
 ## Reuse boundary
 
