@@ -1,7 +1,7 @@
 # Practice-informed reusable workflow templates
 
-**Status: Milestone 17 ready to begin after the completed M16 dogfood and
-coordinator-reconciled postmortem; Milestone 18 remains the first delivery.**
+**Status: Milestone 17 consultation in progress; Milestone 18 remains the first
+delivery.**
 
 MGB already implements fixed, versioned `discovery-v1`, `implementation-v1`,
 and `advisory-review-v1` prescriptions. The next template work is not a request
@@ -105,6 +105,14 @@ No schema or implementation is authorized merely because the consultation
 records a useful idea. The contract milestone ends with a bounded decision
 record, typed artifact and authority tables, negative cases, migration ruling,
 and a deliberately small implementation recommendation.
+
+The consultation opened on 2026-11-02 in Krab session
+`ses_22d2b04b61b448d15079370c68b727dd`. Its living internal ledger freezes the
+practice memo, current fixed-prescription contract, M16 postmortem, and this
+program by content digest. The first bounded wave covers only the reusable
+unit, lifecycle-record placement, control-plane/judgment split, and
+maintainer-approval binding. Later questions remain open; starting the
+consultation did not authorize production changes.
 
 ## Reuse boundary
 

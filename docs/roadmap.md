@@ -2115,7 +2115,7 @@ coordinator-reconciled postmortem suitable as M17 design input.
 
 ## Milestone 17: reusable workflow-template contract
 
-**Status: ready to begin; M16 evidence and debrief are frozen**
+**Status: in progress; foundation consultation opened 2026-11-02**
 
 Bring the Panopticon coordinator in formally as the practice-domain
 co-designer. Use a living, decision-tracked consultation to reconcile three
@@ -2151,6 +2151,12 @@ The M16 debrief sharpens that agenda without selecting an implementation:
 The coordinator supplies domain fidelity and evidence; the product owner rules
 scope and authority. A separate reviewer later supplies independent technical
 approval, so the principal co-designer is not the sole gate reviewer.
+
+The living decision ledger opened in Krab session
+`ses_22d2b04b61b448d15079370c68b727dd`. Consultation wave 1 is deliberately
+limited to the smallest reusable unit, lifecycle-record placement,
+mechanical-versus-judgment ownership, and maintainer-approval binding. No
+production schema or runtime work has begun.
 
 **Exit:** a resolved/deferred decision log, fixed topology and typed-artifact
 contract, authority and negative-case tables, migration ruling, bounded
