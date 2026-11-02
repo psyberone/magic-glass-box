@@ -49,8 +49,10 @@ contains:
 - all active workflows plus a bounded number of recent terminal workflows,
   including current stage, correction round, current version-bound supervisor
   action state, landing mode, queue/policy/candidate identity, provider target
-  and availability, latest manual/provider authority, landed receipt,
-  completion outcome, and any open ruling ID/kind/version. Discovery-scoped
+  and availability, activated provider intent and effect states, latest
+  manual/provider authority, landing-proof disposition, open target hold,
+  landed receipt, completion outcome, and any open ruling ID/kind/version.
+  Discovery-scoped
   workflows additionally expose only their source execution/ruling IDs and the
   latest scope-review ID, round, candidate, policy, run/attempt provenance,
   derived outcome, and digest—never the MUST evidence or PROBE prose;
@@ -79,7 +81,8 @@ contains:
 - an attention queue for pending interactions, open or expired assignments,
   blocker evidence, expired attempt leases, cancellation requests, inconsistent
   active runs, paused provider recovery, unavailable authorities, required
-  refolds, workflow provider targets or capabilities that still need binding,
+  refolds, workflow provider intents, derived targets, or capabilities that
+  still need binding, unresolved provider effects, integration-target holds,
   manual plans, receipts, or retries that need operator action, pending
   provider landings, expired integration claims, exhausted supervisor work,
   failed Discovery or advisory executions, completed advisory reports that

@@ -158,6 +158,15 @@ lease becomes retryable and never enters reconciliation. Logs and SQLite
 records contain operation IDs, bounded classifications, normalized receipts,
 and digests—never credential values or raw provider bodies.
 
+The M18 provider-effect boundary adds strict v1 read-back documents for
+`refs.publish`, `change.open`, and `landing.invoke`. A successful response is
+correlated to the operation's exact candidate, refs, revisions, proposal
+metadata, merge method, and observed primary revision before it becomes a
+durable fact. Provider-native URLs, commands, response envelopes, and implicit
+secondary effects are outside the contract. An activated workflow derives a
+change target only from the confirmed `change.open` fact; missing read-back is
+retained as uncertainty, not reconstructed from a generic receipt.
+
 Every registration pins request and response byte limits, timeout, concurrency,
 and attempts per minute. Each operation may narrow but never expand those
 limits. Exact duplicate idempotency keys resolve to the existing operation;

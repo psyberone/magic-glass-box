@@ -22,6 +22,11 @@ from .domain import (
     require_string,
     validate_provider_name,
 )
+from .provider_effects import (
+    ChangeOpenReadback,
+    LandingReadback,
+    RefPublicationReadback,
+)
 from .work_intake import WorkItemListResult, WorkItemStateResult
 
 SERVICE_SIDECAR_SCHEMA_VERSION = 1
@@ -1285,6 +1290,23 @@ class ServiceOperationResponse:
                     raise ValidationError(
                         "service operation execution result must be canonical"
                     )
+            effect_result_types = {
+                "change.open": ChangeOpenReadback,
+                "landing.invoke": LandingReadback,
+                "refs.publish": RefPublicationReadback,
+            }
+            result_type = effect_result_types.get(authority["capability"].name)
+            if (
+                authority["capability"].version == 1
+                and result_type is not None
+                and receipt.result is not None
+            ):
+                raw_result = receipt.result
+                normalized_result = result_type.from_mapping(raw_result).to_dict()
+                if raw_result != normalized_result:
+                    raise ValidationError(
+                        "service operation effect result must be canonical"
+                    )
         elif error_code is None or receipt is not None:
             raise ValidationError(
                 f"{outcome} service operation must have an error and no receipt"
@@ -1393,6 +1415,65 @@ class ServiceOperationResponse:
             ):
                 raise ValidationError(
                     "service sidecar execution result does not match the request"
+                )
+        if (
+            self.receipt is not None
+            and self.receipt.result is not None
+            and self.capability.version == 1
+            and self.capability.name == "refs.publish"
+        ):
+            publication = RefPublicationReadback.from_mapping(self.receipt.result)
+            if (
+                publication.candidate_id != request.target.resource_id
+                or publication.target_ref != request.parameters.get("target_ref")
+                or publication.published_revision != request.target.desired_revision
+                or self.receipt.observed_revision != publication.published_revision
+                or publication.secondary_effects
+            ):
+                raise ValidationError(
+                    "service sidecar ref-publication result does not match the request"
+                )
+        if (
+            self.receipt is not None
+            and self.receipt.result is not None
+            and self.capability.version == 1
+            and self.capability.name == "change.open"
+        ):
+            change = ChangeOpenReadback.from_mapping(self.receipt.result)
+            parameters = request.parameters
+            if (
+                change.base_ref != parameters.get("base_ref")
+                or change.head_ref != parameters.get("head_ref")
+                or change.base_revision != request.target.expected_revision
+                or change.head_revision != request.target.desired_revision
+                or change.title != parameters.get("title")
+                or change.body != parameters.get("body")
+                or change.draft is not parameters.get("draft")
+                or self.receipt.observed_revision != change.head_revision
+                or change.secondary_effects
+            ):
+                raise ValidationError(
+                    "service sidecar change-open result does not match the request"
+                )
+        if (
+            self.receipt is not None
+            and self.receipt.result is not None
+            and self.capability.version == 1
+            and self.capability.name == "landing.invoke"
+        ):
+            landing = LandingReadback.from_mapping(self.receipt.result)
+            parameters = request.parameters
+            if (
+                landing.change_id != request.target.resource_id
+                or landing.base_ref != parameters.get("integration_ref")
+                or landing.primary_ref != parameters.get("integration_ref")
+                or landing.candidate_revision != request.target.desired_revision
+                or landing.primary_revision != self.receipt.observed_revision
+                or landing.merge_method != parameters.get("merge_method")
+                or landing.secondary_effects
+            ):
+                raise ValidationError(
+                    "service sidecar landing result does not match the request"
                 )
 
 

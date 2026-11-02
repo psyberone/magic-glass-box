@@ -1833,7 +1833,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 47)
+        self.assertEqual(SCHEMA_VERSION, 48)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

@@ -21,6 +21,7 @@ from ..integration import (
     ProviderLandingReceipt,
     ProviderLandingRequest,
 )
+from ..provider_effects import LandingReadback
 from ..service_sidecar import (
     ServiceCapability,
     ServiceMapping,
@@ -29,6 +30,7 @@ from ..service_sidecar import (
     ServiceSidecarSpec,
     core_service_capability,
 )
+from ..workflow_policy import WorkflowActivationSpec
 from .errors import ConcurrentUpdateError, ConflictError, NotFoundError, StorageError
 
 MIN_INTEGRATION_LEASE_SECONDS = 1
@@ -991,6 +993,13 @@ class IntegrationStorage:
     def _assert_queue_authority_ready(
         self, connection: sqlite3.Connection, row: sqlite3.Row
     ) -> dict[str, Any]:
+        held = connection.execute(
+            "SELECT id FROM integration_target_holds "
+            "WHERE integration_ref_id = ? AND state = 'open' LIMIT 1",
+            (row["integration_ref_id"],),
+        ).fetchone()
+        if held is not None:
+            raise ConflictError("integration target is held")
         if row["state"] == "refold_required":
             raise ConflictError("integration item requires a fresh refold")
         if row["state"] not in {"queued", "claimed"}:
@@ -1928,7 +1937,11 @@ class IntegrationStorage:
         }
 
     def _provider_landing_binding(
-        self, connection: sqlite3.Connection, project_id: str
+        self,
+        connection: sqlite3.Connection,
+        project_id: str,
+        *,
+        binding_id: str | None = None,
     ) -> tuple[sqlite3.Row, ServiceSidecarSpec, ServiceMapping, ServiceCapability]:
         capability = core_service_capability("landing.invoke", 1)
         row = connection.execute(
@@ -1943,8 +1956,15 @@ class IntegrationStorage:
             "JOIN service_sidecars s ON s.id = b.service_sidecar_id "
             "JOIN projects p ON p.id = b.project_id "
             "WHERE b.project_id = ? AND b.capability_name = ? "
-            "AND b.capability_version = ? AND b.state = 'active'",
-            (project_id, capability.name, capability.version),
+            "AND b.capability_version = ? AND b.state = 'active' "
+            "AND (? IS NULL OR b.id = ?)",
+            (
+                project_id,
+                capability.name,
+                capability.version,
+                binding_id,
+                binding_id,
+            ),
         ).fetchone()
         if row is None or not row["project_active"] or row["sidecar_state"] != "active":
             raise ConflictError("project landing capability is unavailable")
@@ -2039,15 +2059,20 @@ class IntegrationStorage:
                     )
                 if queue["version"] != expected_version:
                     raise ConcurrentUpdateError("integration queue version changed")
+                required_binding_id = None
                 if workflow_execution_id is not None:
                     workflow = connection.execute(
-                        "SELECT e.state, e.stage, e.version, cv.spec_json, "
-                        "t.resource_id, t.merge_method "
+                        "SELECT e.state, e.stage, e.version, e.project_id, "
+                        "e.workflow_activation_version_id, cv.spec_json, "
+                        "t.resource_id, t.merge_method, origin.intent_id, "
+                        "origin.change_effect_id "
                         "FROM workflow_executions e "
                         "JOIN workflow_configuration_versions cv "
                         "ON cv.id = e.configuration_version_id "
                         "JOIN workflow_landing_bindings b ON b.execution_id = e.id "
                         "JOIN workflow_provider_targets t ON t.execution_id = e.id "
+                        "LEFT JOIN workflow_provider_target_origins origin "
+                        "ON origin.workflow_execution_id = e.id "
                         "WHERE e.id = ? AND b.queue_item_id = ?",
                         (workflow_execution_id, queue_item_id),
                     ).fetchone()
@@ -2076,6 +2101,30 @@ class IntegrationStorage:
                         raise ConflictError(
                             "provider landing does not match workflow target"
                         )
+                    if workflow["workflow_activation_version_id"] is not None:
+                        if (
+                            workflow["intent_id"] is None
+                            or workflow["change_effect_id"] is None
+                        ):
+                            raise ConflictError(
+                                "activated workflow provider target has no "
+                                "confirmed origin"
+                            )
+                        activated_binding = connection.execute(
+                            "SELECT project_capability_binding_id "
+                            "FROM workflow_activation_capability_bindings "
+                            "WHERE activation_version_id = ? "
+                            "AND capability_name = 'landing.invoke' "
+                            "AND capability_version = 1",
+                            (workflow["workflow_activation_version_id"],),
+                        ).fetchone()
+                        if activated_binding is None:
+                            raise StorageError(
+                                "workflow activation landing capability is missing"
+                            )
+                        required_binding_id = activated_binding[
+                            "project_capability_binding_id"
+                        ]
                 if queue["state"] != "claimed" or queue["owner_id"] != owner_id:
                     raise ConflictError("integration claim is not owned by caller")
                 if queue["lease_expires_at"] <= now:
@@ -2093,7 +2142,11 @@ class IntegrationStorage:
                     self._policy_record(policy_row)["manifest"]
                 )
                 binding, sidecar_spec, mapping, capability = (
-                    self._provider_landing_binding(connection, queue["project_id"])
+                    self._provider_landing_binding(
+                        connection,
+                        queue["project_id"],
+                        binding_id=required_binding_id,
+                    )
                 )
                 operation_spec = ServiceOperationSpec.from_mapping(
                     {
@@ -2262,6 +2315,347 @@ class IntegrationStorage:
             raise StorageError("stored provider service receipt digest does not match")
         return receipt
 
+    @staticmethod
+    def _workflow_provider_landing_proof_row(
+        connection: sqlite3.Connection,
+        *,
+        execution_id: str | None = None,
+        provider_landing_id: str | None = None,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT id, workflow_execution_id, workflow_activation_version_id, "
+            "workflow_policy_id, provider_landing_id, landing_receipt_id, "
+            "schema_version, proof_json, content_sha256, status, created_at "
+            "FROM workflow_provider_landing_proofs "
+            "WHERE (? IS NULL OR workflow_execution_id = ?) "
+            "AND (? IS NULL OR provider_landing_id = ?) "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (
+                execution_id,
+                execution_id,
+                provider_landing_id,
+                provider_landing_id,
+            ),
+        ).fetchone()
+
+    @staticmethod
+    def _workflow_provider_landing_proof_record(
+        row: sqlite3.Row,
+    ) -> dict[str, Any]:
+        try:
+            proof = json.loads(row["proof_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise StorageError("stored workflow landing proof is invalid") from exc
+        if (
+            not isinstance(proof, dict)
+            or content_sha256(canonical_json(proof)) != row["content_sha256"]
+            or proof.get("schema_version") != row["schema_version"]
+            or proof.get("workflow_execution_id") != row["workflow_execution_id"]
+            or proof.get("workflow_activation_version_id")
+            != row["workflow_activation_version_id"]
+            or proof.get("workflow_policy_id") != row["workflow_policy_id"]
+            or proof.get("provider_landing_id") != row["provider_landing_id"]
+            or proof.get("landing_receipt_id") != row["landing_receipt_id"]
+            or proof.get("status") != row["status"]
+        ):
+            raise StorageError("stored workflow landing proof digest does not match")
+        readback = proof.get("readback")
+        if readback is not None:
+            try:
+                normalized = LandingReadback.from_mapping(readback).to_dict()
+            except ValidationError as exc:
+                raise StorageError(
+                    "stored workflow landing readback is invalid"
+                ) from exc
+            if readback != normalized:
+                raise StorageError("stored workflow landing readback is not canonical")
+        return {
+            "id": row["id"],
+            **proof,
+            "content_sha256": row["content_sha256"],
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _integration_target_hold_row(
+        connection: sqlite3.Connection,
+        *,
+        hold_id: str | None = None,
+        integration_ref_id: str | None = None,
+        open_only: bool = False,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT hold.id, hold.integration_ref_id, "
+            "hold.workflow_execution_id, hold.landing_proof_id, hold.reason, "
+            "hold.state, hold.version, lifter.handle AS lifted_by, "
+            "hold.created_at, hold.updated_at, hold.lifted_at "
+            "FROM integration_target_holds hold "
+            "LEFT JOIN users lifter ON lifter.id = hold.lifted_by "
+            "WHERE (? IS NULL OR hold.id = ?) "
+            "AND (? IS NULL OR hold.integration_ref_id = ?) "
+            "AND (? = 0 OR hold.state = 'open') "
+            "ORDER BY hold.created_at DESC, hold.id DESC LIMIT 1",
+            (
+                hold_id,
+                hold_id,
+                integration_ref_id,
+                integration_ref_id,
+                1 if open_only else 0,
+            ),
+        ).fetchone()
+
+    @staticmethod
+    def _integration_target_hold_record(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def _record_activated_landing_proof(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        request: ProviderLandingRequest,
+        receipt_id: str,
+        service_receipt: ServiceOperationReceipt,
+        operation: dict[str, Any],
+        now: str,
+    ) -> dict[str, Any] | None:
+        authority = connection.execute(
+            "SELECT execution.id AS execution_id, "
+            "execution.workflow_activation_version_id, "
+            "activation.content_sha256 AS activation_sha256, "
+            "activation.spec_json AS activation_spec_json, "
+            "policy.id AS workflow_policy_id, policy.version AS policy_version, "
+            "policy.content_sha256 AS policy_sha256, queue.integration_ref_id "
+            "FROM workflow_landing_bindings binding "
+            "JOIN workflow_executions execution "
+            "ON execution.id = binding.execution_id "
+            "JOIN integration_queue_items queue ON queue.id = binding.queue_item_id "
+            "LEFT JOIN workflow_activation_versions activation "
+            "ON activation.id = execution.workflow_activation_version_id "
+            "LEFT JOIN workflow_policies policy ON policy.id = activation.policy_id "
+            "WHERE binding.queue_item_id = ?",
+            (request.queue_item_id,),
+        ).fetchone()
+        if authority is None:
+            return None
+        if authority["workflow_activation_version_id"] is None:
+            return None
+        if (
+            authority["activation_sha256"] is None
+            or authority["workflow_policy_id"] is None
+            or authority["policy_version"] is None
+            or authority["policy_sha256"] is None
+        ):
+            raise StorageError("activated workflow landing authority is invalid")
+        try:
+            activation = WorkflowActivationSpec.from_mapping(
+                json.loads(authority["activation_spec_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow activation is invalid") from exc
+        merge_method = operation["spec"]["parameters"].get("merge_method")
+        readback: LandingReadback | None = None
+        reasons: list[str] = []
+        status = "uncertain"
+        if service_receipt.result is None:
+            reasons.append("authoritative_readback_missing")
+        else:
+            try:
+                readback = LandingReadback.from_mapping(service_receipt.result)
+            except ValidationError as exc:
+                raise StorageError("provider landing readback is invalid") from exc
+            if activation.merge_method != merge_method:
+                reasons.append("merge_method_mismatch")
+            if merge_method != "squash":
+                reasons.append("merge_method_unproved")
+            if readback.candidate_revision != request.head_revision:
+                reasons.append("candidate_revision_mismatch")
+            if readback.landing_tree != request.tree_revision:
+                reasons.append("landing_tree_mismatch")
+            if not readback.landing_revision_reachable:
+                reasons.append("landing_revision_unreachable")
+            if readback.primary_ref != request.integration_ref:
+                reasons.append("primary_ref_mismatch")
+            if readback.primary_revision != service_receipt.observed_revision:
+                reasons.append("primary_revision_mismatch")
+            if readback.secondary_effects:
+                reasons.append("unexpected_secondary_effects")
+            status = "conformant" if not reasons else "mismatch"
+        # The provider landing ID is not derivable from the service operation ID.
+        landing_row = connection.execute(
+            "SELECT id FROM integration_provider_landings "
+            "WHERE service_operation_id = ?",
+            (request.service_operation_id,),
+        ).fetchone()
+        if landing_row is None:
+            raise StorageError("provider landing proof source is unavailable")
+        proof_id = self.new_id("wlp")
+        proof = {
+            "schema_version": 1,
+            "workflow_execution_id": authority["execution_id"],
+            "workflow_activation_version_id": authority[
+                "workflow_activation_version_id"
+            ],
+            "workflow_activation_sha256": authority["activation_sha256"],
+            "workflow_policy_id": authority["workflow_policy_id"],
+            "workflow_policy_version": authority["policy_version"],
+            "workflow_policy_sha256": authority["policy_sha256"],
+            "provider_landing_id": landing_row["id"],
+            "landing_receipt_id": receipt_id,
+            "merge_method": merge_method,
+            "object_format": request.object_format,
+            "expected_candidate_revision": request.head_revision,
+            "expected_tree": request.tree_revision,
+            "readback": None if readback is None else readback.to_dict(),
+            "status": status,
+            "reasons": reasons,
+        }
+        proof_json = canonical_json(proof)
+        proof_sha256 = content_sha256(proof_json)
+        connection.execute(
+            "INSERT INTO workflow_provider_landing_proofs "
+            "(id, workflow_execution_id, workflow_activation_version_id, "
+            "workflow_policy_id, provider_landing_id, landing_receipt_id, "
+            "schema_version, proof_json, content_sha256, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+            (
+                proof_id,
+                authority["execution_id"],
+                authority["workflow_activation_version_id"],
+                authority["workflow_policy_id"],
+                landing_row["id"],
+                receipt_id,
+                proof_json,
+                proof_sha256,
+                status,
+                now,
+            ),
+        )
+        proof_row = self._workflow_provider_landing_proof_row(
+            connection, execution_id=authority["execution_id"]
+        )
+        assert proof_row is not None
+        record = self._workflow_provider_landing_proof_record(proof_row)
+        if status != "conformant":
+            hold_id = self.new_id("lth")
+            connection.execute(
+                "INSERT INTO integration_target_holds "
+                "(id, integration_ref_id, workflow_execution_id, "
+                "landing_proof_id, reason, state, version, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'open', 1, ?, ?)",
+                (
+                    hold_id,
+                    authority["integration_ref_id"],
+                    authority["execution_id"],
+                    proof_id,
+                    (
+                        "landing_uncertain"
+                        if status == "uncertain"
+                        else "landing_mismatch"
+                    ),
+                    now,
+                    now,
+                ),
+            )
+        return record
+
+    def get_workflow_provider_landing_proof(
+        self, execution_id: str
+    ) -> dict[str, Any] | None:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        with self._read_snapshot() as connection:
+            row = self._workflow_provider_landing_proof_row(
+                connection, execution_id=execution_id
+            )
+            return (
+                None
+                if row is None
+                else self._workflow_provider_landing_proof_record(row)
+            )
+
+    def list_integration_target_holds(
+        self, *, open_only: bool = False
+    ) -> list[dict[str, Any]]:
+        with self._read_snapshot() as connection:
+            rows = connection.execute(
+                "SELECT id FROM integration_target_holds "
+                "WHERE (? = 0 OR state = 'open') ORDER BY created_at, id",
+                (1 if open_only else 0,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                stored = self._integration_target_hold_row(
+                    connection, hold_id=row["id"]
+                )
+                assert stored is not None
+                result.append(self._integration_target_hold_record(stored))
+            return result
+
+    def lift_integration_target_hold(
+        self,
+        hold_id: str,
+        *,
+        expected_version: int,
+        lifted_by: str,
+    ) -> dict[str, Any]:
+        hold_id = require_string(hold_id, field="hold_id", max_bytes=64)
+        expected_version = self._expected_version(expected_version)
+        lifted_by = require_string(lifted_by, field="lifted_by", max_bytes=64)
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, lifted_by, role="integration target hold lifter"
+                )
+                row = connection.execute(
+                    "SELECT hold.state, hold.version, "
+                    "activation.acknowledged_by AS activation_owner "
+                    "FROM integration_target_holds hold "
+                    "JOIN workflow_executions execution "
+                    "ON execution.id = hold.workflow_execution_id "
+                    "JOIN workflow_activation_versions activation "
+                    "ON activation.id = execution.workflow_activation_version_id "
+                    "WHERE hold.id = ?",
+                    (hold_id,),
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"integration target hold not found: {hold_id}")
+                if row["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        "integration target hold version changed"
+                    )
+                if row["state"] != "open":
+                    raise ConflictError("integration target hold is not open")
+                if row["activation_owner"] != lifted_by:
+                    raise ConflictError(
+                        "only the workflow activation owner may lift the target hold"
+                    )
+                connection.execute(
+                    "UPDATE integration_target_holds SET state = 'lifted', "
+                    "version = version + 1, lifted_by = ?, updated_at = ?, "
+                    "lifted_at = ? WHERE id = ? AND state = 'open' "
+                    "AND version = ?",
+                    (lifted_by, now, now, hold_id, expected_version),
+                )
+                stored = self._integration_target_hold_row(connection, hold_id=hold_id)
+                assert stored is not None
+                result = self._integration_target_hold_record(stored)
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "integration target hold could not be lifted"
+                ) from exc
+        return result
+
     def settle_provider_landing(
         self, provider_landing_id: str, *, settled_by: str
     ) -> dict[str, Any]:
@@ -2387,6 +2781,16 @@ class IntegrationStorage:
                         now,
                     ),
                 )
+                landing_proof = None
+                if receipt.outcome is LandingOutcome.LANDED:
+                    landing_proof = self._record_activated_landing_proof(
+                        connection,
+                        request=request,
+                        receipt_id=receipt_id,
+                        service_receipt=service_receipt,
+                        operation=operation,
+                        now=now,
+                    )
                 connection.execute(
                     "UPDATE integration_provider_landings SET state = ?, "
                     "resolved_at = ? WHERE id = ? AND state = 'pending'",
@@ -2514,6 +2918,7 @@ class IntegrationStorage:
                     "receipt": self._receipt_record(receipt_row),
                     "queue_item": self._queue_record(connection, updated_queue),
                     "integration_ref": self._integration_ref_record(updated_ref),
+                    "landing_proof": landing_proof,
                 }
                 connection.commit()
             except (

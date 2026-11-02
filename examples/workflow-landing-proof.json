@@ -1,0 +1,33 @@
+{
+  "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "created_at": "2026-11-02T12:02:00+00:00",
+  "expected_candidate_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected_tree": "dddddddddddddddddddddddddddddddddddddddd",
+  "id": "wlp_11111111111111111111111111111111",
+  "landing_receipt_id": "lrc_22222222222222222222222222222222",
+  "merge_method": "squash",
+  "object_format": "sha1",
+  "provider_landing_id": "plr_33333333333333333333333333333333",
+  "readback": {
+    "base_ref": "refs/heads/main",
+    "candidate_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "change_id": "42",
+    "landing_revision": "cccccccccccccccccccccccccccccccccccccccc",
+    "landing_revision_reachable": true,
+    "landing_tree": "dddddddddddddddddddddddddddddddddddddddd",
+    "merge_method": "squash",
+    "primary_ref": "refs/heads/main",
+    "primary_revision": "cccccccccccccccccccccccccccccccccccccccc",
+    "schema_version": 1,
+    "secondary_effects": []
+  },
+  "reasons": [],
+  "schema_version": 1,
+  "status": "conformant",
+  "workflow_activation_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "workflow_activation_version_id": "wav_44444444444444444444444444444444",
+  "workflow_execution_id": "wfx_55555555555555555555555555555555",
+  "workflow_policy_id": "wfp_66666666666666666666666666666666",
+  "workflow_policy_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "workflow_policy_version": 1
+}

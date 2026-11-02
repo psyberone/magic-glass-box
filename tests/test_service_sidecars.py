@@ -493,7 +493,15 @@ class ServiceSidecarContractTests(unittest.TestCase):
                 service_sidecar._strict_json_object(payload)
 
     def test_response_is_typed_bounded_and_correlated(self) -> None:
-        operation = operation_spec()
+        operation = operation_spec(
+            parameters={
+                "base_ref": "refs/heads/main",
+                "body": "Bounded candidate summary.",
+                "draft": True,
+                "head_ref": "refs/heads/mgb/candidate-42",
+                "title": "Candidate 42",
+            },
+        )
         deadline = (datetime.now(UTC) + timedelta(seconds=30)).isoformat(
             timespec="microseconds"
         )
@@ -520,8 +528,17 @@ class ServiceSidecarContractTests(unittest.TestCase):
                     "evidence_sha256": "e" * 64,
                     "closed_references": [],
                     "result": {
-                        "items": [{"external_id": "42", "title": "Candidate 42"}],
-                        "next_cursor": None,
+                        "schema_version": 1,
+                        "change_id": "42",
+                        "base_ref": "refs/heads/main",
+                        "head_ref": "refs/heads/mgb/candidate-42",
+                        "base_revision": "c" * 40,
+                        "head_revision": "d" * 40,
+                        "title": "Candidate 42",
+                        "body": "Bounded candidate summary.",
+                        "draft": True,
+                        "state": "open",
+                        "secondary_effects": [],
                     },
                 },
             }
@@ -532,8 +549,17 @@ class ServiceSidecarContractTests(unittest.TestCase):
         self.assertEqual(
             response.receipt.result,
             {
-                "items": [{"external_id": "42", "title": "Candidate 42"}],
-                "next_cursor": None,
+                "schema_version": 1,
+                "change_id": "42",
+                "base_ref": "refs/heads/main",
+                "head_ref": "refs/heads/mgb/candidate-42",
+                "base_revision": "c" * 40,
+                "head_revision": "d" * 40,
+                "title": "Candidate 42",
+                "body": "Bounded candidate summary.",
+                "draft": True,
+                "state": "open",
+                "secondary_effects": [],
             },
         )
         self.assertEqual(

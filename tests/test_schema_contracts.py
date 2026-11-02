@@ -986,6 +986,11 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
             ServiceOperationResponse.from_mapping(oversized)
 
         normalized_result = copy.deepcopy(response)
+        normalized_result["capability"] = {
+            "mode": "read",
+            "name": "checks.read",
+            "version": 1,
+        }
         normalized_result["receipt"]["result"] = {
             "items": [{"external_id": "42", "title": "Candidate 42"}],
             "next_cursor": None,

@@ -762,6 +762,25 @@ class ControlPlane:
             provider_landing_id, settled_by_handle=settled_by_handle
         )
 
+    def list_integration_target_holds(
+        self, *, open_only: bool = False
+    ) -> list[dict[str, Any]]:
+        return self.database.list_integration_target_holds(open_only=open_only)
+
+    def lift_integration_target_hold(
+        self,
+        hold_id: str,
+        *,
+        expected_version: int,
+        lifted_by_handle: str,
+    ) -> dict[str, Any]:
+        lifter = self.database.get_user(lifted_by_handle)
+        return self.database.lift_integration_target_hold(
+            hold_id,
+            expected_version=expected_version,
+            lifted_by=lifter["id"],
+        )
+
     def get_integration_queue_item(self, queue_item_id: str) -> dict[str, Any]:
         return self.database.get_integration_queue_item(queue_item_id)
 
@@ -2536,6 +2555,54 @@ class ControlPlane:
             resource_id=resource_id,
             merge_method=merge_method,
             created_by=configurator["id"],
+        )
+
+    def configure_workflow_provider_intent(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        head_ref: str,
+        title: str,
+        body: str,
+        draft: bool,
+        configured_by_handle: str,
+    ) -> dict[str, Any]:
+        configurator = self.database.get_user(configured_by_handle)
+        return self.database.create_workflow_provider_intent(
+            execution_id,
+            expected_version=expected_version,
+            head_ref=head_ref,
+            title=title,
+            body=body,
+            draft=draft,
+            created_by=configurator["id"],
+        )
+
+    def issue_workflow_provider_effect(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        capability_name: str,
+        issued_by_handle: str,
+    ) -> dict[str, Any]:
+        issuer = self.database.get_user(issued_by_handle)
+        return self.database.issue_workflow_provider_effect(
+            execution_id,
+            expected_version=expected_version,
+            capability_name=capability_name,
+            issued_by=issuer["id"],
+        )
+
+    def settle_workflow_provider_effect(self, effect_id: str) -> dict[str, Any]:
+        return self.database.settle_workflow_provider_effect(effect_id)
+
+    def derive_workflow_provider_target(
+        self, execution_id: str, *, expected_version: int
+    ) -> dict[str, Any]:
+        return self.database.derive_workflow_provider_target(
+            execution_id, expected_version=expected_version
         )
 
     def issue_workflow_manual_landing(

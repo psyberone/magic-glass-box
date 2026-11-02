@@ -12,6 +12,25 @@ def downgrade_workflow_policy_activation(connection: sqlite3.Connection) -> None
     connection.executescript(
         """
         PRAGMA foreign_keys = OFF;
+        DROP TRIGGER IF EXISTS workflow_provider_target_origin_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_provider_target_origin_immutable_update;
+        DROP TRIGGER IF EXISTS workflow_provider_effect_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_provider_effect_identity_immutable;
+        DROP TRIGGER IF EXISTS workflow_provider_intent_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_provider_intent_immutable_update;
+        DROP TRIGGER IF EXISTS integration_target_hold_immutable_delete;
+        DROP TRIGGER IF EXISTS integration_target_hold_identity_immutable;
+        DROP TRIGGER IF EXISTS workflow_provider_landing_proof_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_provider_landing_proof_immutable_update;
+        DROP INDEX IF EXISTS integration_target_hold_execution;
+        DROP INDEX IF EXISTS integration_target_one_open_hold;
+        DROP INDEX IF EXISTS workflow_provider_landing_proof_status;
+        DROP INDEX IF EXISTS workflow_provider_effect_state;
+        DROP TABLE IF EXISTS workflow_provider_target_origins;
+        DROP TABLE IF EXISTS workflow_provider_effects;
+        DROP TABLE IF EXISTS workflow_provider_intents;
+        DROP TABLE IF EXISTS integration_target_holds;
+        DROP TABLE IF EXISTS workflow_provider_landing_proofs;
         DROP TRIGGER IF EXISTS workflow_manual_wake_event_immutable_delete;
         DROP TRIGGER IF EXISTS workflow_manual_wake_event_immutable_update;
         DROP TRIGGER IF EXISTS workflow_manual_wake_immutable_delete;

@@ -610,8 +610,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--decision", required=True, choices=("continue", "cancel")
     )
     workflow_ruling_resolve.add_argument("--resolved-by", required=True)
+    workflow_provider_intent = workflow_commands.add_parser(
+        "provider-intent",
+        help="bind project-local publication and change metadata to a workflow",
+    )
+    workflow_provider_intent.add_argument("execution_id")
+    workflow_provider_intent.add_argument("--expected-version", required=True, type=int)
+    workflow_provider_intent.add_argument("--head-ref", required=True)
+    workflow_provider_intent.add_argument("--title", required=True)
+    workflow_provider_intent.add_argument("--body-file", required=True, type=Path)
+    workflow_provider_intent.add_argument("--draft", action="store_true")
+    workflow_provider_intent.add_argument("--configured-by", required=True)
     workflow_provider_target = workflow_commands.add_parser(
-        "provider-target", help="bind one provider resource to an exact workflow"
+        "provider-target",
+        help="bind a provider resource to a pre-policy workflow",
     )
     workflow_provider_target.add_argument("execution_id")
     workflow_provider_target.add_argument("--expected-version", required=True, type=int)
@@ -1867,6 +1879,20 @@ def _dispatch(
                 expected_version=args.expected_version,
                 decision=args.decision,
                 resolved_by_handle=args.resolved_by,
+            )
+        if args.workflow_command == "provider-intent":
+            return control.configure_workflow_provider_intent(
+                args.execution_id,
+                expected_version=args.expected_version,
+                head_ref=args.head_ref,
+                title=args.title,
+                body=_text_file(
+                    args.body_file,
+                    maximum=32 * 1024,
+                    label="provider intent body",
+                ),
+                draft=args.draft,
+                configured_by_handle=args.configured_by,
             )
         if args.workflow_command == "provider-target":
             return control.configure_workflow_provider_landing(

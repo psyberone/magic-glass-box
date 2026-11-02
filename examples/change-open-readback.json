@@ -1,0 +1,13 @@
+{
+  "base_ref": "refs/heads/main",
+  "base_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "body": "Exact project-local proposal body.",
+  "change_id": "42",
+  "draft": false,
+  "head_ref": "refs/heads/mgb/candidate-1",
+  "head_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "schema_version": 1,
+  "secondary_effects": [],
+  "state": "open",
+  "title": "Add the bounded health probe"
+}

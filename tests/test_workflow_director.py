@@ -43,14 +43,24 @@ from magic_glass_box.service_sidecar import (
 from magic_glass_box.storage.errors import ConcurrentUpdateError, ConflictError
 from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION, WorkflowDirector
+from magic_glass_box.workflow_policy import (
+    WorkflowActivationSpec,
+    WorkflowPolicySpec,
+)
 from magic_glass_box.workflow_scope import WorkflowScopeReview
-from magic_glass_box.workflows import WorkflowConfigurationSpec
+from magic_glass_box.workflows import (
+    IMPLEMENTATION_TEMPLATE_REVISION,
+    WorkflowConfigurationSpec,
+)
 from tests.test_github_provider import (
     FakeGitHubAPI,
     FakeGitPublisher,
 )
 from tests.test_github_provider import (
     api_response as github_api_response,
+)
+from tests.test_github_provider import (
+    commit as github_commit,
 )
 from tests.test_github_provider import (
     pull as github_pull,
@@ -224,12 +234,13 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.workspace_sequence = 0
 
     def director(self) -> WorkflowDirector:
-        # No validation gates are configured in this proof, so the executor is inert.
+        # Most proofs have no validation gates; activated proofs install a bounded
+        # fake executor with the exact configured image identity.
         return WorkflowDirector(
             self.control,
             self.results,
             self.candidates,
-            object(),  # type: ignore[arg-type]
+            getattr(self, "validation_executor", object()),  # type: ignore[arg-type]
         )
 
     def assert_transition_event(
@@ -311,6 +322,13 @@ class WorkflowDirectorTests(unittest.TestCase):
     ) -> dict[str, object]:
         self.workspace_sequence += 1
         owner = f"workflow-test-{self.workspace_sequence}"
+        wakes = self.database.list_workflow_manual_wakes(run_id=run["id"])
+        if wakes and wakes[-1]["state"] == "requested":
+            self.database.acknowledge_workflow_manual_wake(
+                wakes[-1]["id"],
+                expected_version=wakes[-1]["version"],
+                acknowledged_by=self.user["id"],
+            )
         preparing = self.database.begin_run_attempt(
             run["id"],
             runtime_adapter="command",
@@ -1138,6 +1156,301 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         return issued_execution, gate, issued
 
+    def start_activated_provider_execution(
+        self, *, external_id: str
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, dict[str, object]]]:
+        sidecar_document = github_sidecar_spec(
+            self.root / "activated-github.sock"
+        ).to_dict()
+        sidecar_document["capabilities"].append(
+            {"name": "refs.publish", "version": 1, "mode": "effect"}
+        )
+        sidecar = ServiceSidecarSpec.from_mapping(sidecar_document)
+        self.database.register_service_sidecar(
+            name="activated-github", spec=sidecar, created_by=self.user["id"]
+        )
+        bindings = {
+            name: self.database.bind_project_capability(
+                project_key="workflow-project",
+                capability_name=name,
+                capability_version=1,
+                sidecar_name="activated-github",
+                mapping_name="primary",
+                bound_by=self.user["id"],
+            )
+            for name in ("change.open", "landing.invoke", "refs.publish")
+        }
+        configuration = self.database.create_workflow_configuration(
+            project_key="workflow-project",
+            name=f"activated-{external_id}",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [
+                        {
+                            "name": "unit",
+                            "image_id": "sha256:" + "9" * 64,
+                            "command": ["true"],
+                        }
+                    ],
+                    "max_correction_rounds": 2,
+                    "landing_mode": "provider",
+                }
+            ),
+            producer_profile_name="Producer",
+            reviewer_profile_name="Reviewer",
+            created_by=self.user["id"],
+        )
+        policy = self.database.create_workflow_policy(
+            name=f"policy-{external_id}",
+            spec=WorkflowPolicySpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "prescription": {
+                        "key": "implementation-v1",
+                        "revision": IMPLEMENTATION_TEMPLATE_REVISION,
+                    },
+                    "evidence_floor": [
+                        "maintainer_disposition",
+                        "reviewed_content",
+                        "validated_execution",
+                    ],
+                    "validation_obligations": ["tests"],
+                    "resource_maxima": {
+                        "review_rounds": 2,
+                        "seat_count": 2,
+                        "shared_host_concurrency": 1,
+                        "wall_time_seconds": 10800,
+                    },
+                    "wake_mode": "manual",
+                    "required_capabilities": [
+                        {"mode": "effect", "name": name, "version": 1}
+                        for name in ("change.open", "landing.invoke", "refs.publish")
+                    ],
+                    "landing_methods": ["squash"],
+                    "allow_deferred_validation": True,
+                }
+            ),
+            created_by=self.user["id"],
+        )
+        activation = self.database.create_workflow_activation(
+            project_key="workflow-project",
+            policy_name=policy["name"],
+            expected_policy_version=1,
+            spec=WorkflowActivationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "policy_sha256": policy["content_sha256"],
+                    "workflow_configuration_version_id": configuration[
+                        "workflow_configuration_version_id"
+                    ],
+                    "validation_bindings": [
+                        {"obligation": "tests", "validation": "unit"}
+                    ],
+                    "capability_bindings": [
+                        {
+                            "binding_id": bindings[name]["id"],
+                            "mode": "effect",
+                            "name": name,
+                            "version": 1,
+                        }
+                        for name in ("change.open", "landing.invoke", "refs.publish")
+                    ],
+                    "resources": {
+                        "review_rounds": 2,
+                        "seat_count": 2,
+                        "shared_host_concurrency": 1,
+                        "wall_time_seconds": 10800,
+                    },
+                    "wake_bindings": [
+                        {"role": "producer", "wake_class": "human_turn_only"},
+                        {"role": "reviewer", "wake_class": "human_turn_only"},
+                    ],
+                    "merge_method": "squash",
+                    "retired_rules": [],
+                }
+            ),
+            acknowledged_by=self.user["id"],
+        )
+        item = self.database.import_work_item(
+            project_key="workflow-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": external_id,
+                    "source_updated_at": "2026-11-02T15:00:00Z",
+                    "title": "Prove activated provider authority",
+                    "brief": "Use only the exact activated provider bindings.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+
+        class Executor:
+            @staticmethod
+            def execute(_request: object) -> SandboxResult:
+                return SandboxResult(
+                    container_id="a" * 64,
+                    container_name="activated-validation",
+                    image_id="sha256:" + "9" * 64,
+                    exit_code=0,
+                )
+
+        self.validation_executor = Executor()
+        execution = self.database.start_workflow_execution(
+            project_key="workflow-project",
+            configuration_name=configuration["name"],
+            work_item_id=item["id"],
+            source_revision=self.base,
+            expected_configuration_version=1,
+            expected_context_version_id=self.project["context_version_id"],
+            expected_work_item_version_id=item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            expected_activation_version=1,
+            idempotency_key=f"activated-{external_id}",
+            requested_by=self.user["id"],
+        )
+        return execution, activation, bindings
+
+    def activated_provider_landing(
+        self, *, external_id: str
+    ) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+        dict[str, dict[str, object]],
+    ]:
+        execution, activation, bindings = self.start_activated_provider_execution(
+            external_id=external_id
+        )
+        landing, gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref=f"refs/heads/mgb/{external_id}",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        self.drive_activated_provider_effects(enqueued, bindings=bindings)
+        return enqueued, gate, activation, bindings
+
+    def complete_activated_provider_effect(
+        self, effect: dict[str, object], *, include_result: bool = True
+    ) -> None:
+        operation = self.database.get_service_operation(
+            str(effect["service_operation_id"])
+        )
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="activated-provider-effect",
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        observed_revision = request.target.desired_revision
+        assert observed_revision is not None
+        if request.capability.name == "refs.publish":
+            result = {
+                "schema_version": 1,
+                "candidate_id": request.target.resource_id,
+                "target_ref": request.parameters["target_ref"],
+                "published_revision": observed_revision,
+                "secondary_effects": [],
+            }
+            identity = "github:github.com/acme/widgets/ref/mgb-candidate"
+        else:
+            result = {
+                "schema_version": 1,
+                "change_id": "42",
+                "base_ref": request.parameters["base_ref"],
+                "head_ref": request.parameters["head_ref"],
+                "base_revision": request.target.expected_revision,
+                "head_revision": observed_revision,
+                "title": request.parameters["title"],
+                "body": request.parameters["body"],
+                "draft": request.parameters["draft"],
+                "state": "open",
+                "secondary_effects": [],
+            }
+            identity = "github:github.com/acme/widgets/pull/42"
+        response = ServiceOperationResponse.from_mapping(
+            {
+                **request.correlation_dict(),
+                "outcome": "succeeded",
+                "provider_status": 200,
+                "request_bytes": 64,
+                "response_bytes": 256,
+                "error_code": None,
+                "retry_after_seconds": None,
+                "receipt": {
+                    "remote_identity": identity,
+                    "observed_revision": observed_revision,
+                    "evidence_sha256": "3" * 64,
+                    "closed_references": [identity],
+                    **({"result": result} if include_result else {}),
+                },
+            }
+        )
+        response.validate_correlation(request)
+        self.database.complete_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id="activated-provider-effect",
+            expected_operation_version=dispatch["operation"]["version"],
+            response=response,
+        )
+
+    def drive_activated_provider_effects(
+        self,
+        execution: dict[str, object],
+        *,
+        bindings: dict[str, dict[str, object]],
+        derive_target: bool = True,
+    ) -> dict[str, object]:
+        current = self.database.get_workflow_execution(str(execution["id"]))
+        for capability_name in ("refs.publish", "change.open"):
+            self.assertFalse(
+                self.director().advance(
+                    current["id"], expected_version=current["version"]
+                )
+            )
+            current = self.database.get_workflow_execution(current["id"])
+            effect = current["landing"]["provider_intent"]["effects"][capability_name]
+            self.assertEqual(
+                effect["capability_binding_id"], bindings[capability_name]["id"]
+            )
+            self.complete_activated_provider_effect(effect)
+            self.assertFalse(
+                self.director().advance(
+                    current["id"], expected_version=current["version"]
+                )
+            )
+            current = self.database.get_workflow_execution(current["id"])
+            self.assertEqual(
+                current["landing"]["provider_intent"]["effects"][capability_name][
+                    "state"
+                ],
+                "confirmed",
+            )
+        if not derive_target:
+            return current
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+        current = self.database.get_workflow_execution(current["id"])
+        self.assertEqual(current["landing"]["provider_target"]["resource_id"], "42")
+        return current
+
     def complete_provider_operation(
         self,
         issued: dict[str, object],
@@ -1180,6 +1493,727 @@ class WorkflowDirectorTests(unittest.TestCase):
             owner_id="replacement-provider",
             expected_operation_version=dispatch["operation"]["version"],
             response=response,
+        )
+
+    def complete_activated_landing_operation(
+        self,
+        issued: dict[str, object],
+        *,
+        expected_tree: str,
+        observed_tree: str,
+    ) -> None:
+        operation = issued["operation"]
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="activated-provider",
+            expected_version=operation["version"],
+            lease_seconds=60,
+        )
+        request = ServiceOperationRequest.from_mapping(dispatch["request"])
+        observed_revision = "f" * 40
+        identity = "github:github.com/acme/widgets/pull/42"
+        response = ServiceOperationResponse.from_mapping(
+            {
+                **request.correlation_dict(),
+                "outcome": "succeeded",
+                "provider_status": 200,
+                "request_bytes": 64,
+                "response_bytes": 256,
+                "error_code": None,
+                "retry_after_seconds": None,
+                "receipt": {
+                    "remote_identity": identity,
+                    "observed_revision": observed_revision,
+                    "evidence_sha256": "3" * 64,
+                    "closed_references": [identity],
+                    "result": {
+                        "schema_version": 1,
+                        "change_id": "42",
+                        "base_ref": "refs/heads/main",
+                        "candidate_revision": request.target.desired_revision,
+                        "landing_revision": observed_revision,
+                        "landing_tree": observed_tree,
+                        "primary_ref": "refs/heads/main",
+                        "primary_revision": observed_revision,
+                        "landing_revision_reachable": True,
+                        "merge_method": "squash",
+                        "secondary_effects": [],
+                    },
+                },
+            }
+        )
+        response.validate_correlation(request)
+        self.database.complete_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id="activated-provider",
+            expected_operation_version=dispatch["operation"]["version"],
+            response=response,
+        )
+        self.assertEqual(
+            expected_tree,
+            issued["provider_landing"]["request"]["tree_revision"],
+        )
+
+    def test_activated_provider_landing_never_falls_back_to_a_rebound_capability(
+        self,
+    ) -> None:
+        enqueued, _gate, _activation, bindings = self.activated_provider_landing(
+            external_id="activated-binding-pin"
+        )
+        pinned = bindings["landing.invoke"]
+        self.database.unbind_project_capability(
+            pinned["id"],
+            expected_version=pinned["version"],
+            unbound_by=self.user["id"],
+        )
+        replacement = self.database.bind_project_capability(
+            project_key="workflow-project",
+            capability_name="landing.invoke",
+            capability_version=1,
+            sidecar_name="activated-github",
+            mapping_name="primary",
+            bound_by=self.user["id"],
+        )
+        self.assertNotEqual(replacement["id"], pinned["id"])
+
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+
+        unchanged = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(unchanged["landing"]["queue_state"], "queued")
+        self.assertFalse(unchanged["landing"]["provider_available"])
+        self.assertIsNone(unchanged["landing"]["provider_landing_id"])
+
+    def test_activated_provider_intent_rejects_wrong_project_metadata(self) -> None:
+        execution, _activation, _bindings = self.start_activated_provider_execution(
+            external_id="activated-wrong-project-metadata"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+
+        with self.assertRaisesRegex(ConflictError, "pinned work item"):
+            self.control.configure_workflow_provider_intent(
+                enqueued["id"],
+                expected_version=enqueued["version"],
+                head_ref="refs/heads/mgb/wrong-project",
+                title="Imitation Krab candidate",
+                body="Metadata copied from another project.",
+                draft=False,
+                configured_by_handle="operator",
+            )
+
+        unchanged = self.database.get_workflow_execution(enqueued["id"])
+        self.assertIsNone(unchanged["landing"]["provider_intent"])
+        self.assertIsNone(unchanged["landing"]["provider_target"])
+
+    def test_activated_provider_effects_are_pinned_and_derive_target(self) -> None:
+        execution, _activation, bindings = self.start_activated_provider_execution(
+            external_id="activated-effect-chain"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        intent = self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-effect-chain",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+
+        self.assertEqual(intent["intent"]["project_id"], self.project["id"])
+        self.assertEqual(intent["candidate_id"], enqueued["landing"]["candidate_id"])
+        completed = self.drive_activated_provider_effects(enqueued, bindings=bindings)
+
+        target = completed["landing"]["provider_target"]
+        self.assertEqual(target["resource_id"], "42")
+        self.assertEqual(target["intent_id"], intent["id"])
+        self.assertIsNotNone(target["change_effect_id"])
+        self.assertEqual(completed["responsibility"]["reason"], "landing_dispatch")
+
+    def test_confirmed_readback_derives_an_exact_normalized_target(self) -> None:
+        execution, _activation, bindings = self.start_activated_provider_execution(
+            external_id="activated-exact-derived-target"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        intent = self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-exact-derived-target",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        settled = self.drive_activated_provider_effects(
+            enqueued, bindings=bindings, derive_target=False
+        )
+        change_effect = settled["landing"]["provider_intent"]["effects"]["change.open"]
+
+        derived = self.control.derive_workflow_provider_target(
+            settled["id"], expected_version=settled["version"]
+        )
+
+        self.assertEqual(
+            set(derived),
+            {
+                "execution_id",
+                "queue_item_id",
+                "resource_id",
+                "merge_method",
+                "created_by",
+                "created_at",
+                "intent_id",
+                "change_effect_id",
+            },
+        )
+        self.assertEqual(derived["execution_id"], settled["id"])
+        self.assertEqual(derived["queue_item_id"], settled["landing"]["queue_item_id"])
+        self.assertEqual(derived["resource_id"], "42")
+        self.assertEqual(derived["merge_method"], "squash")
+        self.assertEqual(derived["created_by"], "operator")
+        self.assertTrue(derived["created_at"])
+        self.assertEqual(derived["intent_id"], intent["id"])
+        self.assertEqual(derived["change_effect_id"], change_effect["id"])
+
+    def test_target_derivation_requires_a_source_and_active_landing_stage(self) -> None:
+        execution, _activation, bindings = self.start_activated_provider_execution(
+            external_id="activated-derived-target-state"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        with self.assertRaisesRegex(ConflictError, "change-open effect"):
+            self.control.derive_workflow_provider_target(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-derived-target-state",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        settled = self.drive_activated_provider_effects(
+            enqueued, bindings=bindings, derive_target=False
+        )
+        cancelled = self.control.cancel_workflow_execution(
+            settled["id"],
+            expected_version=settled["version"],
+            cancelled_by_handle="operator",
+            reason="Prove that inactive workflows cannot derive provider targets.",
+        )
+
+        with self.assertRaisesRegex(ConflictError, "awaiting landing"):
+            self.control.derive_workflow_provider_target(
+                cancelled["id"], expected_version=cancelled["version"]
+            )
+
+    def test_confirmed_readback_adopts_only_a_matching_v47_provider_target(
+        self,
+    ) -> None:
+        execution, _activation, bindings = self.start_activated_provider_execution(
+            external_id="activated-v47-target"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        with self.database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO workflow_provider_targets "
+                "(execution_id, queue_item_id, resource_id, merge_method, "
+                "created_by, created_at) VALUES (?, ?, '42', 'squash', ?, ?)",
+                (
+                    enqueued["id"],
+                    enqueued["landing"]["queue_item_id"],
+                    self.user["id"],
+                    self.database.now(),
+                ),
+            )
+        intent = self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-v47-target",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+
+        settled = self.drive_activated_provider_effects(
+            enqueued, bindings=bindings, derive_target=False
+        )
+        adopted = self.control.derive_workflow_provider_target(
+            settled["id"], expected_version=settled["version"]
+        )
+        self.assertEqual(
+            set(adopted),
+            {
+                "execution_id",
+                "queue_item_id",
+                "resource_id",
+                "merge_method",
+                "created_by",
+                "created_at",
+                "intent_id",
+                "change_effect_id",
+            },
+        )
+        self.assertEqual(adopted["intent_id"], intent["id"])
+        self.assertEqual(
+            adopted["change_effect_id"],
+            settled["landing"]["provider_intent"]["effects"]["change.open"]["id"],
+        )
+        completed = self.database.get_workflow_execution(settled["id"])
+        target = completed["landing"]["provider_target"]
+        self.assertEqual(target["resource_id"], "42")
+        self.assertEqual(target["intent_id"], intent["id"])
+        self.assertIsNotNone(target["change_effect_id"])
+
+    def test_confirmed_readback_rejects_a_mismatched_v47_provider_target(
+        self,
+    ) -> None:
+        execution, _activation, bindings = self.start_activated_provider_execution(
+            external_id="activated-v47-target-mismatch"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        with self.database.connect() as connection, connection:
+            connection.execute(
+                "INSERT INTO workflow_provider_targets "
+                "(execution_id, queue_item_id, resource_id, merge_method, "
+                "created_by, created_at) VALUES (?, ?, '999', 'squash', ?, ?)",
+                (
+                    enqueued["id"],
+                    enqueued["landing"]["queue_item_id"],
+                    self.user["id"],
+                    self.database.now(),
+                ),
+            )
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-v47-target-mismatch",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+
+        with self.assertRaisesRegex(ConflictError, "differs from its readback"):
+            self.drive_activated_provider_effects(enqueued, bindings=bindings)
+
+        unchanged = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(unchanged["landing"]["provider_target"]["resource_id"], "999")
+        self.assertNotIn("intent_id", unchanged["landing"]["provider_target"])
+        self.assertEqual(unchanged["landing"]["queue_state"], "queued")
+        self.assertIsNone(unchanged["landing"]["provider_landing_id"])
+
+    def test_activated_provider_effect_never_uses_a_rebound_capability(self) -> None:
+        execution, _activation, bindings = self.start_activated_provider_execution(
+            external_id="activated-effect-binding-pin"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-effect-binding-pin",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        pinned = bindings["refs.publish"]
+        self.database.unbind_project_capability(
+            pinned["id"],
+            expected_version=pinned["version"],
+            unbound_by=self.user["id"],
+        )
+        replacement = self.database.bind_project_capability(
+            project_key="workflow-project",
+            capability_name="refs.publish",
+            capability_version=1,
+            sidecar_name="activated-github",
+            mapping_name="primary",
+            bound_by=self.user["id"],
+        )
+        self.assertNotEqual(replacement["id"], pinned["id"])
+
+        current = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(current["landing"]["provider_available"])
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+        unchanged = self.database.get_workflow_execution(current["id"])
+        self.assertEqual(unchanged["landing"]["provider_intent"]["effects"], {})
+
+    def test_missing_effect_readback_is_retained_as_uncertain(self) -> None:
+        execution, _activation, _bindings = self.start_activated_provider_execution(
+            external_id="activated-effect-unproven"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-effect-unproven",
+            title="Prove activated provider authority",
+            body="Exact activated workflow proposal.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        issued = self.database.get_workflow_execution(enqueued["id"])
+        effect = issued["landing"]["provider_intent"]["effects"]["refs.publish"]
+        self.complete_activated_provider_effect(effect, include_result=False)
+        self.assertFalse(
+            self.director().advance(issued["id"], expected_version=issued["version"])
+        )
+
+        uncertain = self.database.get_workflow_execution(issued["id"])
+        publication = uncertain["landing"]["provider_intent"]["effects"]["refs.publish"]
+        self.assertEqual(publication["state"], "uncertain")
+        self.assertIsNone(publication["fact"])
+        self.assertIsNone(uncertain["landing"]["provider_target"])
+        self.assertEqual(
+            uncertain["responsibility"]["reason"], "provider_effect_unresolved"
+        )
+        attention = ControlRoom(self.database).snapshot()["attention"]
+        self.assertTrue(
+            any(
+                item["kind"] == "workflow.responsibility_unresolved"
+                and item["workflow_execution_id"] == uncertain["id"]
+                for item in attention
+            )
+        )
+
+    def test_activated_provider_target_rejects_an_unselected_merge_method(self) -> None:
+        execution, _activation, _bindings = self.start_activated_provider_execution(
+            external_id="activated-merge-method"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+
+        with self.assertRaisesRegex(ConflictError, "differs from its activation"):
+            self.control.configure_workflow_provider_landing(
+                enqueued["id"],
+                expected_version=enqueued["version"],
+                resource_id="42",
+                merge_method="merge",
+                configured_by_handle="operator",
+            )
+
+        self.assertIsNone(
+            self.database.get_workflow_execution(enqueued["id"])["landing"][
+                "provider_target"
+            ]
+        )
+
+    def test_activated_landing_requires_exact_tree_proof_before_completion(
+        self,
+    ) -> None:
+        enqueued, gate, activation, bindings = self.activated_provider_landing(
+            external_id="activated-landing-proof"
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.assertEqual(
+            issued["provider_landing"]["capability_binding_id"],
+            bindings["landing.invoke"]["id"],
+        )
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        proof = landed["landing"]["proof"]
+        self.assertEqual(proof["status"], "conformant")
+        self.assertEqual(proof["merge_method"], "squash")
+        self.assertEqual(proof["expected_tree"], expected_tree)
+        self.assertEqual(proof["readback"]["landing_tree"], expected_tree)
+        self.assertEqual(
+            proof["workflow_activation_version_id"],
+            activation["workflow_activation_version_id"],
+        )
+        self.assertEqual(
+            proof["workflow_policy_sha256"], activation["policy"]["content_sha256"]
+        )
+        self.assertIsNone(landed["landing"]["target_hold"])
+        self.assertTrue(
+            self.director().advance(landed["id"], expected_version=landed["version"])
+        )
+
+    def test_wrong_landed_tree_is_retained_and_holds_the_target(self) -> None:
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-mismatch"
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree="0" * 40,
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "mismatch")
+        self.assertEqual(
+            landed["landing"]["proof"]["reasons"], ["landing_tree_mismatch"]
+        )
+        self.assertEqual(landed["landing"]["target_hold"]["state"], "open")
+        snapshot = ControlRoom(self.database).snapshot()
+        projected = next(
+            item for item in snapshot["workflows"] if item["id"] == landed["id"]
+        )
+        self.assertEqual(projected["landing_proof_status"], "mismatch")
+        self.assertEqual(
+            projected["landing_target_hold_id"],
+            landed["landing"]["target_hold"]["id"],
+        )
+        self.assertIn(
+            "workflow.landing_target_held",
+            {
+                item["kind"]
+                for item in snapshot["attention"]
+                if item.get("workflow_execution_id") == landed["id"]
+            },
+        )
+        self.assertTrue(
+            self.director().advance(landed["id"], expected_version=landed["version"])
+        )
+        ruled = self.database.get_workflow_execution(landed["id"])
+        self.assertEqual(ruled["stage"], "landing")
+        self.assertEqual(ruled["rulings"][-1]["kind"], "landing_authority_mismatch")
+        holds = self.control.list_integration_target_holds(open_only=True)
+        self.assertEqual(len(holds), 1)
+        self.assertEqual(holds[0], landed["landing"]["target_hold"])
+        self.database.create_user("other-owner", "Other Owner")
+        with self.assertRaisesRegex(ConflictError, "activation owner"):
+            self.control.lift_integration_target_hold(
+                holds[0]["id"],
+                expected_version=holds[0]["version"],
+                lifted_by_handle="other-owner",
+            )
+        lifted = self.control.lift_integration_target_hold(
+            holds[0]["id"],
+            expected_version=holds[0]["version"],
+            lifted_by_handle="operator",
+        )
+        self.assertEqual(lifted["state"], "lifted")
+        self.assertEqual(lifted["lifted_by"], "operator")
+        self.assertEqual(self.control.list_integration_target_holds(open_only=True), [])
+
+    def test_missing_authoritative_landing_readback_is_uncertain_and_held(self) -> None:
+        enqueued, _gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-unproven"
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        self.complete_provider_operation(
+            issued, outcome="succeeded", observed_revision="f" * 40
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "uncertain")
+        self.assertEqual(
+            landed["landing"]["proof"]["reasons"],
+            ["authoritative_readback_missing"],
+        )
+        self.assertEqual(
+            landed["landing"]["target_hold"]["reason"], "landing_uncertain"
+        )
+
+    def test_activated_provider_landing_waits_for_every_dependency(self) -> None:
+        enqueued, _gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-provider-dependency"
+        )
+        current = self.database.get_workflow_execution(enqueued["id"])
+        prerequisite = self.database.import_work_item(
+            project_key="workflow-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "activated-provider-prerequisite",
+                    "source_updated_at": "2026-10-23T14:00:00Z",
+                    "title": "Land the activated prerequisite first",
+                    "brief": "This item deliberately remains unlanded.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        self.control.add_landing_dependency(
+            current["work_item_id"],
+            prerequisite["id"],
+            created_by_handle="operator",
+        )
+        blocked = self.database.get_workflow_execution(current["id"])
+        self.assertTrue(blocked["landing"]["gates_ready"])
+        self.assertEqual(blocked["landing"]["blocked_dependency_count"], 1)
+
+        self.assertFalse(
+            self.director().advance(blocked["id"], expected_version=blocked["version"])
+        )
+
+        unchanged = self.database.get_workflow_execution(blocked["id"])
+        self.assertEqual(unchanged["landing"]["queue_state"], "queued")
+        self.assertIsNone(unchanged["landing"]["owner_id"])
+        self.assertIsNone(unchanged["landing"]["provider_landing_id"])
+
+    def test_provider_landing_dispatch_requires_the_exact_target_and_owner(
+        self,
+    ) -> None:
+        enqueued, _gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-provider-dispatch-authority"
+        )
+        current = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+        claimed = self.database.get_workflow_execution(current["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(current["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        operation = issued["operation"]
+        bad_issued = {
+            **issued,
+            "operation": {
+                **operation,
+                "spec": {
+                    **operation["spec"],
+                    "target": {
+                        **operation["spec"]["target"],
+                        "resource_id": "999",
+                    },
+                },
+            },
+        }
+        with (
+            mock.patch.object(
+                self.control, "get_provider_landing", return_value=bad_issued
+            ),
+            mock.patch.object(self.control, "execute_provider_landing") as execute,
+            self.assertRaisesRegex(RuntimeError, "does not match workflow target"),
+        ):
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        execute.assert_not_called()
+
+        owner_id = f"workflow-{awaiting['id']}"
+        with (
+            mock.patch.object(
+                self.control, "get_provider_landing", return_value=issued
+            ),
+            mock.patch.object(self.control, "execute_provider_landing") as execute,
+        ):
+            self.assertFalse(
+                self.director().advance(
+                    awaiting["id"], expected_version=awaiting["version"]
+                )
+            )
+        execute.assert_called_once_with(
+            awaiting["landing"]["provider_landing_id"],
+            owner_id=owner_id,
+            settled_by_handle="operator",
         )
 
     def test_manual_landing_receipt_closes_the_exact_workflow_atomically(self) -> None:
@@ -1912,7 +2946,12 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertEqual(len(publisher.calls), 1)
         self.assertEqual(publisher.calls[0]["desired_revision"], head_revision)
 
-        opened_pull = github_pull(base_sha=self.base, head_sha=head_revision)
+        opened_pull = github_pull(
+            base_sha=self.base,
+            head_sha=head_revision,
+            title="M14 mixed-provider candidate",
+            body="Candidate produced and gated by Magic Glass Box.",
+        )
         opened_pull.pop("merged")
         opened_pull["head"]["ref"] = target_ref.removeprefix("refs/heads/")
         change_api = FakeGitHubAPI(
@@ -1927,6 +2966,7 @@ class WorkflowDirectorTests(unittest.TestCase):
                     ),
                 ),
                 github_api_response(201, opened_pull),
+                github_api_response(200, opened_pull),
             ]
         )
         opened = self.complete_bound_provider_operation(
@@ -2062,6 +3102,13 @@ class WorkflowDirectorTests(unittest.TestCase):
             landing_dispatch["request"]
         )
         observed_revision = "f" * 40
+        landed_pull = github_pull(
+            state="closed",
+            merged=True,
+            base_sha=observed_revision,
+            head_sha=head_revision,
+        )
+        landed_pull["merge_commit_sha"] = observed_revision
         landing_api = FakeGitHubAPI(
             [
                 github_api_response(
@@ -2073,16 +3120,17 @@ class WorkflowDirectorTests(unittest.TestCase):
                     200,
                     {"sha": observed_revision, "merged": True, "message": "ok"},
                 ),
+                github_api_response(200, landed_pull),
+                github_api_response(200, github_ref(observed_revision)),
                 github_api_response(
                     200,
-                    github_pull(
-                        state="closed",
-                        merged=True,
-                        base_sha=observed_revision,
-                        head_sha=head_revision,
+                    github_commit(
+                        observed_revision,
+                        self.database.get_gate_policy(gate["policy_id"])[
+                            "tree_revision"
+                        ],
                     ),
                 ),
-                github_api_response(200, github_ref(observed_revision)),
             ]
         )
         landing_response = GitHubProvider(

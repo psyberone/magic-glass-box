@@ -290,6 +290,13 @@ class FakeControlPlane:
             "workflow.provider-target", execution_id=execution_id, **kwargs
         )
 
+    def configure_workflow_provider_intent(
+        self, execution_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called(
+            "workflow.provider-intent", execution_id=execution_id, **kwargs
+        )
+
     def issue_workflow_manual_landing(
         self, execution_id: str, **kwargs: object
     ) -> dict[str, object]:
@@ -776,8 +783,13 @@ class CLITests(unittest.TestCase):
                     ("ruling-show", "show one durable workflow ruling"),
                     ("ruling-resolve", "resolve one durable workflow ruling"),
                     (
+                        "provider-intent",
+                        "bind project-local publication and change metadata "
+                        "to a workflow",
+                    ),
+                    (
                         "provider-target",
-                        "bind one provider resource to an exact workflow",
+                        "bind a provider resource to a pre-policy workflow",
                     ),
                     (
                         "manual-plan",
@@ -1238,6 +1250,13 @@ class CLITests(unittest.TestCase):
                     "--expected-version",
                     "--decision",
                     "--resolved-by",
+                ),
+                ("workflow", "provider-intent"): (
+                    "--expected-version",
+                    "--head-ref",
+                    "--title",
+                    "--body-file",
+                    "--configured-by",
                 ),
                 ("workflow", "provider-target"): (
                     "--expected-version",
@@ -2695,7 +2714,10 @@ class CLITests(unittest.TestCase):
                 "cancel": "cancel one active workflow execution",
                 "ruling-show": "show one durable workflow ruling",
                 "ruling-resolve": "resolve one durable workflow ruling",
-                "provider-target": "bind one provider resource to an exact workflow",
+                "provider-intent": (
+                    "bind project-local publication and change metadata to a workflow"
+                ),
+                "provider-target": "bind a provider resource to a pre-policy workflow",
                 "manual-plan": "issue the workflow's exact manual landing plan",
             },
             "discovery": {
@@ -2859,9 +2881,41 @@ class CLITests(unittest.TestCase):
             "landing_mode": "manual",
         }
         policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        body_path = Path(self.temporary.name) / "provider-intent-body.md"
+        body_path.write_text("Exact project-local proposal.\n", encoding="utf-8")
         expected_spec = WorkflowConfigurationSpec.from_mapping(policy)
         fake = FakeControlPlane()
         cases = (
+            (
+                [
+                    "workflow",
+                    "provider-intent",
+                    "wfx_" + "4" * 32,
+                    "--expected-version",
+                    "6",
+                    "--head-ref",
+                    "refs/heads/mgb/candidate",
+                    "--title",
+                    "Bounded candidate",
+                    "--body-file",
+                    str(body_path),
+                    "--draft",
+                    "--configured-by",
+                    "operator",
+                ],
+                (
+                    "workflow.provider-intent",
+                    {
+                        "execution_id": "wfx_" + "4" * 32,
+                        "expected_version": 6,
+                        "head_ref": "refs/heads/mgb/candidate",
+                        "title": "Bounded candidate",
+                        "body": "Exact project-local proposal.\n",
+                        "draft": True,
+                        "configured_by_handle": "operator",
+                    },
+                ),
+            ),
             (
                 [
                     "workflow",

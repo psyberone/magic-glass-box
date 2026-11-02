@@ -16,6 +16,7 @@ from magic_glass_box.control_room import ControlRoom
 from magic_glass_box.db import (
     SCHEMA_V45,
     SCHEMA_V46,
+    SCHEMA_V47,
     SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
@@ -347,6 +348,8 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
         run_state: str | None = None,
         wake_state: str | None = None,
         landing_state: str | None = None,
+        provider_intent: bool = False,
+        provider_effects: tuple[tuple[str, str], ...] = (),
         provider_target: bool = False,
     ) -> dict[str, object]:
         connection = sqlite3.connect(":memory:")
@@ -401,6 +404,17 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     id TEXT PRIMARY KEY,
                     execution_id TEXT NOT NULL
                 );
+                CREATE TABLE workflow_provider_intents (
+                    id TEXT PRIMARY KEY,
+                    workflow_execution_id TEXT NOT NULL
+                );
+                CREATE TABLE workflow_provider_effects (
+                    id TEXT PRIMARY KEY,
+                    intent_id TEXT NOT NULL,
+                    capability_name TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    service_operation_id TEXT NOT NULL
+                );
                 """
             )
             connection.execute(
@@ -449,6 +463,28 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     "INSERT INTO workflow_landing_bindings VALUES (?, ?)",
                     ("wfx_1", "inq_1"),
                 )
+                if provider_intent or provider_effects or provider_target:
+                    connection.execute(
+                        "INSERT INTO workflow_provider_intents VALUES (?, ?)",
+                        ("wpi_1", "wfx_1"),
+                    )
+                effects = provider_effects
+                if provider_target and not effects:
+                    effects = (
+                        ("refs.publish", "confirmed"),
+                        ("change.open", "confirmed"),
+                    )
+                for index, (capability_name, effect_state) in enumerate(effects):
+                    connection.execute(
+                        "INSERT INTO workflow_provider_effects VALUES (?, ?, ?, ?, ?)",
+                        (
+                            f"wpe_{index}",
+                            "wpi_1",
+                            capability_name,
+                            effect_state,
+                            f"sop_{index}",
+                        ),
+                    )
                 if provider_target:
                     connection.execute(
                         "INSERT INTO workflow_provider_targets VALUES (?, ?)",
@@ -653,13 +689,102 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                 ),
             ),
             (
-                "provider target",
+                "provider intent",
                 {"stage": "landing", "landing_state": "queued"},
                 self.expected(
                     "landing",
                     "action_required",
                     "owner",
-                    "provider_target",
+                    "provider_intent",
+                    landing_basis,
+                ),
+            ),
+            (
+                "publication dispatch",
+                {
+                    "stage": "landing",
+                    "landing_state": "queued",
+                    "provider_intent": True,
+                },
+                self.expected(
+                    "landing",
+                    "action_required",
+                    "control_plane",
+                    "provider_effect_dispatch",
+                    {**landing_basis, "capability_name": "refs.publish"},
+                ),
+            ),
+            (
+                "publication receipt",
+                {
+                    "stage": "landing",
+                    "landing_state": "queued",
+                    "provider_effects": (("refs.publish", "pending"),),
+                },
+                self.expected(
+                    "landing",
+                    "waiting",
+                    "landing_actuator",
+                    "provider_effect_receipt",
+                    {
+                        **landing_basis,
+                        "capability_name": "refs.publish",
+                        "effect_id": "wpe_0",
+                        "service_operation_id": "sop_0",
+                    },
+                ),
+            ),
+            (
+                "publication unresolved",
+                {
+                    "stage": "landing",
+                    "landing_state": "queued",
+                    "provider_effects": (("refs.publish", "uncertain"),),
+                },
+                self.expected(
+                    "landing",
+                    "attention",
+                    "control_room",
+                    "provider_effect_unresolved",
+                    {
+                        **landing_basis,
+                        "capability_name": "refs.publish",
+                        "effect_id": "wpe_0",
+                        "service_operation_id": "sop_0",
+                        "effect_state": "uncertain",
+                    },
+                ),
+            ),
+            (
+                "change-open dispatch",
+                {
+                    "stage": "landing",
+                    "landing_state": "queued",
+                    "provider_effects": (("refs.publish", "confirmed"),),
+                },
+                self.expected(
+                    "landing",
+                    "action_required",
+                    "control_plane",
+                    "provider_effect_dispatch",
+                    {**landing_basis, "capability_name": "change.open"},
+                ),
+            ),
+            (
+                "provider target derivation",
+                {
+                    "stage": "landing",
+                    "landing_state": "queued",
+                    "provider_effects": (
+                        ("refs.publish", "confirmed"),
+                        ("change.open", "confirmed"),
+                    ),
+                },
+                self.expected(
+                    "landing",
+                    "action_required",
+                    "control_plane",
+                    "provider_target_derivation",
                     landing_basis,
                 ),
             ),
@@ -1294,6 +1419,22 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(status["counts"]["workflow_manual_wakes"], 0)
         self.assertEqual(status["counts"]["workflow_manual_wake_events"], 0)
         self.assertEqual(migrated.list_workflow_manual_wakes(), [])
+
+    def test_schema_migrates_v47_without_synthesizing_landing_proofs(self) -> None:
+        path = self.root / "v47.db"
+        with sqlite3.connect(path) as connection:
+            Database._execute_statements(connection, SCHEMA_V47)
+            connection.execute("PRAGMA user_version = 47")
+            connection.commit()
+        path.chmod(0o600)
+        migrated = Database(path)
+
+        status = migrated.initialize()
+
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(status["counts"]["workflow_provider_landing_proofs"], 0)
+        self.assertEqual(status["counts"]["integration_target_holds"], 0)
+        self.assertEqual(migrated.list_integration_target_holds(), [])
 
     def test_attempt_admission_bypasses_only_pre_workflow_schema_versions(
         self,

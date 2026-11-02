@@ -1,0 +1,7 @@
+{
+  "candidate_id": "cnd_44444444444444444444444444444444",
+  "published_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema_version": 1,
+  "secondary_effects": [],
+  "target_ref": "refs/heads/mgb/candidate-1"
+}

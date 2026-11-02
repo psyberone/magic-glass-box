@@ -247,6 +247,15 @@ project-activity projection.
   execution's pinned source only while that source is still the observed
   integration ref; real external drift continues through the ordinary refold
   and fresh-gate path.
+- Schemas v46-v48 add the first portable-policy runtime boundary. One
+  project-independent policy digest is activated through exact local profiles,
+  controllers, capabilities, resource limits, manual wakes, owner authority,
+  and merge method. Schema v48 translates the activated landing intent through
+  pinned `refs.publish` and `change.open` operations, derives the provider
+  target only from confirmed normalized read-back, and requires an exact
+  squash tree/reachability proof before workflow completion. Missing or
+  mismatched landing evidence holds the integration target for its activation
+  owner instead of becoming inferred success.
 - Schemas v32-v35 generalize immutable role bindings and add the bounded
   `discovery-v1` configuration, evidence ledger, and restart-safe director.
   Investigator and coordinator runs remain read-only; a `GO`, `NO_GO`, or

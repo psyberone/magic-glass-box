@@ -556,7 +556,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 47)
+        self.assertEqual(SCHEMA_VERSION, 48)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {

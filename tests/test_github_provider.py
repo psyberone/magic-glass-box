@@ -25,6 +25,8 @@ from magic_glass_box.service_sidecar import (
 BASE = "a" * 40
 HEAD = "b" * 40
 MERGED = "c" * 40
+HEAD_TREE = "d" * 40
+ADVANCED = "e" * 40
 CONNECTOR_ID = "ssc_" + "1" * 32
 CANDIDATE_ID = "cnd_" + "3" * 32
 DEPLOYMENT = "d" * 64
@@ -131,6 +133,9 @@ def pull(
     merged: bool = False,
     base_sha: str = BASE,
     head_sha: str = HEAD,
+    title: str = "Candidate 42",
+    body: str = "Bounded summary.",
+    draft: bool = False,
 ) -> dict[str, Any]:
     return {
         "number": 42,
@@ -140,6 +145,9 @@ def pull(
         "merge_commit_sha": MERGED if merged else None,
         "head": {"sha": head_sha, "ref": "mgb/op-42", "label": "acme:mgb/op-42"},
         "base": {"sha": base_sha, "ref": "main"},
+        "title": title,
+        "body": body,
+        "draft": draft,
     }
 
 
@@ -148,6 +156,10 @@ def ref(revision: str, name: str = "main") -> dict[str, Any]:
         "ref": f"refs/heads/{name}",
         "object": {"type": "commit", "sha": revision},
     }
+
+
+def commit(revision: str, tree: str = HEAD_TREE) -> dict[str, Any]:
+    return {"sha": revision, "tree": {"sha": tree}}
 
 
 def issue(
@@ -746,6 +758,16 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(response.outcome, "succeeded")
         self.assertEqual(response.receipt.observed_revision, HEAD)
         self.assertEqual(
+            response.receipt.result,
+            {
+                "schema_version": 1,
+                "candidate_id": CANDIDATE_ID,
+                "target_ref": target_ref,
+                "published_revision": HEAD,
+                "secondary_effects": [],
+            },
+        )
+        self.assertEqual(
             publisher.calls,
             [
                 {
@@ -780,6 +802,30 @@ class GitHubProviderTests(unittest.TestCase):
         )
 
         self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(response.provider_status, 200)
+        self.assertEqual(
+            response.receipt.result,
+            {
+                "schema_version": 1,
+                "candidate_id": CANDIDATE_ID,
+                "target_ref": target_ref,
+                "published_revision": HEAD,
+                "secondary_effects": [],
+            },
+        )
+        self.assertEqual(
+            response.receipt.evidence_sha256,
+            content_sha256(
+                canonical_json(
+                    {
+                        "kind": "ref-publication",
+                        "observed_revision": HEAD,
+                        "target_ref": target_ref,
+                    }
+                )
+            ),
+        )
+        self.assertEqual(api.calls[0]["method"], "GET")
         self.assertEqual(publisher.calls, [])
 
     def test_ref_publication_lost_response_becomes_uncertain_then_reconciles(
@@ -877,6 +923,7 @@ class GitHubProviderTests(unittest.TestCase):
                 api_response(200, {"sha": MERGED, "merged": True, "message": "ok"}),
                 api_response(200, pull(state="closed", merged=True)),
                 api_response(200, ref(MERGED)),
+                api_response(200, commit(MERGED)),
             ]
         )
         provider = GitHubProvider(self.spec, api)
@@ -898,6 +945,22 @@ class GitHubProviderTests(unittest.TestCase):
         identity = github_remote_identity("github.com", "acme/widgets", 42)
         self.assertEqual(response.receipt.remote_identity, identity)
         self.assertEqual(response.receipt.closed_references, (identity,))
+        self.assertEqual(
+            response.receipt.result,
+            {
+                "schema_version": 1,
+                "change_id": "42",
+                "base_ref": "refs/heads/main",
+                "candidate_revision": HEAD,
+                "landing_revision": MERGED,
+                "landing_tree": HEAD_TREE,
+                "primary_ref": "refs/heads/main",
+                "primary_revision": MERGED,
+                "landing_revision_reachable": True,
+                "merge_method": "squash",
+                "secondary_effects": [],
+            },
+        )
         self.assertEqual(api.calls[2]["body"], {"merge_method": "squash", "sha": HEAD})
         self.assertEqual(api.calls[2]["method"], "PUT")
         self.assertNotIn("expected_base", api.calls[2]["body"])
@@ -928,6 +991,128 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(response.receipt.closed_references, ())
         self.assertEqual([call["method"] for call in api.calls], ["GET", "GET"])
 
+    def test_landing_readback_proves_merge_commit_reachable_after_primary_advances(
+        self,
+    ) -> None:
+        landed = pull(state="closed", merged=True, base_sha=ADVANCED)
+        api = FakeGitHubAPI(
+            [
+                api_response(200, landed),
+                api_response(200, ref(ADVANCED)),
+                api_response(200, commit(MERGED)),
+                api_response(
+                    200,
+                    {
+                        "status": "ahead",
+                        "merge_base_commit": {"sha": MERGED},
+                    },
+                ),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                phase="reconcile",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(response.receipt.observed_revision, ADVANCED)
+        self.assertEqual(response.receipt.result["landing_revision"], MERGED)
+        self.assertEqual(response.receipt.result["primary_revision"], ADVANCED)
+        self.assertTrue(response.receipt.result["landing_revision_reachable"])
+        self.assertEqual(
+            api.calls[-1]["endpoint"],
+            "repos/acme/widgets/compare/" + MERGED + "..." + ADVANCED,
+        )
+
+    def test_landing_readback_retains_nonreachable_merge_as_negative_fact(self) -> None:
+        landed = pull(state="closed", merged=True, base_sha=ADVANCED)
+        api = FakeGitHubAPI(
+            [
+                api_response(200, landed),
+                api_response(200, ref(ADVANCED)),
+                api_response(200, commit(MERGED)),
+                api_response(
+                    200,
+                    {
+                        "status": "diverged",
+                        "merge_base_commit": {"sha": BASE},
+                    },
+                ),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                phase="reconcile",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertFalse(response.receipt.result["landing_revision_reachable"])
+
+    def test_landing_reachability_requires_valid_status_and_exact_merge_base(
+        self,
+    ) -> None:
+        landed = pull(state="closed", merged=True, base_sha=ADVANCED)
+        cases = (
+            ("ahead", BASE, "succeeded", False),
+            ("behind", BASE, "succeeded", False),
+            ("unknown", MERGED, "denied", None),
+        )
+        for status, merge_base, outcome, reachable in cases:
+            with self.subTest(status=status, merge_base=merge_base):
+                api = FakeGitHubAPI(
+                    [
+                        api_response(200, landed),
+                        api_response(200, ref(ADVANCED)),
+                        api_response(200, commit(MERGED)),
+                        api_response(
+                            200,
+                            {
+                                "status": status,
+                                "merge_base_commit": {"sha": merge_base},
+                            },
+                        ),
+                    ]
+                )
+
+                response = GitHubProvider(self.spec, api).invoke(
+                    request(
+                        self.socket_path,
+                        "landing.invoke",
+                        phase="reconcile",
+                        parameters={
+                            "assurance": "head_enforced",
+                            "integration_ref": "refs/heads/main",
+                            "merge_method": "squash",
+                        },
+                    )
+                )
+
+                self.assertEqual(response.outcome, outcome)
+                self.assertEqual(api.calls[-1]["method"], "GET")
+                if reachable is not None:
+                    self.assertIs(
+                        response.receipt.result["landing_revision_reachable"],
+                        reachable,
+                    )
+
     def test_landing_reconcile_discovers_lost_success_without_second_merge(
         self,
     ) -> None:
@@ -935,6 +1120,7 @@ class GitHubProviderTests(unittest.TestCase):
             [
                 api_response(200, pull(state="closed", merged=True)),
                 api_response(200, ref(MERGED)),
+                api_response(200, commit(MERGED)),
             ]
         )
 
@@ -958,7 +1144,7 @@ class GitHubProviderTests(unittest.TestCase):
     def test_change_open_is_deterministic_and_reconcile_does_not_duplicate(
         self,
     ) -> None:
-        created = pull()
+        created = pull(draft=True)
         created.pop("merged")
         api = FakeGitHubAPI(
             [
@@ -966,6 +1152,7 @@ class GitHubProviderTests(unittest.TestCase):
                 api_response(200, ref(BASE)),
                 api_response(200, ref(HEAD, "mgb/op-42")),
                 api_response(201, created),
+                api_response(200, created),
             ]
         )
         operation = request(
@@ -986,8 +1173,24 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(opened.outcome, "succeeded")
         self.assertEqual(opened.provider_status, 201)
         self.assertEqual(opened.receipt.observed_revision, HEAD)
-        self.assertEqual(api.calls[-1]["method"], "POST")
-        self.assertEqual(api.calls[-1]["body"]["head"], "acme:mgb/op-42")
+        self.assertEqual(
+            opened.receipt.result,
+            {
+                "schema_version": 1,
+                "change_id": "42",
+                "base_ref": "refs/heads/main",
+                "head_ref": "refs/heads/mgb/op-42",
+                "base_revision": BASE,
+                "head_revision": HEAD,
+                "title": "Candidate 42",
+                "body": "Bounded summary.",
+                "draft": True,
+                "state": "open",
+                "secondary_effects": [],
+            },
+        )
+        self.assertEqual(api.calls[-2]["body"]["head"], "acme:mgb/op-42")
+        self.assertEqual(api.calls[-1]["method"], "GET")
 
         reconcile_api = FakeGitHubAPI([api_response(200, [created])])
         reconciled = GitHubProvider(self.spec, reconcile_api).invoke(
@@ -1003,23 +1206,61 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(reconciled.provider_status, 200)
         self.assertEqual(len(reconcile_api.calls), 1)
 
+    def test_change_open_preserves_an_explicit_empty_body(self) -> None:
+        created = pull(body="")
+        created.pop("merged")
+        api = FakeGitHubAPI(
+            [
+                api_response(200, []),
+                api_response(200, ref(BASE)),
+                api_response(200, ref(HEAD, "mgb/op-42")),
+                api_response(201, created),
+                api_response(200, created),
+            ]
+        )
+
+        opened = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "change.open",
+                resource_id="refs/heads/mgb/op-42",
+                parameters={
+                    "base_ref": "refs/heads/main",
+                    "body": "",
+                    "draft": False,
+                    "head_ref": "refs/heads/mgb/op-42",
+                    "title": "Candidate 42",
+                },
+            )
+        )
+
+        self.assertEqual(opened.outcome, "succeeded")
+        self.assertEqual(opened.receipt.result["body"], "")
+
     def test_change_open_treats_mismatched_created_authority_as_uncertain(self) -> None:
         for section, field, value in (
             ("head", "ref", "mgb/another-candidate"),
             ("head", "sha", "f" * 40),
             ("base", "ref", "release"),
             ("base", "sha", "f" * 40),
+            (None, "title", "Imitation Krab candidate"),
+            (None, "body", "Another project's proposal body."),
+            (None, "draft", False),
         ):
             with self.subTest(section=section, field=field):
-                created = pull()
+                created = pull(draft=True)
                 created.pop("merged")
-                created[section][field] = value
+                if section is None:
+                    created[field] = value
+                else:
+                    created[section][field] = value
                 api = FakeGitHubAPI(
                     [
                         api_response(200, []),
                         api_response(200, ref(BASE)),
                         api_response(200, ref(HEAD, "mgb/op-42")),
                         api_response(201, created),
+                        api_response(200, created),
                     ]
                 )
 

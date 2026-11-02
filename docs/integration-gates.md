@@ -423,10 +423,14 @@ revision, not blindly to the candidate head. See
 For an `implementation-v1` workflow, the integration queue is additionally
 bound to the exact workflow execution, correction round, candidate, and ready
 gate. Manual mode requires `workflow manual-plan`; provider mode requires
-`workflow provider-target` plus an active `landing.invoke@1` binding. These
-paths pass the execution ID and optimistic version into landing issuance, so a
-stale, completed, wrong-mode, wrong-queue, or wrong-target workflow cannot
-borrow otherwise valid integration authority. There is no mode fallback.
+an active `landing.invoke@1` binding. Pre-policy histories explicitly bind a
+target with `workflow provider-target`. An activated workflow instead records
+one provider intent, durably executes its exact pinned `refs.publish` and
+`change.open` bindings, and derives the target only from confirmed normalized
+read-back. These paths pass the execution ID and optimistic version into
+landing issuance, so a stale, completed, wrong-mode, wrong-queue, wrong-project,
+or wrong-target workflow cannot borrow otherwise valid integration authority.
+There is no mode, binding, or provider fallback.
 
 One narrow workflow-specific case is not an integration refold. A correction
 candidate starts from the prior changes-requested candidate, so the final
@@ -445,6 +449,14 @@ explicit `continue` authorizes one retry. Manual `not_landed` receipts remain
 operator-attested facts and require an explicit fresh plan. Once either path
 records a matching `landed` receipt, workflow closeout rechecks the current
 gate and commits its outcome, thread seal, and workflow completion atomically.
+
+Activated provider completion adds one more boundary. A squash landing must
+return the authoritative landed commit tree, the observed primary ref/revision,
+and proof that the landing revision is reachable from that primary. MGB binds
+those facts to the exact policy, activation, candidate tree, provider landing,
+and receipt. Missing or mismatched facts open an integration-target hold and
+cannot advance the workflow. Only the activation owner may lift the hold; the
+immutable nonconformant proof remains nonconformant.
 
 ## Receipts
 

@@ -15,6 +15,11 @@ from .domain import (
     parse_rfc3339_timestamp,
     require_string,
 )
+from .provider_effects import (
+    ChangeOpenReadback,
+    LandingReadback,
+    RefPublicationReadback,
+)
 from .service_sidecar import (
     ServiceOperationReceipt,
     ServiceOperationRequest,
@@ -806,7 +811,12 @@ class GitHubProvider:
             raise GitHubProviderError("change.open refs are invalid")
         try:
             title = require_string(parameters["title"], field="title", max_bytes=512)
-            body = require_string(parameters["body"], field="body", max_bytes=32768)
+            body = require_string(
+                parameters["body"],
+                field="body",
+                max_bytes=32768,
+                allow_empty=True,
+            )
         except ValidationError as exc:
             raise GitHubProviderError(str(exc)) from exc
         if not isinstance(parameters["draft"], bool):
@@ -867,7 +877,7 @@ class GitHubProvider:
                 raise GitHubProviderError("GitHub pull list exceeds the bounded page")
         desired = invocation.request.target.desired_revision
         for value in values:
-            item = self._normalize_pull(value, require_merged=False)
+            item = self._normalize_change_effect(value)
             if (
                 item["head_sha"] == desired
                 and item["head_ref"]
@@ -928,9 +938,21 @@ class GitHubProvider:
         )
         if response.status != 201:
             return self._failure_for_response(invocation, response)
+        created = self._normalize_change_effect(response.body)
+        observed_response = self._call(
+            invocation,
+            "GET",
+            _repository_endpoint(
+                request.mapping.repository, f"pulls/{created['number']}"
+            ),
+        )
+        if observed_response.status != 200:
+            return self._failure_for_response(
+                invocation, observed_response, observation_after_effect=True
+            )
         return self._change_success(
             invocation,
-            self._normalize_pull(response.body, require_merged=False),
+            self._normalize_change_effect(observed_response.body),
             provider_status=201,
         )
 
@@ -948,12 +970,30 @@ class GitHubProvider:
             or pull["base_sha"] != request.target.expected_revision
             or pull["head_ref"] != parameters["head_ref"].removeprefix("refs/heads/")
             or pull["base_ref"] != parameters["base_ref"].removeprefix("refs/heads/")
+            or pull["title"] != parameters["title"]
+            or pull["body"] != parameters["body"]
+            or pull["draft"] is not parameters["draft"]
         ):
             raise GitHubProviderError(
                 "GitHub pull request response does not match change authority"
             )
         identity = github_remote_identity(
             request.mapping.host, request.mapping.repository, pull["number"]
+        )
+        result = ChangeOpenReadback.from_mapping(
+            {
+                "schema_version": 1,
+                "change_id": str(pull["number"]),
+                "base_ref": parameters["base_ref"],
+                "head_ref": parameters["head_ref"],
+                "base_revision": pull["base_sha"],
+                "head_revision": pull["head_sha"],
+                "title": pull["title"],
+                "body": pull["body"],
+                "draft": pull["draft"],
+                "state": pull["state"],
+                "secondary_effects": [],
+            }
         )
         return self._success(
             invocation,
@@ -962,6 +1002,7 @@ class GitHubProvider:
             observed_revision=pull["head_sha"],
             evidence={"kind": "change", **pull},
             closed_references=(identity,) if pull["merged"] else (),
+            result=result.to_dict(),
         )
 
     def _checks_parameters(self, request: ServiceOperationRequest) -> dict[str, Any]:
@@ -1211,6 +1252,15 @@ class GitHubProvider:
             f"github:{request.mapping.host}/{request.mapping.repository}/ref/"
             f"{target_ref}"
         )
+        result = RefPublicationReadback.from_mapping(
+            {
+                "schema_version": 1,
+                "candidate_id": request.target.resource_id,
+                "target_ref": target_ref,
+                "published_revision": observed_revision,
+                "secondary_effects": [],
+            }
+        )
         return self._success(
             invocation,
             provider_status=200,
@@ -1222,6 +1272,7 @@ class GitHubProvider:
                 "target_ref": target_ref,
             },
             closed_references=(),
+            result=result.to_dict(),
         )
 
     def _landing_parameters(self, request: ServiceOperationRequest) -> dict[str, Any]:
@@ -1326,6 +1377,41 @@ class GitHubProvider:
             "pull_number": pull["number"],
             "state": pull["state"],
         }
+        result = None
+        if landed:
+            landing_revision = pull["merge_commit_sha"]
+            if landing_revision is None:
+                raise GitHubProviderError(
+                    "GitHub landed change has no landing revision"
+                )
+            landing_tree, failure = self._get_commit_tree(invocation, landing_revision)
+            if failure is not None:
+                return failure
+            assert landing_tree is not None
+            reachable, failure = self._landing_revision_reachable(
+                invocation,
+                landing_revision=landing_revision,
+                primary_revision=observed_revision,
+            )
+            if failure is not None:
+                return failure
+            assert reachable is not None
+            parameters = self._landing_parameters(request)
+            result = LandingReadback.from_mapping(
+                {
+                    "schema_version": 1,
+                    "change_id": str(pull["number"]),
+                    "base_ref": parameters["integration_ref"],
+                    "candidate_revision": pull["head_sha"],
+                    "landing_revision": landing_revision,
+                    "landing_tree": landing_tree,
+                    "primary_ref": parameters["integration_ref"],
+                    "primary_revision": observed_revision,
+                    "landing_revision_reachable": reachable,
+                    "merge_method": parameters["merge_method"],
+                    "secondary_effects": [],
+                }
+            ).to_dict()
         return self._success(
             invocation,
             provider_status=200,
@@ -1333,7 +1419,67 @@ class GitHubProvider:
             observed_revision=observed_revision,
             evidence=evidence,
             closed_references=(identity,) if landed else (),
+            result=result,
         )
+
+    def _get_commit_tree(
+        self, invocation: _Invocation, revision: str
+    ) -> tuple[str | None, ServiceOperationResponse | None]:
+        response = self._call(
+            invocation,
+            "GET",
+            _repository_endpoint(
+                invocation.request.mapping.repository, f"git/commits/{revision}"
+            ),
+        )
+        if response.status != 200:
+            return None, self._failure_for_response(
+                invocation, response, observation_after_effect=True
+            )
+        document = _object(response.body, subject="commit")
+        tree = _object(document.get("tree"), subject="commit tree")
+        tree_revision = tree.get("sha")
+        if (
+            document.get("sha") != revision
+            or not isinstance(tree_revision, str)
+            or re.fullmatch(r"[0-9a-f]{40}", tree_revision) is None
+        ):
+            raise GitHubProviderError("GitHub commit response is invalid")
+        return tree_revision, None
+
+    def _landing_revision_reachable(
+        self,
+        invocation: _Invocation,
+        *,
+        landing_revision: str,
+        primary_revision: str,
+    ) -> tuple[bool | None, ServiceOperationResponse | None]:
+        if landing_revision == primary_revision:
+            return True, None
+        response = self._call(
+            invocation,
+            "GET",
+            _repository_endpoint(
+                invocation.request.mapping.repository,
+                f"compare/{landing_revision}...{primary_revision}",
+            ),
+        )
+        if response.status != 200:
+            return None, self._failure_for_response(
+                invocation, response, observation_after_effect=True
+            )
+        document = _object(response.body, subject="commit comparison")
+        merge_base = _object(
+            document.get("merge_base_commit"), subject="comparison merge base"
+        )
+        status = document.get("status")
+        if status not in {"ahead", "behind", "diverged", "identical"} or not isinstance(
+            merge_base.get("sha"), str
+        ):
+            raise GitHubProviderError("GitHub comparison response is invalid")
+        return (
+            status in {"ahead", "identical"} and merge_base["sha"] == landing_revision
+        ), None
 
     def _get_pull(
         self,
@@ -1463,6 +1609,27 @@ class GitHubProvider:
             "number": number,
             "state": state,
         }
+
+    @staticmethod
+    def _normalize_change_effect(value: object) -> dict[str, Any]:
+        document = _object(value, subject="pull request")
+        normalized = GitHubProvider._normalize_pull(document, require_merged=False)
+        try:
+            title = require_string(
+                document.get("title"), field="pull request title", max_bytes=512
+            )
+            body = require_string(
+                document.get("body"),
+                field="pull request body",
+                max_bytes=32768,
+                allow_empty=True,
+            )
+        except ValidationError as exc:
+            raise GitHubProviderError(str(exc)) from exc
+        draft = document.get("draft")
+        if not isinstance(draft, bool):
+            raise GitHubProviderError("GitHub pull request draft state is invalid")
+        return {**normalized, "body": body, "draft": draft, "title": title}
 
     @staticmethod
     def _normalize_checks(value: object) -> list[dict[str, str | None]]:

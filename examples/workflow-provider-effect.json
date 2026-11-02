@@ -1,0 +1,20 @@
+{
+  "capability_binding_id": "cpb_11111111111111111111111111111111",
+  "capability_name": "refs.publish",
+  "created_at": "2026-11-02T12:00:00+00:00",
+  "fact": {
+    "candidate_id": "cnd_44444444444444444444444444444444",
+    "published_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "schema_version": 1,
+    "secondary_effects": [],
+    "target_ref": "refs/heads/mgb/candidate-1"
+  },
+  "fact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "id": "wpe_22222222222222222222222222222222",
+  "intent_id": "wpi_33333333333333333333333333333333",
+  "operation_state": "succeeded",
+  "resolved_at": "2026-11-02T12:01:00+00:00",
+  "service_operation_id": "sop_55555555555555555555555555555555",
+  "state": "confirmed",
+  "updated_at": "2026-11-02T12:01:00+00:00"
+}

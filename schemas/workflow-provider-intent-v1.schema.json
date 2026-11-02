@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-provider-intent:v1",
+  "title": "Magic Glass Box Workflow Provider Intent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "base_ref", "body", "candidate_id", "draft", "gate_policy_id",
+    "head_ref", "merge_method", "project_id", "schema_version",
+    "secondary_effects", "title", "work_item_id", "work_item_version_id"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project_id": { "type": "string", "pattern": "^boxp_[0-9a-f]{32}$" },
+    "work_item_id": { "type": "string", "pattern": "^wki_[0-9a-f]{32}$" },
+    "work_item_version_id": { "type": "string", "pattern": "^wiv_[0-9a-f]{32}$" },
+    "candidate_id": { "type": "string", "pattern": "^cnd_[0-9a-f]{32}$" },
+    "gate_policy_id": { "type": "string", "pattern": "^gpl_[0-9a-f]{32}$" },
+    "base_ref": { "$ref": "#/$defs/branchRef" },
+    "head_ref": { "$ref": "#/$defs/branchRef" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "body": { "type": "string", "maxLength": 32768 },
+    "draft": { "type": "boolean" },
+    "merge_method": { "enum": ["merge", "rebase", "squash"] },
+    "secondary_effects": { "type": "array", "maxItems": 0 }
+  },
+  "$defs": {
+    "branchRef": {
+      "type": "string",
+      "minLength": 12,
+      "maxLength": 266,
+      "pattern": "^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$"
+    }
+  }
+}

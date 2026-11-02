@@ -455,6 +455,15 @@ class WorkflowDirector:
                     policy_id=landing["policy_id"],
                     provider_landing_id=landing["provider_landing_id"],
                 )
+            if execution["portable_policy"]["status"] == "activated":
+                proof = landing["proof"]
+                if proof is None or proof["status"] != "conformant":
+                    return self._ruling(
+                        execution,
+                        "landing_authority_mismatch",
+                        policy_id=landing["policy_id"],
+                        provider_landing_id=landing["provider_landing_id"],
+                    )
         self.database.advance_workflow_execution(
             execution["id"],
             expected_version=execution["version"],
@@ -476,7 +485,59 @@ class WorkflowDirector:
         self, execution: dict[str, Any], landing: dict[str, Any]
     ) -> bool:
         target = landing["provider_target"]
-        if target is None or landing["queue_state"] == "refold_required":
+        if landing["queue_state"] == "refold_required":
+            return False
+        if not landing["provider_available"]:
+            return False
+        if execution["portable_policy"]["status"] == "activated":
+            intent = landing["provider_intent"]
+            if intent is None:
+                return False
+            effects = intent["effects"]
+            for capability_name in ("refs.publish", "change.open"):
+                effect = effects.get(capability_name)
+                if effect is None:
+                    self.control.issue_workflow_provider_effect(
+                        execution["id"],
+                        expected_version=execution["version"],
+                        capability_name=capability_name,
+                        issued_by_handle=intent["created_by"],
+                    )
+                    return False
+                if effect["state"] in {"failed", "uncertain"}:
+                    return False
+                if effect["state"] == "pending":
+                    operation = self.database.get_service_operation(
+                        effect["service_operation_id"]
+                    )
+                    if operation["state"] in {
+                        "succeeded",
+                        "denied",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        self.control.settle_workflow_provider_effect(effect["id"])
+                        return False
+                    owner_id = f"workflow-effect-{effect['id']}"
+                    if operation["state"] in {"pending", "retryable", "throttled"}:
+                        self.control.execute_service_operation(
+                            operation["id"],
+                            owner_id=owner_id,
+                            expected_version=operation["version"],
+                        )
+                    elif operation["state"] == "uncertain":
+                        self.control.reconcile_service_operation(
+                            operation["id"],
+                            owner_id=owner_id,
+                            expected_version=operation["version"],
+                        )
+                    return False
+            if target is None or target.get("intent_id") is None:
+                self.control.derive_workflow_provider_target(
+                    execution["id"], expected_version=execution["version"]
+                )
+                return False
+        elif target is None:
             return False
         if landing["provider_landing_state"] in {"failed", "not_landed"} and not any(
             ruling["kind"] == "landing_failed"
@@ -493,8 +554,6 @@ class WorkflowDirector:
                 provider_landing_id=landing["provider_landing_id"],
             )
         if landing["blocked_dependency_count"] or not landing["gates_ready"]:
-            return False
-        if not landing["provider_available"]:
             return False
         owner_id = f"workflow-{execution['id']}"
         if landing["queue_state"] == "queued":

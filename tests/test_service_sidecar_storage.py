@@ -112,7 +112,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         )
 
     def test_schema_twenty_four_registers_immutable_redacted_authority(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 47)
+        self.assertEqual(SCHEMA_VERSION, 48)
         self.assertIn("CREATE TABLE service_sidecars", SERVICE_SIDECAR_SCHEMA)
         self.assertIn(
             "CREATE TABLE project_capability_bindings", CAPABILITY_BINDING_SCHEMA
@@ -322,7 +322,7 @@ class ServiceSidecarStorageTests(unittest.TestCase):
         second = legacy.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 47)
+        self.assertEqual(first["schema_version"], 48)
         migrated = legacy.get_service_operation(operation_id)
         self.assertEqual(migrated["spec"], operation.to_dict())
         with closing(legacy.connect()) as connection:
@@ -401,7 +401,13 @@ class ServiceSidecarStorageTests(unittest.TestCase):
 
     def test_successful_attempt_is_audited_and_terminal(self) -> None:
         self.register()
-        operation = self.create_operation()
+        operation = self.create_operation(
+            operation_spec(
+                capability={"name": "checks.read", "version": 1, "mode": "read"},
+                idempotency_key="read-candidate-42-checks",
+                parameters={"check_suite": "required"},
+            )
+        )
         dispatch = self.database.begin_service_operation_attempt(
             operation["id"],
             phase="invoke",

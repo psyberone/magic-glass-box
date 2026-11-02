@@ -491,6 +491,26 @@ class DatabaseCore:
                     "integration_landing_receipts",
                     "SELECT COUNT(*) FROM integration_landing_receipts",
                 ),
+                (
+                    "workflow_provider_landing_proofs",
+                    "SELECT COUNT(*) FROM workflow_provider_landing_proofs",
+                ),
+                (
+                    "workflow_provider_intents",
+                    "SELECT COUNT(*) FROM workflow_provider_intents",
+                ),
+                (
+                    "workflow_provider_effects",
+                    "SELECT COUNT(*) FROM workflow_provider_effects",
+                ),
+                (
+                    "workflow_provider_target_origins",
+                    "SELECT COUNT(*) FROM workflow_provider_target_origins",
+                ),
+                (
+                    "integration_target_holds",
+                    "SELECT COUNT(*) FROM integration_target_holds",
+                ),
                 ("interactions", "SELECT COUNT(*) FROM interactions"),
                 ("work_items", "SELECT COUNT(*) FROM work_items"),
                 ("work_threads", "SELECT COUNT(*) FROM work_threads"),

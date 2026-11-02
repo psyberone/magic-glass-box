@@ -1,0 +1,13 @@
+{
+  "base_ref": "refs/heads/main",
+  "candidate_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "change_id": "42",
+  "landing_revision": "cccccccccccccccccccccccccccccccccccccccc",
+  "landing_revision_reachable": true,
+  "landing_tree": "dddddddddddddddddddddddddddddddddddddddd",
+  "merge_method": "squash",
+  "primary_ref": "refs/heads/main",
+  "primary_revision": "cccccccccccccccccccccccccccccccccccccccc",
+  "schema_version": 1,
+  "secondary_effects": []
+}

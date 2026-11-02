@@ -2201,8 +2201,8 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 
 ## Milestone 18: first reusable-template delivery
 
-**Status: in progress; portable activation and manual-runtime authority
-implemented through schema v47**
+**Status: in progress; provider translation/read-back and exact squash landing
+proof implemented through schema v48**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2276,6 +2276,41 @@ time exhaustion killed 420/447 mutants (93.96%). The mutation-driven hardening
 added exact schema-cutoff, identifier/history, input-bound, equality-threshold,
 and every-state responsibility assertions; the remaining mutants affect only
 SQLite keyword casing or non-contractual diagnostic labels and wording.
+
+M18C replaces activated workflows' hand-entered provider target with one
+durable intent and an ordered `refs.publish` -> `change.open` effect chain.
+Each effect pins the activation's exact project capability/controller binding,
+uses the ordinary idempotent service-operation ledger, and retains normalized
+authoritative read-back. A missing response is `uncertain`; it is never
+converted into a target, retried through a replacement binding, or inferred
+from provider-native output. Only a confirmed `change.open` fact may derive
+the immutable provider change ID. Pre-policy histories keep their legacy
+manual target path without acquiring portable-policy authority.
+
+The same slice records a policy-, activation-, candidate-, receipt-, and
+primary-ref-bound landing proof. The currently accepted reusable policy uses
+GitHub squash landing, so conformance requires the landed commit's tree to
+equal the reviewed candidate tree and the landing revision to be reachable
+from the observed primary ref. Other merge methods remain explicitly
+unproved. Missing or mismatched read-back opens one integration-target hold;
+only the activation owner may lift that hold, and lifting it does not make a
+nonconformant workflow complete. Published intent, read-back, effect, proof,
+hold, and responsibility schemas expose this state without provider payloads
+or credentials. Deadline-bearing closeout obligations and the two-project
+interruption proof remain in M18D. That two-project proof must also hold two
+independent integration targets at once, lift one exact hold, and prove the
+other project's hold is neither returned nor changed.
+
+M18C's checkpoint gate passes 1,508 tests at 87% aggregate statement-plus-
+branch coverage. A two-worker focused mutation campaign over provider
+read-back, durable effects, target derivation, landing proof, and director
+advancement initially killed 2,129/2,471 selected mutants (86.16%), with no
+timeout, crash, suspicious, or uncovered outcome. Survivor-derived tests then
+killed 44/44 exact authorization, evidence, reachability, source-state,
+dependency, target, and owner mutations on direct replay, for an effective
+2,173/2,471 (87.94%). Diagnostic-label, equivalent SQL-casing, and impossible-
+state mutations were not promoted into contractual behavior. The remaining
+multi-record hold-return seam is pinned as an explicit M18D two-project proof.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

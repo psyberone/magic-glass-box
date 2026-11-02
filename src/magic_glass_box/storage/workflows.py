@@ -15,6 +15,7 @@ from ..domain import (
     AgentProfileSpec,
     GatewayCapability,
     ValidationError,
+    WorkItemEnvelope,
     WorkLogEntry,
     WorkLogKind,
     WorkspaceMode,
@@ -26,6 +27,17 @@ from ..domain import (
 )
 from ..gates import ReviewSeparation
 from ..krab import IDEMPOTENCY_KEY_RE
+from ..provider_effects import (
+    ChangeOpenReadback,
+    RefPublicationReadback,
+    WorkflowProviderIntent,
+)
+from ..service_sidecar import (
+    ServiceOperationReceipt,
+    ServiceOperationSpec,
+    core_service_capability,
+)
+from ..workflow_policy import WorkflowActivationSpec
 from ..workflow_scope import WorkflowScopeReview
 from ..workflows import (
     ADVISORY_REVIEW_TEMPLATE_ID,
@@ -1567,12 +1579,15 @@ class WorkflowStorage:
         if stage == "landing":
             landing = connection.execute(
                 "SELECT binding.queue_item_id, queue.state AS queue_state, "
-                "queue.version AS queue_version, target.id AS target_id "
+                "queue.version AS queue_version, "
+                "target.execution_id AS target_id, intent.id AS intent_id "
                 "FROM workflow_landing_bindings binding "
                 "JOIN integration_queue_items queue "
                 "ON queue.id = binding.queue_item_id "
                 "LEFT JOIN workflow_provider_targets target "
                 "ON target.execution_id = binding.execution_id "
+                "LEFT JOIN workflow_provider_intents intent "
+                "ON intent.workflow_execution_id = binding.execution_id "
                 "WHERE binding.execution_id = ?",
                 (execution_id,),
             ).fetchone()
@@ -1586,11 +1601,52 @@ class WorkflowStorage:
                 "queue_item_id": landing["queue_item_id"],
                 "queue_version": landing["queue_version"],
             }
-            if landing["target_id"] is None:
+            if landing["intent_id"] is None:
                 return fact(
                     "action_required",
                     "owner",
-                    "provider_target",
+                    "provider_intent",
+                    basis,
+                )
+            for capability_name in ("refs.publish", "change.open"):
+                effect = connection.execute(
+                    "SELECT id, state, service_operation_id "
+                    "FROM workflow_provider_effects WHERE intent_id = ? "
+                    "AND capability_name = ?",
+                    (landing["intent_id"], capability_name),
+                ).fetchone()
+                if effect is None:
+                    return fact(
+                        "action_required",
+                        "control_plane",
+                        "provider_effect_dispatch",
+                        {**basis, "capability_name": capability_name},
+                    )
+                effect_basis = {
+                    **basis,
+                    "capability_name": capability_name,
+                    "effect_id": effect["id"],
+                    "service_operation_id": effect["service_operation_id"],
+                }
+                if effect["state"] == "pending":
+                    return fact(
+                        "waiting",
+                        "landing_actuator",
+                        "provider_effect_receipt",
+                        effect_basis,
+                    )
+                if effect["state"] in {"failed", "uncertain"}:
+                    return fact(
+                        "attention",
+                        "control_room",
+                        "provider_effect_unresolved",
+                        {**effect_basis, "effect_state": effect["state"]},
+                    )
+            if landing["target_id"] is None:
+                return fact(
+                    "action_required",
+                    "control_plane",
+                    "provider_target_derivation",
                     basis,
                 )
             if landing["queue_state"] in {"queued", "claimed"}:
@@ -1867,6 +1923,99 @@ class WorkflowStorage:
             ).fetchone()
         return None if row is None else self._workflow_scope_review_record(row)
 
+    @staticmethod
+    def _workflow_provider_effect_record(row: sqlite3.Row) -> dict[str, Any]:
+        raw_fact = row["fact_json"]
+        fact = None
+        if raw_fact is not None:
+            try:
+                value = json.loads(raw_fact)
+                if row["capability_name"] == "refs.publish":
+                    parsed = RefPublicationReadback.from_mapping(value)
+                elif row["capability_name"] == "change.open":
+                    parsed = ChangeOpenReadback.from_mapping(value)
+                else:
+                    raise StorageError(
+                        "stored workflow provider effect capability is invalid"
+                    )
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError(
+                    "stored workflow provider effect fact is invalid"
+                ) from exc
+            fact = parsed.to_dict()
+            if content_sha256(canonical_json(fact)) != row["fact_sha256"]:
+                raise StorageError(
+                    "stored workflow provider effect digest does not match"
+                )
+        return {
+            "id": row["id"],
+            "intent_id": row["intent_id"],
+            "capability_name": row["capability_name"],
+            "capability_binding_id": row["capability_binding_id"],
+            "service_operation_id": row["service_operation_id"],
+            "operation_state": row["operation_state"],
+            "state": row["state"],
+            "fact": fact,
+            "fact_sha256": row["fact_sha256"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    @classmethod
+    def _workflow_provider_intent_record(
+        cls, connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> dict[str, Any]:
+        try:
+            intent = WorkflowProviderIntent.from_mapping(json.loads(row["intent_json"]))
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow provider intent is invalid") from exc
+        if intent.digest != row["content_sha256"]:
+            raise StorageError("stored workflow provider intent digest does not match")
+        effect_rows = connection.execute(
+            "SELECT effect.*, operation.state AS operation_state "
+            "FROM workflow_provider_effects effect "
+            "JOIN service_operations operation "
+            "ON operation.id = effect.service_operation_id "
+            "WHERE effect.intent_id = ? ORDER BY effect.capability_name",
+            (row["id"],),
+        ).fetchall()
+        effects = {
+            effect["capability_name"]: cls._workflow_provider_effect_record(effect)
+            for effect in effect_rows
+        }
+        return {
+            "id": row["id"],
+            "workflow_execution_id": row["workflow_execution_id"],
+            "workflow_activation_version_id": row["workflow_activation_version_id"],
+            "workflow_policy_id": row["workflow_policy_id"],
+            "candidate_id": row["candidate_id"],
+            "gate_policy_id": row["gate_policy_id"],
+            "work_item_version_id": row["work_item_version_id"],
+            "intent": intent.to_dict(),
+            "content_sha256": row["content_sha256"],
+            "created_by": row["created_by_handle"],
+            "created_at": row["created_at"],
+            "effects": effects,
+        }
+
+    @classmethod
+    def _workflow_provider_intent_for_execution(
+        cls, connection: sqlite3.Connection, execution_id: str
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT intent.*, creator.handle AS created_by_handle "
+            "FROM workflow_provider_intents intent "
+            "JOIN users creator ON creator.id = intent.created_by "
+            "WHERE intent.workflow_execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        return (
+            None
+            if row is None
+            else cls._workflow_provider_intent_record(connection, row)
+        )
+
     def _workflow_landing_record(
         self,
         connection: sqlite3.Connection,
@@ -1905,19 +2054,41 @@ class WorkflowStorage:
         if mode == WorkflowLandingMode.PROVIDER.value:
             provider_available = bool(
                 connection.execute(
-                    "SELECT EXISTS(SELECT 1 FROM workflow_executions e "
-                    "JOIN project_capability_bindings b ON b.project_id = e.project_id "
+                    "SELECT CASE WHEN e.workflow_activation_version_id IS NULL "
+                    "THEN EXISTS(SELECT 1 FROM project_capability_bindings b "
                     "JOIN service_sidecars s ON s.id = b.service_sidecar_id "
-                    "WHERE e.id = ? AND b.capability_name = 'landing.invoke' "
+                    "WHERE b.project_id = e.project_id "
+                    "AND b.capability_name = 'landing.invoke' "
                     "AND b.capability_version = 1 AND b.state = 'active' "
-                    "AND s.state = 'active')",
+                    "AND s.state = 'active') ELSE ("
+                    "(SELECT COUNT(*) FROM workflow_activation_capability_bindings ab "
+                    "WHERE ab.activation_version_id = "
+                    "e.workflow_activation_version_id AND ab.capability_version = 1 "
+                    "AND ab.capability_name IN "
+                    "('refs.publish', 'change.open', 'landing.invoke')) = 3 "
+                    "AND NOT EXISTS(SELECT 1 "
+                    "FROM workflow_activation_capability_bindings ab "
+                    "LEFT JOIN project_capability_bindings b "
+                    "ON b.id = ab.project_capability_binding_id "
+                    "LEFT JOIN service_sidecars s ON s.id = b.service_sidecar_id "
+                    "WHERE ab.activation_version_id = "
+                    "e.workflow_activation_version_id "
+                    "AND ab.capability_name IN "
+                    "('refs.publish', 'change.open', 'landing.invoke') "
+                    "AND (b.id IS NULL OR b.project_id != e.project_id "
+                    "OR b.state != 'active' OR s.state != 'active'))) END "
+                    "FROM workflow_executions e WHERE e.id = ?",
                     (execution_id,),
                 ).fetchone()[0]
             )
         target = connection.execute(
             "SELECT t.resource_id, t.merge_method, u.handle AS created_by, "
-            "t.created_at FROM workflow_provider_targets t "
-            "JOIN users u ON u.id = t.created_by WHERE t.execution_id = ?",
+            "t.created_at, origin.intent_id, origin.change_effect_id "
+            "FROM workflow_provider_targets t "
+            "JOIN users u ON u.id = t.created_by "
+            "LEFT JOIN workflow_provider_target_origins origin "
+            "ON origin.workflow_execution_id = t.execution_id "
+            "WHERE t.execution_id = ?",
             (execution_id,),
         ).fetchone()
         plan = connection.execute(
@@ -1942,13 +2113,34 @@ class WorkflowStorage:
             ).fetchone()
             if receipt is None:
                 raise StorageError("workflow landing receipt is unavailable")
+        proof_row = self._workflow_provider_landing_proof_row(
+            connection, execution_id=execution_id
+        )
+        proof = (
+            None
+            if proof_row is None
+            else self._workflow_provider_landing_proof_record(proof_row)
+        )
+        hold_row = self._integration_target_hold_row(
+            connection,
+            integration_ref_id=authority["integration_ref_id"],
+            open_only=True,
+        )
+        provider_intent = self._workflow_provider_intent_for_execution(
+            connection, execution_id
+        )
+        target_record = None if target is None else dict(target)
+        if target_record is not None and target_record["intent_id"] is None:
+            target_record.pop("intent_id")
+            target_record.pop("change_effect_id")
         return {
             **dict(row),
             "mode": mode,
             "gates_ready": gates_ready,
             "blocked_dependency_count": authority["blocked_dependency_count"],
             "provider_available": provider_available,
-            "provider_target": None if target is None else dict(target),
+            "provider_intent": provider_intent,
+            "provider_target": target_record,
             "plan_id": None if plan is None else plan["id"],
             "plan_state": None if plan is None else plan["state"],
             "provider_landing_id": None if provider is None else provider["id"],
@@ -1966,6 +2158,12 @@ class WorkflowStorage:
                 None if receipt is None else receipt["observed_revision"]
             ),
             "receipt_assurance": None if receipt is None else receipt["assurance"],
+            "proof": proof,
+            "target_hold": (
+                None
+                if hold_row is None
+                else self._integration_target_hold_record(hold_row)
+            ),
         }
 
     @staticmethod
@@ -2284,6 +2482,703 @@ class WorkflowStorage:
             "created_at": now,
         }
 
+    def create_workflow_provider_intent(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        head_ref: str,
+        title: str,
+        body: str,
+        draft: bool,
+        created_by: str,
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        created_by = require_string(created_by, field="created_by", max_bytes=64)
+        intent_id = self.new_id("wpi")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, created_by, role="workflow provider intent owner"
+                )
+                source = connection.execute(
+                    "SELECT execution.project_id, project.krab_project_key, "
+                    "execution.work_item_id, execution.work_item_version_id, "
+                    "execution.state, execution.stage, execution.version, "
+                    "execution.workflow_activation_version_id, "
+                    "configuration.spec_json AS configuration_spec_json, "
+                    "activation.policy_id AS workflow_policy_id, "
+                    "activation.spec_json AS activation_spec_json, "
+                    "activation.acknowledged_by, item.source, item.external_id, "
+                    "version.content_json, version.source_updated_at, "
+                    "landing.candidate_id, landing.policy_id AS gate_policy_id, "
+                    "queue.current_policy_id, ref.integration_ref, queue.state "
+                    "AS queue_state FROM workflow_executions execution "
+                    "JOIN projects project ON project.id = execution.project_id "
+                    "JOIN workflow_configuration_versions configuration "
+                    "ON configuration.id = execution.configuration_version_id "
+                    "JOIN workflow_activation_versions activation "
+                    "ON activation.id = execution.workflow_activation_version_id "
+                    "JOIN work_items item ON item.id = execution.work_item_id "
+                    "JOIN work_item_versions version "
+                    "ON version.id = execution.work_item_version_id "
+                    "JOIN workflow_landing_bindings landing "
+                    "ON landing.execution_id = execution.id "
+                    "JOIN integration_queue_items queue "
+                    "ON queue.id = landing.queue_item_id "
+                    "JOIN integration_refs ref ON ref.id = queue.integration_ref_id "
+                    "WHERE execution.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if source is None:
+                    raise ConflictError(
+                        "activated workflow provider landing is unavailable"
+                    )
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if source["state"] != "active" or source["stage"] != "landing":
+                    raise ConflictError("workflow is not awaiting landing")
+                if source["acknowledged_by"] != created_by:
+                    raise ConflictError(
+                        "workflow provider intent requires the activation owner"
+                    )
+                try:
+                    configuration = WorkflowConfigurationSpec.from_mapping(
+                        json.loads(source["configuration_spec_json"])
+                    )
+                    activation = WorkflowActivationSpec.from_mapping(
+                        json.loads(source["activation_spec_json"])
+                    )
+                    content = json.loads(source["content_json"])
+                    envelope = WorkItemEnvelope.from_mapping(
+                        {
+                            **content,
+                            "source": source["source"],
+                            "external_id": source["external_id"],
+                            "source_updated_at": source["source_updated_at"],
+                        }
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored workflow provider intent inputs are invalid"
+                    ) from exc
+                if configuration.landing_mode is not WorkflowLandingMode.PROVIDER:
+                    raise ConflictError("workflow is configured for manual landing")
+                if source["queue_state"] not in {"queued", "claimed"}:
+                    raise ConflictError(
+                        "workflow landing queue cannot accept provider intent"
+                    )
+                if source["current_policy_id"] != source["gate_policy_id"]:
+                    raise ConflictError("workflow landing policy changed")
+                if title != envelope.title:
+                    raise ConflictError(
+                        "workflow provider title differs from the pinned work item"
+                    )
+                intent = WorkflowProviderIntent.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "project_id": source["project_id"],
+                        "work_item_id": source["work_item_id"],
+                        "work_item_version_id": source["work_item_version_id"],
+                        "candidate_id": source["candidate_id"],
+                        "gate_policy_id": source["gate_policy_id"],
+                        "base_ref": source["integration_ref"],
+                        "head_ref": head_ref,
+                        "title": title,
+                        "body": body,
+                        "draft": draft,
+                        "merge_method": activation.merge_method,
+                        "secondary_effects": [],
+                    }
+                )
+                existing = connection.execute(
+                    "SELECT intent.*, creator.handle AS created_by_handle "
+                    "FROM workflow_provider_intents intent "
+                    "JOIN users creator ON creator.id = intent.created_by "
+                    "WHERE intent.workflow_execution_id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["content_sha256"] != intent.digest
+                        or existing["created_by"] != created_by
+                    ):
+                        raise ConflictError(
+                            "workflow already has another provider intent"
+                        )
+                    connection.commit()
+                    return self._workflow_provider_intent_record(connection, existing)
+                connection.execute(
+                    "INSERT INTO workflow_provider_intents "
+                    "(id, workflow_execution_id, workflow_activation_version_id, "
+                    "workflow_policy_id, candidate_id, gate_policy_id, "
+                    "work_item_version_id, schema_version, intent_json, "
+                    "content_sha256, created_by, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        intent_id,
+                        execution_id,
+                        source["workflow_activation_version_id"],
+                        source["workflow_policy_id"],
+                        source["candidate_id"],
+                        source["gate_policy_id"],
+                        source["work_item_version_id"],
+                        intent.schema_version,
+                        intent.canonical,
+                        intent.digest,
+                        created_by,
+                        now,
+                    ),
+                )
+                stored = connection.execute(
+                    "SELECT intent.*, creator.handle AS created_by_handle "
+                    "FROM workflow_provider_intents intent "
+                    "JOIN users creator ON creator.id = intent.created_by "
+                    "WHERE intent.id = ?",
+                    (intent_id,),
+                ).fetchone()
+                assert stored is not None
+                result = self._workflow_provider_intent_record(connection, stored)
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow provider intent could not be stored"
+                ) from exc
+        return result
+
+    def _workflow_provider_effect_authority(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        activation_version_id: str,
+        capability_name: str,
+    ) -> tuple[sqlite3.Row, Any, Any, Any]:
+        capability = core_service_capability(capability_name, 1)
+        row = connection.execute(
+            "SELECT binding.id, binding.state, binding.project_id, "
+            "binding.capability_name, binding.capability_version, "
+            "binding.capability_mode, binding.mapping_name, "
+            "binding.sidecar_content_sha256, binding.deployment_sha256, "
+            "sidecar.name AS sidecar_name, sidecar.state AS sidecar_state, "
+            "sidecar.spec_json AS sidecar_spec_json, project.active "
+            "AS project_active FROM workflow_activation_capability_bindings pin "
+            "JOIN project_capability_bindings binding "
+            "ON binding.id = pin.project_capability_binding_id "
+            "JOIN service_sidecars sidecar "
+            "ON sidecar.id = binding.service_sidecar_id "
+            "JOIN projects project ON project.id = binding.project_id "
+            "WHERE pin.activation_version_id = ? AND pin.capability_name = ? "
+            "AND pin.capability_version = 1",
+            (activation_version_id, capability_name),
+        ).fetchone()
+        if (
+            row is None
+            or row["state"] != "active"
+            or row["sidecar_state"] != "active"
+            or not row["project_active"]
+        ):
+            raise ConflictError(
+                f"activated workflow capability is unavailable: {capability_name}"
+            )
+        sidecar = self._parse_stored_sidecar(row)
+        mapping = next(
+            (item for item in sidecar.mappings if item.name == row["mapping_name"]),
+            None,
+        )
+        advertised = next(
+            (
+                item
+                for item in sidecar.capabilities
+                if (item.name, item.version) == (capability.name, capability.version)
+            ),
+            None,
+        )
+        if (
+            mapping is None
+            or advertised != capability
+            or row["sidecar_content_sha256"] != sidecar.digest
+            or row["deployment_sha256"] != sidecar.deployment_sha256
+            or row["capability_mode"] != capability.mode
+        ):
+            raise StorageError(
+                "stored activated workflow capability binding is invalid"
+            )
+        return row, sidecar, mapping, capability
+
+    def issue_workflow_provider_effect(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        capability_name: str,
+        issued_by: str,
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        if capability_name not in {"refs.publish", "change.open"}:
+            raise ValidationError("workflow provider effect capability is invalid")
+        issued_by = require_string(issued_by, field="issued_by", max_bytes=64)
+        effect_id = self.new_id("wpe")
+        operation_id = self.new_id("sop")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, issued_by, role="workflow provider effect issuer"
+                )
+                source = connection.execute(
+                    "SELECT execution.state, execution.stage, execution.version, "
+                    "execution.workflow_activation_version_id, "
+                    "intent.id AS intent_id, intent.intent_json, "
+                    "intent.created_by, gate.expected_base_revision, "
+                    "gate.head_revision, gate.object_format, "
+                    "queue.state AS queue_state FROM workflow_executions execution "
+                    "JOIN workflow_provider_intents intent "
+                    "ON intent.workflow_execution_id = execution.id "
+                    "JOIN integration_gate_policies gate "
+                    "ON gate.id = intent.gate_policy_id "
+                    "JOIN workflow_landing_bindings landing "
+                    "ON landing.execution_id = execution.id "
+                    "JOIN integration_queue_items queue "
+                    "ON queue.id = landing.queue_item_id WHERE execution.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if source is None:
+                    raise ConflictError("workflow provider intent is unavailable")
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if source["state"] != "active" or source["stage"] != "landing":
+                    raise ConflictError("workflow is not awaiting landing")
+                if source["created_by"] != issued_by:
+                    raise ConflictError(
+                        "workflow provider effect requires the intent owner"
+                    )
+                if source["queue_state"] not in {"queued", "claimed"}:
+                    raise ConflictError(
+                        "workflow landing queue cannot issue provider effects"
+                    )
+                try:
+                    intent = WorkflowProviderIntent.from_mapping(
+                        json.loads(source["intent_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored workflow provider intent is invalid"
+                    ) from exc
+                existing = connection.execute(
+                    "SELECT effect.*, operation.state AS operation_state "
+                    "FROM workflow_provider_effects effect "
+                    "JOIN service_operations operation "
+                    "ON operation.id = effect.service_operation_id "
+                    "WHERE effect.intent_id = ? AND effect.capability_name = ?",
+                    (source["intent_id"], capability_name),
+                ).fetchone()
+                if existing is not None:
+                    connection.commit()
+                    return self._workflow_provider_effect_record(existing)
+                if capability_name == "change.open":
+                    publication = connection.execute(
+                        "SELECT state FROM workflow_provider_effects "
+                        "WHERE intent_id = ? AND capability_name = 'refs.publish'",
+                        (source["intent_id"],),
+                    ).fetchone()
+                    if publication is None or publication["state"] != "confirmed":
+                        raise ConflictError(
+                            "workflow change cannot open before ref publication"
+                        )
+                binding, sidecar, mapping, capability = (
+                    self._workflow_provider_effect_authority(
+                        connection,
+                        activation_version_id=source["workflow_activation_version_id"],
+                        capability_name=capability_name,
+                    )
+                )
+                if binding["project_id"] != intent.project_id:
+                    raise ConflictError(
+                        "workflow provider effect belongs to another project"
+                    )
+                if capability_name == "refs.publish":
+                    resource_id = intent.candidate_id
+                    expected_revision = None
+                    parameters: dict[str, Any] = {"target_ref": intent.head_ref}
+                else:
+                    resource_id = intent.head_ref
+                    expected_revision = source["expected_base_revision"]
+                    parameters = {
+                        "base_ref": intent.base_ref,
+                        "head_ref": intent.head_ref,
+                        "title": intent.title,
+                        "body": intent.body,
+                        "draft": intent.draft,
+                    }
+                operation = ServiceOperationSpec.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "connector_name": binding["sidecar_name"],
+                        "deployment_sha256": sidecar.deployment_sha256,
+                        "mapping": mapping.to_dict(),
+                        "capability": capability.to_dict(),
+                        "idempotency_key": (
+                            f"workflow:{execution_id}:{capability_name}"
+                        ),
+                        "target": {
+                            "repository": mapping.repository,
+                            "resource_id": resource_id,
+                            "object_format": source["object_format"],
+                            "expected_revision": expected_revision,
+                            "desired_revision": source["head_revision"],
+                        },
+                        "parameters": parameters,
+                        "request_bytes": sidecar.request_bytes,
+                        "response_bytes": sidecar.response_bytes,
+                        "timeout_ms": sidecar.timeout_ms,
+                    }
+                )
+                selected_operation_id = self._create_service_operation_in_transaction(
+                    connection,
+                    spec=operation,
+                    created_by=issued_by,
+                    project_capability_binding_id=binding["id"],
+                    operation_id=operation_id,
+                    now=now,
+                )
+                if selected_operation_id != operation_id:
+                    raise ConflictError("workflow provider effect already exists")
+                connection.execute(
+                    "INSERT INTO workflow_provider_effects "
+                    "(id, intent_id, capability_name, capability_binding_id, "
+                    "service_operation_id, state, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
+                    (
+                        effect_id,
+                        source["intent_id"],
+                        capability_name,
+                        binding["id"],
+                        operation_id,
+                        now,
+                        now,
+                    ),
+                )
+                stored = connection.execute(
+                    "SELECT effect.*, operation.state AS operation_state "
+                    "FROM workflow_provider_effects effect "
+                    "JOIN service_operations operation "
+                    "ON operation.id = effect.service_operation_id "
+                    "WHERE effect.id = ?",
+                    (effect_id,),
+                ).fetchone()
+                assert stored is not None
+                result = self._workflow_provider_effect_record(stored)
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow provider effect could not be issued"
+                ) from exc
+        return result
+
+    def settle_workflow_provider_effect(self, effect_id: str) -> dict[str, Any]:
+        effect_id = require_string(effect_id, field="effect_id", max_bytes=64)
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT effect.*, operation.state AS operation_state, "
+                    "intent.intent_json FROM workflow_provider_effects effect "
+                    "JOIN service_operations operation "
+                    "ON operation.id = effect.service_operation_id "
+                    "JOIN workflow_provider_intents intent "
+                    "ON intent.id = effect.intent_id WHERE effect.id = ?",
+                    (effect_id,),
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(
+                        f"workflow provider effect not found: {effect_id}"
+                    )
+                if row["state"] != "pending":
+                    connection.commit()
+                    return self._workflow_provider_effect_record(row)
+                operation_state = row["operation_state"]
+                if operation_state not in {
+                    "succeeded",
+                    "denied",
+                    "conflict",
+                    "cancelled",
+                }:
+                    connection.commit()
+                    return self._workflow_provider_effect_record(row)
+                fact_json = None
+                fact_sha256 = None
+                state = "failed"
+                if operation_state == "succeeded":
+                    attempt = connection.execute(
+                        "SELECT receipt_json FROM service_operation_attempts "
+                        "WHERE operation_id = ? AND outcome = 'succeeded' "
+                        "ORDER BY sequence DESC LIMIT 1",
+                        (row["service_operation_id"],),
+                    ).fetchone()
+                    receipt = None
+                    if attempt is not None and attempt["receipt_json"] is not None:
+                        try:
+                            receipt = ServiceOperationReceipt.from_mapping(
+                                json.loads(attempt["receipt_json"])
+                            )
+                        except (
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValidationError,
+                        ) as exc:
+                            raise StorageError(
+                                "stored workflow provider receipt is invalid"
+                            ) from exc
+                    if receipt is None or receipt.result is None:
+                        state = "uncertain"
+                    else:
+                        try:
+                            intent = WorkflowProviderIntent.from_mapping(
+                                json.loads(row["intent_json"])
+                            )
+                            if row["capability_name"] == "refs.publish":
+                                readback = RefPublicationReadback.from_mapping(
+                                    receipt.result
+                                )
+                                matches = (
+                                    readback.candidate_id == intent.candidate_id
+                                    and readback.target_ref == intent.head_ref
+                                    and not readback.secondary_effects
+                                )
+                            else:
+                                readback = ChangeOpenReadback.from_mapping(
+                                    receipt.result
+                                )
+                                matches = (
+                                    readback.base_ref == intent.base_ref
+                                    and readback.head_ref == intent.head_ref
+                                    and readback.title == intent.title
+                                    and readback.body == intent.body
+                                    and readback.draft is intent.draft
+                                    and readback.state == "open"
+                                    and not readback.secondary_effects
+                                )
+                        except (
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValidationError,
+                        ) as exc:
+                            raise StorageError(
+                                "stored workflow provider readback is invalid"
+                            ) from exc
+                        if matches:
+                            state = "confirmed"
+                            fact_json = canonical_json(readback.to_dict())
+                            fact_sha256 = content_sha256(fact_json)
+                        else:
+                            state = "uncertain"
+                connection.execute(
+                    "UPDATE workflow_provider_effects SET state = ?, "
+                    "fact_json = ?, fact_sha256 = ?, updated_at = ?, "
+                    "resolved_at = ? WHERE id = ? AND state = 'pending'",
+                    (
+                        state,
+                        fact_json,
+                        fact_sha256,
+                        now,
+                        now,
+                        effect_id,
+                    ),
+                )
+                stored = connection.execute(
+                    "SELECT effect.*, operation.state AS operation_state "
+                    "FROM workflow_provider_effects effect "
+                    "JOIN service_operations operation "
+                    "ON operation.id = effect.service_operation_id "
+                    "WHERE effect.id = ?",
+                    (effect_id,),
+                ).fetchone()
+                assert stored is not None
+                result = self._workflow_provider_effect_record(stored)
+                connection.commit()
+            except (NotFoundError, StorageError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow provider effect could not be settled"
+                ) from exc
+        return result
+
+    def derive_workflow_provider_target(
+        self, execution_id: str, *, expected_version: int
+    ) -> dict[str, Any]:
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        self._positive_integer(expected_version, field="expected_version")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                source = connection.execute(
+                    "SELECT execution.state, execution.stage, execution.version, "
+                    "landing.queue_item_id, intent.id AS intent_id, "
+                    "intent.intent_json, intent.created_by, effect.id AS effect_id, "
+                    "effect.state AS effect_state, effect.fact_json "
+                    "FROM workflow_executions execution "
+                    "JOIN workflow_landing_bindings landing "
+                    "ON landing.execution_id = execution.id "
+                    "JOIN workflow_provider_intents intent "
+                    "ON intent.workflow_execution_id = execution.id "
+                    "JOIN workflow_provider_effects effect "
+                    "ON effect.intent_id = intent.id "
+                    "AND effect.capability_name = 'change.open' "
+                    "WHERE execution.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if source is None or source["effect_state"] != "confirmed":
+                    raise ConflictError("workflow change-open effect is not confirmed")
+                if source["version"] != expected_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if source["state"] != "active" or source["stage"] != "landing":
+                    raise ConflictError("workflow is not awaiting landing")
+                try:
+                    intent = WorkflowProviderIntent.from_mapping(
+                        json.loads(source["intent_json"])
+                    )
+                    readback = ChangeOpenReadback.from_mapping(
+                        json.loads(source["fact_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError(
+                        "stored workflow provider target source is invalid"
+                    ) from exc
+                existing = connection.execute(
+                    "SELECT target.execution_id, target.queue_item_id, "
+                    "target.resource_id, target.merge_method, "
+                    "creator.handle AS created_by, target.created_at, "
+                    "origin.intent_id, origin.change_effect_id "
+                    "FROM workflow_provider_targets target "
+                    "JOIN users creator ON creator.id = target.created_by "
+                    "LEFT JOIN workflow_provider_target_origins origin "
+                    "ON origin.workflow_execution_id = target.execution_id "
+                    "WHERE target.execution_id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["resource_id"] != readback.change_id
+                        or existing["merge_method"] != intent.merge_method
+                    ):
+                        raise ConflictError(
+                            "workflow provider target differs from its readback"
+                        )
+                    if (
+                        existing["intent_id"] is None
+                        and existing["change_effect_id"] is None
+                    ):
+                        connection.execute(
+                            "INSERT INTO workflow_provider_target_origins "
+                            "(workflow_execution_id, intent_id, change_effect_id, "
+                            "created_at) VALUES (?, ?, ?, ?)",
+                            (
+                                execution_id,
+                                source["intent_id"],
+                                source["effect_id"],
+                                now,
+                            ),
+                        )
+                        adopted = dict(existing)
+                        adopted["intent_id"] = source["intent_id"]
+                        adopted["change_effect_id"] = source["effect_id"]
+                        connection.commit()
+                        return adopted
+                    if (
+                        existing["intent_id"] != source["intent_id"]
+                        or existing["change_effect_id"] != source["effect_id"]
+                    ):
+                        raise ConflictError(
+                            "workflow provider target differs from its readback"
+                        )
+                    connection.commit()
+                    return dict(existing)
+                connection.execute(
+                    "INSERT INTO workflow_provider_targets "
+                    "(execution_id, queue_item_id, resource_id, merge_method, "
+                    "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        execution_id,
+                        source["queue_item_id"],
+                        readback.change_id,
+                        intent.merge_method,
+                        source["created_by"],
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO workflow_provider_target_origins "
+                    "(workflow_execution_id, intent_id, change_effect_id, "
+                    "created_at) VALUES (?, ?, ?, ?)",
+                    (
+                        execution_id,
+                        source["intent_id"],
+                        source["effect_id"],
+                        now,
+                    ),
+                )
+                creator = connection.execute(
+                    "SELECT handle FROM users WHERE id = ?",
+                    (source["created_by"],),
+                ).fetchone()
+                assert creator is not None
+                result = {
+                    "execution_id": execution_id,
+                    "queue_item_id": source["queue_item_id"],
+                    "resource_id": readback.change_id,
+                    "merge_method": intent.merge_method,
+                    "created_by": creator["handle"],
+                    "created_at": now,
+                    "intent_id": source["intent_id"],
+                    "change_effect_id": source["effect_id"],
+                }
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow provider target could not be derived"
+                ) from exc
+        return result
+
     def configure_workflow_provider_target(
         self,
         execution_id: str,
@@ -2313,17 +3208,24 @@ class WorkflowStorage:
                 ).fetchone()
                 existing = connection.execute(
                     "SELECT t.execution_id, t.queue_item_id, t.resource_id, "
-                    "t.merge_method, u.handle AS created_by, t.created_at "
+                    "t.merge_method, u.handle AS created_by, t.created_at, "
+                    "origin.intent_id, origin.change_effect_id "
                     "FROM workflow_provider_targets t JOIN users u "
-                    "ON u.id = t.created_by WHERE t.execution_id = ?",
+                    "ON u.id = t.created_by "
+                    "LEFT JOIN workflow_provider_target_origins origin "
+                    "ON origin.workflow_execution_id = t.execution_id "
+                    "WHERE t.execution_id = ?",
                     (execution_id,),
                 ).fetchone()
                 if existing is not None:
                     current = connection.execute(
-                        "SELECT e.state, e.stage, e.version, cv.spec_json "
+                        "SELECT e.state, e.stage, e.version, cv.spec_json, "
+                        "av.spec_json AS activation_spec_json "
                         "FROM workflow_executions e "
                         "JOIN workflow_configuration_versions cv "
-                        "ON cv.id = e.configuration_version_id WHERE e.id = ?",
+                        "ON cv.id = e.configuration_version_id "
+                        "LEFT JOIN workflow_activation_versions av "
+                        "ON av.id = e.workflow_activation_version_id WHERE e.id = ?",
                         (execution_id,),
                     ).fetchone()
                     if current is None:
@@ -2344,6 +3246,30 @@ class WorkflowStorage:
                         ) from exc
                     if current_spec.landing_mode is not WorkflowLandingMode.PROVIDER:
                         raise ConflictError("workflow is configured for manual landing")
+                    if current["activation_spec_json"] is not None:
+                        try:
+                            activation = WorkflowActivationSpec.from_mapping(
+                                json.loads(current["activation_spec_json"])
+                            )
+                        except (
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValidationError,
+                        ) as exc:
+                            raise StorageError(
+                                "stored workflow activation is invalid"
+                            ) from exc
+                        if activation.merge_method != merge_method:
+                            raise ConflictError(
+                                "workflow merge method differs from its activation"
+                            )
+                        if (
+                            existing["intent_id"] is None
+                            or existing["change_effect_id"] is None
+                        ):
+                            raise StorageError(
+                                "activated workflow provider target has no origin"
+                            )
                     if (
                         existing["resource_id"] != resource_id
                         or existing["merge_method"] != merge_method
@@ -2351,16 +3277,23 @@ class WorkflowStorage:
                         raise ConflictError(
                             "workflow already names another provider target"
                         )
+                    result = dict(existing)
+                    if result["intent_id"] is None:
+                        result.pop("intent_id")
+                        result.pop("change_effect_id")
                     connection.commit()
-                    return dict(existing)
+                    return result
                 source = connection.execute(
                     "SELECT e.state, e.stage, e.version, cv.spec_json, "
+                    "av.spec_json AS activation_spec_json, "
                     "b.queue_item_id, q.state AS queue_state "
                     "FROM workflow_executions e "
                     "JOIN workflow_configuration_versions cv "
                     "ON cv.id = e.configuration_version_id "
                     "JOIN workflow_landing_bindings b ON b.execution_id = e.id "
                     "JOIN integration_queue_items q ON q.id = b.queue_item_id "
+                    "LEFT JOIN workflow_activation_versions av "
+                    "ON av.id = e.workflow_activation_version_id "
                     "WHERE e.id = ?",
                     (execution_id,),
                 ).fetchone()
@@ -2380,6 +3313,27 @@ class WorkflowStorage:
                     ) from exc
                 if spec.landing_mode is not WorkflowLandingMode.PROVIDER:
                     raise ConflictError("workflow is configured for manual landing")
+                if source["activation_spec_json"] is not None:
+                    try:
+                        activation = WorkflowActivationSpec.from_mapping(
+                            json.loads(source["activation_spec_json"])
+                        )
+                    except (
+                        json.JSONDecodeError,
+                        TypeError,
+                        ValidationError,
+                    ) as exc:
+                        raise StorageError(
+                            "stored workflow activation is invalid"
+                        ) from exc
+                    if activation.merge_method != merge_method:
+                        raise ConflictError(
+                            "workflow merge method differs from its activation"
+                        )
+                    raise ConflictError(
+                        "activated workflow provider target is derived from "
+                        "provider readback"
+                    )
                 if source["queue_state"] not in {"queued", "refold_required"}:
                     raise ConflictError("workflow landing authority is already in use")
                 connection.execute(
@@ -2544,7 +3498,8 @@ class WorkflowStorage:
                 connection.execute("BEGIN IMMEDIATE")
                 source = connection.execute(
                     "SELECT e.state, e.stage, e.correction_round, e.version, "
-                    "e.work_thread_id, e.requested_by, cv.spec_json, "
+                    "e.work_thread_id, e.requested_by, "
+                    "e.workflow_activation_version_id, cv.spec_json, "
                     "b.queue_item_id, b.candidate_id, "
                     "q.current_policy_id AS policy_id, q.state AS queue_state, "
                     "q.landed_receipt_id AS receipt_id, gp.head_revision, "
@@ -2598,8 +3553,12 @@ class WorkflowStorage:
                             "workflow receipt does not match provider landing mode"
                         )
                     target = connection.execute(
-                        "SELECT resource_id, merge_method "
-                        "FROM workflow_provider_targets WHERE execution_id = ?",
+                        "SELECT target.resource_id, target.merge_method, "
+                        "origin.intent_id, origin.change_effect_id "
+                        "FROM workflow_provider_targets target "
+                        "LEFT JOIN workflow_provider_target_origins origin "
+                        "ON origin.workflow_execution_id = target.execution_id "
+                        "WHERE target.execution_id = ?",
                         (execution_id,),
                     ).fetchone()
                     operation = connection.execute(
@@ -2627,6 +3586,30 @@ class WorkflowStorage:
                         raise ConflictError(
                             "workflow provider landing does not match its target"
                         )
+                    if source["workflow_activation_version_id"] is not None:
+                        if (
+                            target["intent_id"] is None
+                            or target["change_effect_id"] is None
+                        ):
+                            raise ConflictError(
+                                "activated workflow provider target has no "
+                                "confirmed origin"
+                            )
+                        proof = connection.execute(
+                            "SELECT status FROM workflow_provider_landing_proofs "
+                            "WHERE workflow_execution_id = ? "
+                            "AND provider_landing_id = ? "
+                            "AND landing_receipt_id = ?",
+                            (
+                                execution_id,
+                                source["provider_landing_id"],
+                                source["receipt_id"],
+                            ),
+                        ).fetchone()
+                        if proof is None or proof["status"] != "conformant":
+                            raise ConflictError(
+                                "workflow provider landing proof is not conformant"
+                            )
                 if not self._gate_readiness(connection, source["policy_id"])["ready"]:
                     raise ConflictError("workflow landing gate is no longer ready")
                 active_run = connection.execute(

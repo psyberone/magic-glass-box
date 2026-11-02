@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 48
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -6325,6 +6325,206 @@ BEGIN
 END;
 """
 
+WORKFLOW_LANDING_PROOF_SCHEMA = """
+CREATE TABLE workflow_provider_intents (
+    id TEXT PRIMARY KEY,
+    workflow_execution_id TEXT NOT NULL UNIQUE,
+    workflow_activation_version_id TEXT NOT NULL,
+    workflow_policy_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    gate_policy_id TEXT NOT NULL,
+    work_item_version_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    intent_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_policy_id)
+        REFERENCES workflow_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (candidate_id)
+        REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    FOREIGN KEY (gate_policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (work_item_version_id)
+        REFERENCES work_item_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_provider_effects (
+    id TEXT PRIMARY KEY,
+    intent_id TEXT NOT NULL,
+    capability_name TEXT NOT NULL CHECK (
+        capability_name IN ('refs.publish', 'change.open')
+    ),
+    capability_binding_id TEXT NOT NULL,
+    service_operation_id TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'confirmed', 'failed', 'uncertain')
+    ),
+    fact_json TEXT,
+    fact_sha256 TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (intent_id, capability_name),
+    FOREIGN KEY (intent_id)
+        REFERENCES workflow_provider_intents(id) ON DELETE RESTRICT,
+    FOREIGN KEY (capability_binding_id)
+        REFERENCES project_capability_bindings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (service_operation_id)
+        REFERENCES service_operations(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'pending' AND fact_json IS NULL AND fact_sha256 IS NULL
+            AND resolved_at IS NULL)
+        OR
+        (state = 'confirmed' AND fact_json IS NOT NULL
+            AND fact_sha256 IS NOT NULL AND resolved_at IS NOT NULL)
+        OR
+        (state IN ('failed', 'uncertain') AND fact_json IS NULL
+            AND fact_sha256 IS NULL AND resolved_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE workflow_provider_target_origins (
+    workflow_execution_id TEXT PRIMARY KEY,
+    intent_id TEXT NOT NULL UNIQUE,
+    change_effect_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_provider_targets(execution_id) ON DELETE RESTRICT,
+    FOREIGN KEY (intent_id)
+        REFERENCES workflow_provider_intents(id) ON DELETE RESTRICT,
+    FOREIGN KEY (change_effect_id)
+        REFERENCES workflow_provider_effects(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_provider_effect_state
+    ON workflow_provider_effects(state, updated_at, id);
+
+CREATE TABLE workflow_provider_landing_proofs (
+    id TEXT PRIMARY KEY,
+    workflow_execution_id TEXT NOT NULL UNIQUE,
+    workflow_activation_version_id TEXT NOT NULL,
+    workflow_policy_id TEXT NOT NULL,
+    provider_landing_id TEXT NOT NULL UNIQUE,
+    landing_receipt_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    proof_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (
+        status IN ('conformant', 'mismatch', 'uncertain')
+    ),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_policy_id)
+        REFERENCES workflow_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_landing_id)
+        REFERENCES integration_provider_landings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_receipt_id)
+        REFERENCES integration_landing_receipts(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_provider_landing_proof_status
+    ON workflow_provider_landing_proofs(status, created_at, id);
+
+CREATE TABLE integration_target_holds (
+    id TEXT PRIMARY KEY,
+    integration_ref_id TEXT NOT NULL,
+    workflow_execution_id TEXT NOT NULL,
+    landing_proof_id TEXT NOT NULL UNIQUE,
+    reason TEXT NOT NULL CHECK (
+        reason IN ('landing_mismatch', 'landing_uncertain')
+    ),
+    state TEXT NOT NULL CHECK (state IN ('open', 'lifted')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    lifted_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    lifted_at TEXT,
+    FOREIGN KEY (integration_ref_id)
+        REFERENCES integration_refs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_proof_id)
+        REFERENCES workflow_provider_landing_proofs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (lifted_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'open' AND lifted_by IS NULL AND lifted_at IS NULL)
+        OR
+        (state = 'lifted' AND lifted_by IS NOT NULL AND lifted_at IS NOT NULL)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX integration_target_one_open_hold
+    ON integration_target_holds(integration_ref_id) WHERE state = 'open';
+CREATE INDEX integration_target_hold_execution
+    ON integration_target_holds(workflow_execution_id, created_at, id);
+
+CREATE TRIGGER workflow_provider_landing_proof_immutable_update
+BEFORE UPDATE ON workflow_provider_landing_proofs
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider landing proofs are immutable');
+END;
+CREATE TRIGGER workflow_provider_intent_immutable_update
+BEFORE UPDATE ON workflow_provider_intents
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider intents are immutable');
+END;
+CREATE TRIGGER workflow_provider_intent_immutable_delete
+BEFORE DELETE ON workflow_provider_intents
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider intents cannot be deleted');
+END;
+CREATE TRIGGER workflow_provider_effect_identity_immutable
+BEFORE UPDATE OF
+    id, intent_id, capability_name, capability_binding_id,
+    service_operation_id, created_at
+ON workflow_provider_effects
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider effect identity is immutable');
+END;
+CREATE TRIGGER workflow_provider_effect_immutable_delete
+BEFORE DELETE ON workflow_provider_effects
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider effects cannot be deleted');
+END;
+CREATE TRIGGER workflow_provider_target_origin_immutable_update
+BEFORE UPDATE ON workflow_provider_target_origins
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider target origins are immutable');
+END;
+CREATE TRIGGER workflow_provider_target_origin_immutable_delete
+BEFORE DELETE ON workflow_provider_target_origins
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider target origins cannot be deleted');
+END;
+CREATE TRIGGER workflow_provider_landing_proof_immutable_delete
+BEFORE DELETE ON workflow_provider_landing_proofs
+BEGIN
+    SELECT RAISE(ABORT, 'workflow provider landing proofs cannot be deleted');
+END;
+CREATE TRIGGER integration_target_hold_identity_immutable
+BEFORE UPDATE OF
+    id, integration_ref_id, workflow_execution_id, landing_proof_id,
+    reason, created_at
+ON integration_target_holds
+BEGIN
+    SELECT RAISE(ABORT, 'integration target hold identity is immutable');
+END;
+CREATE TRIGGER integration_target_hold_immutable_delete
+BEFORE DELETE ON integration_target_holds
+BEGIN
+    SELECT RAISE(ABORT, 'integration target holds cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -6378,7 +6578,8 @@ SCHEMA_V45 = (
     + WORKFLOW_REFOLD_RULING_SCHEMA
 )
 SCHEMA_V46 = SCHEMA_V45 + WORKFLOW_POLICY_ACTIVATION_SCHEMA
-SCHEMA = SCHEMA_V46 + WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA
+SCHEMA_V47 = SCHEMA_V46 + WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA
+SCHEMA = SCHEMA_V47 + WORKFLOW_LANDING_PROOF_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -6426,4 +6627,5 @@ MIGRATIONS = {
     44: WORKFLOW_REFOLD_RULING_SCHEMA,
     45: WORKFLOW_POLICY_ACTIVATION_SCHEMA,
     46: WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA,
+    47: WORKFLOW_LANDING_PROOF_SCHEMA,
 }

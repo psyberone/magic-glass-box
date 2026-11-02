@@ -1,0 +1,15 @@
+{
+  "base_ref": "refs/heads/main",
+  "body": "Exact project-local proposal body.",
+  "candidate_id": "cnd_44444444444444444444444444444444",
+  "draft": false,
+  "gate_policy_id": "gpl_55555555555555555555555555555555",
+  "head_ref": "refs/heads/mgb/candidate-1",
+  "merge_method": "squash",
+  "project_id": "boxp_11111111111111111111111111111111",
+  "schema_version": 1,
+  "secondary_effects": [],
+  "title": "Add the bounded health probe",
+  "work_item_id": "wki_22222222222222222222222222222222",
+  "work_item_version_id": "wiv_33333333333333333333333333333333"
+}

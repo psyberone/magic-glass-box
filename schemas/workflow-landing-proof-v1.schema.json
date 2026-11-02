@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-landing-proof:v1",
+  "title": "Magic Glass Box Workflow Landing Proof v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "content_sha256", "created_at", "expected_candidate_revision", "expected_tree",
+    "id", "landing_receipt_id", "merge_method", "object_format",
+    "provider_landing_id", "readback", "reasons", "schema_version", "status",
+    "workflow_activation_sha256", "workflow_activation_version_id",
+    "workflow_execution_id", "workflow_policy_id", "workflow_policy_sha256",
+    "workflow_policy_version"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^wlp_[0-9a-f]{32}$" },
+    "schema_version": { "const": 1 },
+    "workflow_execution_id": { "type": "string", "pattern": "^wfx_[0-9a-f]{32}$" },
+    "workflow_activation_version_id": { "type": "string", "pattern": "^wav_[0-9a-f]{32}$" },
+    "workflow_activation_sha256": { "$ref": "#/$defs/sha256" },
+    "workflow_policy_id": { "type": "string", "pattern": "^wfp_[0-9a-f]{32}$" },
+    "workflow_policy_version": { "type": "integer", "minimum": 1 },
+    "workflow_policy_sha256": { "$ref": "#/$defs/sha256" },
+    "provider_landing_id": { "type": "string", "pattern": "^plr_[0-9a-f]{32}$" },
+    "landing_receipt_id": { "type": "string", "pattern": "^lrc_[0-9a-f]{32}$" },
+    "merge_method": { "enum": ["merge", "rebase", "squash"] },
+    "object_format": { "enum": ["sha1", "sha256"] },
+    "expected_candidate_revision": { "$ref": "#/$defs/objectId" },
+    "expected_tree": { "$ref": "#/$defs/objectId" },
+    "readback": { "type": ["object", "null"] },
+    "status": { "enum": ["conformant", "mismatch", "uncertain"] },
+    "reasons": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "authoritative_readback_missing", "candidate_revision_mismatch",
+          "landing_revision_unreachable", "landing_tree_mismatch",
+          "merge_method_mismatch", "merge_method_unproved", "primary_ref_mismatch",
+          "primary_revision_mismatch", "unexpected_secondary_effects"
+        ]
+      }
+    },
+    "content_sha256": { "$ref": "#/$defs/sha256" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

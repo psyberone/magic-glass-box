@@ -319,6 +319,31 @@ The same activation enforces its correction-round and seat bounds, atomically
 admits attempts under the applicable shared-host concurrency ceiling, and
 opens a non-extendable owner ruling when wall time is exhausted.
 
+Control-plane schema v48 publishes the bounded provider-effect and landing
+evidence surfaces:
+
+- `workflow-provider-intent-v1.schema.json` binds project/work identity,
+  candidate/gate identity, exact refs, proposal metadata, merge method, and an
+  empty secondary-effect declaration;
+- `ref-publication-readback-v1.schema.json`,
+  `change-open-readback-v1.schema.json`, and `landing-readback-v1.schema.json`
+  normalize authoritative provider observation without URLs, credentials, raw
+  responses, or provider-specific commands;
+- `workflow-provider-effect-v1.schema.json` projects the durable operation and
+  its confirmed, failed, uncertain, or pending fact state;
+- `workflow-landing-proof-v1.schema.json` binds the exact portable policy,
+  activation, provider landing, receipt, expected candidate/tree, normalized
+  read-back, and mechanically derived disposition; and
+- `integration-target-hold-v1.schema.json` projects the optimistic owner-lifted
+  hold created when landing proof is missing or mismatched.
+
+Runtime correlation is stricter than structural preflight. It proves every
+read-back ref, revision, proposal field, candidate ID, and requested merge
+method against the immutable service operation. An activated target is derived
+only from a confirmed `change.open` fact. In this bounded slice only squash
+landing can become conformant, by exact candidate-tree equality plus primary-ref
+reachability; other methods remain explicitly unproved.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

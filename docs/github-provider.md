@@ -16,10 +16,10 @@ The reference provider implements eight v1 capabilities:
 | `work.list` | read | Return one bounded page of normalized issue metadata, excluding pull requests |
 | `change.get` | read | Return normalized metadata for one exact pull request |
 | `change.list` | read | Return one bounded page of normalized pull-request metadata |
-| `refs.publish` | effect | Create one previously absent branch at one exact candidate commit |
-| `change.open` | effect | Find or open one exact head/base proposal without duplicating it |
+| `refs.publish` | effect | Create one previously absent branch at one exact candidate commit and read back the exact ref/revision |
+| `change.open` | effect | Find or open one exact head/base proposal without duplicating it, then read back its stored metadata |
 | `checks.read` | read | Read named latest check-runs or legacy status contexts plus latest reviewer decisions for one exact head |
-| `landing.invoke` | effect | Merge only the authorized pull-request head, then report the actual base ref and closed-reference set |
+| `landing.invoke` | effect | Merge only the authorized pull-request head, then report the landed commit/tree and its reachability from the observed primary ref |
 
 `landing.invoke` truthfully reports `head_enforced`. GitHub's REST
 [merge endpoint](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
@@ -154,6 +154,16 @@ the effect. A confirmed non-landing returns the queue to `queued` when the base
 is unchanged, or advances the observed baseline and requires refolds when it
 drifted. A confirmed landing advances MGB to GitHub's actual observed base
 revision, which may be a merge or squash commit rather than the candidate head.
+
+An M18 activated workflow does not accept a hand-entered pull-request number.
+Its owner first records bounded provider intent; the director publishes the
+candidate ref and opens the change through the activation's exact bindings.
+The pull-request number is derived only from GitHub's correlated authoritative
+read-back. For the currently supported portable-policy proof, squash landing is
+conformant only when the landed commit tree equals the reviewed candidate tree
+and that commit is reachable from the observed primary ref. Missing or
+mismatched observation holds the integration target and cannot complete the
+workflow.
 
 ## Live exit proof
 

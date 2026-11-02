@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:ref-publication-readback:v1",
+  "title": "Magic Glass Box Ref Publication Readback v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidate_id", "published_revision", "schema_version", "secondary_effects", "target_ref"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^cnd_[0-9a-f]{32}$" },
+    "target_ref": { "type": "string", "pattern": "^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$" },
+    "published_revision": { "$ref": "#/$defs/objectId" },
+    "secondary_effects": { "type": "array", "maxItems": 0 }
+  },
+  "$defs": {
+    "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
+  }
+}

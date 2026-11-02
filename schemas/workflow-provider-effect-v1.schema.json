@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-provider-effect:v1",
+  "title": "Magic Glass Box Workflow Provider Effect Projection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capability_binding_id", "capability_name", "created_at", "fact",
+    "fact_sha256", "id", "intent_id", "operation_state", "resolved_at",
+    "service_operation_id", "state", "updated_at"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^wpe_[0-9a-f]{32}$" },
+    "intent_id": { "type": "string", "pattern": "^wpi_[0-9a-f]{32}$" },
+    "capability_name": { "enum": ["refs.publish", "change.open"] },
+    "capability_binding_id": { "type": "string", "pattern": "^cpb_[0-9a-f]{32}$" },
+    "service_operation_id": { "type": "string", "pattern": "^sop_[0-9a-f]{32}$" },
+    "operation_state": { "enum": ["pending", "dispatching", "uncertain", "retryable", "throttled", "succeeded", "denied", "conflict", "cancelled"] },
+    "state": { "enum": ["pending", "confirmed", "failed", "uncertain"] },
+    "fact": { "type": ["object", "null"] },
+    "fact_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "resolved_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

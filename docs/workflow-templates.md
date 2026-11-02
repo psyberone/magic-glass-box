@@ -80,6 +80,38 @@ ceiling, correction rounds use the configured hard limit, attempt claims share
 an atomic project host-concurrency limit, and elapsed wall time opens a
 `resource_exhausted` owner ruling that cannot be continued or enlarged.
 
+Schema v48 consumes the activation's provider bindings without giving the
+portable policy provider-native mechanics. At the landing stage, the activation
+owner records one bounded intent containing the exact project, work-item
+version, candidate, gate, base/head refs, title, body, draft flag, and selected
+merge method. The title must equal the pinned work-item title. Secondary effects
+are forbidden.
+
+The director then issues `refs.publish` and `change.open` in order. Each is an
+ordinary durable service operation pinned to the exact capability binding and
+deployment selected by the activation. Every issuance is its own restart-safe
+step. Unbinding or replacing a project capability after activation makes the
+workflow unavailable; it cannot silently re-route an already authorized
+effect. Successful provider responses carry canonical read-back facts, and the
+generic response boundary correlates those facts to the exact requested refs,
+revisions, metadata, and candidate. A lost or absent read-back remains
+`uncertain`. Only a confirmed `change.open` fact can derive the immutable
+provider target used by `landing.invoke`.
+
+For the currently selected squash method, the landing read-back names the
+candidate revision, landed revision and tree, observed primary revision, and
+whether the landed revision is reachable from that primary. A conformant proof
+requires the landed tree to equal the reviewed candidate tree. Missing or
+mismatched evidence records an `uncertain` or `mismatch` proof and opens a hold
+on that integration target. The hold blocks new landing authority until the
+activation owner explicitly lifts its optimistic version; lifting does not
+rewrite the proof or permit the affected workflow to claim completion. Merge
+and rebase remain truthfully unproved in this bounded slice.
+
+Pre-policy workflow histories retain the earlier `workflow provider-target`
+operation as a compatibility path. Activated workflows reject that manual
+target and derive it only from the confirmed effect chain.
+
 Schema v32 makes those role pins prescription-generic. A configuration version
 owns an immutable set of named role bindings rather than fixed producer and
 reviewer columns, and each binding still points to one exact agent-profile

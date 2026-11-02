@@ -754,7 +754,8 @@ class ControlRoom:
             "t.template_key, t.version AS template_version, "
             "t.content_sha256 AS template_revision, c.name AS configuration_name, "
             "cv.version AS configuration_version, "
-            "cv.id AS configuration_version_id, e.work_item_id, "
+            "cv.id AS configuration_version_id, "
+            "e.workflow_activation_version_id, e.work_item_id, "
             "e.work_item_version_id, e.work_thread_id, "
             "e.work_thread_generation, e.context_version_id, e.source_revision, "
             "e.state, e.stage, e.correction_round, e.version, "
@@ -798,12 +799,23 @@ class ControlRoom:
             "WHERE pcb.project_id = e.project_id "
             "AND pcb.capability_name = 'landing.invoke' "
             "AND pcb.capability_version = 1 AND pcb.state = 'active' "
-            "AND sidecar.state = 'active') ELSE NULL END "
+            "AND sidecar.state = 'active' AND ("
+            "e.workflow_activation_version_id IS NULL OR EXISTS("
+            "SELECT 1 FROM workflow_activation_capability_bindings ab "
+            "WHERE ab.activation_version_id = e.workflow_activation_version_id "
+            "AND ab.capability_name = 'landing.invoke' "
+            "AND ab.capability_version = 1 "
+            "AND ab.project_capability_binding_id = pcb.id))) ELSE NULL END "
             "AS landing_provider_available, "
             "plan.id AS landing_plan_id, plan.state AS landing_plan_state, "
             "provider_landing.id AS landing_provider_landing_id, "
             "provider_landing.state AS landing_provider_landing_state, "
             "queue.landed_receipt_id AS landing_receipt_id, "
+            "landing_proof.id AS landing_proof_id, "
+            "landing_proof.status AS landing_proof_status, "
+            "target_hold.id AS landing_target_hold_id, "
+            "target_hold.reason AS landing_target_hold_reason, "
+            "target_hold.version AS landing_target_hold_version, "
             "completion.outcome_entry_id AS completion_outcome_entry_id, "
             "e.created_at, e.updated_at, "
             "e.finished_at FROM visible "
@@ -856,6 +868,11 @@ class ControlRoom:
             "SELECT pl.id FROM integration_provider_landings pl "
             "WHERE pl.queue_item_id = landing.queue_item_id "
             "ORDER BY pl.sequence DESC LIMIT 1) "
+            "LEFT JOIN workflow_provider_landing_proofs landing_proof "
+            "ON landing_proof.workflow_execution_id = e.id "
+            "LEFT JOIN integration_target_holds target_hold "
+            "ON target_hold.integration_ref_id = queue.integration_ref_id "
+            "AND target_hold.state = 'open' "
             "LEFT JOIN workflow_completions completion "
             "ON completion.execution_id = e.id "
             "ORDER BY visible.group_order, e.updated_at DESC, e.id",
@@ -865,6 +882,32 @@ class ControlRoom:
         for record in records:
             record["responsibility"] = self.database._workflow_responsibility(
                 connection, record["id"]
+            )
+            landing = self.database._workflow_landing_record(
+                connection, record["id"], mode=record["landing_mode"]
+            )
+            if landing is None:
+                record["landing_provider_intent_id"] = None
+                record["landing_provider_effects"] = []
+                continue
+            record["landing_provider_available"] = landing["provider_available"]
+            intent = landing["provider_intent"]
+            record["landing_provider_intent_id"] = (
+                None if intent is None else intent["id"]
+            )
+            record["landing_provider_effects"] = (
+                []
+                if intent is None
+                else [
+                    {
+                        "id": effect["id"],
+                        "capability_name": effect["capability_name"],
+                        "state": effect["state"],
+                        "operation_state": effect["operation_state"],
+                        "service_operation_id": effect["service_operation_id"],
+                    }
+                    for effect in intent["effects"].values()
+                ]
             )
         return records
 
@@ -2332,7 +2375,23 @@ class ControlRoom:
             queue_state = workflow["landing_queue_state"]
             if queue_item_id is None:
                 continue
-            if queue_state == "refold_required":
+            if workflow["landing_target_hold_id"] is not None:
+                add(
+                    {
+                        "kind": "workflow.landing_target_held",
+                        "severity": "warning",
+                        "subject_type": "integration_target_hold",
+                        "subject_id": workflow["landing_target_hold_id"],
+                        "workflow_execution_id": workflow["id"],
+                        "queue_item_id": queue_item_id,
+                        "reason": workflow["landing_target_hold_reason"],
+                        "hold_version": workflow["landing_target_hold_version"],
+                        "landing_proof_id": workflow["landing_proof_id"],
+                        "landing_proof_status": workflow["landing_proof_status"],
+                    },
+                    workflow["landing_queue_updated_at"],
+                )
+            elif queue_state == "refold_required":
                 add(
                     {
                         "kind": "workflow.refold_required",
@@ -2340,21 +2399,6 @@ class ControlRoom:
                         "subject_type": "integration_queue_item",
                         "subject_id": queue_item_id,
                         "workflow_execution_id": workflow["id"],
-                    },
-                    workflow["landing_queue_updated_at"],
-                )
-            elif (
-                workflow["landing_mode"] == "provider"
-                and workflow["landing_provider_resource_id"] is None
-            ):
-                add(
-                    {
-                        "kind": "workflow.provider_target_required",
-                        "severity": "action",
-                        "subject_type": "workflow_execution",
-                        "subject_id": workflow["id"],
-                        "workflow_execution_id": workflow["id"],
-                        "queue_item_id": queue_item_id,
                     },
                     workflow["landing_queue_updated_at"],
                 )
@@ -2370,7 +2414,50 @@ class ControlRoom:
                         "subject_id": workflow["id"],
                         "workflow_execution_id": workflow["id"],
                         "queue_item_id": queue_item_id,
-                        "capability": "landing.invoke@1",
+                        "capability": (
+                            "activated-provider-effect-set"
+                            if workflow["workflow_activation_version_id"] is not None
+                            else "landing.invoke@1"
+                        ),
+                    },
+                    workflow["landing_queue_updated_at"],
+                )
+            elif (
+                workflow["landing_mode"] == "provider"
+                and workflow["workflow_activation_version_id"] is not None
+                and workflow["landing_provider_intent_id"] is None
+            ):
+                add(
+                    {
+                        "kind": "workflow.provider_intent_required",
+                        "severity": "action",
+                        "subject_type": "workflow_execution",
+                        "subject_id": workflow["id"],
+                        "workflow_execution_id": workflow["id"],
+                        "queue_item_id": queue_item_id,
+                    },
+                    workflow["landing_queue_updated_at"],
+                )
+            elif (
+                workflow["landing_mode"] == "provider"
+                and workflow["landing_provider_resource_id"] is None
+                and (
+                    workflow["workflow_activation_version_id"] is None
+                    or len(workflow["landing_provider_effects"]) == 2
+                    and all(
+                        effect["state"] == "confirmed"
+                        for effect in workflow["landing_provider_effects"]
+                    )
+                )
+            ):
+                add(
+                    {
+                        "kind": "workflow.provider_target_required",
+                        "severity": "action",
+                        "subject_type": "workflow_execution",
+                        "subject_id": workflow["id"],
+                        "workflow_execution_id": workflow["id"],
+                        "queue_item_id": queue_item_id,
                     },
                     workflow["landing_queue_updated_at"],
                 )

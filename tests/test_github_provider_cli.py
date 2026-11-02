@@ -47,6 +47,7 @@ from magic_glass_box.service_sidecar import ServiceSidecarSpec, UnixServiceSidec
 from tests.test_github_provider import (
     MERGED,
     api_response,
+    commit,
     pull,
     ref,
     request,
@@ -485,6 +486,7 @@ class GitHubProviderCLITests(unittest.TestCase):
                 [
                     api_response(200, pull(state="closed", merged=True)),
                     api_response(200, ref(MERGED)),
+                    api_response(200, commit(MERGED)),
                 ]
             ),
         )
@@ -896,6 +898,7 @@ class GitHubProviderCLITests(unittest.TestCase):
                 [
                     api_response(200, pull(state="closed", merged=True)),
                     api_response(200, ref(MERGED)),
+                    api_response(200, commit(MERGED)),
                 ]
             ),
         ).invoke(operation)

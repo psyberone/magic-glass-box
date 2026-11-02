@@ -344,8 +344,10 @@ candidate, independent reviewer, validation, bounded correction, landing, and
 closeout stages. It waits honestly for maintainer disposition when configured.
 At landing it uses only the mode pinned in the workflow configuration: manual
 mode requires an explicitly issued plan and nonce-bound receipt; provider mode
-requires an explicit target and the project's `landing.invoke@1` binding. It
-never falls back between the two:
+requires the project's exact activated publication, change-open, and landing
+bindings. Activated workflows derive the provider target from authoritative
+read-back; the older explicit-target command remains only for visibly
+pre-policy histories. It never falls back between modes or bindings.
 
 A reviewed correction may be a contiguous commit stack rather than a sibling
 candidate based directly on the original integration ref. MGB records and
@@ -360,7 +362,14 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   workflow manual-plan wfx_<id> --expected-version <version> \
   --remote origin --issued-by operator
 
-# Provider mode: bind the exact provider resource and merge method once.
+# Activated provider mode: record project-local proposal intent. The director
+# durably publishes the candidate, opens the change, and derives its identity.
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow provider-intent wfx_<id> --expected-version <version> \
+  --head-ref refs/heads/mgb/<candidate> --title '<pinned work-item title>' \
+  --body-file /absolute/proposal.md --configured-by operator
+
+# Pre-policy compatibility only: bind an already-open provider resource.
 PYTHONPATH=src python3.11 -m magic_glass_box \
   workflow provider-target wfx_<id> --expected-version <version> \
   --resource-id <pull-number> --merge-method squash \
