@@ -1,7 +1,8 @@
 # Practice-informed reusable workflow templates
 
-**Status: Milestone 17 consultation in progress; foundation resolved and review
-shape under consultation; Milestone 18 remains the first delivery.**
+**Status: Milestone 17 consultation in progress; foundation and review shape
+resolved, lifecycle under consultation; Milestone 18 remains the first
+delivery.**
 
 MGB already implements fixed, versioned `discovery-v1`, `implementation-v1`,
 and `advisory-review-v1` prescriptions. The next template work is not a request
@@ -119,8 +120,20 @@ ceiling-exception class is pre-delegated. A typed cosmetic metadata amendment
 may remain maintainer-only, while ambiguous or claim-significant changes require
 renewed disposition and independent review.
 
-The second bounded wave now covers Discovery depth, gate versus advisory
-authority, delta re-review, budget ownership, and correction-round ceilings.
+The owner also accepted the review-shape decisions. Discovery keeps one
+investigator and coordinator, permits later producer reuse without amendment
+authority, and records an exact skip when policy does not require it. Gate and
+advisory evidence remain blind and separate; a smaller measurement review is a
+future fixed topology rather than an opaque extra seat. A mechanical refold is
+a typed machine attestation, never a reviewer verdict, and its implementation
+is deferred unless the existing fold ledger makes it negligible. Risk tiers
+combine an evidence floor with resource ceilings including shared-host
+concurrency, and do not permit unbounded delivery time. One lineage ceiling
+covers review and maintainer corrections with a cause recorded for every round;
+proven refolds and validation/provider retries remain separately accounted.
+
+The third bounded wave now covers mandatory lifecycle reactions, wake and
+dead-driver behavior, follow-up admission, and code-as-read versus code-as-run.
 Later questions remain open; no consultation decision has yet authorized a
 production change.
 

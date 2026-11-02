@@ -2115,7 +2115,7 @@ coordinator-reconciled postmortem suitable as M17 design input.
 
 ## Milestone 17: reusable workflow-template contract
 
-**Status: in progress; foundation resolved and review-shape consultation open**
+**Status: in progress; foundation and review shape resolved, lifecycle open**
 
 Bring the Panopticon coordinator in formally as the practice-domain
 co-designer. Use a living, decision-tracked consultation to reconcile three
@@ -2162,9 +2162,18 @@ separation after independent review and owner disposition. No ceiling exception
 is pre-delegated, and ambiguous or claim-significant metadata changes require
 renewed disposition and independent review.
 
-Consultation wave 2 now covers Discovery topology, gate versus advisory review,
-delta re-review, budgets, and correction-round ceilings. No production schema
-or runtime work has begun.
+The owner then accepted the review-shape contract: one-investigator Discovery
+with exact skip evidence and immutable accepted rulings; blind and separate
+gate/advisory evidence; future fixed measurement review outside M18; a
+mechanical-refold attestation that is never a reviewer verdict and is deferred
+unless already negligible; evidence-floor/resource-ceiling tiers with
+shared-host concurrency and no unbounded delivery time; and one caused,
+lineage-wide correction ceiling with separately accounted validation/provider
+retries.
+
+Consultation wave 3 now covers mandatory lifecycle reactions, wake and
+dead-driver behavior, follow-up admission, and code-as-read versus code-as-run.
+No production schema or runtime work has begun.
 
 **Exit:** a resolved/deferred decision log, fixed topology and typed-artifact
 contract, authority and negative-case tables, migration ruling, bounded
