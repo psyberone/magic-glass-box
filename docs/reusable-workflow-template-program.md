@@ -1,8 +1,7 @@
 # Practice-informed reusable workflow templates
 
-**Status: Milestone 17 consultation in progress; foundation, review shape, and
-lifecycle resolved, with boundary and closeout under consultation; Milestone
-18 remains the first delivery.**
+**Status: Milestone 17 contract complete; Milestone 18 is the first bounded
+delivery.**
 
 MGB already implements fixed, versioned `discovery-v1`, `implementation-v1`,
 and `advisory-review-v1` prescriptions. The next template work is not a request
@@ -143,10 +142,49 @@ Reviewer measurements run without credentials or effect authority and never
 satisfy immutable validation. The first contract supports explicit per-
 obligation deferred validation, not a general waiver.
 
-The final bounded wave now covers provider/local translation, effect
-reconciliation, the meaning of landed, mirrors, open obligations, migration,
-and M18's smallest accepted slice. No consultation decision has yet authorized
-a production change.
+The owner accepted the final boundary and closeout contract. Every provider
+effect uses an authority-grained typed translation and authoritative read-back;
+partial capability fails the whole intent, provider metadata and secondary
+effects remain effect surfaces, and controllers are structurally allowlisted
+and pinned. A narrowly bounded owner-authorized external correction may be
+reconciled as break-glass evidence, but workers and portable workflows never
+receive raw provider authority.
+
+Primary landing requires authoritative method-specific commit/tree proof, not
+a provider success response or local checkout. Uncertain landing automatically
+holds the target. Mirrors, tracker closure, metadata conformance, closeout, and
+open obligations remain separate facts. Migration is future-only with explicit
+owner-acknowledged project activation, policy version on every new record, and
+no synthetic backfill. In-flight work finishes under its starting policy unless
+the owner records an exact stage-boundary rebind.
+
+## Accepted M17 exit contract
+
+M18 implements one versioned portable policy for the existing
+`implementation-v1` topology, not a workflow builder. MGB and Imitation Krab
+must use the same portable policy digest; their activations may differ only in
+declared local bindings such as profiles, toolchains, capabilities, budgets,
+wake class, and merge method. Removing a required binding makes the policy
+visibly unavailable without fallback.
+
+The first slice includes total derived responsibility, independent review and
+validation evidence, fixed resource and round bounds, explicit manual wake,
+authority-grained provider translation/read-back, exact primary landing proof,
+and closeout with deadline-bearing open obligations. It implements only merge
+methods the two activations actually use.
+
+Acceptance forces one interruption between effect request and receipt in each
+project, replays M16's wrong-project metadata and return-shape failures, and
+retains one genuine deferred obligation through a truthful “closed, N open”
+state. The Panopticon coordinator reviews practice fidelity; a separate blind
+reviewer supplies independent technical and security approval.
+
+Deferred work includes arbitrary composition, unattended watchdog replacement,
+independent Discovery, measurement-review and heightened/advisory orchestration,
+project-local delta review, unused merge methods, mirror-required closeout,
+general validation waivers, and provider-ticket publication. The two-project
+proof demonstrates binding portability, not generality, scale, or autonomous
+operation.
 
 ## Reuse boundary
 
@@ -176,12 +214,11 @@ absent, the template is unavailable rather than partially enabled.
 
 ## Implementation and proof boundary
 
-The first implementation milestone takes only the smallest accepted contract
-slice. RED-first happy and sad paths, the 85% branch-aware coverage floor, and
-focused mutation checks apply normally. Its live proof must run the same
-reusable contract in two materially different projects—initially MGB and
-Imitation Krab are the natural owned candidates—without embedding either
-project's provider or test mechanics.
+The first implementation milestone takes only the accepted slice above.
+RED-first happy and sad paths, the 85% branch-aware coverage floor, and an 80%
+focused meaningful mutation-kill floor apply. Its live proof must run the same
+reusable contract in MGB and Imitation Krab without embedding either project's
+provider or test mechanics.
 
 The proof must preserve producer/reviewer separation, exact-head authority,
 genuine changes-requested return when one occurs, restart recovery, bounded

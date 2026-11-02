@@ -2115,8 +2115,7 @@ coordinator-reconciled postmortem suitable as M17 design input.
 
 ## Milestone 17: reusable workflow-template contract
 
-**Status: in progress; foundation, review shape, and lifecycle resolved;
-boundary and closeout open**
+**Status: complete; contract accepted for bounded M18 implementation**
 
 Bring the Panopticon coordinator in formally as the practice-domain
 co-designer. Use a living, decision-tracked consultation to reconcile three
@@ -2181,18 +2180,28 @@ authority. Sandboxed reviewer measurement remains distinct from immutable
 validation, and the initial contract permits explicit deferred obligations but
 not validation waivers.
 
-Consultation wave 4 now covers provider/local translation, effect
-reconciliation, landing and mirror semantics, open obligations, migration, and
-the smallest M18 slice. No production schema or runtime work has begun.
+The owner accepted the final boundary and closeout wave. Provider effects use
+authority-grained typed translations, structural controller identity, declared
+secondary effects, and authoritative read-back; partial capability stops the
+whole intent. An owner may authorize one exact external break-glass correction
+for reconciliation, but no worker or portable workflow receives raw provider
+authority. Primary landing requires method-specific authoritative commit/tree
+proof, uncertain landing automatically holds the target, and mirrors, metadata,
+tracker closure, delivery closeout, and open obligations remain separate facts.
 
-**Exit:** a resolved/deferred decision log, fixed topology and typed-artifact
-contract, authority and negative-case tables, migration ruling, bounded
-acceptance plan, and one deliberately small recommendation for M18. See
+Migration is future-only with owner-acknowledged activation, policy version on
+every new record, named rule retirement, and no synthetic backfill. In-flight
+work finishes under its starting policy unless the owner explicitly rebinds it
+at a stage boundary.
+
+**Exit accepted:** the resolved decision log, fixed topology and typed-artifact
+contract, authority and negative-case tables, future-only migration ruling,
+bounded acceptance plan, and deliberately small M18 recommendation are in
 [reusable-workflow-template-program.md](reusable-workflow-template-program.md).
 
 ## Milestone 18: first reusable-template delivery
 
-**Status: planned from the accepted M17 contract**
+**Status: next; planned from the accepted M17 contract**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2201,10 +2210,29 @@ required local profile, capability, controller, budget, and owner policy or
 fail closed.
 
 Develop RED-first across happy and sad paths, retain the 85% branch-aware
-coverage floor, and run focused mutation checks over the new authority and
-transition boundaries. Prove the same reusable contract in two materially
-different owned projects—initially MGB and Imitation Krab are the natural
-candidates—without embedding either project's provider or test mechanics.
+coverage floor and an 80% focused meaningful mutation-kill floor over the new
+authority and transition boundaries. Prove the same reusable contract in two
+materially different owned projects—initially MGB and Imitation Krab are the
+natural candidates—without embedding either project's provider or test
+mechanics.
+
+Both projects must load the same portable policy digest, with differences only
+in declared activation bindings. The slice includes total derived
+responsibility, fixed resource and review-round bounds, explicit manual wake,
+authority-grained provider translation/read-back, exact landing proof for only
+the merge methods in use, and deadline-bearing open obligations. A missing
+required binding must make the policy visibly unavailable with no fallback.
+
+Force one interruption per project between provider request and receipt and
+reconcile from authoritative observation. Replay M16's wrong-project metadata
+helper and return-shape confusion as regression tests, and carry one genuine
+deferred obligation through a truthful “closed, N open” state. Do not claim
+generality, scale, or unattended operation from this two-project proof.
+
+Defer arbitrary composition, watchdog replacement, independent Discovery,
+measurement-review and heightened/advisory orchestration, project-local delta
+review, unused merge methods, mirror-required closeout, general validation
+waivers, and provider-ticket publication.
 
 The Panopticon coordinator reviews fidelity to the accepted M17 practice
 contract. A separate blind reviewer and the ordinary security/quality gates
