@@ -14,6 +14,7 @@ from magic_glass_box.db import (
     NotFoundError,
 )
 from magic_glass_box.domain import ProjectContext, ValidationError
+from tests.schema_helpers import downgrade_workflow_policy_activation
 from tests.test_service_sidecars import (
     operation_spec,
     resource_operation_spec,
@@ -366,6 +367,7 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
 
     def test_schema_twenty_four_migrates_schema_twenty_three_once(self) -> None:
         with closing(self.database.connect()) as connection, connection:
+            downgrade_workflow_policy_activation(connection)
             connection.execute("DROP TABLE work_item_service_imports")
             connection.execute("DROP TABLE workflow_scope_reviews")
             connection.execute("DROP TABLE workflow_scope_bindings")

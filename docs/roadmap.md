@@ -2201,7 +2201,8 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 
 ## Milestone 18: first reusable-template delivery
 
-**Status: next; planned from the accepted M17 contract**
+**Status: in progress; portable policy and project-activation foundation
+implemented in schema v46**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2237,6 +2238,23 @@ waivers, and provider-ticket publication.
 The Panopticon coordinator reviews fidelity to the accepted M17 practice
 contract. A separate blind reviewer and the ordinary security/quality gates
 decide whether the implementation lands.
+
+M18A publishes the project-independent policy and project-local activation
+documents, stores their immutable revision histories, and exposes owner-
+acknowledged CLI/service operations. Activation validates the exact
+configuration, obligation mapping, reduced resources, manual wake bindings,
+merge method, and active semantic capability/controller pins. Activated starts
+pin that exact revision and fail closed when it is stale or unavailable;
+existing histories remain visibly `pre_policy` without synthetic authority.
+This is the durable authority foundation only. Total responsibility, effect
+translation/read-back, landing proof, open obligations, and the two-project
+interruption proof remain in the subsequent M18 slices.
+
+M18A's checkpoint gate passes 1,467 tests at 87% aggregate statement-plus-
+branch coverage. The new policy domain and storage modules measure 91% in the
+focused branch-aware report. A clean, two-worker focused mutation wave over
+those modules killed 575/666 mutants (86.34%), with no timeout, crash, or
+uncovered outcome.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,
@@ -2281,6 +2299,70 @@ eligible only after the operator turns it into a bounded recipe, and it still
 runs in a disposable job container rather than the controller. The complete
 design and acceptance boundary are in
 [containerized-runner-appliance.md](containerized-runner-appliance.md).
+
+## Unsequenced candidate: project baseline drift awareness
+
+**Status: accepted roadmap need; sequencing deferred**
+
+MGB may operate beside human developers and other automation that advance the
+authoritative repository independently. Add a provider-neutral, read-only
+baseline observer so MGB can detect and route those changes without silently
+pulling code into a running workspace. This candidate does not expand M18 or
+M19. It may reuse exact base, environment, and invalidation facts those
+milestones already require, but its watcher, dependency analysis, notification,
+and context-amendment behavior remain a separate future slice.
+
+Track three identities independently:
+
+- the latest authoritative remote head and tree;
+- the project baseline MGB has admitted; and
+- the exact base, dependency resolution, toolchain, and image pinned to each
+  execution.
+
+Classify each observation as `in_sync`, `remote_ahead`, `local_ahead`,
+`diverged`, `rewritten`, or `unknown`. A changed remote creates an append-only
+drift event with old and new identities, bounded path/diff metadata, manifest
+and lockfile changes, declared and resolved dependency-version changes, and
+toolchain or image changes. Remote content remains untrusted at ingestion: do
+not execute hooks, package-manager scripts, or changed code merely to describe
+the delta.
+
+Reactions depend on execution state:
+
+- work not yet started uses the latest accepted baseline and context;
+- in-flight work keeps its immutable workspace and receives a durable,
+  exact-revision drift notice that requires acknowledgement;
+- review or landing readiness is invalidated and follows the accepted
+  refold/fresh-evidence path; and
+- closed work retains the observation for audit and future planning without
+  being reopened automatically.
+
+A coordinator or maintainer records `unaffected`,
+`context_refresh_required`, `candidate_refresh_required`, `stop`, or
+`owner_ruling_required`. MGB may mechanically identify changed paths, manifests,
+locks, and versions; it may not decide that a breaking or semantic change is
+harmless. A repository title, release note, or commit message is evidence to
+inspect, not authority.
+
+Keep machine-managed project facts separate from authored documentation.
+Observed baseline, lockfile digest, resolved versions, and image digest may
+advance after bounded validation. Project context or repository documentation
+receives a proposed amendment with exact provenance; acceptance creates a new
+context revision and visibly stales dependent work. An execution always reports
+what its environment actually contained, so a repository that now declares
+library v2 cannot make an in-flight v1 container appear current.
+
+Expose observation through narrow capabilities such as
+`repository.refs.observe@1` and `repository.delta.describe@1`, not raw forge or
+Git commands. Credentials remain in the controller/sidecar boundary. The
+feature never auto-pulls, rebases, edits documentation, changes an agent's
+workspace, or grants provider authority.
+
+Before sequencing, define bounded proof for remote advance before dispatch,
+during execution, and before landing; divergence and history rewrite; a human-
+landed breaking dependency update; declared-versus-resolved version mismatch;
+durable notification and acknowledgement; accepted and rejected context
+amendments; and unavailable observation without guessed fallback.
 
 ## Milestone 20+: provider breadth by demonstrated need
 

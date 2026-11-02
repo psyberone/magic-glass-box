@@ -23,6 +23,7 @@ from magic_glass_box.workflows import (
     ADVISORY_REVIEW_TEMPLATE_REVISION,
     WorkflowConfigurationSpec,
 )
+from tests.schema_helpers import downgrade_workflow_policy_activation
 
 
 def blind_review_value(**overrides: object) -> dict[str, object]:
@@ -655,6 +656,7 @@ class AdvisoryConfigurationStorageTests(unittest.TestCase):
         self,
     ) -> None:
         with self.database.connect() as connection:
+            downgrade_workflow_policy_activation(connection)
             connection.execute("DROP TABLE work_item_service_imports")
             connection.execute("DROP TABLE workflow_scope_reviews")
             connection.execute("DROP TABLE workflow_scope_bindings")
@@ -677,7 +679,7 @@ class AdvisoryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 45)
+        self.assertEqual(SCHEMA_VERSION, 46)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         self.assertEqual(

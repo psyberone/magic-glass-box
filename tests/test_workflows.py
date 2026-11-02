@@ -45,6 +45,7 @@ from magic_glass_box.workflows import (
     WorkflowConfigurationSpec,
     WorkflowTemplateDefinition,
 )
+from tests.schema_helpers import downgrade_workflow_policy_activation
 
 
 class WorkflowConfigurationSpecTests(unittest.TestCase):
@@ -267,6 +268,7 @@ class WorkflowStorageTests(unittest.TestCase):
     def downgrade_configuration_roles_to_v31(
         connection: sqlite3.Connection,
     ) -> None:
+        downgrade_workflow_policy_activation(connection)
         connection.executescript(
             """
             PRAGMA foreign_keys = OFF;
@@ -341,6 +343,7 @@ class WorkflowStorageTests(unittest.TestCase):
 
     @staticmethod
     def downgrade_discovery_to_v32(connection: sqlite3.Connection) -> None:
+        downgrade_workflow_policy_activation(connection)
         connection.executescript(
             """
             DROP TABLE workflow_scope_reviews;
@@ -832,6 +835,7 @@ class WorkflowStorageTests(unittest.TestCase):
                 "project_key",
                 "template_definition_id",
                 "configuration_version_id",
+                "workflow_activation_version_id",
                 "configuration_id",
                 "configuration_version",
                 "configuration_name",
@@ -861,11 +865,14 @@ class WorkflowStorageTests(unittest.TestCase):
                 "landing",
                 "completion",
                 "scope_binding",
+                "portable_policy",
             },
         )
         self.assertIsNone(execution["landing"])
         self.assertIsNone(execution["completion"])
         self.assertIsNone(execution["scope_binding"])
+        self.assertIsNone(execution["workflow_activation_version_id"])
+        self.assertEqual(execution["portable_policy"], {"status": "pre_policy"})
         expected_request = {
             "schema_version": 1,
             "project_key": "workflow-project",

@@ -45,6 +45,7 @@ from magic_glass_box.provider import (
 )
 from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import AcceptedProviderResponse, ControlPlane
+from tests.schema_helpers import downgrade_workflow_policy_activation
 
 
 def connector_spec(socket_path: Path) -> InferenceConnectorSpec:
@@ -415,6 +416,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             run["id"], grant_name="example-main", request={"input": "count me"}
         )
         with sqlite3.connect(self.database.path) as connection:
+            downgrade_workflow_policy_activation(connection)
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;
@@ -1649,6 +1651,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
         invocation_id = self.database.list_provider_invocations(run["id"])[0]["id"]
 
         with sqlite3.connect(self.database.path) as connection:
+            downgrade_workflow_policy_activation(connection)
             connection.executescript(
                 """
                 PRAGMA foreign_keys = OFF;

@@ -66,6 +66,7 @@ from .storage.schema import (
     RUN_REPLACEMENT_SCHEMA,
     SCHEMA,
     SCHEMA_V1,
+    SCHEMA_V45,
     SCHEMA_VERSION,
     SERVICE_RESOURCE_SCHEMA,
     SERVICE_SIDECAR_SCHEMA,
@@ -79,6 +80,7 @@ from .storage.schema import (
     WORKFLOW_DIRECTOR_SCHEMA,
     WORKFLOW_LANDING_CHAIN_SCHEMA,
     WORKFLOW_LANDING_SCHEMA,
+    WORKFLOW_POLICY_ACTIVATION_SCHEMA,
     WORKFLOW_PRESCRIPTION_SCHEMA,
     WORKFLOW_SCOPE_BINDING_SCHEMA,
     WORKFLOW_SCOPE_REVIEW_SCHEMA,
@@ -88,6 +90,7 @@ from .storage.service_sidecars import ServiceSidecarStorage
 from .storage.supervision import SupervisionStorage
 from .storage.work import WorkStorage
 from .storage.work_items import WorkItemStorage
+from .storage.workflow_policies import WorkflowPolicyStorage
 from .storage.workflows import WorkflowStorage
 
 __all__ = [
@@ -137,6 +140,7 @@ __all__ = [
     "RUN_REPLACEMENT_SCHEMA",
     "RUN_PAUSED_STATE_MIGRATION",
     "SCHEMA",
+    "SCHEMA_V45",
     "SCHEMA_V1",
     "SCHEMA_VERSION",
     "SERVICE_RESOURCE_SCHEMA",
@@ -153,6 +157,7 @@ __all__ = [
     "WORKFLOW_LANDING_CHAIN_SCHEMA",
     "WORKFLOW_LANDING_SCHEMA",
     "WORKFLOW_PRESCRIPTION_SCHEMA",
+    "WORKFLOW_POLICY_ACTIVATION_SCHEMA",
     "WORKFLOW_SCOPE_BINDING_SCHEMA",
     "WORKFLOW_SCOPE_REVIEW_SCHEMA",
     "WORKFLOW_TEMPLATE_SCHEMA",
@@ -163,6 +168,7 @@ __all__ = [
 class Database(
     AdvisoryStorage,
     DiscoveryStorage,
+    WorkflowPolicyStorage,
     WorkflowStorage,
     SupervisionStorage,
     ServiceSidecarStorage,

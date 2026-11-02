@@ -41,6 +41,10 @@ from magic_glass_box.gateway import GatewayError
 from magic_glass_box.inference import InferenceConnectorError
 from magic_glass_box.krab import ActivityPage
 from magic_glass_box.worker_transport import WorkerTransportError
+from magic_glass_box.workflow_policy import (
+    WorkflowActivationSpec,
+    WorkflowPolicySpec,
+)
 from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 
@@ -169,6 +173,30 @@ class FakeControlPlane:
 
     def list_workflow_configurations(self, **kwargs: object) -> dict[str, object]:
         return self._called("workflow.config-list", **kwargs)
+
+    def create_workflow_policy(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.policy-create", **kwargs)
+
+    def revise_workflow_policy(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.policy-revise", **kwargs)
+
+    def get_workflow_policy(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.policy-show", **kwargs)
+
+    def list_workflow_policies(self) -> dict[str, object]:
+        return self._called("workflow.policy-list")
+
+    def create_workflow_activation(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.activation-create", **kwargs)
+
+    def revise_workflow_activation(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.activation-revise", **kwargs)
+
+    def get_workflow_activation(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.activation-show", **kwargs)
+
+    def list_workflow_activations(self, **kwargs: object) -> dict[str, object]:
+        return self._called("workflow.activation-list", **kwargs)
 
     def start_workflow_execution(self, **kwargs: object) -> dict[str, object]:
         return self._called("workflow.start", **kwargs)
@@ -683,6 +711,35 @@ class CLITests(unittest.TestCase):
                 True,
                 (
                     (
+                        "policy-create",
+                        "create a portable workflow policy",
+                    ),
+                    (
+                        "policy-revise",
+                        "append an immutable workflow policy revision",
+                    ),
+                    (
+                        "policy-show",
+                        "show one portable workflow policy revision",
+                    ),
+                    ("policy-list", "list latest portable workflow policies"),
+                    (
+                        "activation-create",
+                        "activate one exact policy for a project",
+                    ),
+                    (
+                        "activation-revise",
+                        "append an owner-acknowledged activation revision",
+                    ),
+                    (
+                        "activation-show",
+                        "show one project workflow activation revision",
+                    ),
+                    (
+                        "activation-list",
+                        "list latest project workflow activations",
+                    ),
+                    (
                         "config-create",
                         "create a versioned workflow configuration",
                     ),
@@ -1107,6 +1164,23 @@ class CLITests(unittest.TestCase):
                     "--spec",
                     "--created-by",
                 ),
+                ("workflow", "policy-create"): ("--spec", "--created-by"),
+                ("workflow", "policy-revise"): ("--spec", "--created-by"),
+                ("workflow", "activation-create"): (
+                    "--project",
+                    "--policy",
+                    "--expected-policy-version",
+                    "--spec",
+                    "--acknowledged-by",
+                ),
+                ("workflow", "activation-revise"): (
+                    "--project",
+                    "--policy",
+                    "--expected-policy-version",
+                    "--spec",
+                    "--acknowledged-by",
+                ),
+                ("workflow", "activation-show"): ("--project",),
                 ("workflow", "config-create"): (
                     "--project",
                     "--producer",
@@ -2577,6 +2651,16 @@ class CLITests(unittest.TestCase):
                 "revise": "append an immutable profile revision",
             },
             "workflow": {
+                "policy-create": "create a portable workflow policy",
+                "policy-revise": "append an immutable workflow policy revision",
+                "policy-show": "show one portable workflow policy revision",
+                "policy-list": "list latest portable workflow policies",
+                "activation-create": "activate one exact policy for a project",
+                "activation-revise": (
+                    "append an owner-acknowledged activation revision"
+                ),
+                "activation-show": ("show one project workflow activation revision"),
+                "activation-list": "list latest project workflow activations",
                 "config-create": "create a versioned workflow configuration",
                 "config-revise": "append an immutable configuration revision",
                 "config-show": "show one workflow configuration revision",
@@ -2854,6 +2938,8 @@ class CLITests(unittest.TestCase):
                     "1",
                     "--expected-thread-version",
                     "4",
+                    "--expected-activation-version",
+                    "1",
                     "--discovery-execution",
                     "dxe_" + "9" * 32,
                     "--idempotency-key",
@@ -2873,6 +2959,7 @@ class CLITests(unittest.TestCase):
                         "expected_work_item_version_id": "wiv_" + "3" * 32,
                         "expected_thread_generation": 1,
                         "expected_thread_version": 4,
+                        "expected_activation_version": 1,
                         "discovery_execution_id": "dxe_" + "9" * 32,
                         "idempotency_key": "workflow-start-1",
                         "requested_by_handle": "operator",
@@ -2980,6 +3067,223 @@ class CLITests(unittest.TestCase):
                         "merge_method": "squash",
                         "configured_by_handle": "operator",
                     },
+                ),
+            ),
+        )
+        for arguments, expected_call in cases:
+            with self.subTest(arguments=arguments):
+                stdout = io.StringIO()
+                with (
+                    mock.patch("magic_glass_box.cli.ControlPlane", return_value=fake),
+                    redirect_stdout(stdout),
+                ):
+                    status = main(["--db", str(self.database), *arguments])
+                self.assertEqual(status, 0)
+                self.assertEqual(fake.calls[-1], expected_call)
+
+    def test_workflow_policy_and_activation_commands_dispatch_exact_contracts(
+        self,
+    ) -> None:
+        policy_path = Path(self.temporary.name) / "portable-policy.json"
+        policy_value = {
+            "schema_version": 1,
+            "prescription": {
+                "key": "implementation-v1",
+                "revision": (
+                    "b165a0973686c2e87ed8b4150e919e88f826b8558fe560eafcb256a87b5d75ff"
+                ),
+            },
+            "evidence_floor": [
+                "maintainer_disposition",
+                "reviewed_content",
+                "validated_execution",
+            ],
+            "validation_obligations": ["coverage", "mutation", "tests"],
+            "resource_maxima": {
+                "review_rounds": 4,
+                "seat_count": 4,
+                "shared_host_concurrency": 2,
+                "wall_time_seconds": 21600,
+            },
+            "wake_mode": "manual",
+            "required_capabilities": [
+                {"mode": "effect", "name": "change.open", "version": 1},
+                {"mode": "effect", "name": "landing.invoke", "version": 1},
+                {"mode": "effect", "name": "refs.publish", "version": 1},
+            ],
+            "landing_methods": ["squash"],
+            "allow_deferred_validation": True,
+        }
+        policy_path.write_text(json.dumps(policy_value), encoding="utf-8")
+        expected_policy = WorkflowPolicySpec.from_mapping(policy_value)
+
+        activation_path = Path(self.temporary.name) / "activation.json"
+        activation_value = {
+            "schema_version": 1,
+            "policy_sha256": expected_policy.digest,
+            "workflow_configuration_version_id": "wfv_" + "1" * 32,
+            "validation_bindings": [
+                {"obligation": "coverage", "validation": "coverage"},
+                {"obligation": "mutation", "validation": "mutation"},
+                {"obligation": "tests", "validation": "unit"},
+            ],
+            "capability_bindings": [
+                {
+                    "binding_id": "cpb_" + "2" * 32,
+                    "mode": "effect",
+                    "name": "change.open",
+                    "version": 1,
+                },
+                {
+                    "binding_id": "cpb_" + "3" * 32,
+                    "mode": "effect",
+                    "name": "landing.invoke",
+                    "version": 1,
+                },
+                {
+                    "binding_id": "cpb_" + "4" * 32,
+                    "mode": "effect",
+                    "name": "refs.publish",
+                    "version": 1,
+                },
+            ],
+            "resources": {
+                "review_rounds": 3,
+                "seat_count": 2,
+                "shared_host_concurrency": 1,
+                "wall_time_seconds": 10800,
+            },
+            "wake_bindings": [
+                {"role": "producer", "wake_class": "human_turn_only"},
+                {"role": "reviewer", "wake_class": "human_turn_only"},
+            ],
+            "merge_method": "squash",
+            "retired_rules": [],
+        }
+        activation_path.write_text(json.dumps(activation_value), encoding="utf-8")
+        expected_activation = WorkflowActivationSpec.from_mapping(activation_value)
+        fake = FakeControlPlane()
+        cases = (
+            (
+                [
+                    "workflow",
+                    "policy-create",
+                    "implementation",
+                    "--spec",
+                    str(policy_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "workflow.policy-create",
+                    {
+                        "name": "implementation",
+                        "spec": expected_policy,
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "policy-revise",
+                    "implementation",
+                    "--spec",
+                    str(policy_path),
+                    "--created-by",
+                    "operator",
+                ],
+                (
+                    "workflow.policy-revise",
+                    {
+                        "name": "implementation",
+                        "spec": expected_policy,
+                        "created_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                ["workflow", "policy-show", "implementation", "--version", "2"],
+                (
+                    "workflow.policy-show",
+                    {"name": "implementation", "version": 2},
+                ),
+            ),
+            (
+                ["workflow", "policy-list"],
+                ("workflow.policy-list", {}),
+            ),
+            (
+                [
+                    "workflow",
+                    "activation-create",
+                    "--project",
+                    "box-project",
+                    "--policy",
+                    "implementation",
+                    "--expected-policy-version",
+                    "2",
+                    "--spec",
+                    str(activation_path),
+                    "--acknowledged-by",
+                    "operator",
+                ],
+                (
+                    "workflow.activation-create",
+                    {
+                        "project_key": "box-project",
+                        "policy_name": "implementation",
+                        "expected_policy_version": 2,
+                        "spec": expected_activation,
+                        "acknowledged_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "activation-revise",
+                    "--project",
+                    "box-project",
+                    "--policy",
+                    "implementation",
+                    "--expected-policy-version",
+                    "2",
+                    "--spec",
+                    str(activation_path),
+                    "--acknowledged-by",
+                    "operator",
+                ],
+                (
+                    "workflow.activation-revise",
+                    {
+                        "project_key": "box-project",
+                        "policy_name": "implementation",
+                        "expected_policy_version": 2,
+                        "spec": expected_activation,
+                        "acknowledged_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "activation-show",
+                    "--project",
+                    "box-project",
+                    "--version",
+                    "2",
+                ],
+                (
+                    "workflow.activation-show",
+                    {"project_key": "box-project", "version": 2},
+                ),
+            ),
+            (
+                ["workflow", "activation-list", "--project", "box-project"],
+                (
+                    "workflow.activation-list",
+                    {"project_key": "box-project"},
                 ),
             ),
         )

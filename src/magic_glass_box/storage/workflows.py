@@ -928,6 +928,7 @@ class WorkflowStorage:
         expected_thread_generation: int,
         expected_thread_version: int,
         discovery_execution_id: str | None,
+        expected_activation_version: int | None,
     ) -> dict[str, Any]:
         request = {
             "schema_version": 1,
@@ -943,6 +944,8 @@ class WorkflowStorage:
         }
         if discovery_execution_id is not None:
             request["discovery_execution_id"] = discovery_execution_id
+        if expected_activation_version is not None:
+            request["expected_activation_version"] = expected_activation_version
         return request
 
     def start_workflow_execution(
@@ -960,6 +963,7 @@ class WorkflowStorage:
         idempotency_key: str,
         requested_by: str,
         discovery_execution_id: str | None = None,
+        expected_activation_version: int | None = None,
     ) -> dict[str, Any]:
         project_key = validate_project_key(project_key)
         configuration_name = validate_name(
@@ -990,6 +994,11 @@ class WorkflowStorage:
                 field="discovery_execution_id",
                 max_bytes=64,
             )
+        if expected_activation_version is not None:
+            self._positive_integer(
+                expected_activation_version,
+                field="expected_activation_version",
+            )
         idempotency_key = self._workflow_idempotency_key(idempotency_key)
         request = self._start_request(
             project_key=project_key,
@@ -1002,6 +1011,7 @@ class WorkflowStorage:
             expected_thread_generation=expected_thread_generation,
             expected_thread_version=expected_thread_version,
             discovery_execution_id=discovery_execution_id,
+            expected_activation_version=expected_activation_version,
         )
         request_json = canonical_json(request)
         request_sha256 = content_sha256(request_json)
@@ -1078,6 +1088,14 @@ class WorkflowStorage:
                         )
                     if configuration["active_role_count"] != 2:
                         raise ConflictError("workflow role profile is inactive")
+                    activation = None
+                    if expected_activation_version is not None:
+                        activation = self._resolve_workflow_activation_for_start(
+                            connection,
+                            project_key=project_key,
+                            configuration_version_id=configuration["version_id"],
+                            expected_version=expected_activation_version,
+                        )
                     work_item = connection.execute(
                         "SELECT wi.project_id, wiv.id AS work_item_version_id, "
                         "wt.id AS work_thread_id, wt.generation, wt.state, "
@@ -1139,17 +1157,23 @@ class WorkflowStorage:
                     connection.execute(
                         "INSERT INTO workflow_executions "
                         "(id, project_id, template_definition_id, "
-                        "configuration_version_id, context_version_id, work_item_id, "
-                        "work_item_version_id, work_thread_id, work_thread_generation, "
-                        "source_revision, state, stage, version, request_json, "
-                        "content_sha256, idempotency_key, requested_by, created_at, "
-                        "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', "
-                        "'build', 1, ?, ?, ?, ?, ?, ?)",
+                        "configuration_version_id, workflow_activation_version_id, "
+                        "context_version_id, work_item_id, work_item_version_id, "
+                        "work_thread_id, work_thread_generation, source_revision, "
+                        "state, stage, version, request_json, content_sha256, "
+                        "idempotency_key, requested_by, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'build', "
+                        "1, ?, ?, ?, ?, ?, ?)",
                         (
                             execution_id,
                             project["id"],
                             configuration["template_definition_id"],
                             configuration["version_id"],
+                            (
+                                None
+                                if activation is None
+                                else activation["workflow_activation_version_id"]
+                            ),
                             project["context_version_id"],
                             work_item_id,
                             work_item["work_item_version_id"],
@@ -1168,8 +1192,28 @@ class WorkflowStorage:
                         "INSERT INTO workflow_execution_events "
                         "(execution_id, sequence, kind, from_state, to_state, actor, "
                         "metadata_json, created_at) VALUES (?, 1, "
-                        "'workflow.started', NULL, 'active', ?, '{}', ?)",
-                        (execution_id, requested_by, now),
+                        "'workflow.started', NULL, 'active', ?, ?, ?)",
+                        (
+                            execution_id,
+                            requested_by,
+                            canonical_json(
+                                {}
+                                if activation is None
+                                else {
+                                    "workflow_activation_version_id": activation[
+                                        "workflow_activation_version_id"
+                                    ],
+                                    "workflow_policy_id": activation["policy"]["id"],
+                                    "workflow_policy_version": activation["policy"][
+                                        "version"
+                                    ],
+                                    "workflow_policy_sha256": activation["policy"][
+                                        "content_sha256"
+                                    ],
+                                }
+                            ),
+                            now,
+                        ),
                     )
                     if scope_ruling is not None:
                         connection.execute(
@@ -1270,6 +1314,7 @@ class WorkflowStorage:
         row = connection.execute(
             "SELECT e.id, e.project_id, p.krab_project_key AS project_key, "
             "e.template_definition_id, e.configuration_version_id, "
+            "e.workflow_activation_version_id, "
             "cv.configuration_id, cv.version AS configuration_version, "
             "c.name AS configuration_name, e.context_version_id, "
             "pc.version AS context_version, e.work_item_id, "
@@ -1329,6 +1374,31 @@ class WorkflowStorage:
         )
         completion = self._workflow_completion_record(connection, execution_id)
         scope_binding = self._workflow_scope_binding_record(connection, execution_id)
+        portable_policy: dict[str, Any] = {"status": "pre_policy"}
+        if row["workflow_activation_version_id"] is not None:
+            activation = self._activation_record(
+                connection,
+                self._activation_row(
+                    connection,
+                    row["project_key"],
+                    None,
+                    version_id=row["workflow_activation_version_id"],
+                ),
+            )
+            portable_policy = {
+                "status": "activated",
+                "activation_id": activation["id"],
+                "activation_version_id": activation["workflow_activation_version_id"],
+                "activation_version": activation["version"],
+                "activation_sha256": activation["content_sha256"],
+                "policy_id": activation["policy"]["id"],
+                "policy_name": activation["policy"]["name"],
+                "policy_version": activation["policy"]["version"],
+                "policy_sha256": activation["policy"]["content_sha256"],
+                "resources": activation["spec"]["resources"],
+                "wake_bindings": activation["spec"]["wake_bindings"],
+                "merge_method": activation["spec"]["merge_method"],
+            }
         return {
             **dict(row),
             "template": configuration["template"],
@@ -1340,6 +1410,7 @@ class WorkflowStorage:
             "landing": landing,
             "completion": completion,
             "scope_binding": scope_binding,
+            "portable_policy": portable_policy,
         }
 
     @staticmethod

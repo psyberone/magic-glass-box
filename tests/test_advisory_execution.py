@@ -40,6 +40,7 @@ from magic_glass_box.storage.schema import SCHEMA_V37, SCHEMA_VERSION
 from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflows import ADVISORY_REVIEW_TEMPLATE_ID
 from magic_glass_box.workspace import GitSnapshotter, WorkspaceManager
+from tests.schema_helpers import downgrade_workflow_policy_activation
 
 OWNER_ID = "advisory-ledger-test"
 IMAGE_ID = "sha256:" + "9" * 64
@@ -1812,6 +1813,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
 
     def test_schema_thirty_seven_adds_advisory_ledger_once(self) -> None:
         with self.database.connect() as connection:
+            downgrade_workflow_policy_activation(connection)
             connection.executescript(
                 """
                 DROP TABLE work_item_service_imports;
@@ -1831,7 +1833,7 @@ class AdvisoryExecutionStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 45)
+        self.assertEqual(SCHEMA_VERSION, 46)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

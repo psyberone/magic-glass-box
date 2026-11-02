@@ -282,6 +282,27 @@ supervisor escalation discovery across restarts. Agent-profile JSON may opt
 into `provider_invocation_limit` from 1 through 10,000; omission preserves old
 profile digests and pins the default of 64 only when a new run is created.
 
+Milestone 18 publishes `workflow-policy-v1.schema.json` and
+`workflow-activation-v1.schema.json`. The portable policy names the exact
+`implementation-v1` prescription revision, evidence floor, symbolic validation
+obligations, hard resource maxima, manual wake rule, required semantic
+capabilities, permitted landing methods, and whether explicitly deferred
+validation is permitted. It contains no project, profile, provider, controller,
+credential, command, or repository identity. Canonical ordering gives the same
+policy the same digest across projects.
+
+Control-plane schema v46 stores immutable policy revisions separately from one
+owner-acknowledged activation lineage per project. An activation binds one
+exact policy digest to one exact local workflow-configuration version,
+validation mappings, active capability/controller bindings, reduced resources,
+human-turn-only role wakes, one permitted merge method, and named retired
+rules. Runtime validation proves all relational and availability constraints;
+the portable schema supplies structural preflight only. Activated execution
+starts pin the exact activation version and recheck every required binding.
+Pre-v46 and explicitly unactivated compatibility histories remain visible as
+`pre_policy`; they are never represented as conforming and receive no synthetic
+backfill.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

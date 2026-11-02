@@ -1,6 +1,7 @@
 # Bounded workflow templates
 
-**Status: M12A-M12C and M13A-M13D complete**
+**Status: M12A-M12C and M13A-M13D complete; M18 portable-policy delivery in
+progress**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -32,6 +33,34 @@ creates a new version; an active or historical execution never changes under
 it. A configuration can reduce authority but cannot add credentials, network,
 filesystem access, provider grants, capabilities, or limits absent from project
 and profile policy.
+
+## Portable policy and project activation
+
+Schema v46 adds a fourth and fifth record without changing the fixed state
+machine. A portable workflow policy identifies the exact `implementation-v1`
+revision and the invariant evidence, resource, wake, capability, and landing
+rules that may travel between projects. Its canonical digest is independent of
+project-local ordering and cannot contain provider names, profile identities,
+credentials, controller endpoints, commands, repository paths, or arbitrary
+topology.
+
+One immutable activation lineage per project binds that portable digest to an
+exact local configuration, validation names, capability/controller bindings,
+reduced resource limits, manual role wakes, merge method, owner acknowledgement,
+and named retired rules. Every required binding is exact and active when the
+activation is recorded. An activated start rechecks the latest expected
+activation revision and all live capability/controller availability before it
+creates execution state; removing one binding makes the policy unavailable
+without a legacy or raw-provider fallback.
+
+Activated executions pin the exact activation and policy revisions in both the
+execution row and start event. Read projections expose the portable digest,
+activation digest, bounded resources, wake bindings, and merge method without
+provider payloads or credentials. Existing histories and compatibility starts
+without an activation remain explicitly `pre_policy`; they do not acquire M18
+authority and are never described as conforming. Later M18 slices consume the
+pinned activation for responsibility, provider translation/read-back, landing
+proof, and truthful closeout obligations.
 
 Schema v32 makes those role pins prescription-generic. A configuration version
 owns an immutable set of named role bindings rather than fixed producer and

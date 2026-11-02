@@ -26,6 +26,7 @@ from magic_glass_box.workflows import (
     DISCOVERY_TEMPLATE_ID,
     DISCOVERY_TEMPLATE_REVISION,
 )
+from tests.schema_helpers import downgrade_workflow_policy_activation
 
 
 def trace_value(**overrides: object) -> dict[str, object]:
@@ -653,6 +654,7 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
 
     def test_schema_thirty_three_adds_discovery_without_rewriting_m12(self) -> None:
         with self.database.connect() as connection:
+            downgrade_workflow_policy_activation(connection)
             connection.executescript(
                 """
                 DROP TABLE work_item_service_imports;
@@ -695,7 +697,7 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 45)
+        self.assertEqual(SCHEMA_VERSION, 46)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         definitions = migrated.list_workflow_template_definitions()

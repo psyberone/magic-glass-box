@@ -517,6 +517,19 @@ class DatabaseCore:
                     "workflow_template_definitions",
                     "SELECT COUNT(*) FROM workflow_template_definitions",
                 ),
+                ("workflow_policies", "SELECT COUNT(*) FROM workflow_policies"),
+                (
+                    "workflow_activations",
+                    "SELECT COUNT(*) FROM workflow_activations",
+                ),
+                (
+                    "workflow_activation_versions",
+                    "SELECT COUNT(*) FROM workflow_activation_versions",
+                ),
+                (
+                    "workflow_activation_capability_bindings",
+                    "SELECT COUNT(*) FROM workflow_activation_capability_bindings",
+                ),
                 (
                     "workflow_configurations",
                     "SELECT COUNT(*) FROM workflow_configurations",

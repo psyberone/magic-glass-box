@@ -39,6 +39,7 @@ from magic_glass_box.storage.schema import SCHEMA_VERSION
 from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION
 from magic_glass_box.workflows import WorkflowConfigurationSpec
+from tests.schema_helpers import downgrade_workflow_policy_activation
 
 OWNER_ID = "discovery-ledger-test"
 IMAGE_ID = "sha256:" + "9" * 64
@@ -1868,6 +1869,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
                 connection.execute(statement, parameters)
 
         with self.database.connect() as connection:
+            downgrade_workflow_policy_activation(connection)
             connection.executescript(
                 """
                 DROP TABLE work_item_service_imports;
@@ -1912,7 +1914,7 @@ class DiscoveryExecutionStorageTests(unittest.TestCase):
         migrated = Database(self.database.path)
         first = migrated.initialize()
         second = migrated.initialize()
-        self.assertEqual(SCHEMA_VERSION, 45)
+        self.assertEqual(SCHEMA_VERSION, 46)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         with migrated.connect() as connection:

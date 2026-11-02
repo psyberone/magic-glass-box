@@ -1,0 +1,560 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from typing import Any
+
+from ..domain import (
+    ValidationError,
+    canonical_json,
+    validate_name,
+    validate_project_key,
+)
+from ..workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
+from ..workflows import IMPLEMENTATION_TEMPLATE_ID
+from .errors import ConflictError, NotFoundError, StorageError
+
+
+class WorkflowPolicyStorage:
+    @staticmethod
+    def _workflow_policy_positive_version(value: object, *, field: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValidationError(f"{field} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _workflow_policy_record(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            spec = WorkflowPolicySpec.from_mapping(json.loads(row["spec_json"]))
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow policy is invalid") from exc
+        if spec.digest != row["content_sha256"]:
+            raise StorageError("stored workflow policy digest does not match")
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "version": row["version"],
+            "spec": spec.to_dict(),
+            "content_sha256": row["content_sha256"],
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _workflow_policy_row(
+        connection: sqlite3.Connection, name: str, version: int | None = None
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT policy.id, policy.name, policy.version, policy.spec_json, "
+            "policy.content_sha256, creator.handle AS created_by, "
+            "policy.created_at FROM workflow_policies policy "
+            "JOIN users creator ON creator.id = policy.created_by "
+            "WHERE policy.name = ? AND (? IS NULL OR policy.version = ?) "
+            "ORDER BY policy.version DESC LIMIT 1",
+            (name, version, version),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"workflow policy not found: {name}")
+        return row
+
+    def create_workflow_policy(
+        self,
+        *,
+        name: str,
+        spec: WorkflowPolicySpec,
+        created_by: str,
+    ) -> dict[str, Any]:
+        return self._write_workflow_policy(
+            name=name, spec=spec, created_by=created_by, create=True
+        )
+
+    def revise_workflow_policy(
+        self,
+        *,
+        name: str,
+        spec: WorkflowPolicySpec,
+        created_by: str,
+    ) -> dict[str, Any]:
+        return self._write_workflow_policy(
+            name=name, spec=spec, created_by=created_by, create=False
+        )
+
+    def _write_workflow_policy(
+        self,
+        *,
+        name: str,
+        spec: WorkflowPolicySpec,
+        created_by: str,
+        create: bool,
+    ) -> dict[str, Any]:
+        name = validate_name(name, field="workflow policy name")
+        if not isinstance(spec, WorkflowPolicySpec):
+            raise ValidationError("spec must be a WorkflowPolicySpec")
+        policy_id = self.new_id("wfp")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, created_by, role="workflow policy owner")
+                latest = connection.execute(
+                    "SELECT id, version, content_sha256 FROM workflow_policies "
+                    "WHERE name = ? ORDER BY version DESC LIMIT 1",
+                    (name,),
+                ).fetchone()
+                if create:
+                    if latest is not None:
+                        raise ConflictError("workflow policy already exists")
+                    version = 1
+                else:
+                    if latest is None:
+                        raise NotFoundError(f"workflow policy not found: {name}")
+                    if latest["content_sha256"] == spec.digest:
+                        raise ConflictError("workflow policy revision is identical")
+                    version = latest["version"] + 1
+                connection.execute(
+                    "INSERT INTO workflow_policies "
+                    "(id, name, version, schema_version, spec_json, "
+                    "content_sha256, created_by, created_at) "
+                    "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+                    (
+                        policy_id,
+                        name,
+                        version,
+                        canonical_json(spec.to_dict()),
+                        spec.digest,
+                        created_by,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (ConflictError, NotFoundError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("workflow policy could not be stored") from exc
+        return self.get_workflow_policy(name, version=version)
+
+    def get_workflow_policy(
+        self, name: str, *, version: int | None = None
+    ) -> dict[str, Any]:
+        name = validate_name(name, field="workflow policy name")
+        if version is not None:
+            version = self._workflow_policy_positive_version(
+                version, field="workflow policy version"
+            )
+        with self._connection() as connection:
+            return self._workflow_policy_record(
+                self._workflow_policy_row(connection, name, version)
+            )
+
+    def list_workflow_policies(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT policy.id, policy.name, policy.version, policy.spec_json, "
+                "policy.content_sha256, creator.handle AS created_by, "
+                "policy.created_at FROM workflow_policies policy "
+                "JOIN users creator ON creator.id = policy.created_by "
+                "WHERE policy.version = (SELECT MAX(latest.version) "
+                "FROM workflow_policies latest WHERE latest.name = policy.name) "
+                "ORDER BY policy.name"
+            ).fetchall()
+        return [self._workflow_policy_record(row) for row in rows]
+
+    def create_workflow_activation(
+        self,
+        *,
+        project_key: str,
+        policy_name: str,
+        expected_policy_version: int,
+        spec: WorkflowActivationSpec,
+        acknowledged_by: str,
+    ) -> dict[str, Any]:
+        return self._write_workflow_activation(
+            project_key=project_key,
+            policy_name=policy_name,
+            expected_policy_version=expected_policy_version,
+            spec=spec,
+            acknowledged_by=acknowledged_by,
+            create=True,
+        )
+
+    def revise_workflow_activation(
+        self,
+        *,
+        project_key: str,
+        policy_name: str,
+        expected_policy_version: int,
+        spec: WorkflowActivationSpec,
+        acknowledged_by: str,
+    ) -> dict[str, Any]:
+        return self._write_workflow_activation(
+            project_key=project_key,
+            policy_name=policy_name,
+            expected_policy_version=expected_policy_version,
+            spec=spec,
+            acknowledged_by=acknowledged_by,
+            create=False,
+        )
+
+    def _write_workflow_activation(
+        self,
+        *,
+        project_key: str,
+        policy_name: str,
+        expected_policy_version: int,
+        spec: WorkflowActivationSpec,
+        acknowledged_by: str,
+        create: bool,
+    ) -> dict[str, Any]:
+        project_key = validate_project_key(project_key)
+        policy_name = validate_name(policy_name, field="workflow policy name")
+        expected_policy_version = self._workflow_policy_positive_version(
+            expected_policy_version, field="expected policy version"
+        )
+        if not isinstance(spec, WorkflowActivationSpec):
+            raise ValidationError("spec must be a WorkflowActivationSpec")
+        activation_id = self.new_id("wpa")
+        version_id = self.new_id("wav")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, acknowledged_by, role="workflow activation owner"
+                )
+                project = connection.execute(
+                    "SELECT id, active FROM projects WHERE krab_project_key = ?",
+                    (project_key,),
+                ).fetchone()
+                if project is None:
+                    raise NotFoundError(f"project not found: {project_key}")
+                if project["active"] != 1:
+                    raise ConflictError("workflow activation project is inactive")
+                policy_row = self._workflow_policy_row(connection, policy_name)
+                policy = self._workflow_policy_record(policy_row)
+                if policy["version"] != expected_policy_version:
+                    raise ConflictError("workflow policy version changed")
+                policy_spec = WorkflowPolicySpec.from_mapping(policy["spec"])
+                self._validate_activation(
+                    connection,
+                    project_id=project["id"],
+                    project_key=project_key,
+                    policy=policy_spec,
+                    spec=spec,
+                )
+                existing = connection.execute(
+                    "SELECT activation.id, latest.version, "
+                    "latest.content_sha256 FROM workflow_activations activation "
+                    "JOIN workflow_activation_versions latest "
+                    "ON latest.activation_id = activation.id "
+                    "WHERE activation.project_id = ? "
+                    "ORDER BY latest.version DESC LIMIT 1",
+                    (project["id"],),
+                ).fetchone()
+                if create:
+                    if existing is not None:
+                        raise ConflictError("workflow activation already exists")
+                    version = 1
+                    selected_activation_id = activation_id
+                    connection.execute(
+                        "INSERT INTO workflow_activations "
+                        "(id, project_id, created_at) VALUES (?, ?, ?)",
+                        (selected_activation_id, project["id"], now),
+                    )
+                else:
+                    if existing is None:
+                        raise NotFoundError(
+                            f"workflow activation not found: {project_key}"
+                        )
+                    if existing["content_sha256"] == spec.digest:
+                        raise ConflictError("workflow activation revision is identical")
+                    version = existing["version"] + 1
+                    selected_activation_id = existing["id"]
+                connection.execute(
+                    "INSERT INTO workflow_activation_versions "
+                    "(id, activation_id, version, policy_id, "
+                    "workflow_configuration_version_id, schema_version, "
+                    "spec_json, content_sha256, acknowledged_by, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                    (
+                        version_id,
+                        selected_activation_id,
+                        version,
+                        policy["id"],
+                        spec.workflow_configuration_version_id,
+                        canonical_json(spec.to_dict()),
+                        spec.digest,
+                        acknowledged_by,
+                        now,
+                    ),
+                )
+                for binding in spec.capability_bindings:
+                    connection.execute(
+                        "INSERT INTO workflow_activation_capability_bindings "
+                        "(activation_version_id, capability_name, "
+                        "capability_version, project_capability_binding_id, "
+                        "created_at) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            version_id,
+                            binding.name,
+                            binding.version,
+                            binding.binding_id,
+                            now,
+                        ),
+                    )
+                connection.commit()
+            except (ConflictError, NotFoundError, StorageError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError("workflow activation could not be stored") from exc
+        return self.get_workflow_activation(project_key, version=version)
+
+    def _validate_activation(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        project_id: str,
+        project_key: str,
+        policy: WorkflowPolicySpec,
+        spec: WorkflowActivationSpec,
+    ) -> None:
+        if spec.policy_sha256 != policy.digest:
+            raise ConflictError("workflow activation policy digest does not match")
+        configuration = self._configuration_record(
+            connection,
+            self._configuration_row(
+                connection,
+                version_id=spec.workflow_configuration_version_id,
+            ),
+        )
+        if configuration["project_id"] != project_id:
+            raise ConflictError("workflow activation configuration project differs")
+        if configuration["template"]["id"] != IMPLEMENTATION_TEMPLATE_ID:
+            raise ConflictError("workflow activation requires implementation-v1")
+        if not configuration["spec"]["maintainer_approval"]:
+            raise ConflictError("workflow activation requires maintainer approval")
+        if configuration["spec"]["landing_mode"] != "provider":
+            raise ConflictError("workflow activation requires provider landing")
+        obligation_bindings = {
+            binding.obligation: binding.validation
+            for binding in spec.validation_bindings
+        }
+        if set(obligation_bindings) != set(policy.validation_obligations):
+            raise ConflictError("workflow activation validation scope is incomplete")
+        configured_validations = {
+            validation["name"] for validation in configuration["spec"]["validations"]
+        }
+        if set(obligation_bindings.values()) != configured_validations:
+            raise ConflictError("workflow activation validation binding differs")
+        maxima = policy.resource_maxima
+        resources = spec.resources
+        if (
+            resources.review_rounds > maxima.review_rounds
+            or resources.seat_count > maxima.seat_count
+            or resources.shared_host_concurrency > maxima.shared_host_concurrency
+            or resources.wall_time_seconds > maxima.wall_time_seconds
+        ):
+            raise ConflictError("workflow activation exceeds policy resources")
+        if resources.review_rounds != configuration["spec"]["max_correction_rounds"]:
+            raise ConflictError("workflow activation review-round ceiling differs")
+        if resources.seat_count < len(configuration["roles"]):
+            raise ConflictError("workflow activation seat ceiling is too small")
+        if spec.merge_method not in policy.landing_methods:
+            raise ConflictError("workflow activation merge method is not permitted")
+        required_capabilities = {
+            (name, version, mode)
+            for name, version, mode in policy.required_capabilities
+        }
+        bound_capabilities = {
+            (binding.name, binding.version, binding.mode)
+            for binding in spec.capability_bindings
+        }
+        if bound_capabilities != required_capabilities:
+            raise ConflictError("workflow activation capability scope is incomplete")
+        for binding in spec.capability_bindings:
+            record = self._project_capability_binding_record(
+                connection, binding.binding_id
+            )
+            if (
+                record["project"]["id"] != project_id
+                or record["project"]["key"] != project_key
+            ):
+                raise ConflictError("workflow activation capability project differs")
+            if record["state"] != "active" or not record["project"]["active"]:
+                raise ConflictError("workflow activation capability is unavailable")
+            if record["controller"]["sidecar_state"] != "active":
+                raise ConflictError("workflow activation controller is unavailable")
+            capability = record["capability"]
+            if capability != {
+                "name": binding.name,
+                "version": binding.version,
+                "mode": binding.mode,
+            }:
+                raise ConflictError("workflow activation capability binding differs")
+
+    @staticmethod
+    def _activation_row(
+        connection: sqlite3.Connection,
+        project_key: str,
+        version: int | None,
+        *,
+        version_id: str | None = None,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT activation.id, activation.project_id, "
+            "project.krab_project_key AS project_key, "
+            "activation.created_at AS activation_created_at, "
+            "av.id AS version_id, av.version, av.policy_id, "
+            "av.workflow_configuration_version_id, av.spec_json, "
+            "av.content_sha256, owner.handle AS acknowledged_by, av.created_at, "
+            "policy.name AS policy_name, policy.version AS policy_version, "
+            "policy.spec_json AS policy_spec_json, "
+            "policy.content_sha256 AS policy_content_sha256, "
+            "creator.handle AS policy_created_by, "
+            "policy.created_at AS policy_created_at "
+            "FROM workflow_activations activation "
+            "JOIN projects project ON project.id = activation.project_id "
+            "JOIN workflow_activation_versions av "
+            "ON av.activation_id = activation.id "
+            "JOIN workflow_policies policy ON policy.id = av.policy_id "
+            "JOIN users owner ON owner.id = av.acknowledged_by "
+            "JOIN users creator ON creator.id = policy.created_by "
+            "WHERE project.krab_project_key = ? AND (? IS NULL OR av.version = ?) "
+            "AND (? IS NULL OR av.id = ?) "
+            "ORDER BY av.version DESC LIMIT 1",
+            (project_key, version, version, version_id, version_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"workflow activation not found: {project_key}")
+        return row
+
+    def _activation_record(
+        self, connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> dict[str, Any]:
+        try:
+            spec = WorkflowActivationSpec.from_mapping(json.loads(row["spec_json"]))
+            policy = WorkflowPolicySpec.from_mapping(
+                json.loads(row["policy_spec_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow activation is invalid") from exc
+        if spec.digest != row["content_sha256"]:
+            raise StorageError("stored workflow activation digest does not match")
+        if (
+            policy.digest != row["policy_content_sha256"]
+            or spec.policy_sha256 != policy.digest
+        ):
+            raise StorageError("stored workflow activation policy does not match")
+        binding_rows = connection.execute(
+            "SELECT capability_name, capability_version, "
+            "project_capability_binding_id FROM "
+            "workflow_activation_capability_bindings "
+            "WHERE activation_version_id = ? "
+            "ORDER BY capability_name, capability_version",
+            (row["version_id"],),
+        ).fetchall()
+        stored_bindings = {
+            (
+                binding["capability_name"],
+                binding["capability_version"],
+                binding["project_capability_binding_id"],
+            )
+            for binding in binding_rows
+        }
+        expected_bindings = {
+            (binding.name, binding.version, binding.binding_id)
+            for binding in spec.capability_bindings
+        }
+        if stored_bindings != expected_bindings:
+            raise StorageError(
+                "stored workflow activation capability bindings do not match"
+            )
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "project_key": row["project_key"],
+            "workflow_activation_version_id": row["version_id"],
+            "version": row["version"],
+            "policy": {
+                "id": row["policy_id"],
+                "name": row["policy_name"],
+                "version": row["policy_version"],
+                "content_sha256": row["policy_content_sha256"],
+                "created_by": row["policy_created_by"],
+                "created_at": row["policy_created_at"],
+            },
+            "workflow_configuration_version_id": row[
+                "workflow_configuration_version_id"
+            ],
+            "spec": spec.to_dict(),
+            "content_sha256": row["content_sha256"],
+            "acknowledged_by": row["acknowledged_by"],
+            "created_at": row["created_at"],
+            "activation_created_at": row["activation_created_at"],
+        }
+
+    def _resolve_workflow_activation_for_start(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        project_key: str,
+        configuration_version_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        row = self._activation_row(connection, project_key, None)
+        if row["version"] != expected_version:
+            raise ConflictError("workflow activation version changed")
+        activation = self._activation_record(connection, row)
+        if activation["workflow_configuration_version_id"] != configuration_version_id:
+            raise ConflictError("workflow activation configuration changed")
+        try:
+            policy = WorkflowPolicySpec.from_mapping(
+                json.loads(row["policy_spec_json"])
+            )
+            spec = WorkflowActivationSpec.from_mapping(json.loads(row["spec_json"]))
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow activation is invalid") from exc
+        self._validate_activation(
+            connection,
+            project_id=activation["project_id"],
+            project_key=project_key,
+            policy=policy,
+            spec=spec,
+        )
+        return activation
+
+    def get_workflow_activation(
+        self, project_key: str, *, version: int | None = None
+    ) -> dict[str, Any]:
+        project_key = validate_project_key(project_key)
+        if version is not None:
+            version = self._workflow_policy_positive_version(
+                version, field="workflow activation version"
+            )
+        with self._connection() as connection:
+            return self._activation_record(
+                connection, self._activation_row(connection, project_key, version)
+            )
+
+    def list_workflow_activations(
+        self, *, project_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        if project_key is not None:
+            return [self.get_workflow_activation(project_key)]
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT project.krab_project_key AS project_key "
+                "FROM workflow_activations activation "
+                "JOIN projects project ON project.id = activation.project_id "
+                "ORDER BY project.krab_project_key"
+            ).fetchall()
+            return [
+                self._activation_record(
+                    connection,
+                    self._activation_row(connection, row["project_key"], None),
+                )
+                for row in rows
+            ]

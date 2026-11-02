@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "policy_sha256": "7d44825f394bf249d99f49a9f812cba02b828cc4ec79d0319e6e9895d9aabb7e",
+  "workflow_configuration_version_id": "wfv_11111111111111111111111111111111",
+  "validation_bindings": [
+    { "obligation": "coverage", "validation": "coverage" },
+    { "obligation": "mutation", "validation": "mutation" },
+    { "obligation": "tests", "validation": "unit" }
+  ],
+  "capability_bindings": [
+    {
+      "binding_id": "cpb_22222222222222222222222222222222",
+      "mode": "effect",
+      "name": "change.open",
+      "version": 1
+    },
+    {
+      "binding_id": "cpb_33333333333333333333333333333333",
+      "mode": "effect",
+      "name": "landing.invoke",
+      "version": 1
+    },
+    {
+      "binding_id": "cpb_44444444444444444444444444444444",
+      "mode": "effect",
+      "name": "refs.publish",
+      "version": 1
+    }
+  ],
+  "resources": {
+    "review_rounds": 3,
+    "seat_count": 2,
+    "shared_host_concurrency": 1,
+    "wall_time_seconds": 10800
+  },
+  "wake_bindings": [
+    { "role": "producer", "wake_class": "human_turn_only" },
+    { "role": "reviewer", "wake_class": "human_turn_only" }
+  ],
+  "merge_method": "squash",
+  "retired_rules": ["legacy-merge-check"]
+}

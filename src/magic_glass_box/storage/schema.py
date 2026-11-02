@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -6020,6 +6020,135 @@ BEGIN
 END;
 """
 
+WORKFLOW_POLICY_ACTIVATION_SCHEMA = """
+CREATE TABLE workflow_policies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (name, version),
+    UNIQUE (name, content_sha256),
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_activations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_activation_versions (
+    id TEXT PRIMARY KEY,
+    activation_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    policy_id TEXT NOT NULL,
+    workflow_configuration_version_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    spec_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    acknowledged_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (activation_id, version),
+    UNIQUE (activation_id, content_sha256),
+    FOREIGN KEY (activation_id)
+        REFERENCES workflow_activations(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id) REFERENCES workflow_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_configuration_version_id)
+        REFERENCES workflow_configuration_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (acknowledged_by) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE workflow_activation_capability_bindings (
+    activation_version_id TEXT NOT NULL,
+    capability_name TEXT NOT NULL,
+    capability_version INTEGER NOT NULL CHECK (capability_version >= 1),
+    project_capability_binding_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (
+        activation_version_id, capability_name, capability_version
+    ),
+    UNIQUE (activation_version_id, project_capability_binding_id),
+    FOREIGN KEY (activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (project_capability_binding_id)
+        REFERENCES project_capability_bindings(id) ON DELETE RESTRICT
+) STRICT;
+
+ALTER TABLE workflow_executions
+ADD COLUMN workflow_activation_version_id TEXT
+    REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT;
+
+CREATE INDEX workflow_policy_name_version
+    ON workflow_policies(name, version DESC);
+CREATE INDEX workflow_activation_project
+    ON workflow_activations(project_id);
+CREATE INDEX workflow_activation_version_created
+    ON workflow_activation_versions(activation_id, version DESC);
+CREATE INDEX workflow_activation_policy
+    ON workflow_activation_versions(policy_id, activation_id);
+CREATE INDEX workflow_activation_configuration
+    ON workflow_activation_versions(
+        workflow_configuration_version_id, activation_id
+    );
+CREATE INDEX workflow_activation_capability_binding
+    ON workflow_activation_capability_bindings(
+        project_capability_binding_id, activation_version_id
+    );
+CREATE INDEX workflow_execution_activation
+    ON workflow_executions(workflow_activation_version_id);
+
+CREATE TRIGGER workflow_policy_immutable_update
+BEFORE UPDATE ON workflow_policies
+BEGIN
+    SELECT RAISE(ABORT, 'workflow policies are immutable');
+END;
+CREATE TRIGGER workflow_policy_immutable_delete
+BEFORE DELETE ON workflow_policies
+BEGIN
+    SELECT RAISE(ABORT, 'workflow policies cannot be deleted');
+END;
+CREATE TRIGGER workflow_activation_identity_immutable
+BEFORE UPDATE ON workflow_activations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow activations are immutable');
+END;
+CREATE TRIGGER workflow_activation_immutable_delete
+BEFORE DELETE ON workflow_activations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow activations cannot be deleted');
+END;
+CREATE TRIGGER workflow_activation_version_immutable_update
+BEFORE UPDATE ON workflow_activation_versions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow activation versions are immutable');
+END;
+CREATE TRIGGER workflow_activation_version_immutable_delete
+BEFORE DELETE ON workflow_activation_versions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow activation versions cannot be deleted');
+END;
+CREATE TRIGGER workflow_activation_capability_immutable_update
+BEFORE UPDATE ON workflow_activation_capability_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow activation capability bindings are immutable');
+END;
+CREATE TRIGGER workflow_activation_capability_immutable_delete
+BEFORE DELETE ON workflow_activation_capability_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow activation capability bindings cannot be deleted');
+END;
+CREATE TRIGGER workflow_execution_activation_immutable
+BEFORE UPDATE OF workflow_activation_version_id ON workflow_executions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow execution activation is immutable');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -6066,12 +6195,13 @@ SCHEMA_V39 = SCHEMA_V38 + WORKFLOW_SCOPE_BINDING_SCHEMA
 SCHEMA_V40 = SCHEMA_V39 + WORKFLOW_SCOPE_REVIEW_SCHEMA
 SCHEMA_V41 = SCHEMA_V40 + OPERABILITY_SCHEMA
 SCHEMA_V42 = SCHEMA_V41 + SERVICE_RESOURCE_SCHEMA
-SCHEMA = (
+SCHEMA_V45 = (
     SCHEMA_V42
     + WORK_INTAKE_SCHEMA
     + DIRECTED_RUN_REPLACEMENT_SCHEMA
     + WORKFLOW_REFOLD_RULING_SCHEMA
 )
+SCHEMA = SCHEMA_V45 + WORKFLOW_POLICY_ACTIVATION_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -6117,4 +6247,5 @@ MIGRATIONS = {
     42: WORK_INTAKE_SCHEMA,
     43: DIRECTED_RUN_REPLACEMENT_SCHEMA,
     44: WORKFLOW_REFOLD_RULING_SCHEMA,
+    45: WORKFLOW_POLICY_ACTIVATION_SCHEMA,
 }

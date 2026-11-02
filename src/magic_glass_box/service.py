@@ -121,6 +121,7 @@ from .service_sidecar import (
     ServiceSidecarUnavailableError,
     UnixServiceSidecarClient,
 )
+from .workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
 from .workflow_scope import WorkflowScopeReview
 from .workflows import WorkflowConfigurationSpec
 
@@ -2060,6 +2061,88 @@ class ControlPlane:
             created_by=creator["id"],
         )
 
+    def create_workflow_policy(
+        self,
+        *,
+        name: str,
+        spec: WorkflowPolicySpec,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.create_workflow_policy(
+            name=name,
+            spec=spec,
+            created_by=creator["id"],
+        )
+
+    def revise_workflow_policy(
+        self,
+        *,
+        name: str,
+        spec: WorkflowPolicySpec,
+        created_by_handle: str,
+    ) -> dict[str, Any]:
+        creator = self.database.get_user(created_by_handle)
+        return self.database.revise_workflow_policy(
+            name=name,
+            spec=spec,
+            created_by=creator["id"],
+        )
+
+    def get_workflow_policy(
+        self, *, name: str, version: int | None = None
+    ) -> dict[str, Any]:
+        return self.database.get_workflow_policy(name, version=version)
+
+    def list_workflow_policies(self) -> list[dict[str, Any]]:
+        return self.database.list_workflow_policies()
+
+    def create_workflow_activation(
+        self,
+        *,
+        project_key: str,
+        policy_name: str,
+        expected_policy_version: int,
+        spec: WorkflowActivationSpec,
+        acknowledged_by_handle: str,
+    ) -> dict[str, Any]:
+        owner = self.database.get_user(acknowledged_by_handle)
+        return self.database.create_workflow_activation(
+            project_key=project_key,
+            policy_name=policy_name,
+            expected_policy_version=expected_policy_version,
+            spec=spec,
+            acknowledged_by=owner["id"],
+        )
+
+    def revise_workflow_activation(
+        self,
+        *,
+        project_key: str,
+        policy_name: str,
+        expected_policy_version: int,
+        spec: WorkflowActivationSpec,
+        acknowledged_by_handle: str,
+    ) -> dict[str, Any]:
+        owner = self.database.get_user(acknowledged_by_handle)
+        return self.database.revise_workflow_activation(
+            project_key=project_key,
+            policy_name=policy_name,
+            expected_policy_version=expected_policy_version,
+            spec=spec,
+            acknowledged_by=owner["id"],
+        )
+
+    def get_workflow_activation(
+        self, *, project_key: str, version: int | None = None
+    ) -> dict[str, Any]:
+        return self.database.get_workflow_activation(project_key, version=version)
+
+    def list_workflow_activations(
+        self, *, project_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self.database.list_workflow_activations(project_key=project_key)
+
     def revise_workflow_configuration(
         self,
         *,
@@ -2341,6 +2424,7 @@ class ControlPlane:
         idempotency_key: str,
         requested_by_handle: str,
         discovery_execution_id: str | None = None,
+        expected_activation_version: int | None = None,
     ) -> dict[str, Any]:
         requester = self.database.get_user(requested_by_handle)
         return self.database.start_workflow_execution(
@@ -2356,6 +2440,7 @@ class ControlPlane:
             idempotency_key=idempotency_key,
             requested_by=requester["id"],
             discovery_execution_id=discovery_execution_id,
+            expected_activation_version=expected_activation_version,
         )
 
     def get_workflow_execution(self, execution_id: str) -> dict[str, Any]:

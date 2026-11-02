@@ -71,6 +71,7 @@ from magic_glass_box.service_sidecar import (
     ServiceSidecarSpec,
 )
 from magic_glass_box.workspace import GitSnapshotter, WorkspaceManager
+from tests.schema_helpers import downgrade_workflow_policy_activation
 
 
 def git(binary: Path, *arguments: str, cwd: Path | None = None) -> str:
@@ -555,7 +556,7 @@ class IntegrationMigrationTests(unittest.TestCase):
         database = Database(self.path)
         status = database.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 45)
+        self.assertEqual(SCHEMA_VERSION, 46)
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         with closing(database.connect()) as connection:
             objects = {
@@ -1465,6 +1466,7 @@ class IntegrationLedgerTests(unittest.TestCase):
             issued_by=self.user["id"],
         )
         with closing(self.database.connect()) as connection, connection:
+            downgrade_workflow_policy_activation(connection)
             connection.execute("DROP TABLE work_item_service_imports")
             connection.execute("DROP TABLE workflow_scope_reviews")
             connection.execute("DROP TABLE workflow_scope_bindings")
@@ -1532,6 +1534,7 @@ class IntegrationLedgerTests(unittest.TestCase):
         receipt = landed["receipt"]
 
         with closing(self.database.connect()) as connection:
+            downgrade_workflow_policy_activation(connection)
             connection.execute("PRAGMA foreign_keys = OFF")
             connection.executescript(
                 """

@@ -67,6 +67,7 @@ from .service_sidecar import (
 from .supervision import Supervisor, SupervisorError
 from .worker_transport import WorkerTransportError
 from .workflow_director import WorkflowDirector
+from .workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
 from .workflows import WorkflowConfigurationSpec
 from .workspace import GitSnapshotter, WorkspaceError, WorkspaceManager
 
@@ -472,6 +473,49 @@ def build_parser() -> argparse.ArgumentParser:
         "workflow", help="manage bounded workflow prescriptions"
     )
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
+    for verb in ("policy-create", "policy-revise"):
+        policy = workflow_commands.add_parser(
+            verb,
+            help=(
+                "create a portable workflow policy"
+                if verb == "policy-create"
+                else "append an immutable workflow policy revision"
+            ),
+        )
+        policy.add_argument("name")
+        policy.add_argument("--spec", required=True, type=Path)
+        policy.add_argument("--created-by", required=True)
+    workflow_policy_show = workflow_commands.add_parser(
+        "policy-show", help="show one portable workflow policy revision"
+    )
+    workflow_policy_show.add_argument("name")
+    workflow_policy_show.add_argument("--version", type=int)
+    workflow_commands.add_parser(
+        "policy-list", help="list latest portable workflow policies"
+    )
+    for verb in ("activation-create", "activation-revise"):
+        activation = workflow_commands.add_parser(
+            verb,
+            help=(
+                "activate one exact policy for a project"
+                if verb == "activation-create"
+                else "append an owner-acknowledged activation revision"
+            ),
+        )
+        activation.add_argument("--project", required=True)
+        activation.add_argument("--policy", required=True)
+        activation.add_argument("--expected-policy-version", required=True, type=int)
+        activation.add_argument("--spec", required=True, type=Path)
+        activation.add_argument("--acknowledged-by", required=True)
+    workflow_activation_show = workflow_commands.add_parser(
+        "activation-show", help="show one project workflow activation revision"
+    )
+    workflow_activation_show.add_argument("--project", required=True)
+    workflow_activation_show.add_argument("--version", type=int)
+    workflow_activation_list = workflow_commands.add_parser(
+        "activation-list", help="list latest project workflow activations"
+    )
+    workflow_activation_list.add_argument("--project")
     for verb in ("config-create", "config-revise"):
         configuration = workflow_commands.add_parser(
             verb,
@@ -517,6 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workflow_start.add_argument("--expected-thread-generation", required=True, type=int)
     workflow_start.add_argument("--expected-thread-version", required=True, type=int)
+    workflow_start.add_argument("--expected-activation-version", type=int)
     workflow_start.add_argument("--discovery-execution")
     workflow_start.add_argument("--idempotency-key", required=True)
     workflow_start.add_argument("--requested-by", required=True)
@@ -1703,6 +1748,36 @@ def _dispatch(
         if args.profile_command == "revise":
             return control.revise_agent_profile(**kwargs)
     if args.command == "workflow":
+        if args.workflow_command in {"policy-create", "policy-revise"}:
+            kwargs = {
+                "name": args.name,
+                "spec": WorkflowPolicySpec.from_mapping(_json_file(args.spec)),
+                "created_by_handle": args.created_by,
+            }
+            if args.workflow_command == "policy-create":
+                return control.create_workflow_policy(**kwargs)
+            return control.revise_workflow_policy(**kwargs)
+        if args.workflow_command == "policy-show":
+            return control.get_workflow_policy(name=args.name, version=args.version)
+        if args.workflow_command == "policy-list":
+            return control.list_workflow_policies()
+        if args.workflow_command in {"activation-create", "activation-revise"}:
+            kwargs = {
+                "project_key": args.project,
+                "policy_name": args.policy,
+                "expected_policy_version": args.expected_policy_version,
+                "spec": WorkflowActivationSpec.from_mapping(_json_file(args.spec)),
+                "acknowledged_by_handle": args.acknowledged_by,
+            }
+            if args.workflow_command == "activation-create":
+                return control.create_workflow_activation(**kwargs)
+            return control.revise_workflow_activation(**kwargs)
+        if args.workflow_command == "activation-show":
+            return control.get_workflow_activation(
+                project_key=args.project, version=args.version
+            )
+        if args.workflow_command == "activation-list":
+            return control.list_workflow_activations(project_key=args.project)
         if args.workflow_command in {"config-create", "config-revise"}:
             kwargs = {
                 "project_key": args.project,
@@ -1724,20 +1799,23 @@ def _dispatch(
         if args.workflow_command == "config-list":
             return control.list_workflow_configurations(project_key=args.project)
         if args.workflow_command == "start":
-            return control.start_workflow_execution(
-                project_key=args.project,
-                configuration_name=args.configuration_name,
-                work_item_id=args.work_item,
-                source_revision=args.source_revision,
-                expected_configuration_version=(args.expected_configuration_version),
-                expected_context_version_id=args.expected_context_version_id,
-                expected_work_item_version_id=(args.expected_work_item_version_id),
-                expected_thread_generation=args.expected_thread_generation,
-                expected_thread_version=args.expected_thread_version,
-                idempotency_key=args.idempotency_key,
-                requested_by_handle=args.requested_by,
-                discovery_execution_id=args.discovery_execution,
-            )
+            kwargs = {
+                "project_key": args.project,
+                "configuration_name": args.configuration_name,
+                "work_item_id": args.work_item,
+                "source_revision": args.source_revision,
+                "expected_configuration_version": (args.expected_configuration_version),
+                "expected_context_version_id": args.expected_context_version_id,
+                "expected_work_item_version_id": args.expected_work_item_version_id,
+                "expected_thread_generation": args.expected_thread_generation,
+                "expected_thread_version": args.expected_thread_version,
+                "idempotency_key": args.idempotency_key,
+                "requested_by_handle": args.requested_by,
+                "discovery_execution_id": args.discovery_execution,
+            }
+            if args.expected_activation_version is not None:
+                kwargs["expected_activation_version"] = args.expected_activation_version
+            return control.start_workflow_execution(**kwargs)
         if args.workflow_command == "show":
             return control.get_workflow_execution(args.execution_id)
         if args.workflow_command == "list":

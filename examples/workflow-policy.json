@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "prescription": {
+    "key": "implementation-v1",
+    "revision": "b165a0973686c2e87ed8b4150e919e88f826b8558fe560eafcb256a87b5d75ff"
+  },
+  "evidence_floor": [
+    "maintainer_disposition",
+    "reviewed_content",
+    "validated_execution"
+  ],
+  "validation_obligations": ["coverage", "mutation", "tests"],
+  "resource_maxima": {
+    "review_rounds": 4,
+    "seat_count": 4,
+    "shared_host_concurrency": 2,
+    "wall_time_seconds": 21600
+  },
+  "wake_mode": "manual",
+  "required_capabilities": [
+    { "mode": "effect", "name": "change.open", "version": 1 },
+    { "mode": "effect", "name": "landing.invoke", "version": 1 },
+    { "mode": "effect", "name": "refs.publish", "version": 1 }
+  ],
+  "landing_methods": ["squash"],
+  "allow_deferred_validation": true
+}
