@@ -2115,7 +2115,8 @@ coordinator-reconciled postmortem suitable as M17 design input.
 
 ## Milestone 17: reusable workflow-template contract
 
-**Status: in progress; foundation and review shape resolved, lifecycle open**
+**Status: in progress; foundation, review shape, and lifecycle resolved;
+boundary and closeout open**
 
 Bring the Panopticon coordinator in formally as the practice-domain
 co-designer. Use a living, decision-tracked consultation to reconcile three
@@ -2171,9 +2172,18 @@ shared-host concurrency and no unbounded delivery time; and one caused,
 lineage-wide correction ceiling with separately accounted validation/provider
 retries.
 
-Consultation wave 3 now covers mandatory lifecycle reactions, wake and
-dead-driver behavior, follow-up admission, and code-as-read versus code-as-run.
-No production schema or runtime work has begun.
+The owner then accepted the lifecycle contract: deterministic safety reactions
+remain separate from role judgment; prompt item closeout is distinct from
+target-wide breadth verification; wake bindings must be observed; M18 stays
+manual until fenced watchdog replacement is proven; and bounded follow-up
+admission and landing-target holds do not grant priority, publication, or lift
+authority. Sandboxed reviewer measurement remains distinct from immutable
+validation, and the initial contract permits explicit deferred obligations but
+not validation waivers.
+
+Consultation wave 4 now covers provider/local translation, effect
+reconciliation, landing and mirror semantics, open obligations, migration, and
+the smallest M18 slice. No production schema or runtime work has begun.
 
 **Exit:** a resolved/deferred decision log, fixed topology and typed-artifact
 contract, authority and negative-case tables, migration ruling, bounded

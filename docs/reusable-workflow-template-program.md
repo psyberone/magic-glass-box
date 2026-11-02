@@ -1,8 +1,8 @@
 # Practice-informed reusable workflow templates
 
-**Status: Milestone 17 consultation in progress; foundation and review shape
-resolved, lifecycle under consultation; Milestone 18 remains the first
-delivery.**
+**Status: Milestone 17 consultation in progress; foundation, review shape, and
+lifecycle resolved, with boundary and closeout under consultation; Milestone
+18 remains the first delivery.**
 
 MGB already implements fixed, versioned `discovery-v1`, `implementation-v1`,
 and `advisory-review-v1` prescriptions. The next template work is not a request
@@ -132,10 +132,21 @@ concurrency, and do not permit unbounded delivery time. One lineage ceiling
 covers review and maintainer corrections with a cause recorded for every round;
 proven refolds and validation/provider retries remain separately accounted.
 
-The third bounded wave now covers mandatory lifecycle reactions, wake and
-dead-driver behavior, follow-up admission, and code-as-read versus code-as-run.
-Later questions remain open; no consultation decision has yet authorized a
-production change.
+The owner also accepted the lifecycle contract. Safety transitions remain
+deterministic while materiality and cause stay role judgments; prompt item
+closeout is separate from target-wide breadth verification. Wake bindings must
+be observed, availability is distinct from acknowledgement, and M18 remains
+explicitly manual until fenced watchdog replacement is proven. Follow-ups are
+self-contained non-authoritative proposals with bounded coordinator admission;
+a coordinator may place a landing-target hold, but only the owner may lift it.
+Reviewer measurements run without credentials or effect authority and never
+satisfy immutable validation. The first contract supports explicit per-
+obligation deferred validation, not a general waiver.
+
+The final bounded wave now covers provider/local translation, effect
+reconciliation, the meaning of landed, mirrors, open obligations, migration,
+and M18's smallest accepted slice. No consultation decision has yet authorized
+a production change.
 
 ## Reuse boundary
 
