@@ -45,6 +45,7 @@ from .execution_provider import (
     ExecutionBackendUnavailable,
     ExecutionProviderError,
 )
+from .path_safety import read_bounded_descriptor
 from .service_sidecar import (
     MAX_SERVICE_FRAME_OVERHEAD,
     ServiceOperationRequest,
@@ -198,7 +199,7 @@ def _read_file(
             )
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise ExecutionProviderCLIError(f"{subject} must be owned by this user")
-        raw = os.read(descriptor, maximum + 1)
+        raw = read_bounded_descriptor(descriptor, maximum=maximum)
     finally:
         os.close(descriptor)
     if not raw or len(raw) > maximum:

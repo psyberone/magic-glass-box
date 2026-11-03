@@ -40,6 +40,7 @@ from .execution_provider_cli import BoundedCommandRunner
 from .path_safety import (
     UnsafePathError,
     UnsafeSymlinkError,
+    read_bounded_descriptor,
     validate_repo_path,
     validate_symlink_graph,
     validate_symlink_target,
@@ -235,7 +236,7 @@ def _private_file(path: Path, *, subject: str, maximum: int) -> bytes:
             raise RemoteRunnerError(f"{subject} must use mode 0600")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise RemoteRunnerError(f"{subject} must be owned by this user")
-        raw = os.read(descriptor, maximum + 1)
+        raw = read_bounded_descriptor(descriptor, maximum=maximum)
     finally:
         os.close(descriptor)
     if not raw or len(raw) > maximum:

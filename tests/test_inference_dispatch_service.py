@@ -812,6 +812,36 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             )
         self.assertEqual(len(self.client.calls), 1)
 
+    def test_ambiguous_invocation_cannot_release_reserved_budget(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "ambiguous"):
+            self.database.finalize_provider_invocation(
+                "pinv_" + "f" * 32,
+                outcome="ambiguous",
+                request_bytes=0,
+                response_bytes=0,
+                http_status=None,
+                error_code="reply_lost",
+                release_budget=True,
+            )
+
+    def test_provider_invocation_expiry_limit_is_bounded(self) -> None:
+        for value in (0, 1_001, True, "256"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValidationError, "expiry limit"),
+            ):
+                self.database.expire_stale_provider_invocations(  # type: ignore[arg-type]
+                    max_candidates=value
+                )
+
+    def test_provider_invocation_expiry_accepts_exact_limit_boundaries(self) -> None:
+        self.assertEqual(
+            self.database.expire_stale_provider_invocations(max_candidates=1), 0
+        )
+        self.assertEqual(
+            self.database.expire_stale_provider_invocations(max_candidates=1_000), 0
+        )
+
     def test_non_success_usage_cannot_undercharge_an_ambiguous_call(self) -> None:
         run = self.create_budgeted_run()
         original_invoke = self.client.invoke
@@ -1509,8 +1539,8 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             [("ambiguous", "connector_ambiguous")],
         )
 
-    def test_transport_neutral_client_cannot_bypass_usage_bounds(self) -> None:
-        run = self.create_budgeted_run()
+    def test_transport_neutral_client_retains_reported_output_overrun(self) -> None:
+        run = self.create_budgeted_run(run_microusd=30_000)
         original_invoke = self.client.invoke
 
         def excessive_usage(
@@ -1522,30 +1552,28 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 usage=InferenceUsage(
                     input_tokens=20,
                     cached_input_tokens=5,
-                    output_tokens=101,
+                    output_tokens=6_000,
                     reasoning_output_tokens=1,
                 ),
             )
 
         self.client.invoke = excessive_usage  # type: ignore[method-assign]
 
-        with self.assertRaisesRegex(ProviderError, "ambiguous"):
-            self.control.invoke_provider(
-                run["id"], grant_name="budget-main", request={"input": "one"}
-            )
+        accepted = self.control.invoke_provider(
+            run["id"], grant_name="budget-main", request={"input": "one"}
+        )
 
         invocation = self.database.list_provider_invocations(run["id"])[0]
-        self.assertEqual(invocation["outcome"], "ambiguous")
-        self.assertEqual(invocation["error_code"], "connector_ambiguous")
-        self.assertEqual(invocation["accounting_status"], "conservative")
-        self.assertEqual(invocation["accounted_microusd"], 10_000)
+        self.assertEqual(accepted.estimated_microusd, 12_018)
+        self.assertEqual(invocation["outcome"], "succeeded")
+        self.assertIsNone(invocation["error_code"])
+        self.assertEqual(invocation["accounting_status"], "reported")
+        self.assertEqual(invocation["accounted_microusd"], 12_018)
+        self.assertEqual(invocation["output_tokens"], 6_000)
         budget = ControlRoom(self.database).snapshot()["provider_budgets"][0]
         self.assertEqual(budget["active_reservations"], 0)
-        self.assertEqual(budget["conservative_invocations"], 1)
-        with self.assertRaises(ProviderBudgetError):
-            self.control.invoke_provider(
-                run["id"], grant_name="budget-main", request={"input": "retry"}
-            )
+        self.assertEqual(budget["conservative_invocations"], 0)
+        self.assertEqual(budget["remaining_microusd"]["run"], 17_982)
         self.assertEqual(len(self.client.calls), 1)
 
     def test_post_dispatch_storage_failure_remains_durably_ambiguous(self) -> None:
@@ -1575,6 +1603,141 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM provider_dispatch_reservations"
             ).fetchone()[0]
         self.assertEqual(reservations, 1)
+
+    def test_expired_dispatch_becomes_conservative_ambiguity_once(self) -> None:
+        run = self.create_budgeted_run(run_microusd=30_000)
+        with (
+            mock.patch.object(
+                self.database,
+                "finalize_provider_invocation",
+                side_effect=sqlite3.OperationalError("lost finalization"),
+            ),
+            self.assertRaisesRegex(ProviderError, "ambiguous"),
+        ):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "one"}
+            )
+        pending = self.database.list_provider_invocations(run["id"])[0]
+
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=pending["deadline"],
+        ):
+            self.assertEqual(self.database.expire_stale_provider_invocations(), 1)
+            self.assertEqual(self.database.expire_stale_provider_invocations(), 0)
+
+        expired = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(expired["outcome"], "ambiguous")
+        self.assertEqual(expired["error_code"], "dispatch_deadline_expired")
+        self.assertEqual(expired["accounting_status"], "conservative")
+        self.assertEqual(expired["accounted_microusd"], 10_000)
+        self.assertEqual(expired["finished_at"], pending["deadline"])
+        budget = ControlRoom(self.database).snapshot()["provider_budgets"][0]
+        self.assertEqual(budget["active_reservations"], 0)
+        self.assertEqual(budget["conservative_invocations"], 1)
+
+    def test_expiry_counts_every_dispatch_in_one_batch(self) -> None:
+        run = self.create_budgeted_run(run_microusd=30_000)
+        with mock.patch.object(
+            self.database,
+            "finalize_provider_invocation",
+            side_effect=sqlite3.OperationalError("lost finalization"),
+        ):
+            for request in ("one", "two"):
+                with self.assertRaisesRegex(ProviderError, "ambiguous"):
+                    self.control.invoke_provider(
+                        run["id"],
+                        grant_name="budget-main",
+                        request={"input": request},
+                    )
+        pending = self.database.list_provider_invocations(run["id"])
+        latest_deadline = max(item["deadline"] for item in pending)
+
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=latest_deadline,
+        ):
+            self.assertEqual(self.database.expire_stale_provider_invocations(), 2)
+
+        self.assertEqual(
+            [
+                item["outcome"]
+                for item in self.database.list_provider_invocations(run["id"])
+            ],
+            ["ambiguous", "ambiguous"],
+        )
+
+    def test_terminal_attempt_expires_its_dispatch_before_deadline(self) -> None:
+        run = self.create_budgeted_run(run_microusd=30_000)
+        with (
+            mock.patch.object(
+                self.database,
+                "finalize_provider_invocation",
+                side_effect=sqlite3.OperationalError("lost finalization"),
+            ),
+            self.assertRaisesRegex(ProviderError, "ambiguous"),
+        ):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "one"}
+            )
+        pending = self.database.list_provider_invocations(run["id"])[0]
+        attempt = self.database.get_run(run["id"])["attempts"][-1]
+        self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-budget-test",
+            expected_attempt_version=attempt["version"],
+            reason="simulate owner loss",
+            interrupted=True,
+        )
+
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=pending["started_at"],
+        ):
+            self.assertEqual(self.database.expire_stale_provider_invocations(), 1)
+
+        expired = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(expired["outcome"], "ambiguous")
+        self.assertEqual(expired["error_code"], "dispatch_owner_lost")
+        self.assertEqual(expired["accounting_status"], "conservative")
+
+    def test_expired_attempt_lease_expires_dispatch_before_provider_deadline(
+        self,
+    ) -> None:
+        run = self.create_budgeted_run(run_microusd=30_000)
+        with (
+            mock.patch.object(
+                self.database,
+                "finalize_provider_invocation",
+                side_effect=sqlite3.OperationalError("lost finalization"),
+            ),
+            self.assertRaisesRegex(ProviderError, "ambiguous"),
+        ):
+            self.control.invoke_provider(
+                run["id"], grant_name="budget-main", request={"input": "one"}
+            )
+        pending = self.database.list_provider_invocations(run["id"])[0]
+        attempt = self.database.get_run(run["id"])["attempts"][-1]
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE run_attempts SET lease_expires_at = ? WHERE id = ?",
+                (pending["started_at"], attempt["id"]),
+            )
+
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value=pending["started_at"],
+        ):
+            self.assertEqual(self.database.expire_stale_provider_invocations(), 1)
+
+        expired = self.database.list_provider_invocations(run["id"])[0]
+        self.assertEqual(expired["outcome"], "ambiguous")
+        self.assertEqual(expired["error_code"], "dispatch_owner_lost")
+        self.assertEqual(expired["accounting_status"], "conservative")
 
     def test_revoked_connector_fails_atomic_reservation_before_dispatch(self) -> None:
         run = self.create_run()

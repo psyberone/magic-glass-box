@@ -1093,12 +1093,6 @@ class InferenceInvocationResponse:
                 if not isinstance(raw_usage, dict):
                     raise ValidationError("inference usage must be an object")
                 usage = InferenceUsage.from_mapping(raw_usage)
-                budget = authority["budget"]
-                assert isinstance(budget, InferenceInvocationBudget)
-                if usage.output_tokens > budget.max_output_tokens:
-                    raise ValidationError(
-                        "reported output usage exceeds the output token bound"
-                    )
         raw_retry_after = value.get("retry_after_seconds")
         retry_after_seconds: int | None = None
         if raw_retry_after is not None:

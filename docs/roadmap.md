@@ -2202,7 +2202,7 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v49; external-review remediation R1-R2 complete; R3+ pending**
+schema v49; external-review remediation R1-R3 complete; R4+ pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2402,6 +2402,33 @@ numeric-boundary and concurrent-admission survivors; RED-first boundary tests
 killed all seven on direct replay. The effective result is 114/134 (85.07%).
 The remaining 20 mutations are equivalent operations or changes only to
 non-contractual diagnostic text.
+
+External-review remediation R3 closes four truthfulness and read-coherence
+gaps without a database schema change. Verified successful inference usage now
+retains and accounts a provider-reported output-token overrun instead of
+discarding paid usage as ambiguity. An ambiguous invocation can never release
+its reservation, and the supervisor closes a stranded dispatch exactly once as
+conservative ambiguity when its provider deadline expires, its owning attempt
+lease expires, or its owning attempt is terminal. This frees the concurrency
+slot without replaying the provider call.
+
+`status` now reads all counts from one SQLite snapshot, while WAL mode is
+configured once during initialization instead of being reissued on every
+ordinary connection. One shared descriptor reader completes interrupted and
+short reads through EOF or one byte beyond the declared limit; every private
+credential, profile, sidecar-spec, and runner-config loader uses it before
+parsing or accepting the file.
+
+R3's final gate passes 1,564 tests at 87% aggregate statement-plus-branch
+coverage with clean Ruff format, lint, and diff checks. A fresh-association,
+two-worker focused mutation campaign over the bounded reader and dispatch
+expiry initially killed 63/82 mutants. Survivor-derived zero-boundary,
+exact-limit, and multi-dispatch tests killed eight more on direct replay; a
+second exact seam pass over WAL setup, ambiguous-budget release, and connector
+usage handling killed 15/15. The effective result is 86/97 (88.66%). The eleven
+adjudicated survivors change only equivalent SQLite keyword casing,
+non-contractual diagnostics or internal read-chunk tuning, or the
+non-contractual default expiry batch size.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

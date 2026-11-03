@@ -1263,6 +1263,11 @@ class SupervisionDatabaseTests(unittest.TestCase):
         with (
             mock.patch.object(
                 self.database,
+                "expire_stale_provider_invocations",
+                return_value=0,
+            ) as expire_invocations,
+            mock.patch.object(
+                self.database,
                 "enqueue_supervisor_actions",
                 return_value=[],
             ) as actions,
@@ -1274,6 +1279,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
         ):
             result = supervisor.tick(wait=True)
 
+        expire_invocations.assert_called_once_with()
         actions.assert_called_once_with(max_candidates=14)
         escalations.assert_called_once_with(max_candidates=10)
         self.assertEqual(

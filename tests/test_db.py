@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -287,6 +288,119 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         self.assertEqual(status["counts"]["users"], 1)
         self.assertEqual(status["counts"]["projects"], 1)
+
+    def test_status_counts_share_one_point_in_time_snapshot(self) -> None:
+        first_count_read = threading.Event()
+        writer_committed = threading.Event()
+        writer_errors: list[BaseException] = []
+        original_connect = self.database.connect
+        reader = original_connect()
+
+        class BarrierConnection:
+            def execute(
+                self,
+                statement: str,
+                parameters: tuple[object, ...] = (),
+            ) -> sqlite3.Cursor:
+                cursor = reader.execute(statement, parameters)
+                if statement == "SELECT COUNT(*) FROM users":
+                    first_count_read.set()
+                    if not writer_committed.wait(2):
+                        raise AssertionError("concurrent status writer did not commit")
+                return cursor
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(reader, name)
+
+        def write_related_rows() -> None:
+            connection = original_connect()
+            try:
+                if not first_count_read.wait(2):
+                    raise AssertionError("status did not read its first count")
+                now = self.database.now()
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO users "
+                    "(id, handle, display_name, active, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 1, ?, ?)",
+                    ("boxu_" + "f" * 32, "later", "Later User", now, now),
+                )
+                connection.execute(
+                    "INSERT INTO krab_instances "
+                    "(id, name, base_url, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "krab_" + "f" * 32,
+                        "Later Krab",
+                        "http://127.0.0.1:9876",
+                        now,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except BaseException as exc:  # pragma: no cover - diagnostic capture
+                writer_errors.append(exc)
+            finally:
+                connection.close()
+                writer_committed.set()
+
+        writer = threading.Thread(target=write_related_rows)
+        writer.start()
+        try:
+            with mock.patch.object(
+                self.database,
+                "connect",
+                return_value=BarrierConnection(),
+            ):
+                status = self.database.status()
+        finally:
+            writer_committed.set()
+            writer.join(2)
+
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(writer_errors, [])
+        self.assertEqual(
+            (status["counts"]["users"], status["counts"]["krab_instances"]),
+            (1, 1),
+        )
+
+    def test_ordinary_connections_do_not_reissue_wal_mode(self) -> None:
+        actual_connect = sqlite3.connect
+        statements: list[str] = []
+
+        def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+            connection = actual_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch(
+            "magic_glass_box.storage.core.sqlite3.connect",
+            side_effect=traced_connect,
+        ):
+            connection = self.database.connect()
+            connection.close()
+
+        self.assertNotIn("PRAGMA journal_mode = WAL", statements)
+
+    def test_initialization_configures_wal_exactly_once(self) -> None:
+        actual_connect = sqlite3.connect
+        statements: list[str] = []
+
+        def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+            connection = actual_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        database = Database(Path(self.temporary.name) / "wal-once.db")
+        with mock.patch(
+            "magic_glass_box.storage.core.sqlite3.connect",
+            side_effect=traced_connect,
+        ):
+            database.initialize()
+            connection = database.connect()
+            connection.close()
+
+        self.assertEqual(statements.count("PRAGMA journal_mode = WAL"), 1)
 
     def test_existing_state_directory_must_already_be_private(self) -> None:
         state = Path(self.temporary.name) / "unsafe-state"

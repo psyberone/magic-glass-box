@@ -430,7 +430,11 @@ crossing the connector boundary, the core durably records a `dispatching`
 invocation. It finalizes that record exactly once after a verified response.
 A stranded `dispatching` record is conservative evidence of an uncertain call;
 the core does not automatically replay it. For v2 it also remains a full active
-allowance until finalized.
+allowance until finalized. The supervisor sweeps records whose dispatch
+deadline or owning attempt lease has expired, or whose attempt is already
+terminal, into an immutable `ambiguous` outcome. That terminalization consumes
+the full reservation conservatively and frees the concurrency slot; it never
+replays the provider call.
 A failure before connection is recorded as unavailable/failed; a malformed,
 late, mismatched, or lost reply after dispatch is ambiguous. Connector
 operation IDs provide correlation, not a false promise that every provider

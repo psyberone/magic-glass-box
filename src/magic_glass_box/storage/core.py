@@ -110,7 +110,7 @@ class DatabaseCore:
 
     def initialize(self) -> dict[str, Any]:
         self._prepare_file()
-        with self._connection() as connection:
+        with closing(self._connect(configure_journal_mode=True)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise StorageError(
@@ -275,7 +275,7 @@ class DatabaseCore:
                 "database must not be accessible by group or other users"
             )
 
-    def connect(self) -> sqlite3.Connection:
+    def _connect(self, *, configure_journal_mode: bool) -> sqlite3.Connection:
         try:
             info = self.path.lstat()
         except FileNotFoundError as exc:
@@ -294,10 +294,10 @@ class DatabaseCore:
             connection.execute("PRAGMA trusted_schema = OFF")
             connection.execute("PRAGMA busy_timeout = 5000")
             deadline = time.monotonic() + 5.0
-            for statement in (
-                "PRAGMA journal_mode = WAL",
-                "PRAGMA synchronous = FULL",
-            ):
+            statements = ["PRAGMA synchronous = FULL"]
+            if configure_journal_mode:
+                statements.insert(0, "PRAGMA journal_mode = WAL")
+            for statement in statements:
                 while True:
                     try:
                         connection.execute(statement)
@@ -314,6 +314,9 @@ class DatabaseCore:
             if connection is not None:
                 connection.close()
             raise StorageError(f"cannot open database: {exc}") from exc
+
+    def connect(self) -> sqlite3.Connection:
+        return self._connect(configure_journal_mode=False)
 
     @contextmanager
     def _connection(
@@ -360,7 +363,7 @@ class DatabaseCore:
             raise StorageError("database foreign key check failed")
 
     def status(self) -> dict[str, Any]:
-        with self._connection() as connection:
+        with self._read_snapshot() as connection:
             self._check_schema(connection)
             count_queries = (
                 ("users", "SELECT COUNT(*) FROM users"),

@@ -2116,7 +2116,7 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
         assert response.usage is not None
         self.assertEqual(response.usage.input_tokens, 300_001)
 
-    def test_v2_connector_converts_output_bound_violations_to_ambiguity(self) -> None:
+    def test_v2_connector_retains_provider_reported_output_overrun(self) -> None:
         budget = {
             "policy_sha256": "8" * 64,
             "currency": "USD",
@@ -2150,9 +2150,10 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
             FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, "req_output"))
         ).invoke(request)
 
-        self.assertEqual(response.outcome, "ambiguous")
-        self.assertEqual(response.error_code, "usage_exceeds_output_limit")
-        self.assertIsNone(response.usage)
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertIsNone(response.error_code)
+        assert response.usage is not None
+        self.assertEqual(response.usage.output_tokens, 11)
 
     def test_connector_rejects_wrong_authority_before_provider_transport(self) -> None:
         cases = (

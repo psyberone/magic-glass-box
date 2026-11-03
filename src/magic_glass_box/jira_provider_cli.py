@@ -40,6 +40,7 @@ from .jira_provider import (
     JiraProviderError,
     JiraTransportError,
 )
+from .path_safety import read_bounded_descriptor
 from .service_sidecar import (
     MAX_SERVICE_FRAME_OVERHEAD,
     ServiceOperationRequest,
@@ -218,7 +219,7 @@ def _read_private_file(path: Path, *, maximum: int, subject: str) -> bytes:
             raise JiraProviderCLIError(f"{subject} must not be group/world accessible")
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             raise JiraProviderCLIError(f"{subject} must be owned by this user")
-        raw = os.read(descriptor, maximum + 1)
+        raw = read_bounded_descriptor(descriptor, maximum=maximum)
     finally:
         os.close(descriptor)
     if not raw or len(raw) > maximum:
@@ -568,7 +569,7 @@ def load_spec(path: Path) -> ServiceSidecarSpec:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise JiraProviderCLIError("Jira provider spec must be a regular file")
-        raw = os.read(descriptor, MAX_SPEC_BYTES + 1)
+        raw = read_bounded_descriptor(descriptor, maximum=MAX_SPEC_BYTES)
     finally:
         os.close(descriptor)
     if not raw or len(raw) > MAX_SPEC_BYTES:

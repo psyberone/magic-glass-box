@@ -191,6 +191,7 @@ class Supervisor:
         completed = self._reap()
         self._raise_if_action_overdue()
         self._renew_active_leases()
+        self.database.expire_stale_provider_invocations()
         action_candidates = max(7, self.max_discoveries_per_tick * 7 // 12)
         escalation_candidates = self.max_discoveries_per_tick - action_candidates
         actions_created = len(

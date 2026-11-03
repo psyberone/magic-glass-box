@@ -32,6 +32,7 @@ from .inference import (
     InferenceInvocationResponse,
     InferenceUsage,
 )
+from .path_safety import read_bounded_descriptor
 
 CHATGPT_ISSUER = "https://auth.openai.com"
 CHATGPT_AUTHORIZE_URL = CHATGPT_ISSUER + "/api/accounts/authorize"
@@ -600,7 +601,7 @@ class ChatGPTProfileStore:
                 or (hasattr(os, "getuid") and info.st_uid != os.getuid())
             ):
                 raise ChatGPTAuthenticationError("profile record is unsafe")
-            raw = os.read(descriptor, MAX_PROFILE_BYTES + 1)
+            raw = read_bounded_descriptor(descriptor, maximum=MAX_PROFILE_BYTES)
             if len(raw) > MAX_PROFILE_BYTES:
                 raise ChatGPTAuthenticationError("profile record is oversized")
         finally:
@@ -2121,27 +2122,15 @@ class OpenAIChatGPTConnector:
                 response_bytes=exc.response_bytes,
                 retry_after_seconds=exc.retry_after_seconds,
             )
-        if request.connector_protocol_version == 2:
-            budget = request.budget
-            assert budget is not None
-            if result.usage is None:
-                return self._failed(
-                    request,
-                    error_code="usage_unavailable",
-                    status_code=result.status_code,
-                    request_bytes=result.request_bytes,
-                    response_bytes=result.response_bytes,
-                    outcome="ambiguous",
-                )
-            if result.usage.output_tokens > budget.max_output_tokens:
-                return self._failed(
-                    request,
-                    error_code="usage_exceeds_output_limit",
-                    status_code=result.status_code,
-                    request_bytes=result.request_bytes,
-                    response_bytes=result.response_bytes,
-                    outcome="ambiguous",
-                )
+        if request.connector_protocol_version == 2 and result.usage is None:
+            return self._failed(
+                request,
+                error_code="usage_unavailable",
+                status_code=result.status_code,
+                request_bytes=result.request_bytes,
+                response_bytes=result.response_bytes,
+                outcome="ambiguous",
+            )
         value: dict[str, Any] = {
             **_response_authority(request),
             "outcome": "succeeded",

@@ -28,6 +28,7 @@ from .openai_chatgpt import (
     OpenAIResponsesClient,
     _strict_json_object,
 )
+from .path_safety import read_bounded_descriptor
 from .sidecar import (
     DEFAULT_CLIENT_TIMEOUT_SECONDS,
     UnixSidecarError,
@@ -278,7 +279,7 @@ def load_config(path: Path) -> OpenAIConnectorConfig:
             raise ChatGPTAuthenticationError(
                 "connector config must be one private regular file"
             )
-        raw = os.read(descriptor, MAX_CONFIG_BYTES + 1)
+        raw = read_bounded_descriptor(descriptor, maximum=MAX_CONFIG_BYTES)
     finally:
         os.close(descriptor)
     if not raw or len(raw) > MAX_CONFIG_BYTES:

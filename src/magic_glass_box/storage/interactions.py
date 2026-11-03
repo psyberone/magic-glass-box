@@ -1276,6 +1276,8 @@ class InteractionStorage:
             )
         if not isinstance(release_budget, bool):
             raise ValidationError("release_budget must be boolean")
+        if release_budget and outcome == "ambiguous":
+            raise ValidationError("ambiguous provider invocation cannot release budget")
         if usage is not None and release_budget:
             raise ValidationError("reported usage cannot release its budget")
         if (recovery_category is None) != (retry_after_seconds is None):
@@ -1427,6 +1429,64 @@ class InteractionStorage:
                     "provider invocation could not be finalized"
                 ) from exc
         return result
+
+    def expire_stale_provider_invocations(self, *, max_candidates: int = 256) -> int:
+        """Conservatively close dispatches that can no longer be finalized."""
+
+        if (
+            isinstance(max_candidates, bool)
+            or not isinstance(max_candidates, int)
+            or not 1 <= max_candidates <= MAX_PROVIDER_INVOCATION_HISTORY
+        ):
+            raise ValidationError(
+                "provider invocation expiry limit must be between 1 and "
+                f"{MAX_PROVIDER_INVOCATION_HISTORY}"
+            )
+        now = self.now()
+        expired = 0
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                candidates = connection.execute(
+                    "SELECT pi.id, pi.deadline FROM provider_invocations pi "
+                    "WHERE pi.outcome = 'dispatching' AND "
+                    "(pi.deadline <= ? OR NOT EXISTS ("
+                    "SELECT 1 FROM run_attempts ra WHERE ra.run_id = pi.run_id "
+                    "AND ra.state = 'running' AND ra.lease_expires_at > ?)) "
+                    "ORDER BY pi.deadline, pi.id LIMIT ?",
+                    (now, now, max_candidates),
+                ).fetchall()
+                for candidate in candidates:
+                    error_code = (
+                        "dispatch_deadline_expired"
+                        if candidate["deadline"] <= now
+                        else "dispatch_owner_lost"
+                    )
+                    changed = connection.execute(
+                        "UPDATE provider_invocations SET outcome = 'ambiguous', "
+                        "error_code = ?, accounted_microusd = CASE "
+                        "WHEN budget_policy_json IS NULL THEN NULL "
+                        "ELSE reserved_microusd END, accounting_status = CASE "
+                        "WHEN budget_policy_json IS NULL THEN NULL "
+                        "ELSE 'conservative' END, finished_at = ? "
+                        "WHERE id = ? AND outcome = 'dispatching'",
+                        (error_code, now, candidate["id"]),
+                    ).rowcount
+                    if changed != 1:
+                        raise StorageError(
+                            "stale provider invocation expiry was not retained"
+                        )
+                    expired += 1
+                connection.commit()
+            except (StorageError, ValidationError):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "stale provider invocation could not be expired"
+                ) from exc
+        return expired
 
     def list_provider_invocations(
         self,

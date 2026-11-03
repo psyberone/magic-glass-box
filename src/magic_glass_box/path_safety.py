@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unicodedata
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -38,6 +39,32 @@ class UnsafeSymlinkError(ValueError):
 
 
 LinkLookup = Callable[[PurePosixPath], str | None]
+
+
+def read_bounded_descriptor(descriptor: int, *, maximum: int) -> bytes:
+    """Read through short reads up to one byte beyond a declared limit."""
+
+    if (
+        isinstance(descriptor, bool)
+        or not isinstance(descriptor, int)
+        or descriptor < 0
+        or isinstance(maximum, bool)
+        or not isinstance(maximum, int)
+        or maximum < 0
+    ):
+        raise ValueError("descriptor and maximum must be non-negative integers")
+    remaining = maximum + 1
+    result = bytearray()
+    while remaining:
+        try:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+        except InterruptedError:
+            continue
+        if not chunk:
+            break
+        result.extend(chunk)
+        remaining -= len(chunk)
+    return bytes(result)
 
 
 def portable_path_identity(path: PurePosixPath) -> tuple[str, ...]:

@@ -6,6 +6,8 @@ import stat
 from pathlib import Path
 from typing import Protocol
 
+from .path_safety import read_bounded_descriptor
+
 KRAB_TOKEN_RE = re.compile(r"^krab_(usr_[0-9a-f]{32})_([A-Za-z0-9_-]{43})$")
 
 
@@ -128,8 +130,8 @@ class PrivateFileCredentialResolver:
                 raise CredentialError(
                     "credential file must not be accessible by group or other users"
                 )
-            raw = os.read(descriptor, limit)
-            if os.read(descriptor, 1):
+            raw = read_bounded_descriptor(descriptor, maximum=limit)
+            if len(raw) > limit:
                 raise CredentialError("credential file is unexpectedly large")
         finally:
             os.close(descriptor)

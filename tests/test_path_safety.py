@@ -1,17 +1,104 @@
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 import unittest
 from pathlib import PurePosixPath
+from unittest import mock
 
+from magic_glass_box import (
+    credentials,
+    execution_provider_cli,
+    github_provider_cli,
+    jira_provider_cli,
+    openai_chatgpt,
+    openai_chatgpt_cli,
+    remote_runner,
+)
 from magic_glass_box.path_safety import (
     MAX_PATH_BYTES,
     MAX_PATH_DEPTH,
     UnsafePathError,
     UnsafeSymlinkError,
+    read_bounded_descriptor,
     validate_repo_path,
     validate_symlink_graph,
     validate_symlink_target,
 )
+
+
+class BoundedDescriptorReadTests(unittest.TestCase):
+    def test_retries_interruptions_and_joins_irregular_short_reads(self) -> None:
+        with mock.patch(
+            "magic_glass_box.path_safety.os.read",
+            side_effect=(InterruptedError(), b"a", b"bc", b""),
+        ) as read:
+            self.assertEqual(read_bounded_descriptor(17, maximum=3), b"abc")
+
+        self.assertEqual(read.call_count, 4)
+
+    def test_reads_one_byte_past_the_limit_without_waiting_for_eof(self) -> None:
+        with mock.patch(
+            "magic_glass_box.path_safety.os.read",
+            side_effect=(b"ab", b"cd"),
+        ) as read:
+            self.assertEqual(read_bounded_descriptor(17, maximum=3), b"abcd")
+
+        self.assertEqual(read.call_args_list, [mock.call(17, 4), mock.call(17, 2)])
+
+    def test_zero_descriptor_and_zero_limit_are_valid(self) -> None:
+        with mock.patch(
+            "magic_glass_box.path_safety.os.read", return_value=b""
+        ) as read:
+            self.assertEqual(read_bounded_descriptor(0, maximum=0), b"")
+
+        read.assert_called_once_with(0, 1)
+
+    def test_rejects_invalid_descriptor_and_limit_values(self) -> None:
+        cases = (
+            (-1, 1),
+            (True, 1),
+            (1, -1),
+            (1, True),
+            ("1", 1),
+            (1, "1"),
+        )
+
+        for descriptor, maximum in cases:
+            with (
+                self.subTest(descriptor=descriptor, maximum=maximum),
+                self.assertRaisesRegex(ValueError, "non-negative integers"),
+            ):
+                read_bounded_descriptor(  # type: ignore[arg-type]
+                    descriptor, maximum=maximum
+                )
+
+    def test_all_private_loaders_use_the_shared_bounded_reader(self) -> None:
+        loaders = (
+            credentials.PrivateFileCredentialResolver._read_bytes,
+            execution_provider_cli._read_file,
+            remote_runner._private_file,
+            openai_chatgpt_cli.load_config,
+            openai_chatgpt.ChatGPTProfileStore._read,
+            jira_provider_cli._read_private_file,
+            jira_provider_cli.load_spec,
+            github_provider_cli.load_spec,
+        )
+
+        for loader in loaders:
+            with self.subTest(loader=loader.__qualname__):
+                tree = ast.parse(textwrap.dedent(inspect.getsource(loader)))
+                direct_reads = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "read"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "os"
+                ]
+                self.assertEqual(direct_reads, [])
 
 
 class RepositoryPathSafetyTests(unittest.TestCase):

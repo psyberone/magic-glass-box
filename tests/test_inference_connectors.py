@@ -340,8 +340,9 @@ class InferenceContractTests(unittest.TestCase):
 
         over_budget = copy.deepcopy(response_value)
         over_budget["usage"]["output_tokens"] = 20_000
-        with self.assertRaisesRegex(ValidationError, "output token bound"):
-            InferenceInvocationResponse.from_mapping(over_budget)
+        parsed_output_overrun = InferenceInvocationResponse.from_mapping(over_budget)
+        assert parsed_output_overrun.usage is not None
+        self.assertEqual(parsed_output_overrun.usage.output_tokens, 20_000)
 
         # Upstream usage can include provider-owned instructions and tool
         # formatting that were never present in the worker's request bytes.
