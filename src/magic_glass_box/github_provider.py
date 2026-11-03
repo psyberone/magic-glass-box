@@ -15,6 +15,7 @@ from .domain import (
     parse_rfc3339_timestamp,
     require_string,
 )
+from .git_refs import normalize_branch_ref
 from .provider_effects import (
     ChangeOpenReadback,
     LandingReadback,
@@ -157,29 +158,9 @@ def _exact_parameters(
 
 def _branch_ref(value: object, *, field: str) -> str:
     try:
-        text = require_string(value, field=field, max_bytes=256)
+        return normalize_branch_ref(value, field=field)
     except ValidationError as exc:
         raise GitHubProviderError(str(exc)) from exc
-    if not text.startswith("refs/heads/"):
-        raise GitHubProviderError(f"{field} must be a branch ref")
-    branch = text.removeprefix("refs/heads/")
-    components = branch.split("/")
-    if (
-        not branch
-        or branch.startswith("/")
-        or branch.endswith(("/", "."))
-        or any(
-            component.startswith(".") or component.endswith(".lock")
-            for component in components
-        )
-        or ".." in branch
-        or "//" in branch
-        or "@{" in branch
-        or any(character in " ~^:?*[\\" for character in branch)
-        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in branch)
-    ):
-        raise GitHubProviderError(f"{field} is invalid")
-    return text
 
 
 def _pull_number(value: object) -> int:

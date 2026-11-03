@@ -1138,6 +1138,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         *,
         expected_activation_version: int,
         idempotency_key: str,
+        requested_by: str | None = None,
     ) -> dict[str, object]:
         return self.database.start_workflow_execution(
             project_key="policy-project",
@@ -1151,7 +1152,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             expected_thread_version=1,
             expected_activation_version=expected_activation_version,
             idempotency_key=idempotency_key,
-            requested_by=self.user["id"],
+            requested_by=requested_by or self.user["id"],
         )
 
     def activate(self, **overrides: object) -> dict[str, object]:
@@ -1168,12 +1169,14 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self,
         execution: dict[str, object],
         work_item: dict[str, object],
+        *,
+        requested_by: str | None = None,
     ) -> dict[str, object]:
         return self.database.create_run(
             project_key="policy-project",
             profile_name="Producer",
             work_item_id=work_item["id"],
-            requested_by=self.user["id"],
+            requested_by=requested_by or self.user["id"],
             source_revision="a" * 40,
             workflow_execution_id=execution["id"],
             workflow_round=0,
@@ -1786,6 +1789,35 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         )
         self.assertEqual(attempt["state"], "preparing")
 
+    def test_manual_wake_belongs_to_the_activation_owner_not_the_requester(
+        self,
+    ) -> None:
+        self.activate()
+        requester = self.database.create_user("requester", "Workflow Requester")
+        work_item = self.create_work_item("manual-wake-owner")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="manual-wake-owner",
+            requested_by=requester["id"],
+        )
+
+        self.create_producer_run(
+            execution,
+            work_item,
+            requested_by=requester["id"],
+        )
+
+        wake = self.database.list_workflow_manual_wakes(execution_id=execution["id"])[0]
+        self.assertEqual(execution["requested_by"], "requester")
+        self.assertEqual(wake["recipient"], "owner")
+        with self.assertRaisesRegex(ConflictError, "recipient"):
+            self.database.acknowledge_workflow_manual_wake(
+                wake["id"],
+                expected_version=wake["version"],
+                acknowledged_by=requester["id"],
+            )
+
     def test_replacement_run_requires_its_own_manual_wake(self) -> None:
         self.activate()
         work_item = self.create_work_item("replacement-wake")
@@ -1894,6 +1926,46 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
                 runtime_adapter="docker",
                 owner_id="worker-two",
                 expected_run_version=1,
+            )
+
+    def test_activation_shared_host_concurrency_also_limits_standalone_runs(
+        self,
+    ) -> None:
+        self.activate()
+        activated_item = self.create_work_item("concurrency-activated")
+        execution = self.start_activated(
+            activated_item,
+            expected_activation_version=1,
+            idempotency_key="concurrency-activated",
+        )
+        activated_run = self.create_producer_run(execution, activated_item)
+        wake = self.database.list_workflow_manual_wakes(execution_id=execution["id"])[0]
+        self.database.acknowledge_workflow_manual_wake(
+            wake["id"],
+            expected_version=wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+        self.database.begin_run_attempt(
+            activated_run["id"],
+            runtime_adapter="docker",
+            owner_id="activated-worker",
+            expected_run_version=activated_run["version"],
+        )
+        standalone_item = self.create_work_item("concurrency-standalone")
+        standalone = self.database.create_run(
+            project_key="policy-project",
+            profile_name="Producer",
+            work_item_id=standalone_item["id"],
+            requested_by=self.user["id"],
+            source_revision="a" * 40,
+        )
+
+        with self.assertRaisesRegex(ConflictError, "shared-host concurrency"):
+            self.database.begin_run_attempt(
+                standalone["id"],
+                runtime_adapter="docker",
+                owner_id="standalone-worker",
+                expected_run_version=standalone["version"],
             )
 
     def test_activation_wall_time_opens_a_non_extendable_owner_ruling(self) -> None:

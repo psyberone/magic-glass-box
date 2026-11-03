@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .domain import ValidationError, canonical_json, content_sha256, require_string
+from .git_refs import normalize_branch_ref
 
 PROVIDER_EFFECT_READBACK_SCHEMA_VERSION = 1
 MAX_SECONDARY_EFFECTS = 64
 
 _CHANGE_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 _OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
-_REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 _SECONDARY_EFFECT_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,31}:[^\s]{1,223}$")
 _WORKFLOW_INTENT_ID_PATTERNS = {
     "project_id": re.compile(r"^boxp_[0-9a-f]{32}$"),
@@ -65,10 +65,7 @@ def _revision(value: object, *, field: str) -> str:
 
 
 def _branch_ref(value: object, *, field: str) -> str:
-    result = _identifier(value, field=field, pattern=_REF_RE)
-    if "//" in result or any(part in {".", ".."} for part in result.split("/")):
-        raise ValidationError(f"{field} is invalid")
-    return result
+    return normalize_branch_ref(value, field=field)
 
 
 def _secondary_effects(value: object) -> tuple[str, ...]:

@@ -2689,15 +2689,43 @@ class WorkflowDirectorTests(unittest.TestCase):
             landed["landing"]["proof"]["reasons"], ["landing_tree_mismatch"]
         )
         self.assertEqual(landed["landing"]["target_hold"]["state"], "open")
+
+        unrelated = self.start_execution(
+            configuration_name="unrelated-provider-target",
+            external_id="workflow-director-unrelated-provider-target",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "provider",
+            },
+        )
+        unrelated_landing, _unrelated_gate = self.drive_approved_to_landing(unrelated)
+        self.assertTrue(
+            self.director().advance(
+                unrelated_landing["id"],
+                expected_version=unrelated_landing["version"],
+            )
+        )
+        unrelated_enqueued = self.database.get_workflow_execution(unrelated["id"])
+
         snapshot = ControlRoom(self.database).snapshot()
         projected = next(
             item for item in snapshot["workflows"] if item["id"] == landed["id"]
+        )
+        unrelated_projected = next(
+            item
+            for item in snapshot["workflows"]
+            if item["id"] == unrelated_enqueued["id"]
         )
         self.assertEqual(projected["landing_proof_status"], "mismatch")
         self.assertEqual(
             projected["landing_target_hold_id"],
             landed["landing"]["target_hold"]["id"],
         )
+        self.assertIsNone(unrelated_projected["landing_target_hold_id"])
         self.assertIn(
             "workflow.landing_target_held",
             {
@@ -4346,32 +4374,23 @@ class WorkflowDirectorTests(unittest.TestCase):
                 workflow_execution_id=enqueued["id"],
                 workflow_execution_version=enqueued["version"],
             )
-        issued = self.control.issue_landing_plan(
+        with self.assertRaisesRegex(
+            ConflictError, "workflow landing authority is required"
+        ):
+            self.control.issue_landing_plan(
+                queue["id"],
+                owner_id="generic-operator",
+                expected_version=queue["version"],
+                remote="origin",
+                issued_by_handle="operator",
+                result_store=self.results,
+                candidate_store=self.candidates,
+            )
+        self.control.release_integration_claim(
             queue["id"],
             owner_id="generic-operator",
             expected_version=queue["version"],
-            remote="origin",
-            issued_by_handle="operator",
-            result_store=self.results,
-            candidate_store=self.candidates,
         )
-        self.assertTrue(
-            self.director().advance(
-                enqueued["id"], expected_version=enqueued["version"]
-            )
-        )
-        ruled = self.database.get_workflow_execution(enqueued["id"])
-        ruling = ruled["rulings"][-1]
-        self.assertEqual(ruling["kind"], "landing_authority_mismatch")
-        self.assertEqual(ruling["landing_plan_id"], issued["id"])
-        self.assertIsNone(ruling["provider_landing_id"])
-        with self.assertRaisesRegex(ConflictError, "continue the workflow"):
-            self.control.resolve_workflow_ruling(
-                ruling["id"],
-                expected_version=ruling["version"],
-                decision="continue",
-                resolved_by_handle="operator",
-            )
 
         manual_landing, _gate = self.drive_approved_to_landing(self.execution)
         self.assertTrue(
@@ -4396,6 +4415,28 @@ class WorkflowDirectorTests(unittest.TestCase):
                 issued_by_handle="operator",
                 result_store=self.results,
                 candidate_store=self.candidates,
+            )
+
+        manual_queue = self.database.get_integration_queue_item(
+            manual["landing"]["queue_item_id"]
+        )
+        if manual_queue["state"] == "queued":
+            manual_queue = self.control.claim_integration_item(
+                manual_queue["id"],
+                owner_id="generic-provider",
+                expected_version=manual_queue["version"],
+                lease_seconds=60,
+            )
+        with self.assertRaisesRegex(
+            ConflictError, "workflow landing authority is required"
+        ):
+            self.control.issue_provider_landing(
+                manual_queue["id"],
+                owner_id=manual_queue["owner_id"],
+                expected_version=manual_queue["version"],
+                resource_id="42",
+                merge_method="squash",
+                issued_by_handle="operator",
             )
 
     def test_manual_landing_issuance_rejects_cancelled_workflow_at_landing_stage(

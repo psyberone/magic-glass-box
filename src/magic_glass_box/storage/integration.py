@@ -1678,6 +1678,13 @@ class IntegrationStorage:
                     )
                 if queue["version"] != expected_version:
                     raise ConcurrentUpdateError("integration queue version changed")
+                workflow_binding = connection.execute(
+                    "SELECT execution_id FROM workflow_landing_bindings "
+                    "WHERE queue_item_id = ?",
+                    (queue_item_id,),
+                ).fetchone()
+                if workflow_binding is not None and workflow_execution_id is None:
+                    raise ConflictError("workflow landing authority is required")
                 if workflow_execution_id is not None:
                     workflow = connection.execute(
                         "SELECT e.state, e.stage, e.version, cv.spec_json "
@@ -2059,6 +2066,13 @@ class IntegrationStorage:
                     )
                 if queue["version"] != expected_version:
                     raise ConcurrentUpdateError("integration queue version changed")
+                workflow_binding = connection.execute(
+                    "SELECT execution_id FROM workflow_landing_bindings "
+                    "WHERE queue_item_id = ?",
+                    (queue_item_id,),
+                ).fetchone()
+                if workflow_binding is not None and workflow_execution_id is None:
+                    raise ConflictError("workflow landing authority is required")
                 required_binding_id = None
                 if workflow_execution_id is not None:
                     workflow = connection.execute(

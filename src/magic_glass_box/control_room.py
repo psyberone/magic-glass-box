@@ -163,8 +163,12 @@ class ControlRoom:
         attempts = self._attempts(connection, run_ids, generated_at)
         interactions = self._interactions(connection, run_ids)
         retained_results = self._results(connection, run_ids)
-        candidates = self._candidates(connection, run_ids)
         gate_policies = self._gate_policies(connection, run_ids)
+        candidates = self._candidates(
+            connection,
+            run_ids,
+            [policy["candidate_id"] for policy in gate_policies],
+        )
         landing_dependencies = self._landing_dependencies(connection, history_limit)
         integration_queue = self._integration_queue(
             connection, history_limit, generated_at
@@ -871,7 +875,7 @@ class ControlRoom:
             "LEFT JOIN workflow_provider_landing_proofs landing_proof "
             "ON landing_proof.workflow_execution_id = e.id "
             "LEFT JOIN integration_target_holds target_hold "
-            "ON target_hold.integration_ref_id = queue.integration_ref_id "
+            "ON target_hold.workflow_execution_id = e.id "
             "AND target_hold.state = 'open' "
             "LEFT JOIN workflow_completions completion "
             "ON completion.execution_id = e.id "
@@ -1345,12 +1349,25 @@ class ControlRoom:
 
     @classmethod
     def _candidates(
-        cls, connection: sqlite3.Connection, run_ids: list[str]
+        cls,
+        connection: sqlite3.Connection,
+        run_ids: list[str],
+        retained_candidate_ids: list[str],
     ) -> list[dict[str, Any]]:
-        rows = cls._for_runs(
-            connection,
-            run_ids,
-            "SELECT ic.id, ic.attempt_result_id, ic.schema_version, "
+        if not run_ids and not retained_candidate_ids:
+            return []
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            clauses.append(f"ic.producer_run_id IN ({placeholders})")
+            parameters.extend(run_ids)
+        if retained_candidate_ids:
+            placeholders = ",".join("?" for _ in retained_candidate_ids)
+            clauses.append(f"ic.id IN ({placeholders})")
+            parameters.extend(retained_candidate_ids)
+        query = (
+            "SELECT ic.id, ic.attempt_result_id, ic.schema_version, "  # noqa: S608
             "ic.project_id, ic.context_version_id, ic.work_thread_id, "
             "ic.producer_run_id, ic.producer_attempt_id, ic.base_revision, "
             "ic.head_revision, ic.tree_revision, ic.object_format, "
@@ -1358,41 +1375,61 @@ class ControlRoom:
             "u.handle AS created_by_handle, ic.created_at "
             "FROM integration_candidates ic JOIN users u "
             "ON u.id = ic.created_by "
-            "WHERE ic.producer_run_id IN ({run_ids}) "
-            "ORDER BY ic.created_at DESC, ic.id",
+            f"WHERE {' OR '.join(clauses)} "
+            "ORDER BY ic.created_at DESC, ic.id"
         )
+        rows = connection.execute(query, parameters).fetchall()
         return [dict(row) for row in rows]
 
     @classmethod
     def _gate_policies(
-        cls, connection: sqlite3.Connection, run_ids: list[str]
+        cls,
+        connection: sqlite3.Connection,
+        run_ids: list[str],
     ) -> list[dict[str, Any]]:
-        if not run_ids:
-            return []
-        placeholders = ",".join("?" for _ in run_ids)
-        query = (
+        visible_policy_ids: set[str] = set()
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            visible_rows = connection.execute(
+                "SELECT gp.id FROM integration_gate_policies gp "  # noqa: S608
+                "JOIN integration_candidates ic ON ic.id = gp.candidate_id "
+                f"WHERE ic.producer_run_id IN ({placeholders}) OR EXISTS ("
+                "SELECT 1 FROM integration_gate_review_runs grr "
+                "WHERE grr.policy_id = gp.id AND grr.run_id IN ("
+                f"{placeholders})) OR EXISTS ("
+                "SELECT 1 FROM integration_gate_change_runs gcr "
+                "WHERE gcr.policy_id = gp.id AND gcr.run_id IN ("
+                f"{placeholders})) OR EXISTS ("
+                "SELECT 1 FROM integration_gate_maintainer_change_runs gmcr "
+                "WHERE gmcr.policy_id = gp.id AND gmcr.run_id IN ("
+                f"{placeholders}))",
+                (*run_ids, *run_ids, *run_ids, *run_ids),
+            ).fetchall()
+            visible_policy_ids = {row["id"] for row in visible_rows}
+
+        rows = connection.execute(
             "SELECT gp.id, gp.candidate_id, gp.manifest_json, "  # noqa: S608
             "gp.content_sha256, gp.repository_identity, gp.project_id, "
             "gp.work_thread_id, gp.integration_ref, "
             "gp.expected_base_revision, gp.head_revision, gp.tree_revision, "
             "gp.object_format, gp.policy_revision, gp.review_separation, "
-            "gp.created_at, ic.producer_run_id, u.handle AS created_by_handle "
+            "gp.created_at, ic.producer_run_id, u.handle AS created_by_handle, "
+            "(EXISTS(SELECT 1 FROM workflow_gate_bindings workflow_gate "
+            "JOIN workflow_executions execution "
+            "ON execution.id = workflow_gate.execution_id "
+            "WHERE workflow_gate.policy_id = gp.id AND execution.state = 'active') "
+            "OR EXISTS(SELECT 1 FROM workflow_landing_bindings workflow_landing "
+            "JOIN workflow_executions execution "
+            "ON execution.id = workflow_landing.execution_id "
+            "WHERE workflow_landing.policy_id = gp.id "
+            "AND execution.state = 'active') OR EXISTS("
+            "SELECT 1 FROM integration_queue_items queue "
+            "WHERE queue.current_policy_id = gp.id "
+            "AND queue.state NOT IN ('landed', 'cancelled'))) AS active_reference "
             "FROM integration_gate_policies gp "
             "JOIN integration_candidates ic ON ic.id = gp.candidate_id "
             "JOIN users u ON u.id = gp.created_by "
-            f"WHERE ic.producer_run_id IN ({placeholders}) OR EXISTS ("
-            "SELECT 1 FROM integration_gate_review_runs grr "
-            "WHERE grr.policy_id = gp.id AND grr.run_id IN ("
-            f"{placeholders})) OR EXISTS ("
-            "SELECT 1 FROM integration_gate_change_runs gcr "
-            "WHERE gcr.policy_id = gp.id AND gcr.run_id IN ("
-            f"{placeholders})) OR EXISTS ("
-            "SELECT 1 FROM integration_gate_maintainer_change_runs gmcr "
-            "WHERE gmcr.policy_id = gp.id AND gmcr.run_id IN ("
-            f"{placeholders})) ORDER BY gp.created_at DESC, gp.id"
-        )
-        rows = connection.execute(
-            query, (*run_ids, *run_ids, *run_ids, *run_ids)
+            "ORDER BY gp.created_at DESC, gp.id"
         ).fetchall()
         if not rows:
             return []
@@ -1450,34 +1487,38 @@ class ControlRoom:
             passed = states.count("passed")
             failed = states.count("failed")
             pending = states.count("pending")
-            policies.append(
-                {
-                    "id": row["id"],
-                    "candidate_id": row["candidate_id"],
-                    "project_id": row["project_id"],
-                    "work_thread_id": row["work_thread_id"],
-                    "producer_run_id": row["producer_run_id"],
-                    "repository_identity": row["repository_identity"],
-                    "integration_ref": row["integration_ref"],
-                    "expected_base_revision": row["expected_base_revision"],
-                    "head_revision": row["head_revision"],
-                    "tree_revision": row["tree_revision"],
-                    "object_format": row["object_format"],
-                    "policy_revision": row["policy_revision"],
-                    "content_sha256": row["content_sha256"],
-                    "review_separation": row["review_separation"],
-                    "required_count": len(required),
-                    "passed_count": passed,
-                    "failed_count": failed,
-                    "pending_count": pending,
-                    "ready": passed == len(required),
-                    "latest_evidence_at": (
-                        None if not evidence_times else max(evidence_times)
-                    ),
-                    "created_by_handle": row["created_by_handle"],
-                    "created_at": row["created_at"],
-                }
-            )
+            record = {
+                "id": row["id"],
+                "candidate_id": row["candidate_id"],
+                "project_id": row["project_id"],
+                "work_thread_id": row["work_thread_id"],
+                "producer_run_id": row["producer_run_id"],
+                "repository_identity": row["repository_identity"],
+                "integration_ref": row["integration_ref"],
+                "expected_base_revision": row["expected_base_revision"],
+                "head_revision": row["head_revision"],
+                "tree_revision": row["tree_revision"],
+                "object_format": row["object_format"],
+                "policy_revision": row["policy_revision"],
+                "content_sha256": row["content_sha256"],
+                "review_separation": row["review_separation"],
+                "required_count": len(required),
+                "passed_count": passed,
+                "failed_count": failed,
+                "pending_count": pending,
+                "ready": passed == len(required),
+                "latest_evidence_at": (
+                    None if not evidence_times else max(evidence_times)
+                ),
+                "created_by_handle": row["created_by_handle"],
+                "created_at": row["created_at"],
+            }
+            if (
+                row["id"] in visible_policy_ids
+                or row["active_reference"]
+                or not record["ready"]
+            ):
+                policies.append(record)
         return policies
 
     @classmethod

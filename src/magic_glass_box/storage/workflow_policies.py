@@ -580,7 +580,8 @@ class WorkflowPolicyStorage:
         execution = connection.execute(
             "SELECT execution.workflow_activation_version_id, "
             "execution.version, execution.correction_round, "
-            "execution.requested_by, activation.spec_json "
+            "activation.acknowledged_by AS activation_owner, "
+            "activation.spec_json "
             "FROM workflow_executions execution "
             "LEFT JOIN workflow_activation_versions activation "
             "ON activation.id = execution.workflow_activation_version_id "
@@ -622,7 +623,7 @@ class WorkflowPolicyStorage:
                 correction_round,
                 role,
                 wake_class,
-                execution["requested_by"],
+                execution["activation_owner"],
                 now,
                 now,
             ),

@@ -129,6 +129,61 @@ class ProviderEffectReadbackTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 WorkflowProviderIntent.from_mapping(value)
 
+    def test_all_provider_effect_branch_refs_use_the_canonical_git_contract(
+        self,
+    ) -> None:
+        contracts = (
+            (
+                "workflow-provider-intent",
+                WorkflowProviderIntent.from_mapping,
+                ("base_ref", "head_ref"),
+            ),
+            (
+                "ref-publication-readback",
+                RefPublicationReadback.from_mapping,
+                ("target_ref",),
+            ),
+            (
+                "change-open-readback",
+                ChangeOpenReadback.from_mapping,
+                ("base_ref", "head_ref"),
+            ),
+            (
+                "landing-readback",
+                LandingReadback.from_mapping,
+                ("base_ref", "head_ref", "primary_ref"),
+            ),
+        )
+        invalid_refs = (
+            "refs/heads/a..b",
+            "refs/heads//leading-empty-component",
+            "refs/heads/topic.lock",
+            "refs/heads/topic/.hidden",
+            "refs/heads/topic.",
+            "refs/heads/topic//child",
+        )
+        for name, factory, fields in contracts:
+            schema = json.loads(
+                (self.repository / "schemas" / f"{name}-v1.schema.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            example = json.loads(
+                (self.repository / "examples" / f"{name}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            validator = Draft202012Validator(schema, format_checker=FormatChecker())
+            for field in fields:
+                for invalid_ref in invalid_refs:
+                    value = {**example, field: invalid_ref}
+                    with self.subTest(
+                        contract=name, field=field, invalid_ref=invalid_ref
+                    ):
+                        self.assertTrue(list(validator.iter_errors(value)))
+                        with self.assertRaises(ValidationError):
+                            factory(value)
+
     def test_ref_publication_readback_is_canonical_and_exact(self) -> None:
         value = {
             "schema_version": 1,

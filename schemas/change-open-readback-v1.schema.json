@@ -22,7 +22,7 @@
     "secondary_effects": { "type": "array", "maxItems": 0 }
   },
   "$defs": {
-    "branchRef": { "type": "string", "pattern": "^refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$" },
+    "branchRef": { "type": "string", "minLength": 12, "maxLength": 256, "pattern": "^refs/heads/(?!@$)(?![/.])(?!.*/\\.)(?!.*(?:\\.\\.|@\\{|//|\\.lock(?:/|$)))(?!.*[/.]$)[^ ~^:?*\\\\[\\u0000-\\u001f\\u007f]+$" },
     "objectId": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
   }
 }

@@ -2202,7 +2202,7 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v49; independent review pending**
+schema v49; external-review remediation R1 complete; R2+ pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2345,6 +2345,30 @@ tests added exact public `closed_at` projection and direct retrieval of an open
 obligation. The remaining survivors alter diagnostic prose, pre-existing
 broad-function behavior outside M18D, or trusted-state corruption paths that
 cannot arise through the control-plane API.
+
+External-review remediation R1 closes seven authority and projection gaps
+without a database schema change. One canonical Git branch-ref validator now
+backs all four published provider contracts, provider read-back, GitHub
+translation, and integration-gate normalization. Project activation
+concurrency now covers standalone runs as well as workflow-bound runs; manual
+wakes belong to the activation owner; and provider dispatch rechecks the exact
+project capability immediately before first invocation while uncertain
+reconciliation retains its pinned identity. Workflow-bound landing cannot omit
+its workflow authority tuple, and review gates select only the latest
+successful reviewer attempt. The control room scopes target holds to their
+workflow and retains unresolved or active candidates and gates outside the
+bounded terminal history window.
+
+R1's final gate passes 1,529 tests at 87% aggregate statement-plus-branch
+coverage, with the new canonical ref validator at 100%, and clean Ruff format
+and lint. A fresh-association, two-worker focused mutation campaign over the
+new behavioral seams killed 93/100 selected mutants (93%). Five initial
+behavioral survivors produced direct boundary regressions and were killed on
+replay. The seven adjudicated survivors are one non-contractual error-field
+label and six equivalent ref mutations already rejected by overlapping
+component checks. The mutation harness now copies `tests/` into its isolated
+workspace on every run so association evidence cannot silently reuse stale
+test files.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 from .domain import canonical_json, content_sha256, require_string
+from .git_refs import normalize_branch_ref
 
 GATE_POLICY_SCHEMA_VERSION = 1
 GATE_EVIDENCE_SCHEMA_VERSION = 1
@@ -65,29 +66,14 @@ class MaintainerDecision(StrEnum):
 
 
 def normalize_integration_ref(value: object) -> str:
-    branch = _bounded_text(value, field="integration ref", max_bytes=512)
-    full = branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
-    name = full.removeprefix("refs/heads/")
-    forbidden = set(" ~^:?*[\\")
-    if (
-        not name
-        or name == "@"
-        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in name)
-        or any(character in forbidden for character in name)
-        or ".." in name
-        or "@{" in name
-        or "//" in name
-        or name.startswith("/")
-        or name.endswith(("/", "."))
-    ):
-        raise GateError("integration ref is invalid")
-    components = name.split("/")
-    if any(
-        not component or component.startswith(".") or component.endswith(".lock")
-        for component in components
-    ):
-        raise GateError("integration ref is invalid")
-    return full
+    try:
+        return normalize_branch_ref(
+            value,
+            field="integration ref",
+            allow_short=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise GateError(str(exc)) from exc
 
 
 def _bounded_text(value: object, *, field: str, max_bytes: int) -> str:

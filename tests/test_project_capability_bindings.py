@@ -262,7 +262,7 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
         ):
             self.database.resolve_project_capability("demo-project", "change.open", 1)
 
-    def test_bound_operation_is_atomically_pinned_and_unbind_stops_new_work(
+    def test_bound_operation_is_atomically_pinned_and_unbind_stops_dispatch(
         self,
     ) -> None:
         binding = self.bind()
@@ -313,14 +313,77 @@ class ProjectCapabilityBindingTests(unittest.TestCase):
                 project_capability_binding_id=binding["id"],
             )
 
-        existing = self.database.begin_service_operation_attempt(
-            operation["id"],
+        with self.assertRaisesRegex(ConflictError, "project capability is unavailable"):
+            self.database.begin_service_operation_attempt(
+                operation["id"],
+                phase="invoke",
+                owner_id="supervisor-one",
+                expected_version=1,
+                lease_seconds=30,
+            )
+
+        operator_only = self.database.create_service_operation(
+            spec=operation_spec(
+                connector_name="primary-sidecar",
+                idempotency_key="operator-only-after-unbind",
+                target={
+                    **operation_spec().target.to_dict(),
+                    "resource_id": "operator-only-candidate",
+                },
+            ),
+            created_by=self.user["id"],
+        )
+        dispatched = self.database.begin_service_operation_attempt(
+            operator_only["id"],
             phase="invoke",
             owner_id="supervisor-one",
             expected_version=1,
             lease_seconds=30,
         )
-        self.assertEqual(existing["operation"]["state"], "dispatching")
+        self.assertEqual(dispatched["operation"]["state"], "dispatching")
+
+    def test_unbind_preserves_reconciliation_of_an_already_dispatched_effect(
+        self,
+    ) -> None:
+        binding = self.bind()
+        operation = self.database.create_service_operation(
+            spec=operation_spec(connector_name="primary-sidecar"),
+            created_by=self.user["id"],
+            project_capability_binding_id=binding["id"],
+        )
+        dispatch = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="invoke",
+            owner_id="supervisor-one",
+            expected_version=operation["version"],
+            lease_seconds=30,
+        )
+        uncertain = self.database.fail_service_operation_attempt(
+            dispatch["attempt"]["id"],
+            owner_id="supervisor-one",
+            expected_operation_version=dispatch["operation"]["version"],
+            outcome="ambiguous",
+            error_code="response_lost",
+        )
+        self.database.unbind_project_capability(
+            binding["id"],
+            expected_version=binding["version"],
+            unbound_by=self.user["id"],
+        )
+
+        reconciliation = self.database.begin_service_operation_attempt(
+            operation["id"],
+            phase="reconcile",
+            owner_id="supervisor-two",
+            expected_version=uncertain["version"],
+            lease_seconds=30,
+        )
+
+        self.assertEqual(reconciliation["attempt"]["phase"], "reconcile")
+        self.assertEqual(
+            reconciliation["operation"]["project_capability_binding_id"],
+            binding["id"],
+        )
 
     def test_bound_operation_must_match_exact_controller_and_capability(self) -> None:
         binding = self.bind()

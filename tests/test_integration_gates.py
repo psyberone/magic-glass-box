@@ -28,6 +28,8 @@ from magic_glass_box.db import (
 )
 from magic_glass_box.domain import (
     AgentProfileSpec,
+    HandoffEnvelope,
+    InteractionKind,
     NetworkMode,
     ProjectContext,
     ValidationError,
@@ -257,6 +259,13 @@ class GatePolicyManifestTests(unittest.TestCase):
             value[field] = bad
             with self.subTest(field=field), self.assertRaises(GateError):
                 GatePolicyManifest.from_mapping(value)
+
+        with self.assertRaisesRegex(GateError, "exceeds 256 UTF-8 bytes"):
+            GatePolicyManifest.bind(
+                self.candidate(),
+                default_branch="x" * 246,
+                policy=self.policy(),
+            )
 
 
 class GateEvidenceManifestTests(unittest.TestCase):
@@ -658,6 +667,10 @@ class GateLedgerTests(unittest.TestCase):
             owner_id="gate-test",
             expected_run_version=run["version"],
         )
+        if preparing["recovery_checkpoint"] is not None:
+            self.database.record_recovery_checkpoint_application(
+                preparing["id"], owner_id="gate-test"
+            )
         attempt = self.database.start_run_attempt(
             preparing["id"],
             owner_id="gate-test",
@@ -918,6 +931,22 @@ class GateLedgerTests(unittest.TestCase):
                     "DELETE FROM integration_gate_policies WHERE id = ?",
                     (created["id"],),
                 )
+
+    def test_control_room_retains_unresolved_gate_when_runs_age_out(self) -> None:
+        policy = self.create_policy()
+
+        snapshot = ControlRoom(self.database).snapshot(history_limit=0)
+
+        self.assertEqual(snapshot["runs"], [])
+        self.assertIn(
+            self.candidate["id"],
+            {candidate["id"] for candidate in snapshot["candidates"]},
+        )
+        projected = next(
+            item for item in snapshot["gate_policies"] if item["id"] == policy["id"]
+        )
+        self.assertFalse(projected["ready"])
+        self.assertEqual(projected["pending_count"], 2)
 
     def test_append_only_evidence_derives_readiness_from_latest_gate_outcomes(
         self,
@@ -2064,6 +2093,117 @@ class GateLedgerTests(unittest.TestCase):
             expected_policy_revision=policy["policy_revision"],
         )
         self.assertEqual(correction["change_review_entry_id"], stored_entry["id"])
+
+    def test_typed_review_verdict_uses_latest_successful_reviewer_attempt(
+        self,
+    ) -> None:
+        policy = self.create_policy()
+        review_run = self.control.create_review_run(
+            policy["id"],
+            profile_name="Reviewer",
+            requested_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+            krab_session_id="ses_" + "7" * 32,
+        )
+        recipient = self.database.store_krab_identity(
+            self.instance["id"],
+            KrabIdentity("usr_" + "e" * 32, "review-owner", 1),
+            "file:/private/review-owner",
+            user_id=self.user["id"],
+        )
+        interaction_id: str | None = None
+
+        def hand_off_with_stale_verdict(attempt: dict[str, object]) -> None:
+            nonlocal interaction_id
+            self.control.append_work_log(
+                review_run["id"],
+                WorkLogEntry.from_mapping(
+                    {
+                        "schema_version": 2,
+                        "kind": "review",
+                        "summary": "The first attempt had not completed its review.",
+                        "details": [],
+                        "artifacts": [],
+                        "related_interaction_ids": [],
+                        "candidate_revision": self.candidate["head_revision"],
+                        "review_outcome": "approved",
+                    }
+                ),
+                idempotency_key="stale-handed-off-verdict",
+            )
+            interaction = self.database.open_interaction(
+                review_run["id"],
+                kind=InteractionKind.QUESTION,
+                recipient_krab_identity_id=recipient["id"],
+                request_item_id="itm_" + "8" * 32,
+                expected_run_version=attempt["run_version"],
+            )
+            interaction_id = interaction["id"]
+            self.database.create_attempt_handoff(
+                review_run["id"],
+                HandoffEnvelope.from_mapping(
+                    {
+                        "schema_version": 1,
+                        "work_state": "waiting_for_input",
+                        "summary": "A replacement reviewer must finish the verdict.",
+                        "decisions": [],
+                        "artifacts": [],
+                        "next_steps": ["Re-evaluate the exact candidate."],
+                        "pending_interaction_ids": [interaction["id"]],
+                    }
+                ),
+            )
+            self.database.answer_interaction(
+                interaction["id"],
+                response_item_id="itm_" + "9" * 32,
+                expected_version=interaction["version"],
+            )
+
+        handed_off = self._succeed_attempt(
+            review_run,
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit="8",
+            while_running=hand_off_with_stale_verdict,
+        )
+        self.assertEqual(handed_off["state"], "handed_off")
+        self.assertIsNotNone(interaction_id)
+        successful_entry: dict[str, object] = {}
+
+        def record_successful_verdict(_attempt: dict[str, object]) -> None:
+            successful_entry.update(
+                self.control.append_work_log(
+                    review_run["id"],
+                    WorkLogEntry.from_mapping(
+                        {
+                            "schema_version": 2,
+                            "kind": "review",
+                            "summary": "The replacement found a required correction.",
+                            "details": ["Add the missing authority regression."],
+                            "artifacts": [],
+                            "related_interaction_ids": [],
+                            "candidate_revision": self.candidate["head_revision"],
+                            "review_outcome": "changes_requested",
+                        }
+                    ),
+                    idempotency_key="successful-replacement-verdict",
+                )
+            )
+
+        successful = self._succeed_attempt(
+            self.database.get_run(review_run["id"]),
+            source_revision=self.candidate["head_revision"],
+            changed=False,
+            digit="9",
+            while_running=record_successful_verdict,
+        )
+
+        verdict = self.database.get_typed_review_verdict(policy["id"], review_run["id"])
+
+        self.assertEqual(successful["state"], "succeeded")
+        self.assertEqual(verdict["reviewer_attempt_id"], successful["id"])
+        self.assertEqual(verdict["work_log_entry_id"], successful_entry["id"])
+        self.assertEqual(verdict["outcome"], "changes_requested")
 
     def test_typed_review_verdict_rejects_unbound_and_wrong_head_attempts(
         self,

@@ -621,7 +621,11 @@ class WorkStorage:
                 "v.head_revision, v.outcome, v.reviewer_run_id, "
                 "v.reviewer_attempt_id, v.created_at "
                 "FROM integration_review_verdicts v "
-                "WHERE v.policy_id = ? AND v.reviewer_run_id = ?",
+                "JOIN run_attempts attempt ON attempt.id = v.reviewer_attempt_id "
+                "WHERE v.policy_id = ? AND v.reviewer_run_id = ? "
+                "AND attempt.state = 'succeeded' "
+                "ORDER BY attempt.sequence DESC, v.created_at DESC, "
+                "v.work_log_entry_id DESC LIMIT 1",
                 (policy_id, reviewer_run_id),
             ).fetchone()
         return None if row is None else dict(row)

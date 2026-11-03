@@ -256,15 +256,39 @@ class AttemptStorage:
             "WHERE binding.run_id = ?",
             (run_id,),
         ).fetchone()
-        if binding is None or binding["workflow_activation_version_id"] is None:
+        incoming_activation: WorkflowActivationSpec | None = None
+        if (
+            binding is not None
+            and binding["workflow_activation_version_id"] is not None
+        ):
+            if binding["wake_state"] is None:
+                raise ConflictError("activated workflow run has no manual wake")
+            if binding["wake_state"] != "acknowledged":
+                raise ConflictError("workflow manual wake is not acknowledged")
+            try:
+                incoming_activation = WorkflowActivationSpec.from_mapping(
+                    json.loads(binding["spec_json"])
+                )
+            except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                raise StorageError("stored workflow activation is invalid") from exc
+
+        project_activation_row = connection.execute(
+            "SELECT version.spec_json FROM workflow_activations activation "
+            "JOIN workflow_activation_versions version "
+            "ON version.activation_id = activation.id "
+            "WHERE activation.project_id = ? "
+            "ORDER BY version.version DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if project_activation_row is None and incoming_activation is None:
             return
-        if binding["wake_state"] is None:
-            raise ConflictError("activated workflow run has no manual wake")
-        if binding["wake_state"] != "acknowledged":
-            raise ConflictError("workflow manual wake is not acknowledged")
         try:
-            activation = WorkflowActivationSpec.from_mapping(
-                json.loads(binding["spec_json"])
+            project_activation = (
+                None
+                if project_activation_row is None
+                else WorkflowActivationSpec.from_mapping(
+                    json.loads(project_activation_row["spec_json"])
+                )
             )
         except (json.JSONDecodeError, TypeError, ValidationError) as exc:
             raise StorageError("stored workflow activation is invalid") from exc
@@ -281,7 +305,11 @@ class AttemptStorage:
             "AND active_run.state IN ('preparing', 'running')",
             (project_id,),
         ).fetchall()
-        ceilings = [activation.resources.shared_host_concurrency]
+        ceilings = [
+            activation.resources.shared_host_concurrency
+            for activation in (project_activation, incoming_activation)
+            if activation is not None
+        ]
         try:
             ceilings.extend(
                 WorkflowActivationSpec.from_mapping(

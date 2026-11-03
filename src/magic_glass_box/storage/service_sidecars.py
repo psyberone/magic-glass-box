@@ -1011,9 +1011,19 @@ class ServiceSidecarStorage:
                     "s.id AS sidecar_id, s.state AS sidecar_state, "
                     "s.connector_protocol_version, "
                     "s.spec_json AS sidecar_spec_json, "
-                    "s.content_sha256 AS sidecar_content_sha256 "
+                    "s.content_sha256 AS sidecar_content_sha256, "
+                    "operation_binding.project_capability_binding_id, "
+                    "capability_binding.state AS capability_binding_state, "
+                    "project.active AS capability_project_active "
                     "FROM service_operations o "
                     "JOIN service_sidecars s ON s.id = o.service_sidecar_id "
+                    "LEFT JOIN service_operation_capability_bindings "
+                    "operation_binding ON operation_binding.operation_id = o.id "
+                    "LEFT JOIN project_capability_bindings capability_binding "
+                    "ON capability_binding.id = "
+                    "operation_binding.project_capability_binding_id "
+                    "LEFT JOIN projects project "
+                    "ON project.id = capability_binding.project_id "
                     "WHERE o.id = ?",
                     (operation_id,),
                 ).fetchone()
@@ -1029,6 +1039,11 @@ class ServiceSidecarStorage:
                 sidecar_spec = self._parse_stored_sidecar(row)
                 operation_spec = self._parse_stored_operation(row)
                 if phase == "invoke":
+                    if row["project_capability_binding_id"] is not None and (
+                        row["capability_binding_state"] != "active"
+                        or not row["capability_project_active"]
+                    ):
+                        raise ConflictError("project capability is unavailable")
                     if row["state"] not in {"pending", "retryable", "throttled"}:
                         raise ConflictError(
                             f"service operation cannot be invoked from {row['state']}"
