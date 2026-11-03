@@ -2202,7 +2202,7 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v49; external-review remediation R1 complete; R2+ pending**
+schema v49; external-review remediation R1-R2 complete; R3+ pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2369,6 +2369,39 @@ label and six equivalent ref mutations already rejected by overlapping
 component checks. The mutation harness now copies `tests/` into its isolated
 workspace on every run so association evidence cannot silently reuse stale
 test files.
+
+External-review remediation R2 tightens four runtime boundaries without a
+database schema change. Jira credential identity now includes the configured
+state-transition targets, and the provider uses one closeable direct HTTPS
+connection governed by a single monotonic deadline through connect, headers,
+and bounded body read. Content-Length and Retry-After parsing reject
+pathological digit strings before integer conversion. Git snapshot admission
+now bounds both refs and objects, rejects non-regular or linked control
+metadata, and carries one total deadline through preflight, enumeration, batch
+reads, and materialization rather than granting each phase a fresh timeout.
+
+Every accepted sidecar connection now consumes its finite lifetime budget,
+including malformed or abandoned clients, and completed client threads are
+pruned while a listener remains live. Supervisor escalation work receives the
+same absolute worker deadline as ordinary actions; an overdue escalation is
+failed without renewing its lease, while drain still waits for independent
+healthy workers and truthfully reports the timeout. All eight checked-in live
+proof entrypoints continue to fail closed on unenforced worker storage and now
+require the explicit `--allow-unenforced-worker-storage` acknowledgement to
+exercise that accepted local exception. Documentation states the same
+boundary. Review requests for a larger retry count and a new refold-conflict
+ruling needed no code change: the policy already supplies four action attempts,
+and conflict handling already creates the durable ruling and clears the stale
+fold.
+
+R2's final gate passes 1,549 tests at 87% aggregate statement-plus-branch
+coverage, with the four changed runtime modules at 90% combined branch-aware
+coverage and clean Ruff format, lint, and diff checks. A two-worker focused
+campaign over 134 changed-line mutants initially exposed seven meaningful
+numeric-boundary and concurrent-admission survivors; RED-first boundary tests
+killed all seven on direct replay. The effective result is 114/134 (85.07%).
+The remaining 20 mutations are equivalent operations or changes only to
+non-contractual diagnostic text.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

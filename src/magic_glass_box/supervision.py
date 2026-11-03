@@ -293,16 +293,30 @@ class Supervisor:
         ):
             raise SupervisorError("timeout must be a non-negative finite number")
         deadline = time.monotonic() + effective_timeout
+        timed_out = False
         while True:
             self._reap()
             workers = self._workers()
             if not workers:
-                return True
-            if self._overdue_action_ids():
+                return not timed_out
+            now = time.monotonic()
+            overdue_workers = tuple(
+                worker
+                for worker in workers
+                if worker.thread.is_alive()
+                and worker.deadline is not None
+                and now >= worker.deadline
+            )
+            if overdue_workers:
                 self.stop()
                 self.last_loop_error = SupervisorActionTimeout.__name__
+                timed_out = True
+            joinable = tuple(
+                worker for worker in workers if worker not in overdue_workers
+            )
+            if not joinable:
                 return False
-            for worker in workers:
+            for worker in joinable:
                 remaining = max(0.0, deadline - time.monotonic())
                 join_timeout = min(remaining, self._lease_refresh_interval)
                 if worker.deadline is not None:
@@ -313,7 +327,7 @@ class Supervisor:
                 worker.thread.join(timeout=join_timeout)
                 if time.monotonic() >= deadline:
                     self._reap()
-                    return self._total_worker_count() == 0
+                    return not timed_out and self._total_worker_count() == 0
             self._reap()
             self._renew_active_leases()
 
@@ -365,7 +379,7 @@ class Supervisor:
                 thread=thread,
                 claim_id=escalation_id,
                 version=int(escalation["version"]),
-                deadline=None,
+                deadline=time.monotonic() + self.escalation_timeout,
             )
             thread.start()
 
@@ -398,15 +412,29 @@ class Supervisor:
                 and now >= worker.deadline
             )
 
+    def _overdue_escalation_ids(self) -> tuple[str, ...]:
+        now = time.monotonic()
+        with self._threads_lock:
+            return tuple(
+                escalation_id
+                for escalation_id, worker in self._escalation_workers.items()
+                if worker.thread.is_alive()
+                and worker.deadline is not None
+                and now >= worker.deadline
+            )
+
     def _raise_if_action_overdue(self) -> None:
         overdue = self._overdue_action_ids()
+        timeout = self.action_timeout
+        if not overdue:
+            overdue = self._overdue_escalation_ids()
+            timeout = self.escalation_timeout
         if not overdue:
             return
         self.stop()
         self.last_loop_error = SupervisorActionTimeout.__name__
         raise SupervisorActionTimeout(
-            f"supervisor action {overdue[0]} exceeded its "
-            f"{self.action_timeout:g} second deadline"
+            f"supervisor action {overdue[0]} exceeded its {timeout:g} second deadline"
         )
 
     def _renew_active_leases(self) -> None:
@@ -436,7 +464,11 @@ class Supervisor:
                     self._exception_code(exc),
                 )
         for worker in escalation_workers:
-            if not worker.thread.is_alive():
+            if (
+                not worker.thread.is_alive()
+                or worker.deadline is not None
+                and now >= worker.deadline
+            ):
                 continue
             try:
                 self.database.renew_supervisor_escalation_lease(

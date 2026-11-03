@@ -50,6 +50,13 @@ status ID. That provider-native ID stays in this private file. The provider
 discovers the one currently available Jira transition whose destination is
 that status; no transition ID enters an MGB operation.
 
+The one-way credential-scope fingerprint covers the host, account, token
+digest, and the complete `state_targets` policy. Changing a mapped status is
+therefore an authority change: revise the registered sidecar mapping and
+project capability binding before new operations may use it. An operation
+already pinned to the former fingerprint is never reinterpreted under the new
+mapping.
+
 Jira Cloud script authentication uses the account plus API token selected by
 the operator. The token inherits that account's Jira permissions, so use a
 dedicated account or otherwise constrain it appropriately. See Atlassian's
@@ -121,10 +128,12 @@ provider-neutral
 [`work-item-state-result-v1`](../schemas/work-item-state-result-v1.schema.json)
 shape, not a Jira status or transition document.
 
-The HTTPS carrier rejects redirects, non-HTTPS base URLs, foreign hosts,
+The direct HTTPS carrier rejects redirects, non-HTTPS base URLs, foreign hosts,
 unrecognized endpoints, unbounded reads, malformed JSON, and invalid retry
-headers. It honors Jira `Retry-After` throttling and never copies an upstream
-error body into a result or diagnostic. See Atlassian's
+headers. One monotonic deadline covers connection, headers, and the bounded
+body read; expiry closes the active connection and a late response is not
+accepted as success. It honors Jira `Retry-After` throttling and never copies
+an upstream error body into a result or diagnostic. See Atlassian's
 [rate-limit guidance](https://developer.atlassian.com/cloud/jira/platform/rate-limiting/).
 
 ## Deliberate limits

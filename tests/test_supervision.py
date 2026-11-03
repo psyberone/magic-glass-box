@@ -1124,6 +1124,132 @@ class SupervisionDatabaseTests(unittest.TestCase):
             ):
                 supervisor.drain(timeout=timeout)
 
+    def test_escalation_workers_have_a_finite_execution_deadline(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            FakeEscalationTransport(),
+            escalation_timeout=0.1,
+            action_lease_seconds=10,
+        )
+        release = threading.Event()
+
+        def block(_escalation: dict[str, object]) -> None:
+            release.wait(2)
+
+        try:
+            with mock.patch.object(supervisor, "_run_escalation", side_effect=block):
+                supervisor._start_escalation({"id": "esc_test", "version": 1})
+            worker = supervisor._escalation_workers["esc_test"]
+            self.assertIsNotNone(worker.deadline)
+            self.assertLessEqual(worker.deadline - time.monotonic(), 0.1)
+            with mock.patch(
+                "magic_glass_box.supervision.time.monotonic",
+                return_value=worker.deadline,
+            ):
+                self.assertEqual(
+                    supervisor._overdue_escalation_ids(),
+                    ("esc_test",),
+                )
+        finally:
+            release.set()
+            supervisor.drain(timeout=1)
+
+    def test_drain_waits_for_healthy_workers_after_detecting_an_overdue_one(
+        self,
+    ) -> None:
+        from magic_glass_box.supervision import Supervisor, _ClaimWorker
+
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            FakeEscalationTransport(),
+            action_timeout=1,
+        )
+        release_overdue = threading.Event()
+        overdue_done = threading.Event()
+        healthy_done = threading.Event()
+
+        def finish_overdue() -> None:
+            release_overdue.wait(2)
+            overdue_done.set()
+
+        overdue = threading.Thread(
+            target=finish_overdue,
+            daemon=True,
+        )
+
+        def finish_healthy() -> None:
+            time.sleep(0.1)
+            release_overdue.set()
+            overdue_done.wait(1)
+            healthy_done.set()
+
+        healthy = threading.Thread(target=finish_healthy, daemon=True)
+        overdue.start()
+        healthy.start()
+        with supervisor._threads_lock:
+            supervisor._action_workers = {
+                "overdue": _ClaimWorker(
+                    overdue,
+                    "overdue",
+                    1,
+                    time.monotonic() - 1,
+                ),
+                "healthy": _ClaimWorker(
+                    healthy,
+                    "healthy",
+                    1,
+                    time.monotonic() + 1,
+                ),
+            }
+        try:
+            self.assertFalse(supervisor.drain(timeout=0.5))
+            self.assertTrue(healthy_done.is_set())
+        finally:
+            release_overdue.set()
+            overdue.join(1)
+            healthy.join(1)
+            supervisor._reap()
+
+    def test_drain_treats_the_exact_worker_deadline_as_overdue(self) -> None:
+        from magic_glass_box.supervision import Supervisor, _ClaimWorker
+
+        supervisor = Supervisor(
+            self.database,
+            FakeCoordinator(),
+            FakeEscalationTransport(),
+            action_timeout=1,
+        )
+        release = threading.Event()
+        worker_thread = threading.Thread(
+            target=lambda: release.wait(2),
+            daemon=True,
+        )
+        worker_thread.start()
+        with supervisor._threads_lock:
+            supervisor._action_workers = {
+                "exact": _ClaimWorker(worker_thread, "exact", 1, 100.0)
+            }
+        timer = threading.Timer(0.05, release.set)
+        timer.start()
+        try:
+            with (
+                mock.patch(
+                    "magic_glass_box.supervision.time.monotonic",
+                    return_value=100.0,
+                ),
+                mock.patch.object(supervisor, "_renew_active_leases"),
+            ):
+                self.assertFalse(supervisor.drain(timeout=1))
+        finally:
+            release.set()
+            timer.cancel()
+            worker_thread.join(1)
+            supervisor._reap()
+
     def test_supervisor_splits_one_tick_discovery_budget_fairly(self) -> None:
         from magic_glass_box.supervision import Supervisor
 

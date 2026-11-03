@@ -140,6 +140,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-invocations", type=_positive_integer, default=64)
     parser.add_argument("--max-review-rounds", type=_positive_integer, default=2)
     parser.add_argument(
+        "--allow-unenforced-worker-storage",
+        action="store_true",
+        help="explicitly accept that host worker storage has no hard quota",
+    )
+    parser.add_argument(
         "--i-understand-this-uses-live-quota",
         action="store_true",
         help="required opt-in; correction and reviewer runs consume live quota",
@@ -358,7 +363,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     docker_engine = _RecordingDockerEngine(
         DockerCLI(command_timeout=60, run_timeout=args.run_timeout)
     )
-    executor = DockerExecutor(docker_engine)
+    executor = DockerExecutor(
+        docker_engine,
+        allow_unenforced_worker_storage=args.allow_unenforced_worker_storage,
+    )
     result_store = WorkspaceResultStore(
         state_root / "results", max_paths=512, max_changed_bytes=64 * 1024 * 1024
     )

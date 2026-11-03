@@ -965,6 +965,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--build-timeout", type=float, default=600.0)
     parser.add_argument("--docker-timeout", type=float, default=60.0)
     parser.add_argument("--run-timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--allow-unenforced-worker-storage",
+        action="store_true",
+        help="explicitly accept that host worker storage has no hard quota",
+    )
     return parser.parse_args(argv)
 
 
@@ -1099,7 +1104,12 @@ def main(argv: list[str] | None = None) -> int:
             result_store = WorkspaceResultStore(root / "results", max_paths=16)
             coordinator = RunCoordinator(
                 database,
-                DockerExecutor(docker_engine),
+                DockerExecutor(
+                    docker_engine,
+                    allow_unenforced_worker_storage=(
+                        args.allow_unenforced_worker_storage
+                    ),
+                ),
                 WorkspaceManager(root / "workspaces", GitSnapshotter()),
                 gateways,
                 result_store,

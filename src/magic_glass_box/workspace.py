@@ -34,6 +34,8 @@ RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
 MAX_TREE_ENTRIES = 100_000
+MAX_GIT_OBJECT_ENTRIES = 100_000
+MAX_GIT_REF_ENTRIES = 100_000
 MAX_TREE_BYTES = 32 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 
@@ -42,38 +44,61 @@ class WorkspaceError(RuntimeError):
     """A per-run workspace could not be prepared without weakening isolation."""
 
 
-def _validate_git_object_entries(objects: Path) -> None:
-    pending = [objects]
+def _require_git_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise WorkspaceError("source Git metadata validation timed out")
+
+
+def _validate_git_tree_entries(
+    root: Path,
+    *,
+    deadline: float | None,
+    maximum: int,
+    subject: str,
+) -> None:
+    count = 0
+    pending = [root]
     while pending:
+        _require_git_deadline(deadline)
         directory = pending.pop()
         try:
             with os.scandir(directory) as entries:
                 for entry in entries:
+                    _require_git_deadline(deadline)
+                    count += 1
+                    if count > maximum:
+                        raise WorkspaceError(f"{subject} contains too many entries")
                     try:
                         info = entry.stat(follow_symlinks=False)
                     except OSError as exc:
-                        raise WorkspaceError(
-                            "source Git object store entry is unavailable"
-                        ) from exc
+                        raise WorkspaceError(f"{subject} entry is unavailable") from exc
                     if stat.S_ISLNK(info.st_mode):
-                        raise WorkspaceError(
-                            "source Git object store must not contain symlinks"
-                        )
+                        raise WorkspaceError(f"{subject} must not contain symlinks")
                     if stat.S_ISDIR(info.st_mode):
                         pending.append(Path(entry.path))
                     elif not stat.S_ISREG(info.st_mode):
-                        raise WorkspaceError(
-                            "source Git object store entries must be regular files"
-                        )
+                        raise WorkspaceError(f"{subject} entries must be regular files")
         except WorkspaceError:
             raise
         except OSError as exc:
-            raise WorkspaceError("source Git object store is unavailable") from exc
+            raise WorkspaceError(f"{subject} is unavailable") from exc
 
 
-def validate_git_source(repository: Path) -> None:
+def _validate_git_object_entries(
+    objects: Path, *, deadline: float | None = None
+) -> None:
+    _validate_git_tree_entries(
+        objects,
+        deadline=deadline,
+        maximum=MAX_GIT_OBJECT_ENTRIES,
+        subject="source Git object store",
+    )
+
+
+def validate_git_source(repository: Path, *, deadline: float | None = None) -> None:
     """Reject Git metadata that redirects object reads outside the source."""
 
+    _require_git_deadline(deadline)
     source = Path(repository)
     try:
         source_info = source.lstat()
@@ -94,6 +119,36 @@ def validate_git_source(repository: Path) -> None:
             raise WorkspaceError("redirected source Git directories are not allowed")
         git_directory = marker
 
+    for name in ("HEAD", "config", "packed-refs"):
+        metadata = git_directory / name
+        try:
+            metadata_info = metadata.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise WorkspaceError("source Git metadata is unavailable") from exc
+        if stat.S_ISLNK(metadata_info.st_mode) or not stat.S_ISREG(
+            metadata_info.st_mode
+        ):
+            raise WorkspaceError("source Git metadata must use regular files")
+
+    refs = git_directory / "refs"
+    try:
+        refs_info = refs.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise WorkspaceError("source Git metadata is unavailable") from exc
+    else:
+        if stat.S_ISLNK(refs_info.st_mode) or not stat.S_ISDIR(refs_info.st_mode):
+            raise WorkspaceError("source Git metadata refs must be a real directory")
+        _validate_git_tree_entries(
+            refs,
+            deadline=deadline,
+            maximum=MAX_GIT_REF_ENTRIES,
+            subject="source Git metadata refs",
+        )
+
     common_directory = git_directory / "commondir"
     try:
         common_directory.lstat()
@@ -113,7 +168,7 @@ def validate_git_source(repository: Path) -> None:
         raise WorkspaceError("source Git object store is unavailable") from exc
     if stat.S_ISLNK(objects_info.st_mode) or not stat.S_ISDIR(objects_info.st_mode):
         raise WorkspaceError("redirected source Git object stores are not allowed")
-    _validate_git_object_entries(objects)
+    _validate_git_object_entries(objects, deadline=deadline)
 
     info_directory = objects / "info"
     try:
@@ -273,7 +328,12 @@ class GitSnapshotter:
         }
 
     def _bounded_process(
-        self, command: list[str], environment: dict[str, str], limit: int
+        self,
+        command: list[str],
+        environment: dict[str, str],
+        limit: int,
+        *,
+        deadline: float | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         # Drain both pipes concurrently, aborting before accumulating unbounded
         # output. communicate()/capture_output alone cannot enforce this bound.
@@ -291,10 +351,12 @@ class GitSnapshotter:
             selector.register(process.stdout, selectors.EVENT_READ, "stdout")
             selector.register(process.stderr, selectors.EVENT_READ, "stderr")
             buffers = {"stdout": bytearray(), "stderr": bytearray()}
-            deadline = time.monotonic() + self.timeout
+            process_deadline = (
+                time.monotonic() + self.timeout if deadline is None else deadline
+            )
             try:
                 while selector.get_map():
-                    remaining = deadline - time.monotonic()
+                    remaining = process_deadline - time.monotonic()
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(command, self.timeout)
                     for key, _ in selector.select(remaining):
@@ -307,7 +369,7 @@ class GitSnapshotter:
                         if len(buffers[name]) + len(chunk) > ceiling:
                             raise WorkspaceError("Git command exceeds output limit")
                         buffers[name].extend(chunk)
-                remaining = deadline - time.monotonic()
+                remaining = process_deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, self.timeout)
                 status = process.wait(timeout=remaining)
@@ -326,18 +388,29 @@ class GitSnapshotter:
         operation: str,
         environment: dict[str, str],
         limit: int,
+        deadline: float | None = None,
     ) -> bytes:
         command = self._command(arguments)
         try:
             if self.runner is None:
-                completed = self._bounded_process(command, environment, limit)
+                completed = self._bounded_process(
+                    command,
+                    environment,
+                    limit,
+                    deadline=deadline,
+                )
             else:
+                remaining = (
+                    self.timeout if deadline is None else deadline - time.monotonic()
+                )
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, self.timeout)
                 completed = self.runner(
                     command,
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     check=False,
-                    timeout=self.timeout,
+                    timeout=remaining,
                     env=environment,
                 )
         except subprocess.TimeoutExpired:
@@ -515,6 +588,7 @@ class GitSnapshotter:
         entries: Sequence[_TreeEntry],
         environment: dict[str, str],
         *,
+        deadline: float,
         object_format: str,
     ) -> None:
         command = self._command(["-C", str(repository), "cat-file", "--batch"])
@@ -531,11 +605,12 @@ class GitSnapshotter:
             except OSError:
                 raise WorkspaceError("cannot execute Git CLI") from None
             assert process.stdout is not None
-            reader = _BatchReader(process.stdout, time.monotonic() + self.timeout)
+            reader = _BatchReader(process.stdout, deadline)
             try:
                 links: dict[PurePosixPath, str] = {}
                 spooled: dict[PurePosixPath, tuple[int, int]] = {}
                 for entry in entries:
+                    _require_git_deadline(deadline)
                     if entry.mode != "120000":
                         continue
                     body = self._read_batch_blob(
@@ -556,6 +631,7 @@ class GitSnapshotter:
                     raise WorkspaceError("Git contains an unsafe symlink") from exc
 
                 for entry in entries:
+                    _require_git_deadline(deadline)
                     if entry.mode not in {"100644", "100755"}:
                         continue
                     offset = spool.tell()
@@ -588,11 +664,13 @@ class GitSnapshotter:
                 # aggregate tree-size ceiling rather than process memory.
                 directories = [e for e in entries if e.mode in {"040000", "160000"}]
                 for entry in sorted(directories, key=lambda e: len(e.path.parts)):
+                    _require_git_deadline(deadline)
                     directory = destination.joinpath(*entry.path.parts)
                     directory.mkdir(mode=0o755)
                     if entry.mode == "160000":
                         directory.chmod(0o555)
                 for entry in entries:
+                    _require_git_deadline(deadline)
                     if entry.mode not in {"100644", "100755"}:
                         continue
                     target = destination.joinpath(*entry.path.parts)
@@ -602,6 +680,7 @@ class GitSnapshotter:
                         offset, remaining_bytes = spooled[entry.path]
                         spool.seek(offset)
                         while remaining_bytes:
+                            _require_git_deadline(deadline)
                             chunk = spool.read(min(64 * 1024, remaining_bytes))
                             if not chunk or output.write(chunk) != len(chunk):
                                 raise WorkspaceError("cannot write source blob")
@@ -611,6 +690,7 @@ class GitSnapshotter:
                             0o755 if entry.mode == "100755" else 0o644,
                         )
                 for path, target in links.items():
+                    _require_git_deadline(deadline)
                     destination.joinpath(*path.parts).symlink_to(target)
             except subprocess.TimeoutExpired:
                 self._stop_batch(process)
@@ -627,6 +707,7 @@ class GitSnapshotter:
     def snapshot(
         self, repository: Path, revision: str | None, destination: Path
     ) -> SnapshotResult:
+        operation_deadline = time.monotonic() + self.timeout
         requested = "HEAD" if revision is None else revision
         try:
             valid = (
@@ -639,7 +720,8 @@ class GitSnapshotter:
             valid = False
         if not valid:
             raise WorkspaceError("source revision is invalid")
-        validate_git_source(repository)
+        validate_git_source(repository, deadline=operation_deadline)
+        _require_git_deadline(operation_deadline)
         try:
             info = destination.lstat()
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -660,6 +742,7 @@ class GitSnapshotter:
                     operation="resolve source revision",
                     environment=environment,
                     limit=256,
+                    deadline=operation_deadline,
                 )
                 try:
                     commit = resolved.removesuffix(b"\n").decode("ascii")
@@ -682,6 +765,7 @@ class GitSnapshotter:
                     operation="list source tree",
                     environment=environment,
                     limit=MAX_TREE_BYTES,
+                    deadline=operation_deadline,
                 )
                 entries = self._parse_tree(raw, commit)
                 gitlinks = tuple(
@@ -697,12 +781,14 @@ class GitSnapshotter:
                         destination,
                         entries,
                         environment,
+                        deadline=operation_deadline,
                         object_format="sha1" if len(commit) == 40 else "sha256",
                     )
                     return SnapshotResult(commit, gitlinks)
                 bodies: dict[PurePosixPath, bytes] = {}
                 links: dict[PurePosixPath, str] = {}
                 for entry in entries:
+                    _require_git_deadline(operation_deadline)
                     if entry.mode in {"040000", "160000"}:
                         continue
                     body = self._run(
@@ -710,6 +796,7 @@ class GitSnapshotter:
                         operation="read source blob",
                         environment=environment,
                         limit=entry.size + 1,
+                        deadline=operation_deadline,
                     )
                     digest = hashlib.new("sha1" if len(commit) == 40 else "sha256")
                     digest.update(b"blob " + str(len(body)).encode("ascii") + b"\0")
@@ -734,11 +821,13 @@ class GitSnapshotter:
                 # before writing. Gitlinks become empty directories, never reads.
                 directories = [e for e in entries if e.mode in {"040000", "160000"}]
                 for entry in sorted(directories, key=lambda e: len(e.path.parts)):
+                    _require_git_deadline(operation_deadline)
                     directory = destination.joinpath(*entry.path.parts)
                     directory.mkdir(mode=0o755)
                     if entry.mode == "160000":
                         directory.chmod(0o555)
                 for entry in entries:
+                    _require_git_deadline(operation_deadline)
                     if entry.mode not in {"100644", "100755"}:
                         continue
                     target = destination.joinpath(*entry.path.parts)
@@ -750,6 +839,7 @@ class GitSnapshotter:
                             output.fileno(), 0o755 if entry.mode == "100755" else 0o644
                         )
                 for path, target in links.items():
+                    _require_git_deadline(operation_deadline)
                     destination.joinpath(*path.parts).symlink_to(target)
                 return SnapshotResult(commit, gitlinks)
         except OSError as exc:

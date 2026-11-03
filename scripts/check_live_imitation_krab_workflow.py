@@ -283,6 +283,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--merge-method", choices=("merge", "rebase", "squash"), default="squash"
     )
     parser.add_argument(
+        "--allow-unenforced-worker-storage",
+        action="store_true",
+        help="explicitly accept that host worker storage has no hard quota",
+    )
+    parser.add_argument(
         "--i-understand-this-uses-live-quota",
         action="store_true",
         help="required opt-in; producer and reviewer runs consume live quota",
@@ -1445,7 +1450,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         database, workspaces, result_store, candidate_store
     )
     gateways = FileGatewayManager(state_root / "gateways", control)
-    executor = DockerExecutor(docker_engine)
+    executor = DockerExecutor(
+        docker_engine,
+        allow_unenforced_worker_storage=args.allow_unenforced_worker_storage,
+    )
     coordinator = RunCoordinator(
         database,
         executor,

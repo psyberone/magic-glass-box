@@ -133,8 +133,10 @@ proof connector share one local listener policy. The socket lives in an
 operator-owned mode-`0700` directory and uses mode `0600`; each accepted client
 has a 30-second I/O timeout. Truncated, malformed, oversized, abandoned, or
 broken-pipe clients are isolated to that connection and do not consume a
-successful invocation slot. A controlled `SIGTERM` unwinds the listener and
-removes its socket before exit, so an operator can restart the sidecar without
+successful invocation slot, but every accepted connection consumes the
+listener's `--max-invocations` lifetime budget. A controlled `SIGTERM` unwinds
+the listener and removes its socket before exit, so an operator can restart
+the sidecar without
 manual stale-path cleanup. Immediately before connecting, MGB requires the
 configured path itself—not a symlink—to be a Unix socket owned by the current
 operator. This is a boundary admission check, not continuous surveillance of a
@@ -394,6 +396,7 @@ For a disposable real-account proof after sign-in, first select a slug from
 PYTHONPATH=src python3.11 scripts/check_live_openai_chatgpt.py \
   --profile-dir /absolute/private/openai-chatgpt-profile \
   --model MODEL_SLUG --build --max-invocations 6 --run-timeout 300 \
+  --allow-unenforced-worker-storage \
   --i-understand-this-uses-live-quota
 ```
 

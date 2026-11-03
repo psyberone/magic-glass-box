@@ -172,13 +172,15 @@ run:
 ```console
 docker build --file docker/runtime-proof.Dockerfile \
   --tag magic-glass-box/runtime-proof:local .
-PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py
+PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py \
+  --allow-unenforced-worker-storage
 ```
 
 Or let the proof build the image itself:
 
 ```console
-PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build
+PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build \
+  --allow-unenforced-worker-storage
 ```
 
 The image pins Codex CLI and Claude Code versions and contains this package's

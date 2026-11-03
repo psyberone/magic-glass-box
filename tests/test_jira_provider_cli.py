@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -48,10 +50,14 @@ class FakeHTTPResponse:
         self.body = body
         self.headers = headers or {}
         self.read_sizes: list[int] = []
+        self.closed = threading.Event()
 
     def read(self, size: int = -1) -> bytes:
         self.read_sizes.append(size)
         return self.body if size < 0 else self.body[:size]
+
+    def close(self) -> None:
+        self.closed.set()
 
     def __enter__(self) -> FakeHTTPResponse:
         return self
@@ -64,6 +70,7 @@ class FakeOpener:
     def __init__(self, responses: list[object]) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[object, float]] = []
+        self.closed = threading.Event()
 
     def open(self, outbound: object, *, timeout: float) -> object:
         self.calls.append((outbound, timeout))
@@ -72,10 +79,32 @@ class FakeOpener:
             raise response
         return response
 
+    def close(self) -> None:
+        self.closed.set()
+
+
+class BlockingOpener:
+    def __init__(self) -> None:
+        self.closed = threading.Event()
+
+    def open(self, _outbound: object, *, timeout: float) -> object:
+        self.closed.wait(max(2, timeout * 4))
+        raise TimeoutError("cancelled open")
+
+    def close(self) -> None:
+        self.closed.set()
+
 
 class BrokenHTTPResponse(FakeHTTPResponse):
     def read(self, size: int = -1) -> bytes:
         raise OSError("private read failure")
+
+
+class BlockingHTTPResponse(FakeHTTPResponse):
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        self.closed.wait(2)
+        return self.body if size < 0 else self.body[:size]
 
 
 class JiraProviderCLITests(unittest.TestCase):
@@ -109,6 +138,7 @@ class JiraProviderCLITests(unittest.TestCase):
                 {
                     "account": "operator@example.test",
                     "host": "acme.atlassian.net",
+                    "state_targets": {},
                     "token_sha256": hashlib.sha256(self.token.encode()).hexdigest(),
                 }
             )
@@ -126,6 +156,38 @@ class JiraProviderCLITests(unittest.TestCase):
             },
         )
         self.assertNotIn(self.token, canonical_json(credential.identity.to_dict()))
+
+    def test_transition_policy_is_part_of_credential_authority_identity(self) -> None:
+        baseline = load_credential(self.credential_path)
+        self.write_credential(state_targets={"ABC": {"done": "10001"}})
+        first = load_credential(self.credential_path)
+        self.write_credential(state_targets={"ABC": {"done": "10002"}})
+        second = load_credential(self.credential_path)
+
+        self.assertNotEqual(
+            baseline.credential_scope_sha256, first.credential_scope_sha256
+        )
+        self.assertNotEqual(
+            first.credential_scope_sha256, second.credential_scope_sha256
+        )
+
+        self.write_credential(
+            state_targets={
+                "XYZ": {"done": "20001"},
+                "ABC": {"done": "10001"},
+            }
+        )
+        ordered = load_credential(self.credential_path)
+        self.write_credential(
+            state_targets={
+                "ABC": {"done": "10001"},
+                "XYZ": {"done": "20001"},
+            }
+        )
+        reordered = load_credential(self.credential_path)
+        self.assertEqual(
+            ordered.credential_scope_sha256, reordered.credential_scope_sha256
+        )
 
     def test_credential_file_must_be_absolute_private_regular_and_not_a_symlink(
         self,
@@ -264,6 +326,60 @@ class JiraProviderCLITests(unittest.TestCase):
         self.assertNotIn(self.token, authorization)
         self.assertGreater(timeout, 0)
         self.assertLessEqual(timeout, 120)
+        self.assertTrue(opener.closed.is_set())
+
+    def test_default_http_transport_uses_one_direct_cancellable_connection(
+        self,
+    ) -> None:
+        upstream = FakeHTTPResponse(200, b"{}", {"Content-Length": "2"})
+        connections: list[tuple[str, int | None, float]] = []
+        requests: list[tuple[str, str, bytes | None, dict[str, str]]] = []
+        closed: list[bool] = []
+
+        class Connection:
+            def __init__(self, host: str, port: int | None, timeout: float) -> None:
+                connections.append((host, port, timeout))
+
+            def request(
+                self,
+                method: str,
+                target: str,
+                *,
+                body: bytes | None,
+                headers: dict[str, str],
+            ) -> None:
+                requests.append((method, target, body, headers))
+
+            def getresponse(self) -> FakeHTTPResponse:
+                return upstream
+
+            def close(self) -> None:
+                closed.append(True)
+
+        with patch(
+            "magic_glass_box.jira_provider_cli.http.client.HTTPSConnection",
+            Connection,
+        ):
+            response = JiraHTTP(load_credential(self.credential_path)).request(
+                "GET",
+                host="acme.atlassian.net",
+                endpoint="/rest/api/3/issue/ABC-42?fields=summary",
+                body=None,
+                deadline="2099-01-01T00:00:00.000000Z",
+                response_limit_bytes=100,
+            )
+
+        self.assertEqual(response.status, 200)
+        host, port, timeout = connections[0]
+        self.assertEqual((host, port), ("acme.atlassian.net", None))
+        self.assertTrue(0 < timeout <= 120)
+        method, target, body, headers = requests[0]
+        self.assertEqual(
+            (method, target, body),
+            ("GET", "/rest/api/3/issue/ABC-42?fields=summary", None),
+        )
+        self.assertTrue(headers["Authorization"].startswith("Basic "))
+        self.assertEqual(closed, [True])
 
     def test_http_transport_posts_canonical_json_and_parses_retry_after(self) -> None:
         body = {
@@ -516,12 +632,14 @@ class JiraProviderCLITests(unittest.TestCase):
             FakeHTTPResponse(200, b'{"same":1,"same":2}'),
             FakeHTTPResponse(200, b"\xff"),
             FakeHTTPResponse(429, b"{}", {"Retry-After": "0"}),
+            FakeHTTPResponse(429, b"{}", {"Retry-After": "9" * 10_000}),
             FakeHTTPResponse(99, b"{}"),
             BrokenHTTPResponse(200, b"{}"),
             object(),
             SimpleNamespace(status=200, headers={}),
             FakeHTTPResponse(200, "{}"),  # type: ignore[arg-type]
             URLError("private network failure"),
+            http.client.BadStatusLine("private malformed status"),
         )
         for upstream in cases:
             with self.subTest(upstream=upstream):
@@ -556,9 +674,73 @@ class JiraProviderCLITests(unittest.TestCase):
         with self.assertRaises(JiraProviderCLIError):
             JiraHTTP("not-a-credential")  # type: ignore[arg-type]
 
+    def test_http_transport_closes_a_body_read_at_the_absolute_deadline(self) -> None:
+        upstream = BlockingHTTPResponse(200, b"{}")
+        transport = JiraHTTP(
+            load_credential(self.credential_path), opener=FakeOpener([upstream])
+        )
+        deadline = datetime.now(UTC) + timedelta(seconds=0.1)
+        started = time.monotonic()
+
+        with self.assertRaisesRegex(JiraTransportError, "deadline"):
+            transport.request(
+                "GET",
+                host="acme.atlassian.net",
+                endpoint="/rest/api/3/issue/ABC-42?fields=summary",
+                body=None,
+                deadline=deadline.isoformat().replace("+00:00", "Z"),
+                response_limit_bytes=100,
+            )
+
+        self.assertTrue(upstream.closed.is_set())
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_http_transport_cancels_open_and_header_wait_at_deadline(self) -> None:
+        opener = BlockingOpener()
+        transport = JiraHTTP(load_credential(self.credential_path), opener=opener)
+        deadline = datetime.now(UTC) + timedelta(seconds=0.1)
+        started = time.monotonic()
+
+        with self.assertRaises(JiraTransportError):
+            transport.request(
+                "GET",
+                host="acme.atlassian.net",
+                endpoint="/rest/api/3/issue/ABC-42?fields=summary",
+                body=None,
+                deadline=deadline.isoformat().replace("+00:00", "Z"),
+                response_limit_bytes=100,
+            )
+
+        self.assertTrue(opener.closed.is_set())
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_http_transport_rejects_pathological_content_length_digits(self) -> None:
+        upstream = FakeHTTPResponse(
+            200,
+            b"{}",
+            {"Content-Length": "9" * 10_000},
+        )
+        transport = JiraHTTP(
+            load_credential(self.credential_path), opener=FakeOpener([upstream])
+        )
+
+        with self.assertRaises(JiraTransportError):
+            transport.request(
+                "GET",
+                host="acme.atlassian.net",
+                endpoint="/rest/api/3/issue/ABC-42?fields=summary",
+                body=None,
+                deadline="2099-01-01T00:00:00.000000Z",
+                response_limit_bytes=100,
+            )
+
     def test_http_transport_accepts_exact_size_and_retry_boundaries(self) -> None:
         raw = b"{}"
-        exact = FakeHTTPResponse(200, raw, {"Content-Length": str(len(raw))})
+        exact = FakeHTTPResponse(
+            200,
+            raw,
+            {"Content-Length": "0" * 19 + str(len(raw))},
+        )
         transport = JiraHTTP(
             load_credential(self.credential_path), opener=FakeOpener([exact])
         )
@@ -572,13 +754,38 @@ class JiraProviderCLITests(unittest.TestCase):
         )
         self.assertEqual(response.response_bytes, len(raw))
 
+        for invalid_length in ("+2", "0" * 20 + str(len(raw))):
+            with self.subTest(content_length=invalid_length):
+                upstream = FakeHTTPResponse(
+                    200,
+                    raw,
+                    {"Content-Length": invalid_length},
+                )
+                transport = JiraHTTP(
+                    load_credential(self.credential_path),
+                    opener=FakeOpener([upstream]),
+                )
+                with self.assertRaises(JiraTransportError):
+                    transport.request(
+                        "GET",
+                        host="acme.atlassian.net",
+                        endpoint="/rest/api/3/issue/ABC-42?fields=summary",
+                        body=None,
+                        deadline="2099-01-01T00:00:00.000000Z",
+                        response_limit_bytes=100,
+                    )
+
         maximum_retry = 30 * 24 * 60 * 60
-        for retry in (1, maximum_retry):
-            with self.subTest(retry=retry):
+        for retry, raw_retry in (
+            (1, "1"),
+            (17, "0000000017"),
+            (maximum_retry, str(maximum_retry)),
+        ):
+            with self.subTest(retry=retry, raw_retry=raw_retry):
                 upstream = FakeHTTPResponse(
                     429,
                     raw,
-                    {"Retry-After": str(retry)},
+                    {"Retry-After": raw_retry},
                 )
                 transport = JiraHTTP(
                     load_credential(self.credential_path),
@@ -594,23 +801,29 @@ class JiraProviderCLITests(unittest.TestCase):
                 )
                 self.assertEqual(response.retry_after_seconds, retry)
 
-        upstream = FakeHTTPResponse(
-            429,
-            raw,
-            {"Retry-After": str(maximum_retry + 1)},
-        )
-        transport = JiraHTTP(
-            load_credential(self.credential_path), opener=FakeOpener([upstream])
-        )
-        with self.assertRaises(JiraTransportError):
-            transport.request(
-                "GET",
-                host="acme.atlassian.net",
-                endpoint="/rest/api/3/issue/ABC-42?fields=summary",
-                body=None,
-                deadline="2099-01-01T00:00:00.000000Z",
-                response_limit_bytes=100,
-            )
+        for invalid_retry in (
+            str(maximum_retry + 1),
+            "00000000017",
+        ):
+            with self.subTest(invalid_retry=invalid_retry):
+                upstream = FakeHTTPResponse(
+                    429,
+                    raw,
+                    {"Retry-After": invalid_retry},
+                )
+                transport = JiraHTTP(
+                    load_credential(self.credential_path),
+                    opener=FakeOpener([upstream]),
+                )
+                with self.assertRaises(JiraTransportError):
+                    transport.request(
+                        "GET",
+                        host="acme.atlassian.net",
+                        endpoint="/rest/api/3/issue/ABC-42?fields=summary",
+                        body=None,
+                        deadline="2099-01-01T00:00:00.000000Z",
+                        response_limit_bytes=100,
+                    )
 
     def test_spec_loader_rejects_untrusted_shapes_and_invalid_authority(self) -> None:
         with self.assertRaises(JiraProviderCLIError):

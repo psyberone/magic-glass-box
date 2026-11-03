@@ -129,7 +129,7 @@ class FakeInferenceConnectorProcessTests(unittest.TestCase):
                     "--socket-path",
                     str(socket_path),
                     "--max-invocations",
-                    "1",
+                    "2",
                     "--credential-file",
                     str(credential_path),
                 ],

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -307,6 +308,168 @@ class GitSnapshotterTests(unittest.TestCase):
             with self.subTest(timeout=timeout), self.assertRaises(WorkspaceError):
                 GitSnapshotter(binary=Path("/usr/bin/git"), timeout=timeout)
 
+    def test_git_object_preflight_has_an_entry_ceiling(self) -> None:
+        case = self
+
+        class Entry:
+            def __init__(self, name: str) -> None:
+                self.path = str(case.repository / name)
+
+            def stat(self, *, follow_symlinks: bool) -> os.stat_result:
+                case.assertFalse(follow_symlinks)
+                return os.stat_result((stat.S_IFREG | 0o600,) + (0,) * 9)
+
+        class Scan:
+            def __init__(self, count: int) -> None:
+                self.count = count
+
+            def __enter__(self):
+                return iter(Entry(str(index)) for index in range(self.count))
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        with mock.patch.object(workspace_module, "MAX_GIT_OBJECT_ENTRIES", 2):
+            with mock.patch.object(
+                workspace_module.os,
+                "scandir",
+                return_value=Scan(2),
+            ):
+                workspace_module._validate_git_object_entries(
+                    self.repository,
+                    deadline=time.monotonic() + 1,
+                )
+            with (
+                mock.patch.object(
+                    workspace_module.os,
+                    "scandir",
+                    return_value=Scan(3),
+                ),
+                self.assertRaisesRegex(WorkspaceError, "too many entries"),
+            ):
+                workspace_module._validate_git_object_entries(
+                    self.repository,
+                    deadline=time.monotonic() + 1,
+                )
+
+    def test_snapshot_deadline_includes_source_preflight(self) -> None:
+        snapshotter = self.snapshotter(b"")
+        snapshotter.timeout = 0.05
+
+        def delayed_preflight(*_args: object, **_kwargs: object) -> None:
+            time.sleep(0.1)
+
+        with (
+            mock.patch.object(
+                workspace_module,
+                "validate_git_source",
+                side_effect=delayed_preflight,
+            ),
+            self.assertRaisesRegex(WorkspaceError, "timed out"),
+        ):
+            snapshotter.snapshot(self.repository, None, self.destination)
+        self.assertEqual(self.calls, [])
+
+    def test_git_preflight_treats_the_exact_deadline_as_expired(self) -> None:
+        with mock.patch.object(workspace_module.time, "monotonic", return_value=10):
+            workspace_module._require_git_deadline(10.000001)
+            with self.assertRaisesRegex(WorkspaceError, "timed out"):
+                workspace_module._require_git_deadline(10)
+
+    def test_git_tree_preflight_checks_deadline_before_scanning(self) -> None:
+        with (
+            mock.patch.object(workspace_module.os, "scandir") as scan,
+            self.assertRaisesRegex(WorkspaceError, "timed out"),
+        ):
+            workspace_module._validate_git_object_entries(
+                self.repository,
+                deadline=time.monotonic() - 1,
+            )
+        scan.assert_not_called()
+
+    def test_source_preflight_checks_and_forwards_one_deadline(self) -> None:
+        expired = time.monotonic() - 1
+        with (
+            mock.patch.object(
+                Path,
+                "lstat",
+                side_effect=AssertionError("filesystem read after deadline"),
+            ),
+            self.assertRaisesRegex(WorkspaceError, "timed out"),
+        ):
+            workspace_module.validate_git_source(
+                self.repository,
+                deadline=expired,
+            )
+
+        git_directory = self.repository / ".git"
+        (git_directory / "objects").mkdir(parents=True)
+        (git_directory / "refs").mkdir()
+        (git_directory / "HEAD").write_text(
+            "ref: refs/heads/main\n",
+            encoding="utf-8",
+        )
+        (git_directory / "config").write_text("[core]\n", encoding="utf-8")
+        deadline = time.monotonic() + 1
+        with (
+            mock.patch.object(workspace_module, "_validate_git_tree_entries") as refs,
+            mock.patch.object(
+                workspace_module,
+                "_validate_git_object_entries",
+            ) as objects,
+        ):
+            workspace_module.validate_git_source(
+                self.repository,
+                deadline=deadline,
+            )
+        refs.assert_called_once_with(
+            git_directory / "refs",
+            deadline=deadline,
+            maximum=workspace_module.MAX_GIT_REF_ENTRIES,
+            subject="source Git metadata refs",
+        )
+        objects.assert_called_once_with(
+            git_directory / "objects",
+            deadline=deadline,
+        )
+
+    def test_source_preflight_rejects_nonregular_metadata(self) -> None:
+        git_directory = self.repository / ".git"
+        (git_directory / "objects").mkdir(parents=True)
+        (git_directory / "refs").mkdir()
+        (git_directory / "HEAD").mkdir()
+
+        with self.assertRaisesRegex(WorkspaceError, "regular files"):
+            workspace_module.validate_git_source(self.repository)
+
+    def test_source_preflight_rejects_redirected_head_config_and_refs(self) -> None:
+        git_directory = self.repository / ".git"
+        (git_directory / "objects").mkdir(parents=True)
+        (git_directory / "refs").mkdir()
+        (git_directory / "config").write_text("[core]\n", encoding="utf-8")
+        outside = self.root / "outside"
+        outside.write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+        for name in ("HEAD", "config", "refs"):
+            with self.subTest(name=name):
+                target = git_directory / name
+                if target.exists() or target.is_symlink():
+                    if target.is_dir() and not target.is_symlink():
+                        target.rmdir()
+                    else:
+                        target.unlink()
+                target.symlink_to(outside, target_is_directory=False)
+                with self.assertRaisesRegex(WorkspaceError, "Git metadata"):
+                    workspace_module.validate_git_source(self.repository)
+                target.unlink()
+                if name == "refs":
+                    target.mkdir()
+                else:
+                    target.write_text(
+                        "ref: refs/heads/main\n" if name == "HEAD" else "[core]\n",
+                        encoding="utf-8",
+                    )
+
     def test_raw_files_executable_symlink_directory_and_gitlink(self) -> None:
         body = b"raw\r\n$Id$\n"
         tree = (
@@ -316,9 +479,18 @@ class GitSnapshotterTests(unittest.TestCase):
             + tree_entry("module", mode="160000")
         )
         snapshotter = self.snapshotter(tree, [body, b"src/main"])
-        self.assertEqual(
-            snapshotter.snapshot(self.repository, "main", self.destination),
-            SnapshotResult(COMMIT, ("module",)),
+        with mock.patch.object(
+            workspace_module,
+            "_require_git_deadline",
+            wraps=workspace_module._require_git_deadline,
+        ) as deadline_check:
+            self.assertEqual(
+                snapshotter.snapshot(self.repository, "main", self.destination),
+                SnapshotResult(COMMIT, ("module",)),
+            )
+        self.assertTrue(deadline_check.call_args_list)
+        self.assertTrue(
+            all(call.args[0] is not None for call in deadline_check.call_args_list)
         )
         self.assertEqual((self.destination / "src/main").read_bytes(), body)
         self.assertEqual((self.destination / "src/main").stat().st_mode & 0o777, 0o755)
@@ -597,8 +769,40 @@ class GitSnapshotterTests(unittest.TestCase):
                     self.repository, None, self.destination
                 )
 
+    def test_custom_runner_uses_the_exact_remaining_deadline(self) -> None:
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, b"", b""))
+        snapshotter = GitSnapshotter(binary=Path("/usr/bin/git"), runner=runner)
+
+        with (
+            mock.patch.object(workspace_module.time, "monotonic", return_value=10.0),
+            self.assertRaisesRegex(WorkspaceError, "timed out"),
+        ):
+            snapshotter._run(
+                ["status"],
+                operation="inspect source",
+                environment={},
+                limit=1,
+                deadline=10.0,
+            )
+        runner.assert_not_called()
+
+        with mock.patch.object(
+            workspace_module.time,
+            "monotonic",
+            return_value=10.0,
+        ):
+            snapshotter._run(
+                ["status"],
+                operation="inspect source",
+                environment={},
+                limit=1,
+                deadline=10.5,
+            )
+        self.assertEqual(runner.call_args.kwargs["timeout"], 0.5)
+
     def test_fresh_git_environment_and_configuration_controls(self) -> None:
-        snapshotter = self.snapshotter(b"")
+        body = b"bounded"
+        snapshotter = self.snapshotter(tree_entry("file", body), [body])
         with mock.patch.dict(
             os.environ,
             {"GIT_DIR": "/hostile", "GIT_CONFIG_COUNT": "1", "EVIL": "yes"},
@@ -607,15 +811,17 @@ class GitSnapshotterTests(unittest.TestCase):
         for args, kwargs in self.calls:
             environment = kwargs["env"]
             private = environment["HOME"]
+            timeout = kwargs.pop("timeout")
             self.assertTrue(Path(private).is_absolute())
             self.assertNotEqual(private, "None")
+            self.assertGreater(timeout, 0)
+            self.assertLess(timeout, 60.0)
             self.assertEqual(
                 kwargs,
                 {
                     "stdin": subprocess.DEVNULL,
                     "capture_output": True,
                     "check": False,
-                    "timeout": 60.0,
                     "env": environment,
                 },
             )
@@ -1109,13 +1315,24 @@ class RealGitSnapshotterTests(unittest.TestCase):
             commands.append(list(args[0]))  # type: ignore[arg-type]
             return original_popen(*args, **kwargs)  # type: ignore[arg-type]
 
-        with mock.patch.object(
-            workspace_module.subprocess,
-            "Popen",
-            side_effect=record,
+        with (
+            mock.patch.object(
+                workspace_module.subprocess,
+                "Popen",
+                side_effect=record,
+            ),
+            mock.patch.object(
+                workspace_module,
+                "_require_git_deadline",
+                wraps=workspace_module._require_git_deadline,
+            ) as deadline_check,
         ):
             GitSnapshotter().snapshot(self.repository, None, self.destination)
 
+        self.assertTrue(deadline_check.call_args_list)
+        self.assertTrue(
+            all(call.args[0] is not None for call in deadline_check.call_args_list)
+        )
         blob_commands = [command for command in commands if "cat-file" in command]
         self.assertEqual(len(blob_commands), 1)
         self.assertIn("--batch", blob_commands[0])

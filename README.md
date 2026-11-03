@@ -646,8 +646,10 @@ The network-isolation and gateway-carrier proof uses a local Python image and
 the real Docker executor:
 
 ```console
-PYTHONPATH=src python3.11 scripts/check_live_gateway.py
-PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
+PYTHONPATH=src python3.11 scripts/check_live_gateway.py \
+  --allow-unenforced-worker-storage
+PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py \
+  --allow-unenforced-worker-storage
 ```
 
 Use `--image` to select another local, volume-free image with Python installed.
@@ -681,7 +683,8 @@ that a generated ignored dependency tree is excluded while the worker's
 retained file is captured, and Claude Code proves the second runtime seam:
 
 ```console
-PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build
+PYTHONPATH=src python3.11 scripts/check_live_runtime_adapters.py --build \
+  --allow-unenforced-worker-storage
 ```
 
 It makes no remote provider request and needs no provider credential. See
@@ -700,6 +703,7 @@ PYTHONPATH=src python3.11 scripts/check_live_imitation_krab_beta.py \
   --repository /absolute/imitation-krab \
   --state-dir /absolute/private/short-beta-state \
   --source-revision <exact-commit> --model <account-visible-model> --build \
+  --allow-unenforced-worker-storage \
   --i-understand-this-uses-live-quota
 ```
 
@@ -722,6 +726,7 @@ PYTHONPATH=src python3.11 scripts/check_live_m13.py \
   --repository /absolute/imitation-krab \
   --state-dir /absolute/private/short-m13-state \
   --source-revision <exact-commit> --model <account-visible-model> --build \
+  --allow-unenforced-worker-storage \
   --i-understand-this-uses-live-quota
 ```
 
@@ -744,6 +749,7 @@ PYTHONPATH=src python3.11 scripts/check_live_m13.py \
   --source-revision <the-same-exact-commit> \
   --model <the-same-account-visible-model> \
   --scope-answer-file /absolute/private/scope-answer.json \
+  --allow-unenforced-worker-storage \
   --i-understand-this-uses-live-quota
 ```
 

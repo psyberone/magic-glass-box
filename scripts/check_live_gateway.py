@@ -213,6 +213,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="python:3.12-slim")
     parser.add_argument("--docker-timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--allow-unenforced-worker-storage",
+        action="store_true",
+        help="explicitly accept that host worker storage has no hard quota",
+    )
     return parser.parse_args(argv)
 
 
@@ -255,7 +260,8 @@ def main() -> int:
                 DockerCLI(
                     command_timeout=args.docker_timeout,
                     run_timeout=args.docker_timeout,
-                )
+                ),
+                allow_unenforced_worker_storage=(args.allow_unenforced_worker_storage),
             ).execute(
                 SandboxRequest(
                     run_id=RUN_ID,

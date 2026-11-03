@@ -105,7 +105,8 @@ Run the deterministic isolation proof with a real Docker worker and a separate
 fake connector:
 
 ```console
-PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
+PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py \
+  --allow-unenforced-worker-storage
 ```
 
 The proof requires direct egress, undeclared grants, worker-selected

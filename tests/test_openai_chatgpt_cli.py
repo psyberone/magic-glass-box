@@ -331,7 +331,7 @@ class OpenAIChatGPTCLITests(unittest.TestCase):
                 result.append(
                     serve_unix(
                         socket_path,
-                        1,
+                        3,
                         connector,
                         client_timeout=0.05,
                     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import signal
 import socket
@@ -9,9 +10,11 @@ import tempfile
 import threading
 import time
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
+import magic_glass_box.sidecar as sidecar_module
 from magic_glass_box.sidecar import (
     UnixSidecarError,
     _staging_socket_path,
@@ -20,6 +23,124 @@ from magic_glass_box.sidecar import (
 
 
 class UnixSidecarTests(unittest.TestCase):
+    def test_recoverable_failure_consumes_one_invocation_budget(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            socket_path = Path(temporary) / "sidecar.sock"
+            finished = threading.Event()
+            results: list[int] = []
+
+            def handler(connection: socket.socket) -> None:
+                marker = connection.recv(1)
+                if marker == b"x":
+                    raise OSError("malformed client")
+
+            def run() -> None:
+                try:
+                    results.append(
+                        serve_unix_socket(
+                            socket_path,
+                            1,
+                            handler,
+                            recoverable_errors=(OSError,),
+                        )
+                    )
+                finally:
+                    finished.set()
+
+            server = threading.Thread(target=run, daemon=True)
+            server.start()
+            deadline = time.monotonic() + 2
+            while not socket_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(socket_path.exists())
+
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(str(socket_path))
+                    client.sendall(b"x")
+                self.assertTrue(finished.wait(0.5))
+            finally:
+                if not finished.is_set() and socket_path.exists():
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        client.connect(str(socket_path))
+                        client.sendall(b"y")
+                server.join(2)
+
+            self.assertFalse(server.is_alive())
+            self.assertEqual(results, [0])
+
+    def test_completed_client_threads_are_pruned_while_listener_stays_live(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            socket_path = Path(temporary) / "sidecar.sock"
+            handled = 0
+            handled_condition = threading.Condition()
+            references: list[weakref.ReferenceType[threading.Thread]] = []
+            original_thread = threading.Thread
+
+            def handler(connection: socket.socket) -> None:
+                nonlocal handled
+                marker = connection.recv(1)
+                with handled_condition:
+                    handled += 1
+                    handled_condition.notify_all()
+                if marker == b"x":
+                    raise OSError("malformed client")
+
+            def track_thread(*args: object, **kwargs: object) -> threading.Thread:
+                worker = original_thread(*args, **kwargs)
+                references.append(weakref.ref(worker))
+                return worker
+
+            results: list[int] = []
+            server = original_thread(
+                target=lambda: results.append(
+                    serve_unix_socket(
+                        socket_path,
+                        21,
+                        handler,
+                        recoverable_errors=(OSError,),
+                    )
+                ),
+                daemon=True,
+            )
+            with mock.patch(
+                "magic_glass_box.sidecar.threading.Thread",
+                side_effect=track_thread,
+            ):
+                server.start()
+                deadline = time.monotonic() + 2
+                while not socket_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                for index in range(20):
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        client.connect(str(socket_path))
+                        client.sendall(b"x")
+                    with handled_condition:
+                        self.assertTrue(
+                            handled_condition.wait_for(
+                                lambda expected=index + 1: handled == expected,
+                                timeout=2,
+                            )
+                        )
+
+                deadline = time.monotonic() + 2
+                alive = len(references)
+                while alive > 1 and time.monotonic() < deadline:
+                    gc.collect()
+                    alive = sum(reference() is not None for reference in references)
+                    time.sleep(0.01)
+                self.assertLessEqual(alive, 1)
+
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(str(socket_path))
+                    client.sendall(b"y")
+                server.join(2)
+
+            self.assertFalse(server.is_alive())
+            self.assertEqual(results, [1])
+
     def test_staging_path_skips_target_and_occupied_siblings_without_growth(
         self,
     ) -> None:
@@ -189,6 +310,79 @@ class UnixSidecarTests(unittest.TestCase):
             self.assertEqual(completed, [2])
             self.assertFalse(socket_path.exists())
 
+    def test_invocation_budget_caps_concurrent_accepted_clients(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            socket_path = Path(temporary) / "sidecar.sock"
+            started: list[bytes] = []
+            started_condition = threading.Condition()
+            release = threading.Event()
+            completed: list[int] = []
+
+            def handler(connection: socket.socket) -> None:
+                marker = connection.recv(1)
+                with started_condition:
+                    started.append(marker)
+                    started_condition.notify_all()
+                if not release.wait(2):  # pragma: no cover - asserted below
+                    raise AssertionError("test did not release handler")
+                connection.sendall(marker)
+
+            server = threading.Thread(
+                target=lambda: completed.append(
+                    serve_unix_socket(
+                        socket_path,
+                        2,
+                        handler,
+                        recoverable_errors=(OSError,),
+                        max_concurrency=3,
+                    )
+                ),
+                daemon=True,
+            )
+            server.start()
+            deadline = time.monotonic() + 2
+            while not socket_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            clients = [
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) for _ in range(3)
+            ]
+            try:
+                for index, client in enumerate(clients, start=1):
+                    client.settimeout(1)
+                    client.connect(str(socket_path))
+                    client.sendall(str(index).encode("ascii"))
+                    if index < 3:
+                        with started_condition:
+                            self.assertTrue(
+                                started_condition.wait_for(
+                                    lambda expected=index: len(started) >= expected,
+                                    timeout=1,
+                                )
+                            )
+                with started_condition:
+                    self.assertFalse(
+                        started_condition.wait_for(
+                            lambda: len(started) == 3, timeout=0.2
+                        )
+                    )
+                clients[2].settimeout(0.1)
+                with self.assertRaises(TimeoutError):
+                    clients[2].recv(1)
+                release.set()
+                self.assertEqual(clients[0].recv(1), b"1")
+                self.assertEqual(clients[1].recv(1), b"2")
+            finally:
+                release.set()
+                for client in clients:
+                    client.close()
+                server.join(2)
+
+            self.assertFalse(server.is_alive())
+            self.assertEqual(started, [b"1", b"2"])
+            self.assertEqual(completed, [2])
+            self.assertFalse(socket_path.exists())
+
     def test_listener_default_concurrency_is_serial(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
             socket_path = Path(temporary) / "sidecar.sock"
@@ -261,12 +455,12 @@ class UnixSidecarTests(unittest.TestCase):
                     "    Path(sys.argv[2]).write_text('started')",
                     "    time.sleep(0.25)",
                     "    connection.sendall(b'done')",
-                    "serve_unix_socket(Path(sys.argv[1]), 1, handler, "
+                    "serve_unix_socket(Path(sys.argv[1]), 2, handler, "
                     "recoverable_errors=(OSError,), max_concurrency=1)",
                 )
             )
             environment = os.environ.copy()
-            source_root = str(Path(__file__).resolve().parents[1] / "src")
+            source_root = str(Path(sidecar_module.__file__).resolve().parents[1])
             environment["PYTHONPATH"] = os.pathsep.join(
                 value
                 for value in (source_root, environment.get("PYTHONPATH", ""))

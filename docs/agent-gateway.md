@@ -424,6 +424,8 @@ export forge comments, or store transcripts.
 Run the carrier and isolation proof with:
 
 ```console
-PYTHONPATH=src python3.11 scripts/check_live_gateway.py
-PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py
+PYTHONPATH=src python3.11 scripts/check_live_gateway.py \
+  --allow-unenforced-worker-storage
+PYTHONPATH=src python3.11 scripts/check_live_provider_gateway.py \
+  --allow-unenforced-worker-storage
 ```

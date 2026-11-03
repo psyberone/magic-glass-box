@@ -119,16 +119,17 @@ def serve_unix_socket(
         client_timeout,
         max_concurrency,
     )
+    attempted = 0
     completed = 0
     active = 0
     staging_path = _staging_socket_path(path)
     stop_event = threading.Event()
     condition = threading.Condition()
     fatal: list[BaseException] = []
-    workers: list[threading.Thread] = []
+    workers: set[threading.Thread] = set()
 
     def serve_connection(connection: socket.socket) -> None:
-        nonlocal active, completed
+        nonlocal active, attempted, completed
         succeeded = False
         try:
             with connection:
@@ -145,6 +146,7 @@ def serve_unix_socket(
         finally:
             with condition:
                 active -= 1
+                attempted += 1
                 if succeeded:
                     completed += 1
                 condition.notify_all()
@@ -165,18 +167,19 @@ def serve_unix_socket(
             staging_path.unlink()
             listener.settimeout(0.1)
             while True:
+                workers = {worker for worker in workers if worker.is_alive()}
                 with condition:
                     while (
                         not stop_event.is_set()
                         and not fatal
-                        and completed < max_invocations
+                        and attempted < max_invocations
                         and (
                             active >= max_concurrency
-                            or completed + active >= max_invocations
+                            or attempted + active >= max_invocations
                         )
                     ):
                         condition.wait(timeout=0.1)
-                    if stop_event.is_set() or fatal or completed >= max_invocations:
+                    if stop_event.is_set() or fatal or attempted >= max_invocations:
                         break
                 try:
                     connection, _ = listener.accept()
@@ -186,7 +189,7 @@ def serve_unix_socket(
                     if (
                         stop_event.is_set()
                         or fatal
-                        or completed + active >= max_invocations
+                        or attempted + active >= max_invocations
                     ):
                         connection.close()
                         continue
@@ -196,10 +199,11 @@ def serve_unix_socket(
                     args=(connection,),
                     name="magic-glass-box-sidecar-client",
                 )
-                workers.append(worker)
+                workers.add(worker)
                 try:
                     worker.start()
                 except BaseException:
+                    workers.discard(worker)
                     connection.close()
                     with condition:
                         active -= 1

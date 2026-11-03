@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -11,14 +12,17 @@ import socket
 import stat
 import struct
 import sys
+import threading
+import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
 
 from .domain import (
     ValidationError,
@@ -99,17 +103,66 @@ class HTTPOpener(Protocol):
     def open(self, request: Request, *, timeout: float) -> object: ...
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(
+class _DirectHTTPSResponse:
+    def __init__(
         self,
-        req: Request,
-        fp: object,
-        code: int,
-        msg: str,
-        headers: object,
-        newurl: str,
+        response: http.client.HTTPResponse,
+        opener: _DirectHTTPSOpener,
     ) -> None:
-        return None
+        self._response = response
+        self._opener = opener
+        self.status = response.status
+        self.headers = response.headers
+
+    def read(self, size: int = -1) -> bytes:
+        return self._response.read(size)
+
+    def close(self) -> None:
+        try:
+            self._response.close()
+        finally:
+            self._opener.close()
+
+
+class _DirectHTTPSOpener:
+    """One-request direct HTTPS carrier that the deadline watchdog can close."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._connection: http.client.HTTPSConnection | None = None
+
+    def open(self, request: Request, *, timeout: float) -> object:
+        parsed = urlsplit(request.full_url)
+        if parsed.scheme != "https" or parsed.hostname is None:
+            raise JiraTransportError("Jira HTTPS transport target is invalid")
+        target = parsed.path or "/"
+        if parsed.query:
+            target += "?" + parsed.query
+        connection = http.client.HTTPSConnection(
+            parsed.hostname,
+            parsed.port,
+            timeout=timeout,
+        )
+        with self._lock:
+            self._connection = connection
+        try:
+            connection.request(
+                request.get_method(),
+                target,
+                body=request.data,
+                headers=dict(request.header_items()),
+            )
+            return _DirectHTTPSResponse(connection.getresponse(), self)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        with self._lock:
+            connection = self._connection
+            self._connection = None
+        if connection is not None:
+            connection.close()
 
 
 def _strict_json_value(raw: bytes, *, subject: str) -> object:
@@ -232,10 +285,6 @@ def load_credential(path: Path) -> JiraCredential:
         or any(character in "\r\n" for character in account + token)
     ):
         raise JiraProviderCLIError("Jira credential file is invalid")
-    token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    scope = content_sha256(
-        canonical_json({"account": account, "host": host, "token_sha256": token_sha256})
-    )
     raw_targets = document.get("state_targets", {})
     if not isinstance(raw_targets, dict):
         raise JiraProviderCLIError("Jira credential file is invalid")
@@ -251,6 +300,17 @@ def load_credential(path: Path) -> JiraCredential:
         ):
             raise JiraProviderCLIError("Jira credential file is invalid")
         state_targets[project] = {"done": states["done"]}
+    token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    scope = content_sha256(
+        canonical_json(
+            {
+                "account": account,
+                "host": host,
+                "state_targets": state_targets,
+                "token_sha256": token_sha256,
+            }
+        )
+    )
     return JiraCredential(base_url, host, account, token, scope, state_targets)
 
 
@@ -335,7 +395,17 @@ def _header(headers: object, name: str) -> str | None:
     return value
 
 
-def _read_http_response(response: object, *, limit: int) -> JiraAPIResponse:
+def _require_http_deadline(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise JiraTransportError("Jira operation deadline expired")
+    return remaining
+
+
+def _read_http_response(
+    response: object, *, deadline: float, limit: int
+) -> JiraAPIResponse:
+    _require_http_deadline(deadline)
     status = getattr(response, "status", None)
     if status is None:
         status = getattr(response, "code", None)
@@ -344,20 +414,29 @@ def _read_http_response(response: object, *, limit: int) -> JiraAPIResponse:
     if headers is None or reader is None:
         raise JiraTransportError("Jira HTTP response is invalid")
     content_length = _header(headers, "Content-Length")
-    if content_length is not None and (
-        not content_length.isdigit() or int(content_length) > limit
-    ):
-        raise JiraTransportError("Jira HTTP response exceeds its limit")
+    if content_length is not None:
+        if not content_length.isdigit() or len(content_length) > 20:
+            raise JiraTransportError("Jira HTTP response exceeds its limit")
+        try:
+            declared_size = int(content_length)
+        except ValueError as exc:
+            raise JiraTransportError("Jira HTTP response exceeds its limit") from exc
+        if declared_size > limit:
+            raise JiraTransportError("Jira HTTP response exceeds its limit")
+    _require_http_deadline(deadline)
     try:
         raw = reader(limit + 1)
-    except (OSError, TimeoutError) as exc:
+        _require_http_deadline(deadline)
+    except JiraTransportError:
+        raise
+    except (OSError, TimeoutError, http.client.HTTPException, ValueError) as exc:
         raise JiraTransportError("Jira HTTP response failed") from exc
     if not isinstance(raw, bytes) or len(raw) > limit:
         raise JiraTransportError("Jira HTTP response exceeds its limit")
     retry_header = _header(headers, "Retry-After")
     retry_after: int | None = None
     if retry_header is not None:
-        if not retry_header.isdigit():
+        if not retry_header.isdigit() or len(retry_header) > 10:
             raise JiraTransportError("Jira retry header is invalid")
         retry_after = int(retry_header)
         if not 1 <= retry_after <= 30 * 24 * 60 * 60:
@@ -382,7 +461,7 @@ class JiraHTTP:
         if not isinstance(credential, JiraCredential):
             raise JiraProviderCLIError("Jira credential is invalid")
         self.credential = credential
-        self.opener = opener or build_opener(_NoRedirect())
+        self.opener = opener
 
     def request(
         self,
@@ -404,6 +483,7 @@ class JiraHTTP:
         ):
             raise JiraTransportError("Jira API response limit is invalid")
         timeout = _remaining_seconds(deadline)
+        operation_deadline = time.monotonic() + timeout
         raw_body = None if body is None else canonical_json(dict(body)).encode("utf-8")
         encoded = base64.b64encode(
             f"{self.credential.account}:{self.credential.api_token}".encode()
@@ -420,19 +500,59 @@ class JiraHTTP:
             headers=headers,
             method=method,
         )
-        response: object
+        response: object | None = None
+        opener = self.opener or _DirectHTTPSOpener()
+        expired = threading.Event()
+        response_lock = threading.Lock()
+
+        def expire() -> None:
+            expired.set()
+            cancel = getattr(opener, "close", None)
+            if callable(cancel):
+                with suppress(Exception):
+                    cancel()
+            with response_lock:
+                current = response
+            if current is not None:
+                closer = getattr(current, "close", None)
+                if callable(closer):
+                    with suppress(Exception):
+                        closer()
+
+        watchdog = threading.Timer(timeout, expire)
+        watchdog.daemon = True
+        watchdog.start()
         try:
-            response = self.opener.open(outbound, timeout=timeout)
-        except HTTPError as exc:
-            response = exc
-        except (OSError, TimeoutError, URLError) as exc:
-            raise JiraTransportError("Jira HTTPS transport failed") from exc
-        try:
-            return _read_http_response(response, limit=response_limit_bytes)
+            try:
+                opened = opener.open(outbound, timeout=timeout)
+            except HTTPError as exc:
+                opened = exc
+            except (
+                OSError,
+                TimeoutError,
+                URLError,
+                http.client.HTTPException,
+            ) as exc:
+                raise JiraTransportError("Jira HTTPS transport failed") from exc
+            with response_lock:
+                response = opened
+            if expired.is_set():
+                raise JiraTransportError("Jira operation deadline expired")
+            _require_http_deadline(operation_deadline)
+            return _read_http_response(
+                opened,
+                deadline=operation_deadline,
+                limit=response_limit_bytes,
+            )
         finally:
-            closer = getattr(response, "close", None)
-            if closer is not None:
-                closer()
+            watchdog.cancel()
+            if response is not None:
+                closer = getattr(response, "close", None)
+                if callable(closer):
+                    closer()
+            cancel = getattr(opener, "close", None)
+            if callable(cancel):
+                cancel()
 
 
 def load_spec(path: Path) -> ServiceSidecarSpec:
