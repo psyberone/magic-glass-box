@@ -1,0 +1,11 @@
+{
+  "authorized_bound": 4,
+  "authorized_by": "owner",
+  "configured_bound": 3,
+  "created_at": "2026-11-04T16:00:00.000000+00:00",
+  "exceeded_bound": 3,
+  "ruling_id": "wri_11111111111111111111111111111111",
+  "single_use": true,
+  "workflow_activation_version_id": "wav_22222222222222222222222222222222",
+  "workflow_execution_id": "wfx_33333333333333333333333333333333"
+}

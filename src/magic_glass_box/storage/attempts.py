@@ -280,8 +280,6 @@ class AttemptStorage:
             "ORDER BY version.version DESC LIMIT 1",
             (project_id,),
         ).fetchone()
-        if project_activation_row is None and incoming_activation is None:
-            return
         try:
             project_activation = (
                 None
@@ -294,20 +292,24 @@ class AttemptStorage:
             raise StorageError("stored workflow activation is invalid") from exc
 
         active_rows = connection.execute(
-            "SELECT activation.spec_json FROM runs active_run "
-            "JOIN workflow_run_bindings active_binding "
+            "SELECT COALESCE(exact_activation.spec_json, ("
+            "SELECT latest.spec_json FROM workflow_activations project_activation "
+            "JOIN workflow_activation_versions latest "
+            "ON latest.activation_id = project_activation.id "
+            "WHERE project_activation.project_id = active_run.project_id "
+            "ORDER BY latest.version DESC LIMIT 1)) AS spec_json "
+            "FROM runs active_run LEFT JOIN workflow_run_bindings active_binding "
             "ON active_binding.run_id = active_run.id "
-            "JOIN workflow_executions active_execution "
+            "LEFT JOIN workflow_executions active_execution "
             "ON active_execution.id = active_binding.execution_id "
-            "JOIN workflow_activation_versions activation "
-            "ON activation.id = active_execution.workflow_activation_version_id "
-            "WHERE active_run.project_id = ? "
-            "AND active_run.state IN ('preparing', 'running')",
-            (project_id,),
+            "LEFT JOIN workflow_activation_versions exact_activation "
+            "ON exact_activation.id = "
+            "active_execution.workflow_activation_version_id "
+            "WHERE active_run.state IN ('preparing', 'running')"
         ).fetchall()
         ceilings = [
             activation.resources.shared_host_concurrency
-            for activation in (project_activation, incoming_activation)
+            for activation in (incoming_activation or project_activation,)
             if activation is not None
         ]
         try:
@@ -316,13 +318,14 @@ class AttemptStorage:
                     json.loads(row["spec_json"])
                 ).resources.shared_host_concurrency
                 for row in active_rows
+                if row["spec_json"] is not None
             )
         except (json.JSONDecodeError, TypeError, ValidationError) as exc:
             raise StorageError("stored workflow activation is invalid") from exc
+        if not ceilings:
+            return
         active_count = connection.execute(
-            "SELECT COUNT(*) FROM runs WHERE project_id = ? "
-            "AND state IN ('preparing', 'running')",
-            (project_id,),
+            "SELECT COUNT(*) FROM runs WHERE state IN ('preparing', 'running')"
         ).fetchone()[0]
         if active_count >= min(ceilings):
             raise ConflictError("workflow shared-host concurrency is exhausted")

@@ -30,6 +30,7 @@ from magic_glass_box.domain import (
 )
 from magic_glass_box.inference import InferenceConnectorSpec, InferenceGrantSpec
 from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.orchestration import RunOrchestrationError
 
 
 class FakeCoordinator:
@@ -249,6 +250,15 @@ class SupervisionDatabaseTests(unittest.TestCase):
         self.assertEqual(first["max_attempts"], 3)
         self.assertIsNone(competing)
 
+        with self.assertRaisesRegex(ValidationError, "retryable must be boolean"):
+            self.database.fail_supervisor_action(
+                first["id"],
+                owner_id="supervisor-one",
+                expected_version=first["version"],
+                error_code="RunOrchestrationError",
+                retryable=1,  # type: ignore[arg-type]
+            )
+
         with mock.patch.object(
             self.database, "now", return_value=start.isoformat(timespec="microseconds")
         ):
@@ -257,6 +267,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
                 owner_id="supervisor-one",
                 expected_version=first["version"],
                 error_code="RunOrchestrationError",
+                retryable=True,
             )
         self.assertEqual(pending["state"], "pending")
         self.assertEqual(
@@ -292,6 +303,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
                 owner_id="supervisor-two",
                 expected_version=claimed["version"],
                 error_code="StorageError",
+                retryable=True,
             )
         self.assertEqual(claimed["attempt_count"], 2)
         self.assertEqual(
@@ -314,6 +326,7 @@ class SupervisionDatabaseTests(unittest.TestCase):
                 owner_id="supervisor-one",
                 expected_version=final_claim["version"],
                 error_code="StorageError",
+                retryable=True,
             )
         self.assertEqual(final_claim["attempt_count"], 3)
         self.assertEqual(exhausted["state"], "exhausted")
@@ -572,7 +585,9 @@ class SupervisionDatabaseTests(unittest.TestCase):
         ):
             run = self.create_run(self.automatic_policy())
         coordinator = FakeCoordinator()
-        coordinator.execute_error = RuntimeError("private upstream failure detail")
+        coordinator.execute_error = RunOrchestrationError(
+            "private upstream failure detail"
+        )
         supervisor = Supervisor(
             self.database,
             coordinator,
@@ -604,11 +619,75 @@ class SupervisionDatabaseTests(unittest.TestCase):
         self.assertEqual(action["run_id"], run["id"])
         self.assertEqual(action["state"], "exhausted")
         self.assertEqual(action["attempt_count"], 3)
-        self.assertEqual(action["last_error_code"], "RuntimeError")
+        self.assertEqual(action["last_error_code"], "RunOrchestrationError")
         self.assertNotIn("private upstream failure detail", str(action))
         rendered_logs = "\n".join(logs.output)
-        self.assertIn("RuntimeError", rendered_logs)
+        self.assertIn("RunOrchestrationError", rendered_logs)
         self.assertNotIn("private upstream failure detail", rendered_logs)
+
+    def test_supervisor_retries_exact_storage_failures(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        start = datetime(2027, 1, 1, tzinfo=UTC)
+        with mock.patch.object(
+            self.database, "now", return_value=start.isoformat(timespec="microseconds")
+        ):
+            run = self.create_run(self.automatic_policy())
+        coordinator = FakeCoordinator()
+        coordinator.execute_error = StorageError("private storage failure detail")
+        supervisor = Supervisor(
+            self.database,
+            coordinator,
+            FakeEscalationTransport(),
+            supervisor_id="supervisor-storage-retry",
+            max_workers=1,
+        )
+        self.addCleanup(supervisor.close)
+
+        with (
+            mock.patch.object(
+                self.database,
+                "now",
+                return_value=start.isoformat(timespec="microseconds"),
+            ),
+            self.assertLogs("magic_glass_box.supervision", level="WARNING"),
+        ):
+            supervisor.tick(wait=True)
+
+        action = self.database.list_supervisor_actions()[0]
+        self.assertEqual(coordinator.execute_calls, [run["id"]])
+        self.assertEqual(action["state"], "pending")
+        self.assertEqual(action["attempt_count"], 1)
+        self.assertEqual(action["last_error_code"], "StorageError")
+        self.assertEqual(
+            action["available_at"],
+            (start + timedelta(seconds=5)).isoformat(timespec="microseconds"),
+        )
+
+    def test_supervisor_stops_an_unclassified_failure_after_one_attempt(self) -> None:
+        from magic_glass_box.supervision import Supervisor
+
+        run = self.create_run(self.automatic_policy())
+        coordinator = FakeCoordinator()
+        coordinator.execute_error = RuntimeError("unclassified private detail")
+        supervisor = Supervisor(
+            self.database,
+            coordinator,
+            FakeEscalationTransport(),
+            supervisor_id="supervisor-unclassified",
+            max_workers=1,
+        )
+        self.addCleanup(supervisor.close)
+
+        with self.assertLogs("magic_glass_box.supervision", level="WARNING"):
+            supervisor.tick(wait=True)
+            supervisor.tick(wait=True)
+
+        action = self.database.list_supervisor_actions()[0]
+        self.assertEqual(coordinator.execute_calls, [run["id"]])
+        self.assertEqual(action["state"], "exhausted")
+        self.assertEqual(action["attempt_count"], 1)
+        self.assertEqual(action["last_error_code"], "RuntimeError")
 
     def test_escalations_are_threshold_deduplicated_and_bodyless(self) -> None:
         start = datetime(2027, 1, 1, tzinfo=UTC)

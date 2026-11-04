@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -6655,6 +6655,41 @@ BEGIN
 END;
 """
 
+WORKFLOW_CORRECTION_CEILING_EXTENSION_SCHEMA = """
+CREATE TABLE workflow_correction_ceiling_extensions (
+    ruling_id TEXT PRIMARY KEY,
+    workflow_execution_id TEXT NOT NULL UNIQUE,
+    workflow_activation_version_id TEXT,
+    configured_bound INTEGER NOT NULL CHECK (configured_bound BETWEEN 1 AND 8),
+    exceeded_bound INTEGER NOT NULL CHECK (exceeded_bound BETWEEN 0 AND 7),
+    authorized_bound INTEGER NOT NULL CHECK (authorized_bound BETWEEN 1 AND 8),
+    authorized_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (ruling_id) REFERENCES workflow_rulings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (authorized_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (exceeded_bound >= configured_bound),
+    CHECK (authorized_bound = exceeded_bound + 1)
+) STRICT;
+
+CREATE INDEX workflow_correction_ceiling_execution
+    ON workflow_correction_ceiling_extensions(workflow_execution_id, created_at);
+
+CREATE TRIGGER workflow_correction_ceiling_extension_immutable_update
+BEFORE UPDATE ON workflow_correction_ceiling_extensions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow correction ceiling extensions are immutable');
+END;
+CREATE TRIGGER workflow_correction_ceiling_extension_immutable_delete
+BEFORE DELETE ON workflow_correction_ceiling_extensions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow correction ceiling extensions cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -6710,7 +6745,8 @@ SCHEMA_V45 = (
 SCHEMA_V46 = SCHEMA_V45 + WORKFLOW_POLICY_ACTIVATION_SCHEMA
 SCHEMA_V47 = SCHEMA_V46 + WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA
 SCHEMA_V48 = SCHEMA_V47 + WORKFLOW_LANDING_PROOF_SCHEMA
-SCHEMA = SCHEMA_V48 + WORKFLOW_CLOSEOUT_SCHEMA
+SCHEMA_V49 = SCHEMA_V48 + WORKFLOW_CLOSEOUT_SCHEMA
+SCHEMA = SCHEMA_V49 + WORKFLOW_CORRECTION_CEILING_EXTENSION_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -6760,4 +6796,5 @@ MIGRATIONS = {
     46: WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING_SCHEMA,
     47: WORKFLOW_LANDING_PROOF_SCHEMA,
     48: WORKFLOW_CLOSEOUT_SCHEMA,
+    49: WORKFLOW_CORRECTION_CEILING_EXTENSION_SCHEMA,
 }

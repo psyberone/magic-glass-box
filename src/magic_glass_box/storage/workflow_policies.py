@@ -478,6 +478,12 @@ class WorkflowPolicyStorage:
             raise StorageError(
                 "stored workflow activation capability bindings do not match"
             )
+        availability = self._workflow_activation_availability(
+            connection,
+            row=row,
+            policy=policy,
+            spec=spec,
+        )
         return {
             "id": row["id"],
             "project_id": row["project_id"],
@@ -498,9 +504,50 @@ class WorkflowPolicyStorage:
             "spec": spec.to_dict(),
             "content_sha256": row["content_sha256"],
             "acknowledged_by": row["acknowledged_by"],
+            "availability": availability,
             "created_at": row["created_at"],
             "activation_created_at": row["activation_created_at"],
         }
+
+    def _workflow_activation_availability(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        policy: WorkflowPolicySpec,
+        spec: WorkflowActivationSpec,
+    ) -> dict[str, str | None]:
+        try:
+            self._validate_activation(
+                connection,
+                project_id=row["project_id"],
+                project_key=row["project_key"],
+                policy=policy,
+                spec=spec,
+            )
+            roles = connection.execute(
+                "SELECT COUNT(*) AS role_count, "
+                "SUM(CASE WHEN profile.active = 1 THEN 1 ELSE 0 END) "
+                "AS active_role_count FROM workflow_configuration_role_bindings "
+                "binding JOIN agent_profile_versions profile_version "
+                "ON profile_version.id = binding.profile_version_id "
+                "JOIN agent_profiles profile "
+                "ON profile.id = profile_version.profile_id "
+                "WHERE binding.configuration_version_id = ?",
+                (row["workflow_configuration_version_id"],),
+            ).fetchone()
+            if (
+                roles is None
+                or roles["role_count"] != 2
+                or roles["active_role_count"] != roles["role_count"]
+            ):
+                raise ConflictError("workflow activation role profile is unavailable")
+        except (ConflictError, NotFoundError):
+            return {
+                "status": "unavailable",
+                "reason": "activation_requirements_unavailable",
+            }
+        return {"status": "available", "reason": None}
 
     def _resolve_workflow_activation_for_start(
         self,

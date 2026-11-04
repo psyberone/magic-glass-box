@@ -109,8 +109,14 @@ or a bounded shutdown expires, a replacement may reclaim the action after
 lease expiry. The underlying run or attempt transition remains the final
 defense against duplicate worker launch or premature recovery. An obsolete
 action settles without repeating the effect. Operational failures retain only
-a safe exception class, wait for the pinned finite backoff, and become
-`exhausted` after the final attempt. There is no unbounded retry loop.
+a safe exception class. Only the exact base storage-boundary failure and
+explicit run-orchestration failures use the pinned finite backoff. Semantic
+storage failures such as conflicts and missing records, plus unclassified
+director, policy, or programming failures, become `exhausted` after their first
+claim instead of replaying an unknown effect; the current workflow projection
+returns responsibility to its owner and the control room retains the exhausted
+action. Classified failures still become `exhausted` after their final attempt.
+There is no unbounded or catch-all retry loop.
 
 Answered interactions queue their run only when the previous attempt is gone.
 An opted-in queued run is then discovered by the same normal action path; no
@@ -140,6 +146,13 @@ immutable validation once, and an exact failed-provider-landing ruling may
 authorize one retry of that attempt. Each retry requires its own ruling; neither
 path can alter the pinned command, image, policy, or candidate. Other rulings
 can only cancel.
+
+For activated workflows, only the activation's pinned owner may resolve a
+ruling, including cancellation. A correction-limit continuation is available
+only after the configured ceiling is reached and consumes the execution's one
+immutable, single-round ceiling-extension artifact. Pre-policy histories retain
+their prior active-user compatibility authority without gaining activated
+policy status.
 
 Waiting at landing is not an operational failure and does not spend retry
 budget. Manual workflows wait for an explicitly issued plan and receipt;

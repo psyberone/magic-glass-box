@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-correction-ceiling-extension:v1",
+  "title": "Magic Glass Box Workflow Correction Ceiling Extension v1",
+  "description": "One immutable, owner-authorized, single-round exception to an exhausted workflow correction ceiling.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "authorized_bound",
+    "authorized_by",
+    "configured_bound",
+    "created_at",
+    "exceeded_bound",
+    "ruling_id",
+    "single_use",
+    "workflow_activation_version_id",
+    "workflow_execution_id"
+  ],
+  "properties": {
+    "authorized_bound": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "authorized_by": { "$ref": "#/$defs/handle" },
+    "configured_bound": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "exceeded_bound": { "type": "integer", "minimum": 0, "maximum": 7 },
+    "ruling_id": { "type": "string", "pattern": "^wri_[0-9a-f]{32}$" },
+    "single_use": { "const": true },
+    "workflow_activation_version_id": {
+      "oneOf": [
+        { "type": "string", "pattern": "^wav_[0-9a-f]{32}$" },
+        { "type": "null" }
+      ]
+    },
+    "workflow_execution_id": {
+      "type": "string",
+      "pattern": "^wfx_[0-9a-f]{32}$"
+    }
+  },
+  "$defs": {
+    "handle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "\\S"
+    }
+  }
+}

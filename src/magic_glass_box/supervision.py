@@ -18,6 +18,7 @@ from .db import (
     NotFoundError,
     StorageError,
 )
+from .orchestration import RunOrchestrationError
 
 logger = logging.getLogger(__name__)
 
@@ -545,6 +546,7 @@ class Supervisor:
                         owner_id=self.supervisor_id,
                         expected_version=action["version"],
                         error_code=error_code,
+                        retryable=self._action_failure_is_retryable(action, exc),
                     )
             except (ConcurrentUpdateError, ConflictError, NotFoundError) as exc:
                 logger.warning(
@@ -768,6 +770,16 @@ class Supervisor:
                     escalation["id"],
                     self._exception_code(persistence_error),
                 )
+
+    @staticmethod
+    def _action_failure_is_retryable(action: dict[str, Any], exc: Exception) -> bool:
+        if type(exc) is StorageError:
+            return True
+        return action["kind"] in {
+            "run.execute",
+            "attempt.reconcile",
+            "run.reconcile",
+        } and isinstance(exc, RunOrchestrationError)
 
     @staticmethod
     def _exception_code(exc: Exception) -> str:

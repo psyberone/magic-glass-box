@@ -18,6 +18,7 @@ from magic_glass_box.db import (
     SCHEMA_V46,
     SCHEMA_V47,
     SCHEMA_V48,
+    SCHEMA_V49,
     SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
@@ -321,7 +322,11 @@ class WorkflowPolicyPublishedSchemaTests(unittest.TestCase):
                     factory(extra)
 
     def test_runtime_projection_examples_match_published_contracts(self) -> None:
-        for name in ("workflow-manual-wake", "workflow-responsibility"):
+        for name in (
+            "workflow-correction-ceiling-extension",
+            "workflow-manual-wake",
+            "workflow-responsibility",
+        ):
             with self.subTest(name=name):
                 schema = json.loads(
                     (self.repository / "schemas" / f"{name}-v1.schema.json").read_text()
@@ -354,6 +359,8 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
         provider_target: bool = False,
         closeout_declared: bool = False,
         open_closeout_obligation: bool = False,
+        target_hold: bool = False,
+        exhausted_action: bool = False,
     ) -> dict[str, object]:
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
@@ -428,6 +435,26 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     state TEXT NOT NULL,
                     version INTEGER NOT NULL,
                     deadline TEXT NOT NULL
+                );
+                CREATE TABLE integration_target_holds (
+                    id TEXT PRIMARY KEY,
+                    workflow_execution_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    integration_ref_id TEXT NOT NULL,
+                    landing_proof_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE supervisor_actions (
+                    id TEXT PRIMARY KEY,
+                    workflow_execution_id TEXT NOT NULL,
+                    subject_version INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    last_error_code TEXT,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -520,6 +547,18 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                         "2026-11-05T06:00:00.000000Z",
                     ),
                 )
+            if target_hold:
+                connection.execute(
+                    "INSERT INTO integration_target_holds VALUES "
+                    "('ith_1', 'wfx_1', 'open', 4, 'landing_mismatch', "
+                    "'irf_1', 'wlp_1', '2026-11-02T13:00:00+00:00')"
+                )
+            if exhausted_action:
+                connection.execute(
+                    "INSERT INTO supervisor_actions VALUES "
+                    "('spa_1', 'wfx_1', 7, 'workflow.advance', 'exhausted', "
+                    "5, 'RuntimeError', '2026-11-02T14:00:00+00:00')"
+                )
             return Database._workflow_responsibility(connection, "wfx_1")
         finally:
             connection.close()
@@ -572,6 +611,40 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                 ),
             ),
             (
+                "active with landing hold",
+                {"target_hold": True},
+                self.expected(
+                    "build",
+                    "action_required",
+                    "owner",
+                    "landing_target_hold",
+                    {
+                        "hold_id": "ith_1",
+                        "hold_version": 4,
+                        "hold_reason": "landing_mismatch",
+                        "integration_ref_id": "irf_1",
+                        "landing_proof_id": "wlp_1",
+                    },
+                ),
+            ),
+            (
+                "terminal with landing hold",
+                {"execution_state": "cancelled", "target_hold": True},
+                self.expected(
+                    "build",
+                    "action_required",
+                    "owner",
+                    "landing_target_hold",
+                    {
+                        "hold_id": "ith_1",
+                        "hold_version": 4,
+                        "hold_reason": "landing_mismatch",
+                        "integration_ref_id": "irf_1",
+                        "landing_proof_id": "wlp_1",
+                    },
+                ),
+            ),
+            (
                 "open ruling",
                 {"ruling": True},
                 self.expected(
@@ -591,6 +664,22 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                 {},
                 self.expected(
                     "build", "action_required", "control_plane", "role_admission"
+                ),
+            ),
+            (
+                "exhausted stage transition",
+                {"exhausted_action": True},
+                self.expected(
+                    "build",
+                    "action_required",
+                    "owner",
+                    "supervisor_action_exhausted",
+                    {
+                        "action_id": "spa_1",
+                        "action_kind": "workflow.advance",
+                        "action_version": 5,
+                        "last_error_code": "RuntimeError",
+                    },
                 ),
             ),
             (
@@ -1516,6 +1605,20 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(status["counts"]["workflow_closeout_proofs"], 0)
         self.assertEqual(migrated.list_workflow_closeout_obligations(), [])
 
+    def test_schema_migrates_v49_without_synthesizing_ceiling_extensions(self) -> None:
+        path = self.root / "v49.db"
+        with sqlite3.connect(path) as connection:
+            Database._execute_statements(connection, SCHEMA_V49)
+            connection.execute("PRAGMA user_version = 49")
+            connection.commit()
+        path.chmod(0o600)
+        migrated = Database(path)
+
+        status = migrated.initialize()
+
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(status["counts"]["workflow_correction_ceiling_extensions"], 0)
+
     def test_attempt_admission_bypasses_only_pre_workflow_schema_versions(
         self,
     ) -> None:
@@ -1562,6 +1665,29 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             [activation],
         )
 
+    def test_first_activation_preserves_an_exact_pre_policy_start_replay(self) -> None:
+        work_item = self.create_work_item("pre-policy-replay")
+        request = {
+            "project_key": "policy-project",
+            "configuration_name": "default",
+            "work_item_id": work_item["id"],
+            "source_revision": "a" * 40,
+            "expected_configuration_version": 1,
+            "expected_context_version_id": self.project["context_version_id"],
+            "expected_work_item_version_id": work_item["work_item_version_id"],
+            "expected_thread_generation": 1,
+            "expected_thread_version": 1,
+            "idempotency_key": "pre-policy-replay",
+            "requested_by": self.user["id"],
+        }
+        original = self.database.start_workflow_execution(**request)
+        self.activate()
+
+        replayed = self.database.start_workflow_execution(**request)
+
+        self.assertEqual(replayed, original)
+        self.assertEqual(replayed["portable_policy"], {"status": "pre_policy"})
+
     def test_execution_pins_exact_activation_and_rechecks_availability(self) -> None:
         policy = self.create_policy()
         activation = self.database.create_workflow_activation(
@@ -1571,7 +1697,32 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             spec=self.activation_spec(policy),
             acknowledged_by=self.user["id"],
         )
+        self.assertEqual(
+            activation["availability"], {"status": "available", "reason": None}
+        )
+        available_snapshot = ControlRoom(self.database).snapshot()
+        self.assertFalse(
+            any(
+                item["kind"] == "workflow.activation_unavailable"
+                for item in available_snapshot["attention"]
+            )
+        )
         work_item = self.create_work_item("activated-1")
+
+        with self.assertRaisesRegex(ConflictError, "requires.*activation"):
+            self.database.start_workflow_execution(
+                project_key="policy-project",
+                configuration_name="default",
+                work_item_id=work_item["id"],
+                source_revision="a" * 40,
+                expected_configuration_version=1,
+                expected_context_version_id=self.project["context_version_id"],
+                expected_work_item_version_id=work_item["work_item_version_id"],
+                expected_thread_generation=1,
+                expected_thread_version=1,
+                idempotency_key="activated-fallback-forbidden",
+                requested_by=self.user["id"],
+            )
 
         with self.assertRaisesRegex(ConflictError, "activation version changed"):
             self.start_activated(
@@ -1623,6 +1774,267 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
                 expected_activation_version=1,
                 idempotency_key="unavailable-activation",
             )
+
+        unavailable = self.database.get_workflow_activation("policy-project")
+        self.assertEqual(unavailable["availability"]["status"], "unavailable")
+        self.assertEqual(
+            unavailable["availability"]["reason"],
+            "activation_requirements_unavailable",
+        )
+        snapshot = ControlRoom(self.database).snapshot()
+        projected = snapshot["workflow_activations"][0]
+        self.assertEqual(projected["project_key"], "policy-project")
+        self.assertEqual(projected["availability"], unavailable["availability"])
+        self.assertEqual(
+            set(projected),
+            {
+                "acknowledged_by",
+                "availability",
+                "created_at",
+                "id",
+                "policy_name",
+                "policy_sha256",
+                "policy_version",
+                "project_key",
+                "version",
+                "workflow_activation_version_id",
+            },
+        )
+        self.assertTrue(
+            any(
+                item["kind"] == "workflow.activation_unavailable"
+                and item["subject_id"] == activation["id"]
+                for item in snapshot["attention"]
+            )
+        )
+
+    def test_activation_availability_rechecks_current_role_profiles(self) -> None:
+        activation = self.activate()
+        self.assertEqual(
+            activation["availability"], {"status": "available", "reason": None}
+        )
+        with self.database.connect() as connection:
+            changed = connection.execute(
+                "UPDATE agent_profiles SET active = 0 WHERE name = 'Producer'"
+            ).rowcount
+        self.assertEqual(changed, 1)
+
+        unavailable = self.database.get_workflow_activation("policy-project")
+
+        self.assertEqual(
+            unavailable["availability"],
+            {
+                "status": "unavailable",
+                "reason": "activation_requirements_unavailable",
+            },
+        )
+
+    def test_activated_ruling_requires_owner_and_records_one_ceiling_extension(
+        self,
+    ) -> None:
+        self.activate()
+        work_item = self.create_work_item("activated-ruling-owner")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="activated-ruling-owner",
+        )
+        current = execution
+        for correction_round in range(3):
+            current = self.database.advance_workflow_execution(
+                execution["id"],
+                expected_version=current["version"],
+                expected_stage="build",
+                expected_correction_round=correction_round,
+                target_stage="review",
+                target_correction_round=correction_round,
+                event_kind="workflow.review_started",
+                metadata={},
+            )
+            current = self.database.advance_workflow_execution(
+                execution["id"],
+                expected_version=current["version"],
+                expected_stage="review",
+                expected_correction_round=correction_round,
+                target_stage="build",
+                target_correction_round=correction_round + 1,
+                event_kind="workflow.correction_started",
+                metadata={},
+            )
+        review = self.database.advance_workflow_execution(
+            execution["id"],
+            expected_version=current["version"],
+            expected_stage="build",
+            expected_correction_round=3,
+            target_stage="review",
+            target_correction_round=3,
+            event_kind="workflow.review_started",
+            metadata={},
+        )
+        ruling = self.database.open_workflow_ruling(
+            review["id"],
+            expected_version=review["version"],
+            kind="correction_limit",
+        )
+        intruder = self.database.create_user("intruder", "Intruding User")
+
+        with self.assertRaisesRegex(ConflictError, "activation owner"):
+            self.database.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by=intruder["id"],
+            )
+
+        resolved = self.database.resolve_workflow_ruling(
+            ruling["id"],
+            expected_version=ruling["version"],
+            decision="continue",
+            resolved_by=self.user["id"],
+        )
+        self.assertEqual(
+            (resolved["state"], resolved["decision"]), ("resolved", "continue")
+        )
+        extension = resolved["ceiling_extension"]
+        self.assertEqual(extension["ruling_id"], ruling["id"])
+        self.assertEqual(extension["workflow_execution_id"], execution["id"])
+        self.assertEqual(extension["authorized_by"], "owner")
+        current = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            {
+                key: extension[key]
+                for key in (
+                    "configured_bound",
+                    "exceeded_bound",
+                    "authorized_bound",
+                    "single_use",
+                )
+            },
+            {
+                "configured_bound": 3,
+                "exceeded_bound": 3,
+                "authorized_bound": 4,
+                "single_use": True,
+            },
+        )
+        self.assertEqual(current["rulings"][-1]["ceiling_extension"], extension)
+        schema = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "schemas/workflow-correction-ceiling-extension-v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        Draft202012Validator(schema).validate(extension)
+        with (
+            self.database.connect() as connection,
+            self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"),
+        ):
+            connection.execute(
+                "UPDATE workflow_correction_ceiling_extensions "
+                "SET authorized_bound = 5 WHERE ruling_id = ?",
+                (ruling["id"],),
+            )
+        with (
+            self.database.connect() as connection,
+            self.assertRaisesRegex(sqlite3.IntegrityError, "cannot be deleted"),
+        ):
+            connection.execute(
+                "DELETE FROM workflow_correction_ceiling_extensions "
+                "WHERE ruling_id = ?",
+                (ruling["id"],),
+            )
+
+        review_four = self.database.advance_workflow_execution(
+            current["id"],
+            expected_version=current["version"],
+            expected_stage="build",
+            expected_correction_round=4,
+            target_stage="review",
+            target_correction_round=4,
+            event_kind="workflow.review_started",
+            metadata={},
+        )
+        second_ruling = self.database.open_workflow_ruling(
+            review_four["id"],
+            expected_version=review_four["version"],
+            kind="correction_limit",
+        )
+        with (
+            self.database.connect() as connection,
+            self.assertRaisesRegex(sqlite3.IntegrityError, "workflow_execution_id"),
+        ):
+            connection.execute(
+                "INSERT INTO workflow_correction_ceiling_extensions "
+                "(ruling_id, workflow_execution_id, "
+                "workflow_activation_version_id, configured_bound, "
+                "exceeded_bound, authorized_bound, authorized_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    second_ruling["id"],
+                    execution["id"],
+                    extension["workflow_activation_version_id"],
+                    3,
+                    4,
+                    5,
+                    self.user["id"],
+                    second_ruling["created_at"],
+                ),
+            )
+        with self.assertRaisesRegex(ConflictError, "already been used"):
+            self.database.resolve_workflow_ruling(
+                second_ruling["id"],
+                expected_version=second_ruling["version"],
+                decision="continue",
+                resolved_by=self.user["id"],
+            )
+
+    def test_correction_ceiling_extension_requires_the_configured_bound(self) -> None:
+        self.activate()
+        work_item = self.create_work_item("activated-ruling-before-ceiling")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="activated-ruling-before-ceiling",
+        )
+        ruling = self.database.open_workflow_ruling(
+            execution["id"],
+            expected_version=execution["version"],
+            kind="correction_limit",
+        )
+
+        with self.assertRaisesRegex(ConflictError, "ceiling has not been reached"):
+            self.database.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by=self.user["id"],
+            )
+
+        with (
+            self.database.connect() as connection,
+            self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK constraint failed"),
+        ):
+            connection.execute(
+                "INSERT INTO workflow_correction_ceiling_extensions "
+                "(ruling_id, workflow_execution_id, "
+                "workflow_activation_version_id, configured_bound, "
+                "exceeded_bound, authorized_bound, authorized_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ruling["id"],
+                    execution["id"],
+                    execution["workflow_activation_version_id"],
+                    3,
+                    0,
+                    1,
+                    self.user["id"],
+                    ruling["created_at"],
+                ),
+            )
+
+        self.assertEqual(
+            self.database.get_workflow_ruling(ruling["id"])["state"], "open"
+        )
 
     def test_activated_role_requires_exact_manual_wake_acknowledgement(self) -> None:
         activation = self.activate()
@@ -1968,6 +2380,246 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
                 expected_run_version=standalone["version"],
             )
 
+    def test_activation_shared_host_concurrency_is_global_across_projects(self) -> None:
+        self.activate()
+        second_project = self.database.create_project(
+            instance_id=self.instance["id"],
+            krab_project_id="prj_" + "9" * 32,
+            krab_project_key="second-policy-project",
+            display_name="Second Policy Project",
+            context=ProjectContext.from_mapping({"purpose": "Share one host"}),
+            created_by=self.user["id"],
+        )
+        second_configuration = self.database.create_workflow_configuration(
+            project_key="second-policy-project",
+            name="default",
+            spec=WorkflowConfigurationSpec.from_mapping(
+                {
+                    "schema_version": 1,
+                    "review_separation": "different_profile_and_identity",
+                    "maintainer_approval": True,
+                    "validations": [
+                        {
+                            "name": "coverage",
+                            "image_id": "sha256:" + "4" * 64,
+                            "command": ["make", "coverage"],
+                        },
+                        {
+                            "name": "mutation",
+                            "image_id": "sha256:" + "4" * 64,
+                            "command": ["make", "mutation"],
+                        },
+                        {
+                            "name": "unit",
+                            "image_id": "sha256:" + "4" * 64,
+                            "command": ["make", "test"],
+                        },
+                    ],
+                    "max_correction_rounds": 3,
+                    "landing_mode": "provider",
+                }
+            ),
+            producer_profile_name="Producer",
+            reviewer_profile_name="Reviewer",
+            created_by=self.user["id"],
+        )
+        second_bindings = {
+            name: self.database.bind_project_capability(
+                project_key="second-policy-project",
+                capability_name=name,
+                capability_version=1,
+                sidecar_name="forge",
+                mapping_name="primary",
+                bound_by=self.user["id"],
+            )
+            for name in ("change.open", "landing.invoke", "refs.publish")
+        }
+        policy = self.database.get_workflow_policy("standard-delivery")
+        second_spec = self.activation_spec(policy).to_dict()
+        second_spec["workflow_configuration_version_id"] = second_configuration[
+            "workflow_configuration_version_id"
+        ]
+        for binding in second_spec["capability_bindings"]:
+            binding["binding_id"] = second_bindings[binding["name"]]["id"]
+        self.database.create_workflow_activation(
+            project_key="second-policy-project",
+            policy_name="standard-delivery",
+            expected_policy_version=1,
+            spec=WorkflowActivationSpec.from_mapping(second_spec),
+            acknowledged_by=self.user["id"],
+        )
+
+        first_item = self.create_work_item("global-concurrency-first")
+        first_execution = self.start_activated(
+            first_item,
+            expected_activation_version=1,
+            idempotency_key="global-concurrency-first",
+        )
+        first_run = self.create_producer_run(first_execution, first_item)
+        first_wake = self.database.list_workflow_manual_wakes(
+            execution_id=first_execution["id"]
+        )[0]
+        self.database.acknowledge_workflow_manual_wake(
+            first_wake["id"],
+            expected_version=first_wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+        self.database.begin_run_attempt(
+            first_run["id"],
+            runtime_adapter="docker",
+            owner_id="global-worker-one",
+            expected_run_version=first_run["version"],
+        )
+
+        legacy_project = self.database.create_project(
+            instance_id=self.instance["id"],
+            krab_project_id="prj_" + "8" * 32,
+            krab_project_key="legacy-policy-project",
+            display_name="Legacy Policy Project",
+            context=ProjectContext.from_mapping(
+                {"purpose": "Prove an unactivated run cannot bypass a host ceiling"}
+            ),
+            created_by=self.user["id"],
+        )
+        legacy_item = self.database.import_work_item(
+            project_key="legacy-policy-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "global-concurrency-legacy",
+                    "source_updated_at": "2026-11-02T12:00:00Z",
+                    "title": "Exercise an unactivated project",
+                    "brief": "Prove legacy work still counts on the shared host.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        legacy_run = self.database.create_run(
+            project_key="legacy-policy-project",
+            profile_name="Producer",
+            work_item_id=legacy_item["id"],
+            requested_by=self.user["id"],
+            source_revision="a" * 40,
+        )
+        self.assertEqual(legacy_project["krab_project_key"], "legacy-policy-project")
+        with self.assertRaisesRegex(ConflictError, "shared-host concurrency"):
+            self.database.begin_run_attempt(
+                legacy_run["id"],
+                runtime_adapter="docker",
+                owner_id="global-worker-legacy",
+                expected_run_version=legacy_run["version"],
+            )
+
+        second_item = self.database.import_work_item(
+            project_key="second-policy-project",
+            envelope=WorkItemEnvelope.from_mapping(
+                {
+                    "schema_version": 1,
+                    "source": "manual",
+                    "external_id": "global-concurrency-second",
+                    "source_updated_at": "2026-11-02T12:00:00Z",
+                    "title": "Exercise the second activation",
+                    "brief": "Prove the host ceiling crosses project boundaries.",
+                }
+            ),
+            imported_by=self.user["id"],
+        )
+        second_execution = self.database.start_workflow_execution(
+            project_key="second-policy-project",
+            configuration_name="default",
+            work_item_id=second_item["id"],
+            source_revision="a" * 40,
+            expected_configuration_version=1,
+            expected_context_version_id=second_project["context_version_id"],
+            expected_work_item_version_id=second_item["work_item_version_id"],
+            expected_thread_generation=1,
+            expected_thread_version=1,
+            expected_activation_version=1,
+            idempotency_key="global-concurrency-second",
+            requested_by=self.user["id"],
+        )
+        second_run = self.database.create_run(
+            project_key="second-policy-project",
+            profile_name="Producer",
+            work_item_id=second_item["id"],
+            requested_by=self.user["id"],
+            source_revision="a" * 40,
+            workflow_execution_id=second_execution["id"],
+            workflow_round=0,
+            workflow_role="producer",
+        )
+        second_wake = self.database.list_workflow_manual_wakes(
+            execution_id=second_execution["id"]
+        )[0]
+        self.database.acknowledge_workflow_manual_wake(
+            second_wake["id"],
+            expected_version=second_wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "shared-host concurrency"):
+            self.database.begin_run_attempt(
+                second_run["id"],
+                runtime_adapter="docker",
+                owner_id="global-worker-two",
+                expected_run_version=second_run["version"],
+            )
+
+    def test_attempt_admission_uses_the_execution_pinned_concurrency_ceiling(
+        self,
+    ) -> None:
+        first_activation = self.activate()
+        pinned_item = self.create_work_item("pinned-concurrency")
+        pinned_execution = self.start_activated(
+            pinned_item,
+            expected_activation_version=1,
+            idempotency_key="pinned-concurrency",
+        )
+        revised_spec = copy.deepcopy(first_activation["spec"])
+        revised_spec["resources"]["shared_host_concurrency"] = 2
+        revised = self.database.revise_workflow_activation(
+            project_key="policy-project",
+            policy_name="standard-delivery",
+            expected_policy_version=1,
+            spec=WorkflowActivationSpec.from_mapping(revised_spec),
+            acknowledged_by=self.user["id"],
+        )
+        self.assertEqual(revised["version"], 2)
+
+        current_item = self.create_work_item("current-concurrency")
+        current_run = self.database.create_run(
+            project_key="policy-project",
+            profile_name="Producer",
+            work_item_id=current_item["id"],
+            requested_by=self.user["id"],
+            source_revision="a" * 40,
+        )
+        self.database.begin_run_attempt(
+            current_run["id"],
+            runtime_adapter="docker",
+            owner_id="current-activation-worker",
+            expected_run_version=current_run["version"],
+        )
+
+        pinned_run = self.create_producer_run(pinned_execution, pinned_item)
+        pinned_wake = self.database.list_workflow_manual_wakes(
+            execution_id=pinned_execution["id"]
+        )[0]
+        self.database.acknowledge_workflow_manual_wake(
+            pinned_wake["id"],
+            expected_version=pinned_wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "shared-host concurrency"):
+            self.database.begin_run_attempt(
+                pinned_run["id"],
+                runtime_adapter="docker",
+                owner_id="pinned-activation-worker",
+                expected_run_version=pinned_run["version"],
+            )
+
     def test_activation_wall_time_opens_a_non_extendable_owner_ruling(self) -> None:
         self.activate()
         work_item = self.create_work_item("wall-time")
@@ -2014,3 +2666,103 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             self.database.get_workflow_execution(execution["id"])["state"],
             "cancelled",
         )
+
+    def test_activation_wall_time_governs_every_pre_landing_stage(self) -> None:
+        director = WorkflowDirector(
+            ControlPlane(self.database),
+            result_store=None,  # type: ignore[arg-type]
+            candidate_store=None,  # type: ignore[arg-type]
+            validation_executor=None,  # type: ignore[arg-type]
+        )
+        for stage in ("build", "review", "maintainer"):
+            with (
+                self.subTest(stage=stage),
+                mock.patch.object(
+                    self.database,
+                    "get_workflow_execution",
+                    return_value={
+                        "id": "wfx_wall_time",
+                        "state": "active",
+                        "stage": stage,
+                        "version": 7,
+                        "rulings": [],
+                    },
+                ),
+                mock.patch.object(
+                    director, "_wall_time_exhausted", return_value=True
+                ) as exhausted,
+                mock.patch.object(director, "_ruling", return_value=True) as ruling,
+            ):
+                self.assertTrue(director.advance("wfx_wall_time", expected_version=7))
+                exhausted.assert_called_once()
+                ruling.assert_called_once_with(
+                    {
+                        "id": "wfx_wall_time",
+                        "state": "active",
+                        "stage": stage,
+                        "version": 7,
+                        "rulings": [],
+                    },
+                    "resource_exhausted",
+                )
+
+    def test_activation_wall_time_stops_applying_once_landing_begins(self) -> None:
+        self.activate()
+        work_item = self.create_work_item("wall-time-after-landing")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="wall-time-after-landing",
+        )
+        landing = {**execution, "stage": "landing"}
+        director = WorkflowDirector(
+            ControlPlane(self.database),
+            result_store=None,  # type: ignore[arg-type]
+            candidate_store=None,  # type: ignore[arg-type]
+            validation_executor=None,  # type: ignore[arg-type]
+        )
+
+        with (
+            mock.patch.object(
+                self.database, "get_workflow_execution", return_value=landing
+            ),
+            mock.patch.object(
+                director, "_wall_time_exhausted", return_value=True
+            ) as exhausted,
+            mock.patch.object(director, "_ruling", return_value=True) as ruling,
+            mock.patch.object(director, "_advance_landing", return_value=False),
+        ):
+            self.assertFalse(director.advance(execution["id"], expected_version=1))
+
+        exhausted.assert_not_called()
+        ruling.assert_not_called()
+
+    def test_exhausted_workflow_action_returns_responsibility_to_owner(self) -> None:
+        self.activate()
+        work_item = self.create_work_item("exhausted-workflow-action")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="exhausted-workflow-action",
+        )
+        action = self.database.enqueue_supervisor_actions()[0]
+        claimed = self.database.claim_supervisor_action(
+            owner_id="supervisor-owner-return",
+            lease_seconds=60,
+        )
+        self.assertEqual(claimed["id"], action["id"])
+        exhausted = self.database.fail_supervisor_action(
+            claimed["id"],
+            owner_id="supervisor-owner-return",
+            expected_version=claimed["version"],
+            error_code="RuntimeError",
+            retryable=False,
+        )
+        self.assertEqual(exhausted["state"], "exhausted")
+
+        current = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(current["responsibility"]["holder"], "owner")
+        self.assertEqual(
+            current["responsibility"]["reason"], "supervisor_action_exhausted"
+        )
+        self.assertEqual(current["responsibility"]["basis"]["action_id"], action["id"])

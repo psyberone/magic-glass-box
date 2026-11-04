@@ -1,7 +1,7 @@
 # Bounded workflow templates
 
 **Status: M12A-M12C and M13A-M13D complete; M18 portable-policy delivery
-implemented through schema v49 with final quality gates in progress**
+implemented through schema v50 with external-review remediation in progress**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -56,11 +56,13 @@ without a legacy or raw-provider fallback.
 Activated executions pin the exact activation and policy revisions in both the
 execution row and start event. Read projections expose the portable digest,
 activation digest, bounded resources, wake bindings, and merge method without
-provider payloads or credentials. Existing histories and compatibility starts
-without an activation remain explicitly `pre_policy`; they do not acquire M18
-authority and are never described as conforming. Later M18 slices consume the
-pinned activation for responsibility, provider translation/read-back, landing
-proof, and truthful closeout obligations.
+provider payloads or credentials. Histories created before a project's first
+activation remain explicitly `pre_policy`; they do not acquire M18 authority
+and are never described as conforming. Once a project has an acknowledged
+activation, every new start must name its expected activation version. Omitting
+that pin is not a compatibility fallback. Later M18 slices consume the pinned
+activation for responsibility, provider translation/read-back, landing proof,
+and truthful closeout obligations.
 
 Schema v47 consumes the activation's manual wake and resource bindings. Creating
 an activated role run atomically creates one owner-addressed wake; only the
@@ -76,9 +78,15 @@ Missing wake or unresolved stage state is attention, not inference. Pre-policy
 executions remain `{ "status": "pre_policy" }`.
 
 Resource declarations are enforceable: the two fixed roles must fit the seat
-ceiling, correction rounds use the configured hard limit, attempt claims share
-an atomic project host-concurrency limit, and elapsed wall time opens a
-`resource_exhausted` owner ruling that cannot be continued or enlarged.
+ceiling, correction rounds stop at the configured bound, and attempt claims
+share one atomic host-wide concurrency limit across projects. At the correction
+ceiling, only the activation owner may consume one immutable, single-round
+exception for the execution; the absolute bound remains eight. Elapsed wall
+time governs build, review, and maintainer work and opens a
+`resource_exhausted` owner ruling that cannot be continued or enlarged. Landing
+and completion instead preserve their already-issued provider effects,
+receipts, holds, and closeout responsibility; elapsed time cannot relabel those
+facts as cancellation.
 
 Schema v48 consumes the activation's provider bindings without giving the
 portable policy provider-native mechanics. At the landing stage, the activation
@@ -87,16 +95,19 @@ version, candidate, gate, base/head refs, title, body, draft flag, and selected
 merge method. The title must equal the pinned work-item title. Secondary effects
 are forbidden.
 
-The director then issues `refs.publish` and `change.open` in order. Each is an
-ordinary durable service operation pinned to the exact capability binding and
-deployment selected by the activation. Every issuance is its own restart-safe
-step. Unbinding or replacing a project capability after activation makes the
-workflow unavailable; it cannot silently re-route an already authorized
-effect. Successful provider responses carry canonical read-back facts, and the
-generic response boundary correlates those facts to the exact requested refs,
-revisions, metadata, and candidate. A lost or absent read-back remains
-`uncertain`. Only a confirmed `change.open` fact can derive the immutable
-provider target used by `landing.invoke`.
+The director then issues `refs.publish` and `change.open` in order. Before the
+first effect, admission rechecks the complete pinned intent authority:
+`refs.publish`, `change.open`, and `landing.invoke` must all remain available.
+A missing later capability at this admission point therefore prevents partial
+publication. Each effect is an ordinary durable service operation pinned to
+the exact capability binding and deployment selected by the activation. Every
+issuance is its own restart-safe step. Unbinding or replacing a project
+capability after activation makes the workflow unavailable; it cannot silently
+re-route an already authorized effect. Successful provider responses carry
+canonical read-back facts, and the generic response boundary correlates those
+facts to the exact requested refs, revisions, metadata, and candidate. A lost
+or absent read-back remains `uncertain`. Only a confirmed `change.open` fact can
+derive the immutable provider target used by `landing.invoke`.
 
 For the currently selected squash method, the landing read-back names the
 candidate revision, landed revision and tree, observed primary revision, and
@@ -387,8 +398,11 @@ integration ledger remains truthful.
   build, review, or maintainer stage. Waiting defers without consuming retry
   budget; process death is recovered by the ordinary leased-action path.
 - The configured correction ceiling stops the loop and opens an explicit
-  ruling. CLI resolution may authorize one more bounded round or cancel the
-  workflow; it cannot silently weaken another failure.
+  ruling. For activated work, only the pinned activation owner may resolve any
+  ruling. One `correction_limit` resolution may authorize exactly one more
+  bounded round and records an immutable ceiling-extension artifact; that
+  authority cannot be consumed again. Cancellation remains explicit and no
+  ruling may silently weaken another failure.
 - A failed validation also stops at an explicit ruling. Continuing reruns only
   that same pinned validation against the same exact candidate, once; another
   failure requires another ruling and never becomes passing evidence.

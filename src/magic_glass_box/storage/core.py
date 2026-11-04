@@ -511,6 +511,10 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM workflow_closeout_proofs",
                 ),
                 (
+                    "workflow_correction_ceiling_extensions",
+                    "SELECT COUNT(*) FROM workflow_correction_ceiling_extensions",
+                ),
+                (
                     "workflow_provider_intents",
                     "SELECT COUNT(*) FROM workflow_provider_intents",
                 ),

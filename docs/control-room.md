@@ -29,6 +29,10 @@ contains:
 - local users and their configured Krab identity IDs;
 - Krab instances and redacted identity metadata;
 - projects and current context-version metadata;
+- each project's current workflow activation identity, policy digest, owner,
+  and bounded available/unavailable fact. Activation specifications, local
+  capability bindings, controller details, and validation commands remain
+  private;
 - profiles, runtime adapters, explicit provider routes, and current
   execution-policy metadata;
 - connector-bound provider grants with lifecycle state, grant kind, redacted
@@ -53,6 +57,8 @@ contains:
   manual/provider authority, landing-proof disposition, open target hold,
   landed receipt, closeout disposition and summary, bounded open/overdue
   obligation metadata, completion outcome, and any open ruling ID/kind/version.
+  Terminal workflows with an open closeout obligation or integration-target
+  hold remain visible even when the ordinary terminal-history bound is zero.
   Discovery-scoped
   workflows additionally expose only their source execution/ruling IDs and the
   latest scope-review ID, round, candidate, policy, run/attempt provenance,
@@ -86,7 +92,7 @@ contains:
   still need binding, unresolved provider effects, integration-target holds,
   manual plans, receipts, or retries that need operator action, pending
   provider landings, expired integration claims, exhausted supervisor work,
-  overdue workflow closeout obligations,
+  unavailable workflow activations, overdue workflow closeout obligations,
   failed Discovery or advisory executions, completed advisory reports that
   request routine or urgent attention, and open workflow rulings. Advisory
   attention is explicitly informational and never represents gate or landing

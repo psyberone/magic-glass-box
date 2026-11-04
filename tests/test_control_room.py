@@ -560,6 +560,7 @@ class ControlRoomTests(unittest.TestCase):
                 "work_items",
                 "assignments",
                 "runs",
+                "workflow_activations",
                 "workflows",
                 "discovery_executions",
                 "advisory_executions",
@@ -1131,6 +1132,167 @@ class ControlRoomTests(unittest.TestCase):
 
         active_only = ControlRoom(self.database).snapshot(history_limit=0)
         self.assertEqual([run["id"] for run in active_only["runs"]], [active["id"]])
+
+    def test_activation_attention_skips_available_and_preserves_exact_shape(
+        self,
+    ) -> None:
+        available = {
+            "id": "wpa_available",
+            "project_key": "available-project",
+            "version": 2,
+            "availability": {"status": "available", "reason": None},
+            "created_at": "2026-10-10T09:00:00Z",
+        }
+        unavailable = {
+            "id": "wpa_unavailable",
+            "project_key": "unavailable-project",
+            "version": 3,
+            "availability": {
+                "status": "unavailable",
+                "reason": "activation_requirements_unavailable",
+            },
+            "created_at": "2026-10-10T10:00:00Z",
+        }
+
+        attention = ControlRoom._attention(
+            work_items=[],
+            assignments=[],
+            runs=[],
+            attempts=[],
+            interactions=[],
+            authorities=[],
+            workflow_activations=[available, unavailable],
+            generated_at="2026-10-10T12:00:00Z",
+        )
+
+        self.assertEqual(
+            attention,
+            [
+                {
+                    "kind": "workflow.activation_unavailable",
+                    "severity": "action",
+                    "subject_type": "workflow_activation",
+                    "subject_id": "wpa_unavailable",
+                    "project_key": "unavailable-project",
+                    "activation_version": 3,
+                    "reason": "activation_requirements_unavailable",
+                    "age_seconds": 0,
+                }
+            ],
+        )
+        without_clock = ControlRoom._attention(
+            work_items=[],
+            assignments=[],
+            runs=[],
+            attempts=[],
+            interactions=[],
+            authorities=[],
+            workflow_activations=[unavailable],
+        )
+        self.assertNotIn("age_seconds", without_clock[0])
+
+    def test_workflow_attention_visits_every_hold_and_only_active_refolds(
+        self,
+    ) -> None:
+        common = {
+            "responsibility": {
+                "status": "assigned",
+                "reason": "landing_admission",
+                "basis": {},
+            },
+            "open_ruling_id": None,
+            "closeout_obligations": [],
+            "landing_queue_state": "refold_required",
+            "landing_queue_updated_at": "2026-10-10T10:00:00Z",
+            "updated_at": "2026-10-10T10:00:00Z",
+        }
+        held_one = {
+            **common,
+            "id": "wfx_held_one",
+            "landing_queue_item_id": "inq_held_one",
+            "landing_target_hold_id": "ith_held_one",
+            "landing_target_hold_reason": "landing_mismatch",
+            "landing_target_hold_version": 2,
+            "landing_proof_id": "wlp_held_one",
+            "landing_proof_status": "mismatch",
+        }
+        held_two = {
+            **common,
+            "id": "wfx_held_two",
+            "landing_queue_item_id": "inq_held_two",
+            "landing_target_hold_id": "ith_held_two",
+            "landing_target_hold_reason": "landing_unproven",
+            "landing_target_hold_version": 4,
+            "landing_proof_id": "wlp_held_two",
+            "landing_proof_status": "unproven",
+        }
+        terminal_refold = {
+            **common,
+            "id": "wfx_terminal",
+            "state": "completed",
+            "stage": "landing",
+            "landing_queue_item_id": "inq_terminal",
+            "landing_target_hold_id": None,
+        }
+        active_refold = {
+            **common,
+            "id": "wfx_active",
+            "state": "active",
+            "stage": "landing",
+            "landing_queue_item_id": "inq_active",
+            "landing_target_hold_id": None,
+        }
+
+        attention = ControlRoom._attention(
+            work_items=[],
+            assignments=[],
+            runs=[],
+            attempts=[],
+            interactions=[],
+            authorities=[],
+            workflows=[held_one, held_two, terminal_refold, active_refold],
+            generated_at="2026-10-10T10:00:00Z",
+        )
+
+        self.assertEqual(
+            attention,
+            [
+                {
+                    "kind": "workflow.refold_required",
+                    "severity": "action",
+                    "subject_type": "integration_queue_item",
+                    "subject_id": "inq_active",
+                    "workflow_execution_id": "wfx_active",
+                    "age_seconds": 0,
+                },
+                {
+                    "kind": "workflow.landing_target_held",
+                    "severity": "warning",
+                    "subject_type": "integration_target_hold",
+                    "subject_id": "ith_held_one",
+                    "workflow_execution_id": "wfx_held_one",
+                    "queue_item_id": "inq_held_one",
+                    "reason": "landing_mismatch",
+                    "hold_version": 2,
+                    "landing_proof_id": "wlp_held_one",
+                    "landing_proof_status": "mismatch",
+                    "age_seconds": 0,
+                },
+                {
+                    "kind": "workflow.landing_target_held",
+                    "severity": "warning",
+                    "subject_type": "integration_target_hold",
+                    "subject_id": "ith_held_two",
+                    "workflow_execution_id": "wfx_held_two",
+                    "queue_item_id": "inq_held_two",
+                    "reason": "landing_unproven",
+                    "hold_version": 4,
+                    "landing_proof_id": "wlp_held_two",
+                    "landing_proof_status": "unproven",
+                    "age_seconds": 0,
+                },
+            ],
+        )
 
     def test_attention_projection_covers_every_operator_condition(self) -> None:
         attention = ControlRoom._attention(

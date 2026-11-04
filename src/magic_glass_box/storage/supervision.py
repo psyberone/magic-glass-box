@@ -505,13 +505,17 @@ class SupervisionStorage:
         owner_id: str,
         expected_version: int,
         error_code: str,
+        retryable: bool,
     ) -> dict[str, Any]:
         error_code = self._error_code(error_code)
+        if not isinstance(retryable, bool):
+            raise ValidationError("retryable must be boolean")
         return self._finish_supervisor_action(
             action_id,
             owner_id=owner_id,
             expected_version=expected_version,
             error_code=error_code,
+            retryable=retryable,
         )
 
     def _finish_supervisor_action(
@@ -521,6 +525,7 @@ class SupervisionStorage:
         owner_id: str,
         expected_version: int,
         error_code: str | None,
+        retryable: bool = True,
     ) -> dict[str, Any]:
         action_id = require_string(action_id, field="action_id", max_bytes=64)
         owner_id = self._supervisor_owner(owner_id)
@@ -550,7 +555,7 @@ class SupervisionStorage:
                     state = "succeeded"
                     available_at = row["available_at"]
                     finished_at = now
-                elif row["attempt_count"] >= row["max_attempts"]:
+                elif not retryable or row["attempt_count"] >= row["max_attempts"]:
                     state = "exhausted"
                     available_at = row["available_at"]
                     finished_at = now

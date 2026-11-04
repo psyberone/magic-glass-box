@@ -2273,6 +2273,46 @@ class WorkflowDirectorTests(unittest.TestCase):
         unchanged = self.database.get_workflow_execution(current["id"])
         self.assertEqual(unchanged["landing"]["provider_intent"]["effects"], {})
 
+    def test_activated_provider_effect_stops_when_a_later_capability_is_unavailable(
+        self,
+    ) -> None:
+        execution, _activation, bindings = self.start_activated_provider_execution(
+            external_id="activated-effect-partial-capability"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-effect-partial-capability",
+            title="Prove activated provider authority",
+            body="Do not dispatch a partial provider intent.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        later = bindings["change.open"]
+        self.database.unbind_project_capability(
+            later["id"],
+            expected_version=later["version"],
+            unbound_by=self.user["id"],
+        )
+
+        with self.assertRaisesRegex(
+            ConflictError, "capability is unavailable: change.open"
+        ):
+            self.control.issue_workflow_provider_effect(
+                enqueued["id"],
+                expected_version=enqueued["version"],
+                capability_name="refs.publish",
+                issued_by_handle="operator",
+            )
+
+        unchanged = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(unchanged["landing"]["provider_intent"]["effects"], {})
+
     def test_missing_effect_readback_is_retained_as_uncertain(self) -> None:
         execution, _activation, _bindings = self.start_activated_provider_execution(
             external_id="activated-effect-unproven"
@@ -2509,8 +2549,11 @@ class WorkflowDirectorTests(unittest.TestCase):
             self.assertEqual(
                 overdue["closeout"]["obligations"][0]["deadline_state"], "overdue"
             )
-            snapshot = ControlRoom(self.database).snapshot()
+            snapshot = ControlRoom(self.database).snapshot(history_limit=0)
             attention = snapshot["attention"]
+        self.assertIn(
+            finished["id"], {workflow["id"] for workflow in snapshot["workflows"]}
+        )
         self.assertTrue(
             any(
                 item["kind"] == "workflow.closeout_obligation_overdue"
@@ -2690,42 +2733,15 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         self.assertEqual(landed["landing"]["target_hold"]["state"], "open")
 
-        unrelated = self.start_execution(
-            configuration_name="unrelated-provider-target",
-            external_id="workflow-director-unrelated-provider-target",
-            spec={
-                "schema_version": 1,
-                "review_separation": "different_profile_and_identity",
-                "maintainer_approval": False,
-                "validations": [],
-                "max_correction_rounds": 2,
-                "landing_mode": "provider",
-            },
-        )
-        unrelated_landing, _unrelated_gate = self.drive_approved_to_landing(unrelated)
-        self.assertTrue(
-            self.director().advance(
-                unrelated_landing["id"],
-                expected_version=unrelated_landing["version"],
-            )
-        )
-        unrelated_enqueued = self.database.get_workflow_execution(unrelated["id"])
-
         snapshot = ControlRoom(self.database).snapshot()
         projected = next(
             item for item in snapshot["workflows"] if item["id"] == landed["id"]
-        )
-        unrelated_projected = next(
-            item
-            for item in snapshot["workflows"]
-            if item["id"] == unrelated_enqueued["id"]
         )
         self.assertEqual(projected["landing_proof_status"], "mismatch")
         self.assertEqual(
             projected["landing_target_hold_id"],
             landed["landing"]["target_hold"]["id"],
         )
-        self.assertIsNone(unrelated_projected["landing_target_hold_id"])
         self.assertIn(
             "workflow.landing_target_held",
             {
@@ -2744,6 +2760,31 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertEqual(len(holds), 1)
         self.assertEqual(holds[0], landed["landing"]["target_hold"])
         self.database.create_user("other-owner", "Other Owner")
+        with self.assertRaisesRegex(ConflictError, "activation owner"):
+            self.control.resolve_workflow_ruling(
+                ruled["rulings"][-1]["id"],
+                expected_version=ruled["rulings"][-1]["version"],
+                decision="cancel",
+                resolved_by_handle="other-owner",
+            )
+        self.control.resolve_workflow_ruling(
+            ruled["rulings"][-1]["id"],
+            expected_version=ruled["rulings"][-1]["version"],
+            decision="cancel",
+            resolved_by_handle="operator",
+        )
+        cancelled = self.database.get_workflow_execution(ruled["id"])
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(cancelled["responsibility"]["holder"], "owner")
+        self.assertEqual(cancelled["responsibility"]["reason"], "landing_target_hold")
+        held_snapshot = ControlRoom(self.database).snapshot()
+        self.assertTrue(
+            any(
+                item["kind"] == "workflow.landing_target_held"
+                and item["workflow_execution_id"] == cancelled["id"]
+                for item in held_snapshot["attention"]
+            )
+        )
         with self.assertRaisesRegex(ConflictError, "activation owner"):
             self.control.lift_integration_target_hold(
                 holds[0]["id"],
@@ -5555,21 +5596,41 @@ class WorkflowDirectorTests(unittest.TestCase):
             event_kind="workflow.review_started",
             metadata={},
         )
-        ruling = self.database.open_workflow_ruling(
+        build_two = self.database.advance_workflow_execution(
             review_one["id"],
             expected_version=review_one["version"],
+            expected_stage="review",
+            expected_correction_round=1,
+            target_stage="build",
+            target_correction_round=2,
+            event_kind="workflow.correction_started",
+            metadata={},
+        )
+        review_two = self.database.advance_workflow_execution(
+            build_two["id"],
+            expected_version=build_two["version"],
+            expected_stage="build",
+            expected_correction_round=2,
+            target_stage="review",
+            target_correction_round=2,
+            event_kind="workflow.review_started",
+            metadata={},
+        )
+        ruling = self.database.open_workflow_ruling(
+            review_two["id"],
+            expected_version=review_two["version"],
             kind="correction_limit",
         )
 
         self.assertEqual(ruling["state"], "open")
-        opened = self.database.get_workflow_execution(review_one["id"])
+        opened = self.database.get_workflow_execution(review_two["id"])
         self.assertEqual(opened["events"][-1]["kind"], "workflow.ruling_opened")
         self.assertEqual(
             opened["events"][-1]["metadata"],
             {
                 "ruling_id": ruling["id"],
                 "kind": "correction_limit",
-                "correction_round": 1,
+                "correction_round": 2,
                 "policy_id": None,
                 "run_id": None,
                 "gate_name": None,
@@ -5586,8 +5647,8 @@ class WorkflowDirectorTests(unittest.TestCase):
             (continued["state"], continued["decision"]), ("resolved", "continue")
         )
         self.assertEqual(continued["resolved_by"], "operator")
-        resumed = self.database.get_workflow_execution(review_one["id"])
-        self.assertEqual((resumed["stage"], resumed["correction_round"]), ("build", 2))
+        resumed = self.database.get_workflow_execution(review_two["id"])
+        self.assertEqual((resumed["stage"], resumed["correction_round"]), ("build", 3))
         self.assertEqual(resumed["events"][-1]["kind"], "workflow.ruling_resolved")
         self.assertEqual(
             resumed["events"][-1]["metadata"],
@@ -5596,8 +5657,8 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "decision": "continue",
                 "from_stage": "review",
                 "to_stage": "build",
-                "from_correction_round": 1,
-                "to_correction_round": 2,
+                "from_correction_round": 2,
+                "to_correction_round": 3,
             },
         )
         actions = self.database.enqueue_supervisor_actions()

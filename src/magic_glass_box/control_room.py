@@ -151,6 +151,7 @@ class ControlRoom:
         work_items = self._work_items(connection)
         assignments = self._assignments(connection, generated_at)
         runs, terminal_total = self._runs(connection, history_limit)
+        workflow_activations = self._workflow_activations(connection)
         workflows = self._workflows(connection, history_limit)
         discovery_executions = self._discovery_executions(connection, history_limit)
         advisory_executions = self._advisory_executions(connection, history_limit)
@@ -236,6 +237,7 @@ class ControlRoom:
             escalations,
             gate_policies,
             integration_queue,
+            workflow_activations=workflow_activations,
             workflows=workflows,
             discovery_executions=discovery_executions,
             advisory_executions=advisory_executions,
@@ -261,6 +263,7 @@ class ControlRoom:
                 "work_items": work_items,
                 "assignments": assignments,
                 "runs": runs,
+                "workflow_activations": workflow_activations,
                 "workflows": workflows,
                 "discovery_executions": discovery_executions,
                 "advisory_executions": advisory_executions,
@@ -748,12 +751,23 @@ class ControlRoom:
         self, connection: sqlite3.Connection, history_limit: int
     ) -> list[dict[str, Any]]:
         rows = connection.execute(
-            "WITH terminal AS (SELECT id FROM workflow_executions "
+            "WITH retained AS (SELECT execution.id FROM workflow_executions execution "
+            "WHERE EXISTS(SELECT 1 FROM workflow_closeout_obligations obligation "
+            "WHERE obligation.workflow_execution_id = execution.id "
+            "AND obligation.state = 'open') OR EXISTS(SELECT 1 "
+            "FROM integration_target_holds hold "
+            "WHERE hold.workflow_execution_id = execution.id "
+            "AND hold.state = 'open')), terminal AS ("
+            "SELECT id FROM workflow_executions "
             "WHERE state IN ('cancelled','completed') "
+            "AND id NOT IN (SELECT id FROM retained) "
             "ORDER BY updated_at DESC, id LIMIT ?), visible AS ("
             "SELECT id, 0 AS group_order FROM workflow_executions "
             "WHERE state = 'active' UNION ALL "
-            "SELECT id, 1 AS group_order FROM terminal"
+            "SELECT execution.id, 1 AS group_order FROM workflow_executions execution "
+            "JOIN retained ON retained.id = execution.id "
+            "WHERE execution.state != 'active' UNION ALL "
+            "SELECT id, 2 AS group_order FROM terminal"
             ") SELECT e.id, p.krab_project_key AS project_key, "
             "t.template_key, t.version AS template_version, "
             "t.content_sha256 AS template_revision, c.name AS configuration_name, "
@@ -942,6 +956,40 @@ class ControlRoom:
                 ]
             )
         return records
+
+    def _workflow_activations(
+        self, connection: sqlite3.Connection
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            "SELECT project.krab_project_key AS project_key "
+            "FROM workflow_activations activation "
+            "JOIN projects project ON project.id = activation.project_id "
+            "ORDER BY project.krab_project_key"
+        ).fetchall()
+        records = [
+            self.database._activation_record(
+                connection,
+                self.database._activation_row(connection, row["project_key"], None),
+            )
+            for row in rows
+        ]
+        return [
+            {
+                "id": record["id"],
+                "project_key": record["project_key"],
+                "workflow_activation_version_id": record[
+                    "workflow_activation_version_id"
+                ],
+                "version": record["version"],
+                "policy_name": record["policy"]["name"],
+                "policy_version": record["policy"]["version"],
+                "policy_sha256": record["policy"]["content_sha256"],
+                "availability": record["availability"],
+                "acknowledged_by": record["acknowledged_by"],
+                "created_at": record["created_at"],
+            }
+            for record in records
+        ]
 
     @staticmethod
     def _discovery_executions(
@@ -2146,6 +2194,7 @@ class ControlRoom:
         gate_policies: list[dict[str, Any]] | None = None,
         integration_queue: list[dict[str, Any]] | None = None,
         *,
+        workflow_activations: list[dict[str, Any]] | None = None,
         workflows: list[dict[str, Any]] | None = None,
         discovery_executions: list[dict[str, Any]] | None = None,
         advisory_executions: list[dict[str, Any]] | None = None,
@@ -2177,6 +2226,21 @@ class ControlRoom:
             for interaction in interactions
             if interaction["state"] == "open"
         }
+        for activation in workflow_activations or []:
+            if activation["availability"]["status"] == "available":
+                continue
+            add(
+                {
+                    "kind": "workflow.activation_unavailable",
+                    "severity": "action",
+                    "subject_type": "workflow_activation",
+                    "subject_id": activation["id"],
+                    "project_key": activation["project_key"],
+                    "activation_version": activation["version"],
+                    "reason": activation["availability"]["reason"],
+                },
+                generated_at or activation["created_at"],
+            )
         for interaction in interactions:
             if interaction["state"] == "open":
                 add(
@@ -2454,12 +2518,8 @@ class ControlRoom:
                     },
                     obligation["deadline"],
                 )
-            if workflow["state"] != "active" or workflow["stage"] != "landing":
-                continue
             queue_item_id = workflow["landing_queue_item_id"]
             queue_state = workflow["landing_queue_state"]
-            if queue_item_id is None:
-                continue
             if workflow["landing_target_hold_id"] is not None:
                 add(
                     {
@@ -2476,7 +2536,12 @@ class ControlRoom:
                     },
                     workflow["landing_queue_updated_at"],
                 )
-            elif queue_state == "refold_required":
+                continue
+            if workflow["state"] != "active" or workflow["stage"] != "landing":
+                continue
+            if queue_item_id is None:
+                continue
+            if queue_state == "refold_required":
                 add(
                     {
                         "kind": "workflow.refold_required",

@@ -52,7 +52,9 @@ class WorkflowDirector:
             return True
         if any(ruling["state"] == "open" for ruling in execution["rulings"]):
             return True
-        if self._wall_time_exhausted(execution):
+        if execution["stage"] in {"build", "review", "maintainer"} and (
+            self._wall_time_exhausted(execution)
+        ):
             return self._ruling(execution, "resource_exhausted")
         if execution["stage"] == "build":
             return self._advance_build(execution)

@@ -1114,6 +1114,16 @@ class WorkflowStorage:
                             configuration_version_id=configuration["version_id"],
                             expected_version=expected_activation_version,
                         )
+                    elif (
+                        connection.execute(
+                            "SELECT 1 FROM workflow_activations WHERE project_id = ?",
+                            (project["id"],),
+                        ).fetchone()
+                        is not None
+                    ):
+                        raise ConflictError(
+                            "project requires its acknowledged workflow activation"
+                        )
                     work_item = connection.execute(
                         "SELECT wi.project_id, wiv.id AS work_item_version_id, "
                         "wt.id AS work_thread_id, wt.generation, wt.state, "
@@ -1385,6 +1395,15 @@ class WorkflowStorage:
             "WHERE wr.execution_id = ? ORDER BY wr.created_at, wr.id",
             (execution_id,),
         ).fetchall()
+        ruling_records = []
+        for ruling in rulings:
+            ruling_record = dict(ruling)
+            ruling_record["ceiling_extension"] = (
+                self._workflow_correction_ceiling_extension_record(
+                    connection, ruling["id"]
+                )
+            )
+            ruling_records.append(ruling_record)
         landing = self._workflow_landing_record(
             connection,
             execution_id,
@@ -1425,7 +1444,7 @@ class WorkflowStorage:
             "roles": configuration["roles"],
             "spec": configuration["spec"],
             "events": parsed_events,
-            "rulings": [dict(ruling) for ruling in rulings],
+            "rulings": ruling_records,
             "landing": landing,
             "completion": completion,
             "closeout": closeout,
@@ -1486,6 +1505,25 @@ class WorkflowStorage:
                     },
                 )
         if execution["state"] != "active":
+            hold = connection.execute(
+                "SELECT id, version, reason, integration_ref_id, landing_proof_id "
+                "FROM integration_target_holds WHERE workflow_execution_id = ? "
+                "AND state = 'open' ORDER BY created_at, id LIMIT 1",
+                (execution_id,),
+            ).fetchone()
+            if hold is not None:
+                return fact(
+                    "action_required",
+                    "owner",
+                    "landing_target_hold",
+                    {
+                        "hold_id": hold["id"],
+                        "hold_version": hold["version"],
+                        "hold_reason": hold["reason"],
+                        "integration_ref_id": hold["integration_ref_id"],
+                        "landing_proof_id": hold["landing_proof_id"],
+                    },
+                )
             return fact(
                 "terminal",
                 "none",
@@ -1507,6 +1545,43 @@ class WorkflowStorage:
                     "ruling_id": ruling["id"],
                     "ruling_kind": ruling["kind"],
                     "ruling_version": ruling["version"],
+                },
+            )
+        hold = connection.execute(
+            "SELECT id, version, reason, integration_ref_id, landing_proof_id "
+            "FROM integration_target_holds WHERE workflow_execution_id = ? "
+            "AND state = 'open' ORDER BY created_at, id LIMIT 1",
+            (execution_id,),
+        ).fetchone()
+        if hold is not None:
+            return fact(
+                "action_required",
+                "owner",
+                "landing_target_hold",
+                {
+                    "hold_id": hold["id"],
+                    "hold_version": hold["version"],
+                    "hold_reason": hold["reason"],
+                    "integration_ref_id": hold["integration_ref_id"],
+                    "landing_proof_id": hold["landing_proof_id"],
+                },
+            )
+        exhausted_action = connection.execute(
+            "SELECT id, kind, version, last_error_code FROM supervisor_actions "
+            "WHERE workflow_execution_id = ? AND subject_version = ? "
+            "AND state = 'exhausted' ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (execution_id, execution["version"]),
+        ).fetchone()
+        if exhausted_action is not None:
+            return fact(
+                "action_required",
+                "owner",
+                "supervisor_action_exhausted",
+                {
+                    "action_id": exhausted_action["id"],
+                    "action_kind": exhausted_action["kind"],
+                    "action_version": exhausted_action["version"],
+                    "last_error_code": exhausted_action["last_error_code"],
                 },
             )
 
@@ -3026,13 +3101,19 @@ class WorkflowStorage:
                         raise ConflictError(
                             "workflow change cannot open before ref publication"
                         )
-                binding, sidecar, mapping, capability = (
-                    self._workflow_provider_effect_authority(
+                authorities = {
+                    required_name: self._workflow_provider_effect_authority(
                         connection,
                         activation_version_id=source["workflow_activation_version_id"],
-                        capability_name=capability_name,
+                        capability_name=required_name,
                     )
-                )
+                    for required_name in (
+                        "refs.publish",
+                        "change.open",
+                        "landing.invoke",
+                    )
+                }
+                binding, sidecar, mapping, capability = authorities[capability_name]
                 if binding["project_id"] != intent.project_id:
                     raise ConflictError(
                         "workflow provider effect belongs to another project"
@@ -4746,6 +4827,25 @@ class WorkflowStorage:
         return self._workflow_ruling_record(None, row)
 
     @staticmethod
+    def _workflow_correction_ceiling_extension_record(
+        connection: sqlite3.Connection, ruling_id: str
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT extension.ruling_id, extension.workflow_execution_id, "
+            "extension.workflow_activation_version_id, "
+            "extension.configured_bound, extension.exceeded_bound, "
+            "extension.authorized_bound, owner.handle AS authorized_by, "
+            "extension.created_at "
+            "FROM workflow_correction_ceiling_extensions extension "
+            "JOIN users owner ON owner.id = extension.authorized_by "
+            "WHERE extension.ruling_id = ?",
+            (ruling_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {**dict(row), "single_use": True}
+
+    @staticmethod
     def _workflow_ruling_record(
         connection: sqlite3.Connection | None, row: sqlite3.Row
     ) -> dict[str, Any]:
@@ -4757,6 +4857,13 @@ class WorkflowStorage:
             if resolver is None:
                 raise StorageError("workflow ruling resolver is unavailable")
             record["resolved_by"] = resolver["handle"]
+        record["ceiling_extension"] = (
+            None
+            if connection is None
+            else WorkflowStorage._workflow_correction_ceiling_extension_record(
+                connection, row["id"]
+            )
+        )
         return record
 
     def get_workflow_ruling(self, ruling_id: str) -> dict[str, Any]:
@@ -4796,12 +4903,29 @@ class WorkflowStorage:
                 if ruling["state"] != "open":
                     raise ConflictError("workflow ruling is not open")
                 execution = connection.execute(
-                    "SELECT state, stage, correction_round, version, requested_by "
-                    "FROM workflow_executions WHERE id = ?",
+                    "SELECT execution.state, execution.stage, "
+                    "execution.correction_round, execution.version, "
+                    "execution.requested_by, "
+                    "execution.workflow_activation_version_id, "
+                    "configuration.spec_json AS configuration_spec_json, "
+                    "activation.acknowledged_by AS activation_owner "
+                    "FROM workflow_executions execution "
+                    "JOIN workflow_configuration_versions configuration "
+                    "ON configuration.id = execution.configuration_version_id "
+                    "LEFT JOIN workflow_activation_versions activation "
+                    "ON activation.id = execution.workflow_activation_version_id "
+                    "WHERE execution.id = ?",
                     (ruling["execution_id"],),
                 ).fetchone()
                 if execution is None:
                     raise StorageError("workflow ruling execution is unavailable")
+                if (
+                    execution["workflow_activation_version_id"] is not None
+                    and execution["activation_owner"] != resolved_by
+                ):
+                    raise ConflictError(
+                        "workflow ruling resolution requires the activation owner"
+                    )
                 if (
                     execution["state"] != "active"
                     or execution["version"] != ruling["execution_version"]
@@ -4809,6 +4933,7 @@ class WorkflowStorage:
                 ):
                     raise ConflictError("workflow execution changed after the ruling")
                 resolution_metadata: dict[str, Any] = {}
+                ceiling_extension: dict[str, Any] | None = None
                 if decision == "continue":
                     if ruling["kind"] == "resource_exhausted":
                         raise ConflictError(
@@ -4820,8 +4945,47 @@ class WorkflowStorage:
                             raise ConflictError(
                                 "workflow reached the absolute correction-round limit"
                             )
+                        if (
+                            connection.execute(
+                                "SELECT 1 FROM "
+                                "workflow_correction_ceiling_extensions "
+                                "WHERE workflow_execution_id = ?",
+                                (ruling["execution_id"],),
+                            ).fetchone()
+                            is not None
+                        ):
+                            raise ConflictError(
+                                "workflow correction ceiling exception has already "
+                                "been used"
+                            )
                         target_stage = "build"
                         target_round = execution["correction_round"] + 1
+                        try:
+                            configuration = WorkflowConfigurationSpec.from_mapping(
+                                json.loads(execution["configuration_spec_json"])
+                            )
+                        except (
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValidationError,
+                        ) as exc:
+                            raise StorageError(
+                                "stored workflow configuration is invalid"
+                            ) from exc
+                        if (
+                            execution["correction_round"]
+                            < configuration.max_correction_rounds
+                        ):
+                            raise ConflictError(
+                                "workflow correction ceiling has not been reached"
+                            )
+                        ceiling_extension = {
+                            "ruling_id": ruling_id,
+                            "configured_bound": configuration.max_correction_rounds,
+                            "exceeded_bound": execution["correction_round"],
+                            "authorized_bound": target_round,
+                            "single_use": True,
+                        }
                     elif ruling["kind"] == "validation_failed":
                         if execution["stage"] != "review":
                             raise ConflictError(
@@ -4924,6 +5088,24 @@ class WorkflowStorage:
                 if changed != 1:
                     raise ConcurrentUpdateError(
                         "workflow execution changed concurrently"
+                    )
+                if ceiling_extension is not None:
+                    connection.execute(
+                        "INSERT INTO workflow_correction_ceiling_extensions "
+                        "(ruling_id, workflow_execution_id, "
+                        "workflow_activation_version_id, configured_bound, "
+                        "exceeded_bound, authorized_bound, authorized_by, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            ruling_id,
+                            ruling["execution_id"],
+                            execution["workflow_activation_version_id"],
+                            ceiling_extension["configured_bound"],
+                            ceiling_extension["exceeded_bound"],
+                            ceiling_extension["authorized_bound"],
+                            resolved_by,
+                            now,
+                        ),
                     )
                 connection.execute(
                     "UPDATE workflow_rulings SET state = 'resolved', "

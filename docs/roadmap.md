@@ -2202,7 +2202,7 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v49; external-review remediation R1-R4 complete; R5+ pending**
+schema v50; external-review remediation R1-R5 complete; R6+ pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2454,6 +2454,39 @@ package-consistency, and diff checks. The dependency audit reports no known
 vulnerabilities. A clean focused mutation campaign over state backup and
 restore killed 775/951 mutants (81.49%), counting all three timeouts against
 the required 80% floor.
+
+External-review remediation R5 makes reusable-workflow authority fail closed
+for both admission and continued operation. Once a project has an activation,
+new starts require its exact version; control-room reads revalidate the pinned
+configuration, profiles, capabilities, controllers, and project and expose a
+bounded unavailable reason without falling back to pre-policy behavior. The
+pinned activation owner alone resolves activated rulings. One continued
+`correction_limit` ruling may authorize one immutable, single-round exception,
+bounded by both the configured ceiling and the absolute ceiling of eight.
+
+Attempt admission now enforces one shared-host concurrency ceiling across all
+projects and counts active legacy work; concurrent activated work uses the
+strictest exact pinned ceiling among the incoming and active executions.
+Elapsed wall time governs build, review, and maintainer work but cannot
+retroactively cancel landing or completion facts. Before the first provider
+effect, the director revalidates the complete publication, change-open, and
+landing capability set. Supervisor retries distinguish explicitly retryable
+orchestration/storage failures from permanent failures, and exhausted actions,
+open holds, and closeout obligations return durable responsibility to the
+activation owner. Terminal workflows with those open responsibilities remain
+visible even when terminal-history retention is zero.
+
+R5's final gate passes 1,599 tests at 87% aggregate statement-plus-branch
+coverage with clean format, lint, lock, exported-package consistency, and diff
+checks. The dependency audit reports no known vulnerabilities. A clean
+changed-line campaign over the seven affected authority and supervision
+modules initially killed 414/511 mutants (81.02%) with no timeout, crash,
+suspicious, uncovered, or interrupted outcome. Survivor-derived tests then
+killed all 64 selected activation-availability, attention, responsibility,
+wall-time, and pinned-concurrency mutations on direct replay, for an effective
+478/511 (93.54%). The 33 adjudicated survivors alter equivalent SQL casing,
+non-contractual diagnostics and success-path defaults, or guards for aggregate
+states that SQLite always supplies.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

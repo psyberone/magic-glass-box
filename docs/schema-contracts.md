@@ -299,9 +299,12 @@ human-turn-only role wakes, one permitted merge method, and named retired
 rules. Runtime validation proves all relational and availability constraints;
 the portable schema supplies structural preflight only. Activated execution
 starts pin the exact activation version and recheck every required binding.
-Pre-v46 and explicitly unactivated compatibility histories remain visible as
-`pre_policy`; they are never represented as conforming and receive no synthetic
-backfill.
+Pre-v46 histories and workflows created before a project's first activation
+remain visible as `pre_policy`; they are never represented as conforming and
+receive no synthetic backfill. After activation exists, a new start cannot omit
+its expected activation version to select that compatibility path. Activation
+reads expose a bounded availability fact, and the control room reports an
+unavailable current activation without exposing its local binding document.
 
 Control-plane schema v47 publishes `workflow-manual-wake-v1.schema.json` and
 `workflow-responsibility-v1.schema.json`. Each activated producer or reviewer
@@ -315,9 +318,12 @@ Responsibility is a derived projection, not another mutable ownership ledger.
 Every activated stage resolves to one named holder and reason from exact
 execution, ruling, run, wake, queue, and target revisions. Missing required
 facts resolve to control-room attention instead of an empty or guessed owner.
-The same activation enforces its correction-round and seat bounds, atomically
-admits attempts under the applicable shared-host concurrency ceiling, and
-opens a non-extendable owner ruling when wall time is exhausted.
+Open closeout obligations, integration-target holds, and exhausted current
+supervisor actions remain owner responsibility even when ordinary bounded
+terminal history would otherwise omit the execution. The same activation
+enforces its correction-round and seat bounds, atomically admits attempts under
+one host-wide concurrency ceiling across projects, and opens a non-extendable
+owner ruling when pre-landing wall time is exhausted.
 
 Control-plane schema v48 publishes the bounded provider-effect and landing
 evidence surfaces:
@@ -340,8 +346,12 @@ evidence surfaces:
 Runtime correlation is stricter than structural preflight. It proves every
 read-back ref, revision, proposal field, candidate ID, and requested merge
 method against the immutable service operation. An activated target is derived
-only from a confirmed `change.open` fact. In this bounded slice only squash
-landing can become conformant, by exact candidate-tree equality plus primary-ref
+only from a confirmed `change.open` fact. Before the first provider effect, all
+three capabilities required to publish, open, and land the intent must still be
+available; losing a later capability rejects the whole intent rather than
+publishing a partial result when the intent is initially admitted. In this
+bounded slice only squash landing can
+become conformant, by exact candidate-tree equality plus primary-ref
 reachability; other methods remain explicitly unproved.
 
 Control-plane schema v49 publishes the owner closeout surfaces:
@@ -363,6 +373,16 @@ proposal metadata and closure, the conformant landing proof and receipt, and
 the absence of undeclared secondary effects. These relational checks cannot be
 granted by the portable schemas. Schema v49 is future-only: existing and
 pre-policy histories receive no synthetic declaration, obligation, or proof.
+
+Control-plane schema v50 publishes
+`workflow-correction-ceiling-extension-v1.schema.json`. A continued
+`correction_limit` ruling may create at most one immutable exception for an
+execution, names its configured, exceeded, and newly authorized round bounds,
+and is authorized only by the activated project's pinned owner. It advances
+exactly one round, cannot be reused, cannot exceed the absolute round bound,
+and cannot be created before the configured ceiling is reached. Pre-policy
+compatibility retains its prior active-user authority but receives the same
+explicit single-use artifact and bounds.
 
 M18 external-review remediation R4 publishes
 `state-backup-manifest-v1.schema.json`. The manifest inventories one coherent
