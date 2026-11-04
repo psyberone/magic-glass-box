@@ -1441,16 +1441,23 @@ class ServiceOperationResponse:
         ):
             change = ChangeOpenReadback.from_mapping(self.receipt.result)
             parameters = request.parameters
+            observed_effects = "expected_secondary_effects" in parameters
             if (
                 change.base_ref != parameters.get("base_ref")
                 or change.head_ref != parameters.get("head_ref")
                 or change.base_revision != request.target.expected_revision
                 or change.head_revision != request.target.desired_revision
-                or change.title != parameters.get("title")
-                or change.body != parameters.get("body")
-                or change.draft is not parameters.get("draft")
                 or self.receipt.observed_revision != change.head_revision
-                or change.secondary_effects
+                or (
+                    not observed_effects
+                    and (
+                        change.title != parameters.get("title")
+                        or change.body != parameters.get("body")
+                        or change.draft is not parameters.get("draft")
+                        or change.secondary_effects
+                    )
+                )
+                or (change.schema_version == 2 and not observed_effects)
             ):
                 raise ValidationError(
                     "service sidecar change-open result does not match the request"
@@ -1463,14 +1470,21 @@ class ServiceOperationResponse:
         ):
             landing = LandingReadback.from_mapping(self.receipt.result)
             parameters = request.parameters
+            observed_effects = "expected_secondary_effects" in parameters
             if (
                 landing.change_id != request.target.resource_id
                 or landing.base_ref != parameters.get("integration_ref")
                 or landing.primary_ref != parameters.get("integration_ref")
                 or landing.candidate_revision != request.target.desired_revision
                 or landing.primary_revision != self.receipt.observed_revision
-                or landing.merge_method != parameters.get("merge_method")
-                or landing.secondary_effects
+                or (
+                    landing.schema_version == 1
+                    and (
+                        landing._legacy_merge_method != parameters.get("merge_method")
+                        or landing.secondary_effects
+                    )
+                )
+                or (landing.schema_version == 2 and not observed_effects)
             ):
                 raise ValidationError(
                     "service sidecar landing result does not match the request"

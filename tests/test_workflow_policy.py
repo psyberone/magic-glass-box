@@ -356,6 +356,7 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
         landing_state: str | None = None,
         provider_intent: bool = False,
         provider_effects: tuple[tuple[str, str], ...] = (),
+        provider_effect_mismatch: bool = False,
         provider_target: bool = False,
         closeout_declared: bool = False,
         open_closeout_obligation: bool = False,
@@ -423,6 +424,7 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     intent_id TEXT NOT NULL,
                     capability_name TEXT NOT NULL,
                     state TEXT NOT NULL,
+                    conforms_intent INTEGER,
                     service_operation_id TEXT NOT NULL
                 );
                 CREATE TABLE workflow_closeout_declarations (
@@ -516,13 +518,22 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                         ("change.open", "confirmed"),
                     )
                 for index, (capability_name, effect_state) in enumerate(effects):
+                    conforms_intent = (
+                        0
+                        if provider_effect_mismatch and capability_name == "change.open"
+                        else 1
+                        if effect_state == "confirmed"
+                        else None
+                    )
                     connection.execute(
-                        "INSERT INTO workflow_provider_effects VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO workflow_provider_effects "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             f"wpe_{index}",
                             "wpi_1",
                             capability_name,
                             effect_state,
+                            conforms_intent,
                             f"sop_{index}",
                         ),
                     )
@@ -887,6 +898,30 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     "control_plane",
                     "provider_effect_dispatch",
                     {**landing_basis, "capability_name": "change.open"},
+                ),
+            ),
+            (
+                "provider effect mismatch",
+                {
+                    "stage": "landing",
+                    "landing_state": "queued",
+                    "provider_effects": (
+                        ("refs.publish", "confirmed"),
+                        ("change.open", "confirmed"),
+                    ),
+                    "provider_effect_mismatch": True,
+                },
+                self.expected(
+                    "landing",
+                    "action_required",
+                    "owner",
+                    "provider_effect_mismatch",
+                    {
+                        **landing_basis,
+                        "capability_name": "change.open",
+                        "effect_id": "wpe_1",
+                        "service_operation_id": "sop_1",
+                    },
                 ),
             ),
             (

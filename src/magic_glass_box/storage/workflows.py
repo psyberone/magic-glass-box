@@ -29,6 +29,7 @@ from ..domain import (
 from ..gates import ReviewSeparation
 from ..krab import IDEMPOTENCY_KEY_RE
 from ..provider_effects import (
+    OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
     ChangeOpenReadback,
     LandingReadback,
     RefPublicationReadback,
@@ -1711,7 +1712,7 @@ class WorkflowStorage:
                 )
             for capability_name in ("refs.publish", "change.open"):
                 effect = connection.execute(
-                    "SELECT id, state, service_operation_id "
+                    "SELECT id, state, conforms_intent, service_operation_id "
                     "FROM workflow_provider_effects WHERE intent_id = ? "
                     "AND capability_name = ?",
                     (landing["intent_id"], capability_name),
@@ -1742,6 +1743,13 @@ class WorkflowStorage:
                         "control_room",
                         "provider_effect_unresolved",
                         {**effect_basis, "effect_state": effect["state"]},
+                    )
+                if effect["state"] == "confirmed" and effect["conforms_intent"] != 1:
+                    return fact(
+                        "action_required",
+                        "owner",
+                        "provider_effect_mismatch",
+                        effect_basis,
                     )
             if landing["target_id"] is None:
                 return fact(
@@ -2059,6 +2067,19 @@ class WorkflowStorage:
                 raise StorageError(
                     "stored workflow provider effect digest does not match"
                 )
+        conforms_value = row["conforms_intent"]
+        if row["state"] == "confirmed":
+            if conforms_value not in {0, 1}:
+                raise StorageError(
+                    "stored workflow provider effect conformance is invalid"
+                )
+            conforms_intent: bool | None = bool(conforms_value)
+        else:
+            if conforms_value is not None:
+                raise StorageError(
+                    "stored workflow provider effect conformance is invalid"
+                )
+            conforms_intent = None
         return {
             "id": row["id"],
             "intent_id": row["intent_id"],
@@ -2067,6 +2088,7 @@ class WorkflowStorage:
             "service_operation_id": row["service_operation_id"],
             "operation_state": row["operation_state"],
             "state": row["state"],
+            "conforms_intent": conforms_intent,
             "fact": fact,
             "fact_sha256": row["fact_sha256"],
             "created_at": row["created_at"],
@@ -3093,11 +3115,15 @@ class WorkflowStorage:
                     return self._workflow_provider_effect_record(existing)
                 if capability_name == "change.open":
                     publication = connection.execute(
-                        "SELECT state FROM workflow_provider_effects "
+                        "SELECT state, conforms_intent FROM workflow_provider_effects "
                         "WHERE intent_id = ? AND capability_name = 'refs.publish'",
                         (source["intent_id"],),
                     ).fetchone()
-                    if publication is None or publication["state"] != "confirmed":
+                    if (
+                        publication is None
+                        or publication["state"] != "confirmed"
+                        or publication["conforms_intent"] != 1
+                    ):
                         raise ConflictError(
                             "workflow change cannot open before ref publication"
                         )
@@ -3131,6 +3157,7 @@ class WorkflowStorage:
                         "title": intent.title,
                         "body": intent.body,
                         "draft": intent.draft,
+                        "expected_secondary_effects": list(intent.secondary_effects),
                     }
                 operation = ServiceOperationSpec.from_mapping(
                     {
@@ -3240,6 +3267,7 @@ class WorkflowStorage:
                     return self._workflow_provider_effect_record(row)
                 fact_json = None
                 fact_sha256 = None
+                conforms_intent = None
                 state = "failed"
                 if operation_state == "succeeded":
                     attempt = connection.execute(
@@ -3283,13 +3311,16 @@ class WorkflowStorage:
                                     receipt.result
                                 )
                                 matches = (
-                                    readback.base_ref == intent.base_ref
+                                    readback.schema_version
+                                    == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
+                                    and readback.base_ref == intent.base_ref
                                     and readback.head_ref == intent.head_ref
                                     and readback.title == intent.title
                                     and readback.body == intent.body
                                     and readback.draft is intent.draft
                                     and readback.state == "open"
-                                    and not readback.secondary_effects
+                                    and readback.secondary_effects
+                                    == intent.secondary_effects
                                 )
                         except (
                             json.JSONDecodeError,
@@ -3299,20 +3330,20 @@ class WorkflowStorage:
                             raise StorageError(
                                 "stored workflow provider readback is invalid"
                             ) from exc
-                        if matches:
-                            state = "confirmed"
-                            fact_json = canonical_json(readback.to_dict())
-                            fact_sha256 = content_sha256(fact_json)
-                        else:
-                            state = "uncertain"
+                        state = "confirmed"
+                        conforms_intent = 1 if matches else 0
+                        fact_json = canonical_json(readback.to_dict())
+                        fact_sha256 = content_sha256(fact_json)
                 connection.execute(
                     "UPDATE workflow_provider_effects SET state = ?, "
-                    "fact_json = ?, fact_sha256 = ?, updated_at = ?, "
+                    "fact_json = ?, fact_sha256 = ?, conforms_intent = ?, "
+                    "updated_at = ?, "
                     "resolved_at = ? WHERE id = ? AND state = 'pending'",
                     (
                         state,
                         fact_json,
                         fact_sha256,
+                        conforms_intent,
                         now,
                         now,
                         effect_id,
@@ -3352,7 +3383,8 @@ class WorkflowStorage:
                     "SELECT execution.state, execution.stage, execution.version, "
                     "landing.queue_item_id, intent.id AS intent_id, "
                     "intent.intent_json, intent.created_by, effect.id AS effect_id, "
-                    "effect.state AS effect_state, effect.fact_json "
+                    "effect.state AS effect_state, effect.conforms_intent, "
+                    "effect.fact_json "
                     "FROM workflow_executions execution "
                     "JOIN workflow_landing_bindings landing "
                     "ON landing.execution_id = execution.id "
@@ -3366,6 +3398,10 @@ class WorkflowStorage:
                 ).fetchone()
                 if source is None or source["effect_state"] != "confirmed":
                     raise ConflictError("workflow change-open effect is not confirmed")
+                if source["conforms_intent"] != 1:
+                    raise ConflictError(
+                        "workflow change-open effect does not conform to its intent"
+                    )
                 if source["version"] != expected_version:
                     raise ConcurrentUpdateError("workflow execution version changed")
                 if source["state"] != "active" or source["stage"] != "landing":

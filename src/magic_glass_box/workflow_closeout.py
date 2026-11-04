@@ -14,6 +14,7 @@ from .domain import (
     require_string,
 )
 from .provider_effects import (
+    OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
     ChangeOpenReadback,
     LandingReadback,
     WorkflowProviderIntent,
@@ -91,7 +92,11 @@ def validate_delivery_closeout(
             "workflow closeout proposal metadata does not match its intent"
         )
     if (
-        change_readback.head_revision != landing_readback.candidate_revision
+        change_readback.schema_version
+        != OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
+        or landing_readback.schema_version
+        != OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
+        or change_readback.head_revision != landing_readback.candidate_revision
         or change_readback.change_id != landing_readback.change_id
         or landing_readback.base_ref != intent.base_ref
         or landing_readback.head_ref != intent.head_ref
@@ -99,7 +104,7 @@ def validate_delivery_closeout(
         or landing_readback.body != intent.body
         or landing_readback.draft is not intent.draft
         or landing_readback.state != "closed"
-        or landing_readback.merge_method != intent.merge_method
+        or landing_readback.first_parent_status != "contains"
     ):
         raise ValidationError(
             "workflow closeout provider readback differs from its intent"
@@ -107,7 +112,9 @@ def validate_delivery_closeout(
     if (
         intent.secondary_effects
         or change_readback.secondary_effects
+        or change_readback.closure_references
         or landing_readback.secondary_effects
+        or landing_readback.closure_references
     ):
         raise ValidationError("workflow closeout has undeclared secondary effects")
     if closed_references != (remote_identity,):

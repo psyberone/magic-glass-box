@@ -2202,7 +2202,7 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v50; external-review remediation R1-R5 complete; R6+ pending**
+schema v51; external-review remediation R1-R6 complete; R7 pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2487,6 +2487,39 @@ wall-time, and pinned-concurrency mutations on direct replay, for an effective
 478/511 (93.54%). The 33 adjudicated survivors alter equivalent SQL casing,
 non-contractual diagnostics and success-path defaults, or guards for aggregate
 states that SQLite always supplies.
+
+External-review remediation R6 replaces provider assertions with bounded
+observed facts at the reusable-workflow boundary. Version-two change read-back
+records the proposal's exact state, metadata, closure references, and secondary
+effects. The GitHub controller obtains those closure facts through one fixed,
+read-only, exactly shaped GraphQL request; the CLI carrier allowlists that
+request only and does not expose generic GraphQL. Version-one read-backs remain
+parseable for existing durable history, but activated advancement requires the
+new observed contract and an explicit empty expected-effect declaration.
+
+Landing read-back now records the landed commit's tree, bounded parent list,
+exact commit message, observed primary revision, bounded first-parent status,
+proposal state, closure references, and secondary effects. Activated squash
+landing proves that the landing revision is on the observed primary's first-
+parent chain, has the expected sole parent, carries the authorized title/body
+encoding, and has the reviewed candidate tree. Unexpected issue closure, head-
+ref deletion, truncation, or any other secondary effect fails conformance.
+Schema v51 durably separates provider confirmation from intent conformance: a
+successful but mismatched provider result remains an immutable observed fact,
+is projected for attention, and cannot derive a target, landing proof, or
+workflow advancement.
+
+R6's final gate passes 1,621 tests at 87% aggregate statement-plus-
+branch coverage with clean format, lint, frozen lock, source/wheel schema
+catalog, and diff checks. The dependency audit reports no known
+vulnerabilities. The exact serial changed-line mutation campaign over the nine
+affected provider, storage, closeout, director, and projection modules killed
+1,174/1,443 mutants (81.36%) with no timeout, crash, suspicious, uncovered, or
+interrupted outcome. A focused audit of 27 representative initial survivors
+then added exact collection, byte, correlation, read-shape, graph, propagation,
+and mixed-version regressions; all 27 fail on direct replay. Diagnostic prose,
+equivalent SQL casing, and subject-label mutations were not promoted into
+protocol behavior.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

@@ -17,9 +17,9 @@ The reference provider implements eight v1 capabilities:
 | `change.get` | read | Return normalized metadata for one exact pull request |
 | `change.list` | read | Return one bounded page of normalized pull-request metadata |
 | `refs.publish` | effect | Create one previously absent branch at one exact candidate commit and read back the exact ref/revision |
-| `change.open` | effect | Find or open one exact head/base proposal without duplicating it, then read back its stored metadata |
+| `change.open` | effect | Find or open one exact head/base proposal without duplicating it, then read back its stored metadata and provider-interpreted issue closures |
 | `checks.read` | read | Read named latest check-runs or legacy status contexts plus latest reviewer decisions for one exact head |
-| `landing.invoke` | effect | Merge only the authorized pull-request head, then report the landed commit/tree and its reachability from the observed primary ref |
+| `landing.invoke` | effect | Merge only the authorized pull-request head, then report the landed commit, tree, parents, message, first-parent status, and observed provider side effects |
 
 `landing.invoke` truthfully reports `head_enforced`. GitHub's REST
 [merge endpoint](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
@@ -159,14 +159,24 @@ An M18 activated workflow does not accept a hand-entered pull-request number.
 Its owner first records bounded provider intent; the director publishes the
 candidate ref and opens the change through the activation's exact bindings.
 The pull-request number is derived only from GitHub's correlated authoritative
-read-back. For the currently supported portable-policy proof, squash landing is
-conformant only when the landed commit tree equals the reviewed candidate tree
-and that commit is reachable from the observed primary ref. Missing or
-mismatched observation holds the integration target and cannot complete the
-workflow.
+read-back. The activated operation opts into read-back v2: one fixed bounded
+GraphQL query observes GitHub's interpreted closing-issue references, while
+REST observes the landed commit, its parents and message, the authoritative
+primary ref, and whether the landing commit occurs on that ref's bounded
+first-parent chain. The carrier allowlists only that fixed read-only GraphQL
+query; it does not expose general GraphQL or `gh` access.
+
+For the currently supported portable-policy proof, squash landing is
+conformant only when the landed commit tree equals the reviewed candidate tree,
+its sole parent equals the authorized base, its message exactly matches the
+authorized title and body, it remains on the observed primary's first-parent
+chain, and neither issue closure nor head-ref deletion was introduced. Missing,
+truncated, or mismatched observation holds the integration target and cannot
+complete the workflow.
 
 The final landing observation also retains the normalized head ref, title,
-body, draft flag, and closed proposal state. Schema-v49 closeout compares these
+body, draft flag, closed proposal state, closure references, and secondary
+effects. Schema-v49 closeout compares these
 fields with both the original intent and the authoritative open-change fact;
 the landing receipt must close exactly the same normalized pull-request
 identity. This proves proposal metadata and closure independently of the Git

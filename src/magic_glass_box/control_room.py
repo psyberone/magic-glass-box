@@ -949,6 +949,7 @@ class ControlRoom:
                         "id": effect["id"],
                         "capability_name": effect["capability_name"],
                         "state": effect["state"],
+                        "conforms_intent": effect["conforms_intent"],
                         "operation_state": effect["operation_state"],
                         "service_operation_id": effect["service_operation_id"],
                     }
@@ -2476,6 +2477,22 @@ class ControlRoom:
                     },
                     workflow["updated_at"],
                 )
+            elif responsibility.get("reason") == "provider_effect_mismatch":
+                add(
+                    {
+                        "kind": "workflow.provider_effect_mismatch",
+                        "severity": "action",
+                        "subject_type": "workflow_provider_effect",
+                        "subject_id": responsibility["basis"]["effect_id"],
+                        "workflow_execution_id": workflow["id"],
+                        "effect_id": responsibility["basis"]["effect_id"],
+                        "capability_name": responsibility["basis"]["capability_name"],
+                        "service_operation_id": responsibility["basis"][
+                            "service_operation_id"
+                        ],
+                    },
+                    workflow["updated_at"],
+                )
             elif responsibility.get("status") == "attention":
                 add(
                     {
@@ -2596,6 +2613,7 @@ class ControlRoom:
                     or len(workflow["landing_provider_effects"]) == 2
                     and all(
                         effect["state"] == "confirmed"
+                        and effect["conforms_intent"] is True
                         for effect in workflow["landing_provider_effects"]
                     )
                 )

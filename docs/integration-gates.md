@@ -451,12 +451,16 @@ records a matching `landed` receipt, workflow closeout rechecks the current
 gate and commits its outcome, thread seal, and workflow completion atomically.
 
 Activated provider completion adds one more boundary. A squash landing must
-return the authoritative landed commit tree, the observed primary ref/revision,
-and proof that the landing revision is reachable from that primary. MGB binds
-those facts to the exact policy, activation, candidate tree, provider landing,
-and receipt. Missing or mismatched facts open an integration-target hold and
-cannot advance the workflow. Only the activation owner may lift the hold; the
-immutable nonconformant proof remains nonconformant.
+return the authoritative landed commit tree, parent list and commit message,
+the observed primary ref/revision, and a bounded observation of the primary's
+first-parent chain. MGB binds those facts to the exact policy, activation,
+candidate tree, authorized base, proposal metadata, provider landing, and
+receipt. The landing must have exactly the authorized base as its parent, its
+message must equal the authorized title/body encoding, and it must occur on the
+primary's first-parent chain. Missing, truncated, mismatched, or side-effectful
+facts open an integration-target hold and cannot advance the workflow. Only
+the activation owner may lift the hold; the immutable nonconformant proof
+remains nonconformant.
 
 A conformant landing proof is necessary but not sufficient for activated
 closeout. The activation owner must also declare closeout. The completion

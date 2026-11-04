@@ -1,7 +1,7 @@
 # Bounded workflow templates
 
 **Status: M12A-M12C and M13A-M13D complete; M18 portable-policy delivery
-implemented through schema v50 with external-review remediation in progress**
+implemented through schema v51 with external-review remediation in progress**
 
 Magic Glass Box already has the durable primitives needed to build, review,
 correct, approve, and land an exact candidate. The first Imitation Krab beta
@@ -104,20 +104,28 @@ the exact capability binding and deployment selected by the activation. Every
 issuance is its own restart-safe step. Unbinding or replacing a project
 capability after activation makes the workflow unavailable; it cannot silently
 re-route an already authorized effect. Successful provider responses carry
-canonical read-back facts, and the generic response boundary correlates those
-facts to the exact requested refs, revisions, metadata, and candidate. A lost
-or absent read-back remains `uncertain`. Only a confirmed `change.open` fact can
-derive the immutable provider target used by `landing.invoke`.
+canonical read-back facts. The generic response boundary correlates those facts
+to the exact requested refs, revisions, and candidate; durable effect
+settlement separately compares observed metadata and secondary effects with the
+immutable intent. A valid mismatch is retained as a confirmed fact with
+`conforms_intent=false`, returns an owner-visible action, and cannot derive a
+target. A lost or absent read-back remains `uncertain`. Only a confirmed,
+conformant `change.open` fact can derive the immutable provider target used by
+`landing.invoke`.
 
-For the currently selected squash method, the landing read-back names the
-candidate revision, landed revision and tree, observed primary revision, and
-whether the landed revision is reachable from that primary. A conformant proof
-requires the landed tree to equal the reviewed candidate tree. Missing or
-mismatched evidence records an `uncertain` or `mismatch` proof and opens a hold
-on that integration target. The hold blocks new landing authority until the
-activation owner explicitly lifts its optimistic version; lifting does not
-rewrite the proof or permit the affected workflow to claim completion. Merge
-and rebase remain truthfully unproved in this bounded slice.
+For the currently selected squash method, landing read-back v2 names the
+candidate revision, landed revision and tree, landing parents and commit
+message, observed primary revision, bounded first-parent status, closure
+references, and observed secondary effects. A conformant proof requires the
+landed tree to equal the reviewed candidate tree, exactly one parent equal to
+the authorized base, the commit message to equal the authorized title/body
+encoding, the landing revision to occur on the observed primary's first-parent
+chain, and no undeclared side effect. Missing, truncated, or mismatched
+evidence records an `uncertain` or `mismatch` proof and opens a hold on that
+integration target. The hold blocks new landing authority until the activation
+owner explicitly lifts its optimistic version; lifting does not rewrite the
+proof or permit the affected workflow to claim completion. Merge and rebase
+remain truthfully unproved in this bounded slice.
 
 Pre-policy workflow histories retain the earlier `workflow provider-target`
 operation as a compatibility path. Activated workflows reject that manual
@@ -132,10 +140,11 @@ immutable baseline gate evidence, and must carry a future deadline and bounded
 reason. This permits scheduled follow-up; it never converts missing or failed
 validation into success.
 
-The completion transaction independently proves that the normalized
-change-open fact matched the intent, the final landing read-back retained the
-same base/head/title/body/draft fields and reports the proposal closed, the
-exact squash landing remains conformant, no secondary effect was introduced,
+The completion transaction independently proves that the normalized,
+observed-v2 change-open fact matched the intent, the final landing read-back
+retained the same base/head/title/body/draft fields and reports the proposal
+closed, the exact squash landing remains conformant, no closure reference or
+other secondary effect was introduced,
 and the service receipt closed exactly its landed remote identity. It then
 stores an immutable closeout proof and derives either `closed` or
 `closed, N open`. Open obligations return responsibility to the activation

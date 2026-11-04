@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
@@ -40,15 +41,17 @@ class ProviderEffectReadbackTests(unittest.TestCase):
         )
         for name, factory in contracts:
             with self.subTest(name=name):
-                schema = json.loads(
-                    (self.repository / "schemas" / f"{name}-v1.schema.json").read_text(
-                        encoding="utf-8"
-                    )
-                )
                 example = json.loads(
                     (self.repository / "examples" / f"{name}.json").read_text(
                         encoding="utf-8"
                     )
+                )
+                schema = json.loads(
+                    (
+                        self.repository
+                        / "schemas"
+                        / f"{name}-v{example['schema_version']}.schema.json"
+                    ).read_text(encoding="utf-8")
                 )
                 Draft202012Validator.check_schema(schema)
                 validator = Draft202012Validator(schema, format_checker=FormatChecker())
@@ -56,16 +59,16 @@ class ProviderEffectReadbackTests(unittest.TestCase):
                 self.assertEqual(factory(example).to_dict(), example)
 
     def test_published_provider_effect_projections_validate(self) -> None:
-        for name in (
-            "workflow-provider-effect",
-            "workflow-landing-proof",
-            "integration-target-hold",
+        for name, version in (
+            ("workflow-provider-effect", 2),
+            ("workflow-landing-proof", 1),
+            ("integration-target-hold", 1),
         ):
             with self.subTest(name=name):
                 schema = json.loads(
-                    (self.repository / "schemas" / f"{name}-v1.schema.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (
+                        self.repository / "schemas" / f"{name}-v{version}.schema.json"
+                    ).read_text(encoding="utf-8")
                 )
                 example = json.loads(
                     (self.repository / "examples" / f"{name}.json").read_text(
@@ -76,6 +79,37 @@ class ProviderEffectReadbackTests(unittest.TestCase):
                 Draft202012Validator(schema, format_checker=FormatChecker()).validate(
                     example
                 )
+
+    def test_provider_effect_projection_enforces_fact_lifecycle(self) -> None:
+        schema = json.loads(
+            (
+                self.repository / "schemas" / "workflow-provider-effect-v2.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        example = json.loads(
+            (self.repository / "examples" / "workflow-provider-effect.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        contradictory = (
+            {
+                **example,
+                "state": "pending",
+                "conforms_intent": None,
+                "resolved_at": None,
+            },
+            {**example, "resolved_at": None},
+            {
+                **example,
+                "state": "failed",
+                "conforms_intent": None,
+            },
+        )
+
+        for projection in contradictory:
+            with self.subTest(state=projection["state"]):
+                self.assertTrue(list(validator.iter_errors(projection)))
 
     def test_workflow_provider_intent_is_project_and_artifact_bound(self) -> None:
         value = {
@@ -163,15 +197,17 @@ class ProviderEffectReadbackTests(unittest.TestCase):
             "refs/heads/topic//child",
         )
         for name, factory, fields in contracts:
-            schema = json.loads(
-                (self.repository / "schemas" / f"{name}-v1.schema.json").read_text(
-                    encoding="utf-8"
-                )
-            )
             example = json.loads(
                 (self.repository / "examples" / f"{name}.json").read_text(
                     encoding="utf-8"
                 )
+            )
+            schema = json.loads(
+                (
+                    self.repository
+                    / "schemas"
+                    / f"{name}-v{example['schema_version']}.schema.json"
+                ).read_text(encoding="utf-8")
             )
             validator = Draft202012Validator(schema, format_checker=FormatChecker())
             for field in fields:
@@ -217,6 +253,10 @@ class ProviderEffectReadbackTests(unittest.TestCase):
 
         self.assertEqual(readback.to_dict(), value)
         self.assertEqual(readback.title, value["title"])
+        self.assertEqual(
+            ChangeOpenReadback.from_mapping({**value, "state": "closed"}).state,
+            "closed",
+        )
 
     def test_change_open_readback_accepts_an_explicit_empty_body(self) -> None:
         value = {
@@ -234,6 +274,30 @@ class ProviderEffectReadbackTests(unittest.TestCase):
         }
 
         self.assertEqual(ChangeOpenReadback.from_mapping(value).to_dict(), value)
+
+    def test_change_open_v2_retains_observed_closure_and_secondary_effects(
+        self,
+    ) -> None:
+        identity = "github:github.com/acme/widgets/issues/12"
+        value = {
+            "schema_version": 2,
+            "change_id": "42",
+            "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/mgb/candidate-1",
+            "base_revision": "a" * 40,
+            "head_revision": "b" * 40,
+            "title": "Add the bounded health probe",
+            "body": "Exact project-local proposal body.",
+            "draft": False,
+            "state": "open",
+            "closure_references": [identity],
+            "secondary_effects": [f"issue.close:{identity}"],
+        }
+
+        readback = ChangeOpenReadback.from_mapping(value)
+
+        self.assertEqual(readback.to_dict(), value)
+        self.assertEqual(readback.closure_references, (identity,))
 
     def test_landing_readback_separates_primary_and_landing_revisions(self) -> None:
         value = {
@@ -260,6 +324,142 @@ class ProviderEffectReadbackTests(unittest.TestCase):
         self.assertEqual(readback.to_dict(), value)
         self.assertNotEqual(readback.landing_revision, readback.primary_revision)
         self.assertEqual(readback.state, "closed")
+        self.assertEqual(readback.landing_parent_revisions, ())
+        self.assertEqual(readback.landing_commit_message, "")
+        self.assertEqual(readback.first_parent_status, "contains")
+        self.assertEqual(readback.closure_references, ())
+        unreachable = LandingReadback.from_mapping(
+            {**value, "landing_revision_reachable": False}
+        )
+        self.assertEqual(unreachable.first_parent_status, "absent")
+        open_readback = LandingReadback.from_mapping({**value, "state": "open"})
+        self.assertEqual(open_readback.state, "open")
+
+    def test_observed_readback_collection_and_byte_boundaries_are_exact(
+        self,
+    ) -> None:
+        references = [
+            f"github:github.com/acme/widgets/issues/{number}" for number in range(1, 65)
+        ]
+        change = {
+            "schema_version": 2,
+            "change_id": "42",
+            "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/mgb/candidate-1",
+            "base_revision": "a" * 40,
+            "head_revision": "b" * 40,
+            "title": "Add the bounded health probe",
+            "body": "Exact project-local proposal body.",
+            "draft": False,
+            "state": "open",
+            "closure_references": references,
+            "secondary_effects": [
+                f"issue.close:{reference}" for reference in references
+            ],
+        }
+        landing = {
+            "schema_version": 2,
+            "change_id": "42",
+            "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/mgb/candidate-1",
+            "candidate_revision": "b" * 40,
+            "landing_revision": "c" * 40,
+            "landing_tree": "d" * 40,
+            "landing_parent_revisions": [f"{number:040x}" for number in range(1, 17)],
+            "landing_commit_message": "x" * 65536,
+            "primary_ref": "refs/heads/main",
+            "primary_revision": "e" * 40,
+            "first_parent_status": "contains",
+            "title": "Add the bounded health probe",
+            "body": "Exact project-local proposal body.",
+            "draft": False,
+            "state": "closed",
+            "closure_references": [],
+            "secondary_effects": [],
+        }
+
+        self.assertEqual(
+            len(ChangeOpenReadback.from_mapping(change).closure_references), 64
+        )
+        parsed_landing = LandingReadback.from_mapping(landing)
+        self.assertEqual(len(parsed_landing.landing_parent_revisions), 16)
+        self.assertEqual(len(parsed_landing.landing_commit_message), 65536)
+        with self.assertRaises(ValidationError):
+            LandingReadback.from_mapping(
+                {**landing, "landing_commit_message": "x" * 65537}
+            )
+        with self.assertRaises(ValidationError):
+            ChangeOpenReadback.from_mapping(
+                {
+                    **change,
+                    "closure_references": (references[0],),
+                    "secondary_effects": [f"issue.close:{references[0]}"],
+                }
+            )
+
+    def test_landing_v2_uses_observed_first_parent_and_commit_evidence(self) -> None:
+        value = {
+            "schema_version": 2,
+            "change_id": "42",
+            "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/mgb/candidate-1",
+            "candidate_revision": "b" * 40,
+            "landing_revision": "c" * 40,
+            "landing_tree": "d" * 40,
+            "landing_parent_revisions": ["a" * 40],
+            "landing_commit_message": (
+                "Add the bounded health probe\n\nExact project-local proposal body."
+            ),
+            "primary_ref": "refs/heads/main",
+            "primary_revision": "e" * 40,
+            "first_parent_status": "contains",
+            "title": "Add the bounded health probe",
+            "body": "Exact project-local proposal body.",
+            "draft": False,
+            "state": "closed",
+            "closure_references": [],
+            "secondary_effects": [],
+        }
+
+        readback = LandingReadback.from_mapping(value)
+
+        self.assertEqual(readback.to_dict(), value)
+        self.assertEqual(readback.landing_parent_revisions, ("a" * 40,))
+        self.assertEqual(readback.first_parent_status, "contains")
+        self.assertFalse(hasattr(readback, "merge_method"))
+        self.assertFalse(hasattr(readback, "landing_revision_reachable"))
+
+    def test_landing_v2_rejects_inconsistent_first_parent_evidence(self) -> None:
+        valid = {
+            "schema_version": 2,
+            "change_id": "42",
+            "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/mgb/candidate-1",
+            "candidate_revision": "b" * 40,
+            "landing_revision": "c" * 40,
+            "landing_tree": "d" * 40,
+            "landing_parent_revisions": ["a" * 40],
+            "landing_commit_message": "Candidate 42\n\nBounded summary.",
+            "primary_ref": "refs/heads/main",
+            "primary_revision": "c" * 40,
+            "first_parent_status": "contains",
+            "title": "Candidate 42",
+            "body": "Bounded summary.",
+            "draft": False,
+            "state": "closed",
+            "closure_references": [],
+            "secondary_effects": [],
+        }
+        cases = (
+            {**valid, "first_parent_status": "reachable"},
+            {**valid, "landing_parent_revisions": []},
+            {**valid, "landing_commit_message": ""},
+            {**valid, "closure_references": ["not a remote identity"]},
+            {**valid, "state": "open"},
+        )
+        for value in cases:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                LandingReadback.from_mapping(value)
 
     def test_readbacks_reject_ambiguous_or_provider_shaped_extras(self) -> None:
         valid_change = {
@@ -289,6 +489,26 @@ class ProviderEffectReadbackTests(unittest.TestCase):
         for value in cases:
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 ChangeOpenReadback.from_mapping(value)  # type: ignore[arg-type]
+
+    def test_readbacks_reject_an_unknown_integer_schema_version(self) -> None:
+        value = {
+            "schema_version": 3,
+            "change_id": "42",
+            "base_ref": "refs/heads/main",
+            "head_ref": "refs/heads/mgb/candidate-1",
+            "base_revision": "a" * 40,
+            "head_revision": "b" * 40,
+            "title": "MGB work",
+            "body": "Bounded body.",
+            "draft": False,
+            "state": "open",
+            "secondary_effects": [],
+        }
+
+        with self.assertRaisesRegex(
+            ValidationError, "change-open readback schema_version must be 1 or 2"
+        ):
+            ChangeOpenReadback.from_mapping(value)
 
     def test_service_response_rejects_wrong_change_metadata_on_correlation(
         self,
@@ -323,13 +543,140 @@ class ProviderEffectReadbackTests(unittest.TestCase):
             ).invoke(operation)
             value = response.to_dict()
             assert value["receipt"] is not None
-            value["receipt"]["result"]["title"] = "Imitation Krab candidate"
-            mismatched = ServiceOperationResponse.from_mapping(value)
+            mismatches = (
+                (
+                    "title",
+                    lambda document: document["receipt"]["result"].__setitem__(
+                        "title", "Imitation Krab candidate"
+                    ),
+                ),
+                (
+                    "body",
+                    lambda document: document["receipt"]["result"].__setitem__(
+                        "body", "Different body."
+                    ),
+                ),
+                (
+                    "draft",
+                    lambda document: document["receipt"]["result"].__setitem__(
+                        "draft", False
+                    ),
+                ),
+                (
+                    "receipt revision",
+                    lambda document: document["receipt"].__setitem__(
+                        "observed_revision", "c" * 40
+                    ),
+                ),
+            )
+            for label, mutate in mismatches:
+                mismatched_value = copy.deepcopy(value)
+                mutate(mismatched_value)
+                mismatched = ServiceOperationResponse.from_mapping(mismatched_value)
+                with (
+                    self.subTest(label=label),
+                    self.assertRaisesRegex(
+                        ValidationError, "change-open result does not match"
+                    ),
+                ):
+                    mismatched.validate_correlation(operation)
 
+    def test_service_response_rejects_each_landing_correlation_mismatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            socket_path = Path(temporary) / "github.sock"
+            parameters = {
+                "assurance": "head_enforced",
+                "integration_ref": "refs/heads/main",
+                "merge_method": "squash",
+                "title": "Candidate 42",
+                "body": "Bounded summary.",
+                "draft": False,
+                "expected_secondary_effects": [],
+            }
+            operation = request(
+                socket_path,
+                "landing.invoke",
+                parameters=parameters,
+            )
+            result = {
+                "schema_version": 2,
+                "change_id": "42",
+                "base_ref": "refs/heads/main",
+                "head_ref": "refs/heads/mgb/op-42",
+                "candidate_revision": HEAD,
+                "landing_revision": "c" * 40,
+                "landing_tree": "d" * 40,
+                "landing_parent_revisions": [BASE],
+                "landing_commit_message": "Candidate 42\n\nBounded summary.",
+                "primary_ref": "refs/heads/main",
+                "primary_revision": "c" * 40,
+                "first_parent_status": "contains",
+                "title": "Candidate 42",
+                "body": "Bounded summary.",
+                "draft": False,
+                "state": "closed",
+                "closure_references": [],
+                "secondary_effects": [],
+            }
+            value = {
+                **operation.correlation_dict(),
+                "outcome": "succeeded",
+                "provider_status": 200,
+                "request_bytes": 64,
+                "response_bytes": 256,
+                "error_code": None,
+                "retry_after_seconds": None,
+                "receipt": {
+                    "remote_identity": "github:github.com/acme/widgets/pull/42",
+                    "observed_revision": "c" * 40,
+                    "evidence_sha256": "3" * 64,
+                    "closed_references": [],
+                    "result": result,
+                },
+            }
+            ServiceOperationResponse.from_mapping(value).validate_correlation(operation)
+
+            mismatches = (
+                ("candidate", ("result", "candidate_revision", "e" * 40)),
+                ("receipt", ("receipt", "observed_revision", "e" * 40)),
+            )
+            for label, (_scope, field, replacement) in mismatches:
+                mismatched_value = copy.deepcopy(value)
+                if _scope == "result":
+                    mismatched_value["receipt"]["result"][field] = replacement
+                else:
+                    mismatched_value["receipt"][field] = replacement
+                with (
+                    self.subTest(label=label),
+                    self.assertRaisesRegex(
+                        ValidationError, "landing result does not match"
+                    ),
+                ):
+                    ServiceOperationResponse.from_mapping(
+                        mismatched_value
+                    ).validate_correlation(operation)
+
+            legacy_request_shape = request(
+                socket_path,
+                "landing.invoke",
+                parameters={
+                    key: value
+                    for key, value in parameters.items()
+                    if key != "expected_secondary_effects"
+                },
+            )
+            legacy_shaped_value = {
+                **value,
+                **legacy_request_shape.correlation_dict(),
+            }
             with self.assertRaisesRegex(
-                ValidationError, "change-open result does not match"
+                ValidationError, "landing result does not match"
             ):
-                mismatched.validate_correlation(operation)
+                ServiceOperationResponse.from_mapping(
+                    legacy_shaped_value
+                ).validate_correlation(legacy_request_shape)
 
 
 if __name__ == "__main__":

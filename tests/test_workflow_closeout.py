@@ -333,6 +333,8 @@ class WorkflowCloseoutDeclarationTests(unittest.TestCase):
                 )
 
         readback_cases = (
+            replace(change, schema_version=1),
+            replace(landing, schema_version=1),
             replace(landing, candidate_revision="e" * 40),
             replace(landing, change_id="43"),
             replace(landing, base_ref="refs/heads/release"),
@@ -341,7 +343,7 @@ class WorkflowCloseoutDeclarationTests(unittest.TestCase):
             replace(landing, body="Different body"),
             replace(landing, draft=True),
             replace(landing, state="open"),
-            replace(landing, merge_method="merge"),
+            replace(landing, first_parent_status="absent"),
         )
         for changed in readback_cases:
             with (

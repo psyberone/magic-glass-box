@@ -344,15 +344,15 @@ evidence surfaces:
   hold created when landing proof is missing or mismatched.
 
 Runtime correlation is stricter than structural preflight. It proves every
-read-back ref, revision, proposal field, candidate ID, and requested merge
-method against the immutable service operation. An activated target is derived
-only from a confirmed `change.open` fact. Before the first provider effect, all
-three capabilities required to publish, open, and land the intent must still be
-available; losing a later capability rejects the whole intent rather than
-publishing a partial result when the intent is initially admitted. In this
-bounded slice only squash landing can
-become conformant, by exact candidate-tree equality plus primary-ref
-reachability; other methods remain explicitly unproved.
+read-back identity, ref, revision, and candidate against the immutable service
+operation. Durable conformance separately compares the observed proposal
+metadata and secondary effects with the intent. An activated target is derived
+only from a confirmed, conformant `change.open` fact. Before the first provider
+effect, all three capabilities required to publish, open, and land the intent
+must still be available; losing a later capability rejects the whole intent
+rather than publishing a partial result when the intent is initially admitted.
+The v1 change and landing read-backs remain parseable compatibility contracts;
+they cannot satisfy the current activated proof.
 
 Control-plane schema v49 publishes the owner closeout surfaces:
 
@@ -383,6 +383,27 @@ exactly one round, cannot be reused, cannot exceed the absolute round bound,
 and cannot be created before the configured ceiling is reached. Pre-policy
 compatibility retains its prior active-user authority but receives the same
 explicit single-use artifact and bounds.
+
+Control-plane schema v51 publishes observed provider facts without granting
+them authority merely because they are well formed:
+
+- `change-open-readback-v2.schema.json` adds bounded provider-interpreted
+  closure references and normalized secondary effects;
+- `landing-readback-v2.schema.json` replaces request-echoed merge method and
+  graph reachability with observed commit parents, exact commit message,
+  bounded first-parent status, closure references, and secondary effects; and
+- `workflow-provider-effect-v2.schema.json` distinguishes durable confirmation
+  from conformance with the immutable intent.
+
+Activated change-open and landing operations opt into those observations. A
+valid mismatch is stored with `conforms_intent=false`, returns a dedicated
+owner-visible action, and cannot derive a landing target. Migration never
+upgrades an old v1 change-open fact into v2 authority. For squash, conformance
+requires the reviewed tree, exactly the authorized base as sole parent, the
+authorized title/body commit message, membership on the observed primary's
+first-parent chain, and no undeclared closure or ref-deletion effect. A missing
+read-back is uncertain; an absent or truncated first-parent observation is a
+mismatch and opens the ordinary immutable landing hold.
 
 M18 external-review remediation R4 publishes
 `state-backup-manifest-v1.schema.json`. The manifest inventories one coherent

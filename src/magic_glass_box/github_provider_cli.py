@@ -33,6 +33,8 @@ from .domain import (
     parse_rfc3339_timestamp,
 )
 from .github_provider import (
+    _PULL_EFFECTS_QUERY,
+    PULL_NUMBER_RE,
     GitHubAPIResponse,
     GitHubProvider,
     GitHubProviderError,
@@ -56,6 +58,7 @@ INSPECTION_SECONDS = 30.0
 GITHUB_API_VERSION = "2026-03-10"
 SAFE_METHODS = frozenset({"GET", "HEAD"})
 METHODS = frozenset({"DELETE", "GET", "HEAD", "PATCH", "POST", "PUT"})
+GITHUB_REPOSITORY_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 STATUS_LINE_RE = re.compile(
     rb"^HTTP/(?:1\.[01]|2(?:\.0)?|3(?:\.0)?) ([1-5][0-9]{2})(?:[ \t].*)?$"
 )
@@ -518,7 +521,10 @@ class GitHubCLI:
         deadline: str,
         response_limit_bytes: int,
     ) -> GitHubAPIResponse:
-        if method not in METHODS or not endpoint.startswith("repos/"):
+        fixed_graphql_read = self._is_fixed_graphql_read(method, endpoint, body)
+        if method not in METHODS or not (
+            endpoint.startswith("repos/") or fixed_graphql_read
+        ):
             raise GitHubTransportError("GitHub API request is invalid", ambiguous=False)
         if any(
             ord(character) < 0x21 or ord(character) == 0x7F for character in endpoint
@@ -565,7 +571,11 @@ class GitHubCLI:
         except BoundedCommandError as exc:
             raise GitHubTransportError(
                 "GitHub CLI transport failed",
-                ambiguous=exc.dispatched and method not in SAFE_METHODS,
+                ambiguous=(
+                    exc.dispatched
+                    and method not in SAFE_METHODS
+                    and not fixed_graphql_read
+                ),
             ) from exc
         try:
             return _parse_included_response(
@@ -573,8 +583,42 @@ class GitHubCLI:
             )
         except GitHubProviderCLIError as exc:
             raise GitHubTransportError(
-                "GitHub CLI response is invalid", ambiguous=method not in SAFE_METHODS
+                "GitHub CLI response is invalid",
+                ambiguous=method not in SAFE_METHODS and not fixed_graphql_read,
             ) from exc
+
+    @staticmethod
+    def _is_fixed_graphql_read(
+        method: str, endpoint: str, body: Mapping[str, Any] | None
+    ) -> bool:
+        if method != "POST" or endpoint != "graphql" or not isinstance(body, dict):
+            return False
+        if (
+            set(body) != {"query", "variables"}
+            or body.get("query") != _PULL_EFFECTS_QUERY
+        ):
+            return False
+        variables = body.get("variables")
+        if not isinstance(variables, dict) or set(variables) != {
+            "name",
+            "number",
+            "owner",
+        }:
+            return False
+        owner = variables.get("owner")
+        name = variables.get("name")
+        number = variables.get("number")
+        return bool(
+            isinstance(owner, str)
+            and isinstance(name, str)
+            and owner not in {".", ".."}
+            and name not in {".", ".."}
+            and GITHUB_REPOSITORY_COMPONENT_RE.fullmatch(owner)
+            and GITHUB_REPOSITORY_COMPONENT_RE.fullmatch(name)
+            and not isinstance(number, bool)
+            and isinstance(number, int)
+            and PULL_NUMBER_RE.fullmatch(str(number))
+        )
 
     def credential_identity(self, host: str) -> GitHubCredentialIdentity:
         return _credential_identity(self, host)

@@ -1555,6 +1555,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         *,
         change_id: str = "42",
         include_result: bool = True,
+        closure_references: tuple[str, ...] = (),
     ) -> ServiceOperationResponse:
         observed_revision = request.target.desired_revision
         assert observed_revision is not None
@@ -1572,8 +1573,13 @@ class WorkflowDirectorTests(unittest.TestCase):
                 + published_ref.removeprefix("refs/heads/").replace("/", "-")
             )
         else:
+            observed_effects = tuple(
+                f"issue.close:{reference}" for reference in closure_references
+            )
             result = {
-                "schema_version": 1,
+                "schema_version": (
+                    2 if "expected_secondary_effects" in request.parameters else 1
+                ),
                 "change_id": change_id,
                 "base_ref": request.parameters["base_ref"],
                 "head_ref": request.parameters["head_ref"],
@@ -1583,7 +1589,12 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "body": request.parameters["body"],
                 "draft": request.parameters["draft"],
                 "state": "open",
-                "secondary_effects": [],
+                **(
+                    {"closure_references": list(closure_references)}
+                    if "expected_secondary_effects" in request.parameters
+                    else {}
+                ),
+                "secondary_effects": list(observed_effects),
             }
             identity = (
                 f"github:{request.mapping.host}/{request.mapping.repository}/pull/"
@@ -1614,6 +1625,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         *,
         include_result: bool = True,
         change_id: str = "42",
+        closure_references: tuple[str, ...] = (),
     ) -> None:
         operation = self.database.get_service_operation(
             str(effect["service_operation_id"])
@@ -1630,6 +1642,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             request,
             change_id=change_id,
             include_result=include_result,
+            closure_references=closure_references,
         )
         response.validate_correlation(request)
         self.database.complete_service_operation_attempt(
@@ -1861,21 +1874,25 @@ class WorkflowDirectorTests(unittest.TestCase):
         assert intent_row is not None
         intent = json.loads(intent_row["intent_json"])
         readback: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "change_id": change_id,
             "base_ref": str(request.parameters["integration_ref"]),
             "head_ref": intent["head_ref"],
             "candidate_revision": request.target.desired_revision,
             "landing_revision": observed_revision,
             "landing_tree": observed_tree,
+            "landing_parent_revisions": [request.target.expected_revision],
+            "landing_commit_message": (
+                intent["title"] + (f"\n\n{intent['body']}" if intent["body"] else "")
+            ),
             "primary_ref": str(request.parameters["integration_ref"]),
             "primary_revision": observed_revision,
-            "landing_revision_reachable": True,
-            "merge_method": "squash",
+            "first_parent_status": "contains",
             "title": intent["title"],
             "body": intent["body"],
             "draft": intent["draft"],
             "state": "closed",
+            "closure_references": [],
             "secondary_effects": [],
         }
         readback.update(readback_overrides or {})
@@ -2360,6 +2377,109 @@ class WorkflowDirectorTests(unittest.TestCase):
             )
         )
 
+    def test_observed_provider_effect_mismatch_is_retained_and_blocks_target(
+        self,
+    ) -> None:
+        execution, _activation, _bindings = self.start_activated_provider_execution(
+            external_id="activated-effect-mismatch"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-effect-mismatch",
+            title="Prove activated provider authority",
+            body="Retain a provider-interpreted issue closure.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        current = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+        current = self.database.get_workflow_execution(current["id"])
+        publication = current["landing"]["provider_intent"]["effects"]["refs.publish"]
+        self.complete_activated_provider_effect(publication)
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+        current = self.database.get_workflow_execution(current["id"])
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+        current = self.database.get_workflow_execution(current["id"])
+        change = current["landing"]["provider_intent"]["effects"]["change.open"]
+        operation = self.database.get_service_operation(
+            str(change["service_operation_id"])
+        )
+        self.assertEqual(
+            operation["spec"]["parameters"]["expected_secondary_effects"], []
+        )
+        issue = "github:github.com/acme/widgets/issues/12"
+        self.complete_activated_provider_effect(
+            change,
+            closure_references=(issue,),
+        )
+        self.assertFalse(
+            self.director().advance(current["id"], expected_version=current["version"])
+        )
+
+        mismatched = self.database.get_workflow_execution(current["id"])
+        effect = mismatched["landing"]["provider_intent"]["effects"]["change.open"]
+        self.assertEqual(effect["state"], "confirmed")
+        self.assertFalse(effect["conforms_intent"])
+        self.assertEqual(effect["fact"]["closure_references"], [issue])
+        self.assertEqual(effect["fact"]["secondary_effects"], [f"issue.close:{issue}"])
+        self.assertIsNone(mismatched["landing"]["provider_target"])
+        with self.assertRaisesRegex(ConflictError, "does not conform"):
+            self.control.derive_workflow_provider_target(
+                mismatched["id"], expected_version=mismatched["version"]
+            )
+        self.assertEqual(
+            mismatched["responsibility"]["reason"], "provider_effect_mismatch"
+        )
+        self.assertFalse(
+            self.director().advance(
+                mismatched["id"], expected_version=mismatched["version"]
+            )
+        )
+        attention = ControlRoom(self.database).snapshot()["attention"]
+        mismatch_attention = next(
+            item
+            for item in attention
+            if item["kind"] == "workflow.provider_effect_mismatch"
+            and item["workflow_execution_id"] == mismatched["id"]
+        )
+        self.assertEqual(
+            {
+                key: mismatch_attention[key]
+                for key in (
+                    "kind",
+                    "severity",
+                    "subject_type",
+                    "subject_id",
+                    "workflow_execution_id",
+                    "effect_id",
+                    "capability_name",
+                    "service_operation_id",
+                )
+            },
+            {
+                "kind": "workflow.provider_effect_mismatch",
+                "severity": "action",
+                "subject_type": "workflow_provider_effect",
+                "subject_id": effect["id"],
+                "workflow_execution_id": mismatched["id"],
+                "effect_id": effect["id"],
+                "capability_name": "change.open",
+                "service_operation_id": effect["service_operation_id"],
+            },
+        )
+
     def test_activated_provider_target_rejects_an_unselected_merge_method(self) -> None:
         execution, _activation, _bindings = self.start_activated_provider_execution(
             external_id="activated-merge-method"
@@ -2404,6 +2524,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         issued = self.control.get_provider_landing(
             awaiting["landing"]["provider_landing_id"]
         )
+        self.assertEqual(issued["operation"]["spec"]["parameters"]["draft"], False)
         expected_tree = self.database.get_gate_policy(gate["policy_id"])[
             "tree_revision"
         ]
@@ -2439,6 +2560,103 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertTrue(
             self.director().advance(landed["id"], expected_version=landed["version"])
         )
+
+    def test_activated_landing_requires_first_parent_message_and_effect_proof(
+        self,
+    ) -> None:
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-first-parent"
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+            readback_overrides={
+                "landing_revision": "e" * 40,
+                "first_parent_status": "absent",
+                "landing_commit_message": "Provider-selected message",
+                "closure_references": ["github:github.com/acme/widgets/issues/12"],
+                "secondary_effects": [
+                    "issue.close:github:github.com/acme/widgets/issues/12"
+                ],
+            },
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "mismatch")
+        self.assertEqual(
+            landed["landing"]["proof"]["reasons"],
+            [
+                "landing_first_parent_absent",
+                "landing_commit_message_mismatch",
+                "unexpected_secondary_effects",
+            ],
+        )
+        self.assertEqual(landed["landing"]["target_hold"]["state"], "open")
+
+    def test_activated_landing_records_truncated_first_parent_proof(self) -> None:
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-truncated-first-parent"
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+            readback_overrides={
+                "landing_revision": "e" * 40,
+                "first_parent_status": "truncated",
+            },
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "mismatch")
+        self.assertEqual(
+            landed["landing"]["proof"]["reasons"],
+            ["landing_first_parent_truncated"],
+        )
+        self.assertEqual(landed["landing"]["target_hold"]["state"], "open")
 
     def test_activated_closeout_retains_and_ages_one_deferred_obligation(
         self,

@@ -21,7 +21,11 @@ from ..integration import (
     ProviderLandingReceipt,
     ProviderLandingRequest,
 )
-from ..provider_effects import LandingReadback
+from ..provider_effects import (
+    OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
+    LandingReadback,
+    WorkflowProviderIntent,
+)
 from ..service_sidecar import (
     ServiceCapability,
     ServiceMapping,
@@ -2074,12 +2078,13 @@ class IntegrationStorage:
                 if workflow_binding is not None and workflow_execution_id is None:
                     raise ConflictError("workflow landing authority is required")
                 required_binding_id = None
+                activated_intent: WorkflowProviderIntent | None = None
                 if workflow_execution_id is not None:
                     workflow = connection.execute(
                         "SELECT e.state, e.stage, e.version, e.project_id, "
                         "e.workflow_activation_version_id, cv.spec_json, "
                         "t.resource_id, t.merge_method, origin.intent_id, "
-                        "origin.change_effect_id "
+                        "origin.change_effect_id, intent.intent_json "
                         "FROM workflow_executions e "
                         "JOIN workflow_configuration_versions cv "
                         "ON cv.id = e.configuration_version_id "
@@ -2087,6 +2092,8 @@ class IntegrationStorage:
                         "JOIN workflow_provider_targets t ON t.execution_id = e.id "
                         "LEFT JOIN workflow_provider_target_origins origin "
                         "ON origin.workflow_execution_id = e.id "
+                        "LEFT JOIN workflow_provider_intents intent "
+                        "ON intent.workflow_execution_id = e.id "
                         "WHERE e.id = ? AND b.queue_item_id = ?",
                         (workflow_execution_id, queue_item_id),
                     ).fetchone()
@@ -2119,11 +2126,24 @@ class IntegrationStorage:
                         if (
                             workflow["intent_id"] is None
                             or workflow["change_effect_id"] is None
+                            or workflow["intent_json"] is None
                         ):
                             raise ConflictError(
                                 "activated workflow provider target has no "
                                 "confirmed origin"
                             )
+                        try:
+                            activated_intent = WorkflowProviderIntent.from_mapping(
+                                json.loads(workflow["intent_json"])
+                            )
+                        except (
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValidationError,
+                        ) as exc:
+                            raise StorageError(
+                                "stored workflow provider intent is invalid"
+                            ) from exc
                         activated_binding = connection.execute(
                             "SELECT project_capability_binding_id "
                             "FROM workflow_activation_capability_bindings "
@@ -2162,6 +2182,18 @@ class IntegrationStorage:
                         binding_id=required_binding_id,
                     )
                 )
+                operation_parameters = dict(parameters)
+                if activated_intent is not None:
+                    operation_parameters.update(
+                        {
+                            "title": activated_intent.title,
+                            "body": activated_intent.body,
+                            "draft": activated_intent.draft,
+                            "expected_secondary_effects": list(
+                                activated_intent.secondary_effects
+                            ),
+                        }
+                    )
                 operation_spec = ServiceOperationSpec.from_mapping(
                     {
                         "schema_version": 1,
@@ -2179,7 +2211,7 @@ class IntegrationStorage:
                             "expected_revision": queue["current_revision"],
                             "desired_revision": policy.head_revision,
                         },
-                        "parameters": dict(parameters),
+                        "parameters": operation_parameters,
                         "request_bytes": sidecar_spec.request_bytes,
                         "response_bytes": sidecar_spec.response_bytes,
                         "timeout_ms": sidecar_spec.timeout_ms,
@@ -2481,12 +2513,36 @@ class IntegrationStorage:
                 reasons.append("merge_method_mismatch")
             if merge_method != "squash":
                 reasons.append("merge_method_unproved")
+            if (
+                readback.schema_version
+                != OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
+            ):
+                reasons.append("landing_readback_version_unproved")
             if readback.candidate_revision != request.head_revision:
                 reasons.append("candidate_revision_mismatch")
             if readback.landing_tree != request.tree_revision:
                 reasons.append("landing_tree_mismatch")
-            if not readback.landing_revision_reachable:
-                reasons.append("landing_revision_unreachable")
+            if (
+                readback.schema_version
+                == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
+            ):
+                if readback.first_parent_status == "absent":
+                    reasons.append("landing_first_parent_absent")
+                elif readback.first_parent_status == "truncated":
+                    reasons.append("landing_first_parent_truncated")
+                if readback.landing_parent_revisions != (
+                    request.expected_base_revision,
+                ):
+                    reasons.append("landing_parent_mismatch")
+                title = operation["spec"]["parameters"].get("title")
+                body = operation["spec"]["parameters"].get("body")
+                expected_message = (
+                    title + (f"\n\n{body}" if body else "")
+                    if isinstance(title, str) and isinstance(body, str)
+                    else None
+                )
+                if readback.landing_commit_message != expected_message:
+                    reasons.append("landing_commit_message_mismatch")
             if readback.primary_ref != request.integration_ref:
                 reasons.append("primary_ref_mismatch")
             if readback.primary_revision != service_receipt.observed_revision:

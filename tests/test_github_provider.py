@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from typing import Any
 
 from magic_glass_box.domain import WorkItemEnvelope, canonical_json, content_sha256
 from magic_glass_box.github_provider import (
+    _PULL_EFFECTS_QUERY,
     GitHubAPIResponse,
     GitHubProvider,
     GitHubProviderError,
@@ -158,8 +160,40 @@ def ref(revision: str, name: str = "main") -> dict[str, Any]:
     }
 
 
-def commit(revision: str, tree: str = HEAD_TREE) -> dict[str, Any]:
-    return {"sha": revision, "tree": {"sha": tree}}
+def commit(
+    revision: str,
+    tree: str = HEAD_TREE,
+    *,
+    parents: tuple[str, ...] = (BASE,),
+    message: str = "Candidate 42\n\nBounded summary.",
+) -> dict[str, Any]:
+    return {
+        "sha": revision,
+        "tree": {"sha": tree},
+        "parents": [{"sha": parent} for parent in parents],
+        "message": message,
+    }
+
+
+def interpreted_effects(*references: tuple[str, int]) -> dict[str, Any]:
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "closingIssuesReferences": {
+                        "nodes": [
+                            {
+                                "number": number,
+                                "repository": {"nameWithOwner": repository},
+                            }
+                            for repository, number in references
+                        ],
+                        "pageInfo": {"hasNextPage": False},
+                    }
+                }
+            }
+        }
+    }
 
 
 def issue(
@@ -970,6 +1004,84 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(api.calls[2]["method"], "PUT")
         self.assertNotIn("expected_base", api.calls[2]["body"])
 
+    def test_landing_v2_observes_effects_and_pins_exact_commit_message(self) -> None:
+        api = FakeGitHubAPI(
+            [
+                api_response(200, pull()),
+                api_response(200, ref(BASE)),
+                api_response(200, interpreted_effects()),
+                api_response(200, {"sha": MERGED, "merged": True, "message": "ok"}),
+                api_response(200, pull(state="closed", merged=True)),
+                api_response(200, ref(MERGED)),
+                api_response(200, interpreted_effects()),
+                api_response(200, commit(MERGED)),
+                api_response(200, ref(HEAD, "mgb/op-42")),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                    "title": "Candidate 42",
+                    "body": "Bounded summary.",
+                    "draft": False,
+                    "expected_secondary_effects": [],
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(response.receipt.result["schema_version"], 2)
+        self.assertEqual(response.receipt.result["first_parent_status"], "contains")
+        self.assertEqual(response.receipt.result["secondary_effects"], [])
+        merge_call = next(call for call in api.calls if call["method"] == "PUT")
+        self.assertEqual(
+            merge_call["body"],
+            {
+                "commit_message": "Bounded summary.",
+                "commit_title": "Candidate 42",
+                "merge_method": "squash",
+                "sha": HEAD,
+            },
+        )
+
+    def test_landing_v2_refuses_provider_interpreted_closure_before_merge(
+        self,
+    ) -> None:
+        api = FakeGitHubAPI(
+            [
+                api_response(200, pull()),
+                api_response(200, ref(BASE)),
+                api_response(200, interpreted_effects(("acme/widgets", 12))),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                    "title": "Candidate 42",
+                    "body": "Bounded summary.",
+                    "draft": False,
+                    "expected_secondary_effects": [],
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertIsNone(response.receipt.result)
+        self.assertEqual(response.receipt.closed_references, ())
+        self.assertNotIn("PUT", {call["method"] for call in api.calls})
+
     def test_landing_precondition_drift_settles_without_false_success(self) -> None:
         drift = "f" * 40
         api = FakeGitHubAPI(
@@ -1146,6 +1258,138 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(response.receipt.observed_revision, MERGED)
         self.assertTrue(all(call["method"] == "GET" for call in api.calls))
 
+    def test_landing_v2_uses_first_parent_not_graph_reachability(self) -> None:
+        api = FakeGitHubAPI(
+            [
+                api_response(200, pull(state="closed", merged=True, base_sha=ADVANCED)),
+                api_response(200, ref(ADVANCED)),
+                api_response(200, interpreted_effects()),
+                api_response(200, commit(MERGED)),
+                api_response(
+                    200,
+                    commit(
+                        ADVANCED,
+                        parents=(BASE, MERGED),
+                        message="Advance primary",
+                    ),
+                ),
+                api_response(200, commit(BASE, parents=(), message="Base")),
+                api_response(200, ref(HEAD, "mgb/op-42")),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                phase="reconcile",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                    "title": "Candidate 42",
+                    "body": "Bounded summary.",
+                    "draft": False,
+                    "expected_secondary_effects": [],
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(response.receipt.result["schema_version"], 2)
+        self.assertEqual(response.receipt.result["first_parent_status"], "absent")
+        self.assertNotIn("landing_revision_reachable", response.receipt.result)
+        self.assertNotIn("merge_method", response.receipt.result)
+        self.assertEqual(response.receipt.result["landing_parent_revisions"], [BASE])
+
+    def test_landing_v2_reports_closure_and_auto_deleted_head_effects(self) -> None:
+        issue_identity = "github:github.com/acme/widgets/issues/12"
+        api = FakeGitHubAPI(
+            [
+                api_response(200, pull(state="closed", merged=True)),
+                api_response(200, ref(MERGED)),
+                api_response(200, interpreted_effects(("acme/widgets", 12))),
+                api_response(200, commit(MERGED)),
+                api_response(404, {"message": "missing"}),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                phase="reconcile",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                    "title": "Candidate 42",
+                    "body": "Bounded summary.",
+                    "draft": False,
+                    "expected_secondary_effects": [],
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(
+            response.receipt.result["closure_references"], [issue_identity]
+        )
+        self.assertEqual(
+            response.receipt.result["secondary_effects"],
+            [
+                f"issue.close:{issue_identity}",
+                "ref.delete:refs/heads/mgb/op-42",
+            ],
+        )
+        self.assertEqual(response.receipt.result["first_parent_status"], "contains")
+
+    def test_landing_v2_bounds_first_parent_observation(self) -> None:
+        chain = tuple(f"{index + 1000:040x}" for index in range(129))
+        responses = [
+            api_response(200, pull(state="closed", merged=True, base_sha=chain[0])),
+            api_response(200, ref(chain[0])),
+            api_response(200, interpreted_effects()),
+            api_response(200, commit(MERGED)),
+            *[
+                api_response(
+                    200,
+                    commit(
+                        chain[index],
+                        parents=(chain[index + 1],),
+                        message=f"Primary commit {index}",
+                    ),
+                )
+                for index in range(128)
+            ],
+            api_response(200, ref(HEAD, "mgb/op-42")),
+        ]
+        api = FakeGitHubAPI(responses)
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                phase="reconcile",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                    "title": "Candidate 42",
+                    "body": "Bounded summary.",
+                    "draft": False,
+                    "expected_secondary_effects": [],
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(response.receipt.result["first_parent_status"], "truncated")
+        commit_calls = [
+            call for call in api.calls if "/git/commits/" in call["endpoint"]
+        ]
+        self.assertEqual(len(commit_calls), 129)
+
     def test_change_open_is_deterministic_and_reconcile_does_not_duplicate(
         self,
     ) -> None:
@@ -1210,6 +1454,193 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(reconciled.outcome, "succeeded")
         self.assertEqual(reconciled.provider_status, 200)
         self.assertEqual(len(reconcile_api.calls), 1)
+
+    def test_change_open_v2_observes_provider_interpreted_closures(self) -> None:
+        created = pull(draft=True)
+        created.pop("merged")
+        identity = "github:github.com/acme/widgets/issues/12"
+        api = FakeGitHubAPI(
+            [
+                api_response(200, []),
+                api_response(200, ref(BASE)),
+                api_response(200, ref(HEAD, "mgb/op-42")),
+                api_response(201, created),
+                api_response(200, created),
+                api_response(200, interpreted_effects(("acme/widgets", 12))),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "change.open",
+                resource_id="refs/heads/mgb/op-42",
+                parameters={
+                    "base_ref": "refs/heads/main",
+                    "body": "Bounded summary.",
+                    "draft": True,
+                    "head_ref": "refs/heads/mgb/op-42",
+                    "title": "Candidate 42",
+                    "expected_secondary_effects": [],
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(response.receipt.result["schema_version"], 2)
+        self.assertEqual(response.receipt.result["closure_references"], [identity])
+        self.assertEqual(
+            response.receipt.result["secondary_effects"],
+            [f"issue.close:{identity}"],
+        )
+        self.assertEqual(api.calls[-1]["endpoint"], "graphql")
+        self.assertEqual(api.calls[-1]["method"], "POST")
+        self.assertEqual(
+            api.calls[-1]["body"],
+            {
+                "query": _PULL_EFFECTS_QUERY,
+                "variables": {"name": "widgets", "number": 42, "owner": "acme"},
+            },
+        )
+
+    def test_change_open_v2_rejects_unbounded_or_ambiguous_effect_observation(
+        self,
+    ) -> None:
+        created = pull(draft=True)
+        created.pop("merged")
+        operation = request(
+            self.socket_path,
+            "change.open",
+            phase="reconcile",
+            resource_id="refs/heads/mgb/op-42",
+            parameters={
+                "base_ref": "refs/heads/main",
+                "body": "Bounded summary.",
+                "draft": True,
+                "head_ref": "refs/heads/mgb/op-42",
+                "title": "Candidate 42",
+                "expected_secondary_effects": [],
+            },
+        )
+        duplicated = interpreted_effects(("acme/widgets", 12), ("acme/widgets", 12))
+        paginated = interpreted_effects()
+        paginated["data"]["repository"]["pullRequest"]["closingIssuesReferences"][
+            "pageInfo"
+        ]["hasNextPage"] = True
+        oversized = interpreted_effects(
+            *(("acme/widgets", number) for number in range(1, 66))
+        )
+        errored = {
+            **interpreted_effects(),
+            "errors": [{"message": "private upstream diagnostic"}],
+        }
+
+        for observed in (duplicated, paginated, oversized, errored):
+            with self.subTest(observed=observed):
+                response = GitHubProvider(
+                    self.spec,
+                    FakeGitHubAPI(
+                        [api_response(200, [created]), api_response(200, observed)]
+                    ),
+                ).invoke(operation)
+                self.assertEqual(response.outcome, "denied")
+                self.assertIsNone(response.receipt)
+
+    def test_change_open_v2_effect_observation_has_exact_collection_and_node_bounds(
+        self,
+    ) -> None:
+        created = pull(draft=True)
+        created.pop("merged")
+        operation = request(
+            self.socket_path,
+            "change.open",
+            phase="reconcile",
+            resource_id="refs/heads/mgb/op-42",
+            parameters={
+                "base_ref": "refs/heads/main",
+                "body": "Bounded summary.",
+                "draft": True,
+                "head_ref": "refs/heads/mgb/op-42",
+                "title": "Candidate 42",
+                "expected_secondary_effects": [],
+            },
+        )
+        exact_limit = interpreted_effects(
+            *(("acme/widgets", number) for number in range(1, 65))
+        )
+        accepted = GitHubProvider(
+            self.spec,
+            FakeGitHubAPI(
+                [api_response(200, [created]), api_response(200, exact_limit)]
+            ),
+        ).invoke(operation)
+        self.assertEqual(accepted.outcome, "succeeded")
+        self.assertEqual(len(accepted.receipt.result["closure_references"]), 64)
+
+        malformed = []
+        for field, replacement in (
+            ("number", "12"),
+            ("number", 10_000_000_000),
+        ):
+            document = interpreted_effects(("acme/widgets", 12))
+            node = document["data"]["repository"]["pullRequest"][
+                "closingIssuesReferences"
+            ]["nodes"][0]
+            node[field] = replacement
+            malformed.append(document)
+        non_string_repository = interpreted_effects(("acme/widgets", 12))
+        non_string_repository["data"]["repository"]["pullRequest"][
+            "closingIssuesReferences"
+        ]["nodes"][0]["repository"]["nameWithOwner"] = 12
+        malformed.append(non_string_repository)
+        extra_repository_field = interpreted_effects(("acme/widgets", 12))
+        extra_repository_field["data"]["repository"]["pullRequest"][
+            "closingIssuesReferences"
+        ]["nodes"][0]["repository"]["extra"] = "ambiguous"
+        malformed.append(extra_repository_field)
+
+        for observed in malformed:
+            with self.subTest(observed=observed):
+                denied = GitHubProvider(
+                    self.spec,
+                    FakeGitHubAPI(
+                        [
+                            api_response(200, [copy.deepcopy(created)]),
+                            api_response(200, observed),
+                        ]
+                    ),
+                ).invoke(operation)
+                self.assertEqual(denied.outcome, "denied")
+                self.assertIsNone(denied.receipt)
+
+    def test_landing_effect_preflight_failure_remains_retry_safe(self) -> None:
+        response = GitHubProvider(
+            self.spec,
+            FakeGitHubAPI(
+                [
+                    api_response(200, pull()),
+                    api_response(200, ref(BASE)),
+                    api_response(503, {}),
+                ]
+            ),
+        ).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                    "title": "Candidate 42",
+                    "body": "Bounded summary.",
+                    "draft": False,
+                    "expected_secondary_effects": [],
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "retryable")
+        self.assertEqual(response.error_code, "github-upstream-unavailable")
 
     def test_change_open_preserves_an_explicit_empty_body(self) -> None:
         created = pull(body="")

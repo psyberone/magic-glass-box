@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from magic_glass_box.domain import canonical_json, content_sha256
 from magic_glass_box.github_provider import (
+    _PULL_EFFECTS_QUERY,
     GitHubAPIResponse,
     GitHubProvider,
     GitHubProviderError,
@@ -274,6 +275,128 @@ class GitHubProviderCLITests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", call["env"])
         self.assertEqual(call["env"]["GH_CONFIG_DIR"], str(self.config_dir.resolve()))
         self.assertNotIn(b"secret-bearing", canonical_json(response.body).encode())
+
+    def test_api_transport_allows_only_the_fixed_read_only_graphql_query(
+        self,
+    ) -> None:
+        body = {
+            "query": _PULL_EFFECTS_QUERY,
+            "variables": {"name": "widgets", "number": 42, "owner": "acme"},
+        }
+        runner = FakeRunner(
+            [
+                GitHubCommandResult(
+                    returncode=0,
+                    stdout=included(200, {"data": {"repository": None}}),
+                    stderr=b"",
+                )
+            ]
+        )
+
+        response = self.client(runner).request(
+            "POST",
+            host="github.com",
+            endpoint="graphql",
+            body=body,
+            deadline="2099-01-01T00:00:00.000000+00:00",
+            response_limit_bytes=4096,
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(runner.calls[0]["argv"][-1], "graphql")
+        self.assertEqual(runner.calls[0]["stdin"], canonical_json(body).encode())
+
+        invalid = (
+            ("GET", body),
+            ("POST", None),
+            ("POST", []),
+            ("POST", {**body, "query": "mutation { deleteProjectV2 }"}),
+            ("POST", {**body, "variables": {"owner": "acme"}}),
+            (
+                "POST",
+                {**body, "variables": ["name", "number", "owner"]},
+            ),
+            (
+                "POST",
+                {**body, "variables": {"name": ".", "number": 42, "owner": "acme"}},
+            ),
+            (
+                "POST",
+                {**body, "variables": {"name": "..", "number": 42, "owner": "acme"}},
+            ),
+            (
+                "POST",
+                {**body, "variables": {"name": "widgets", "number": 42, "owner": "."}},
+            ),
+            (
+                "POST",
+                {**body, "variables": {"name": "widgets", "number": 42, "owner": ".."}},
+            ),
+            (
+                "POST",
+                {
+                    **body,
+                    "variables": {"name": "widgets", "number": True, "owner": "acme"},
+                },
+            ),
+            (
+                "POST",
+                {
+                    **body,
+                    "variables": {"name": "widgets", "number": "42", "owner": "acme"},
+                },
+            ),
+        )
+        for method, invalid_body in invalid:
+            with (
+                self.subTest(method=method, body=invalid_body),
+                self.assertRaises(GitHubTransportError),
+            ):
+                self.client(FakeRunner([])).request(
+                    method,
+                    host="github.com",
+                    endpoint="graphql",
+                    body=invalid_body,
+                    deadline="2099-01-01T00:00:00.000000+00:00",
+                    response_limit_bytes=4096,
+                )
+
+    def test_fixed_graphql_transport_failure_is_never_effect_ambiguous(self) -> None:
+        body = {
+            "query": _PULL_EFFECTS_QUERY,
+            "variables": {"name": "widgets", "number": 42, "owner": "acme"},
+        }
+        client = self.client(
+            FakeRunner([BoundedCommandError("private", dispatched=True)])
+        )
+
+        with self.assertRaises(GitHubTransportError) as captured:
+            client.request(
+                "POST",
+                host="github.com",
+                endpoint="graphql",
+                body=body,
+                deadline="2099-01-01T00:00:00.000000+00:00",
+                response_limit_bytes=4096,
+            )
+
+        self.assertFalse(captured.exception.ambiguous)
+
+        malformed = self.client(
+            FakeRunner(
+                [GitHubCommandResult(returncode=0, stdout=b"not HTTP", stderr=b"")]
+            )
+        )
+        with self.assertRaises(GitHubTransportError) as malformed_capture:
+            malformed.request(
+                "POST",
+                host="github.com",
+                endpoint="graphql",
+                body=body,
+                deadline="2099-01-01T00:00:00.000000+00:00",
+                response_limit_bytes=4096,
+            )
+        self.assertFalse(malformed_capture.exception.ambiguous)
 
     def test_api_transport_rejects_unbounded_inputs_and_redacts_failures(self) -> None:
         client = self.client(FakeRunner([]))

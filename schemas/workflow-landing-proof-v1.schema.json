@@ -31,12 +31,14 @@
     "status": { "enum": ["conformant", "mismatch", "uncertain"] },
     "reasons": {
       "type": "array",
-      "maxItems": 8,
+      "maxItems": 12,
       "uniqueItems": true,
       "items": {
         "enum": [
           "authoritative_readback_missing", "candidate_revision_mismatch",
-          "landing_revision_unreachable", "landing_tree_mismatch",
+          "landing_commit_message_mismatch", "landing_first_parent_absent",
+          "landing_first_parent_truncated", "landing_parent_mismatch",
+          "landing_readback_version_unproved", "landing_tree_mismatch",
           "merge_method_mismatch", "merge_method_unproved", "primary_ref_mismatch",
           "primary_revision_mismatch", "unexpected_secondary_effects"
         ]

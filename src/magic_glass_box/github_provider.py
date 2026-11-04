@@ -59,7 +59,21 @@ MAX_REQUIRED_CHECKS = 64
 MAX_REQUIRED_APPROVALS = 32
 MAX_READ_PAGE_SIZE = 100
 MAX_READ_CURSOR = 10_000
+MAX_FIRST_PARENT_OBSERVATIONS = 128
 DEFAULT_RETRY_SECONDS = 15
+
+_PULL_EFFECTS_QUERY = """
+query MagicGlassBoxPullEffects($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      closingIssuesReferences(first: 65) {
+        nodes { number repository { nameWithOwner } }
+        pageInfo { hasNextPage }
+      }
+    }
+  }
+}
+""".strip()
 
 
 class GitHubProviderError(ValueError):
@@ -323,6 +337,7 @@ class GitHubProvider:
         endpoint: str,
         *,
         body: Mapping[str, Any] | None = None,
+        read_only: bool = False,
     ) -> GitHubAPIResponse:
         request = invocation.request
         raw_body = b"" if body is None else canonical_json(dict(body)).encode("utf-8")
@@ -335,9 +350,9 @@ class GitHubProvider:
         if remaining < 1:
             raise GitHubTransportError(
                 "GitHub response budget is exhausted",
-                ambiguous=method not in {"GET", "HEAD"},
+                ambiguous=method not in {"GET", "HEAD"} and not read_only,
             )
-        effect_call = method not in {"GET", "HEAD"}
+        effect_call = method not in {"GET", "HEAD"} and not read_only
         previously_dispatched = invocation.effect_dispatched
         if effect_call:
             invocation.effect_dispatched = True
@@ -357,14 +372,14 @@ class GitHubProvider:
         if not isinstance(response, GitHubAPIResponse):
             raise GitHubTransportError(
                 "GitHub transport response is invalid",
-                ambiguous=method not in {"GET", "HEAD"},
+                ambiguous=effect_call,
             )
         next_response_bytes = invocation.response_bytes + response.response_bytes
         if next_response_bytes > request.response_limit_bytes:
             invocation.response_bytes = request.response_limit_bytes
             raise GitHubTransportError(
                 "GitHub response budget is exhausted",
-                ambiguous=method not in {"GET", "HEAD"},
+                ambiguous=effect_call,
             )
         invocation.response_bytes = next_response_bytes
         return response
@@ -781,9 +796,16 @@ class GitHubProvider:
         )
 
     def _change_parameters(self, request: ServiceOperationRequest) -> dict[str, Any]:
+        raw_parameters = request.parameters
+        base_fields = {"base_ref", "body", "draft", "head_ref", "title"}
+        observed_fields = base_fields | {"expected_secondary_effects"}
         parameters = _exact_parameters(
-            request.parameters,
-            fields={"base_ref", "body", "draft", "head_ref", "title"},
+            raw_parameters,
+            fields=(
+                observed_fields
+                if set(raw_parameters) == observed_fields
+                else base_fields
+            ),
             capability="change.open",
         )
         base_ref = _branch_ref(parameters["base_ref"], field="base_ref")
@@ -802,6 +824,11 @@ class GitHubProvider:
             raise GitHubProviderError(str(exc)) from exc
         if not isinstance(parameters["draft"], bool):
             raise GitHubProviderError("change.open draft must be a boolean")
+        observe_effects = "expected_secondary_effects" in parameters
+        if observe_effects and parameters["expected_secondary_effects"] != []:
+            raise GitHubProviderError(
+                "change.open expected secondary effects are invalid"
+            )
         if (
             request.target.expected_revision is None
             or request.target.desired_revision is None
@@ -812,6 +839,7 @@ class GitHubProvider:
             "body": body,
             "draft": parameters["draft"],
             "head_ref": head_ref,
+            "observe_effects": observe_effects,
             "title": title,
         }
 
@@ -961,9 +989,23 @@ class GitHubProvider:
         identity = github_remote_identity(
             request.mapping.host, request.mapping.repository, pull["number"]
         )
+        closure_references: tuple[str, ...] = ()
+        secondary_effects: tuple[str, ...] = ()
+        schema_version = 1
+        if parameters["observe_effects"]:
+            observed, failure = self._pull_secondary_effects(
+                invocation,
+                pull["number"],
+                observation_after_effect=True,
+            )
+            if failure is not None:
+                return failure
+            assert observed is not None
+            closure_references, secondary_effects = observed
+            schema_version = 2
         result = ChangeOpenReadback.from_mapping(
             {
-                "schema_version": 1,
+                "schema_version": schema_version,
                 "change_id": str(pull["number"]),
                 "base_ref": parameters["base_ref"],
                 "head_ref": parameters["head_ref"],
@@ -973,7 +1015,12 @@ class GitHubProvider:
                 "body": pull["body"],
                 "draft": pull["draft"],
                 "state": pull["state"],
-                "secondary_effects": [],
+                **(
+                    {"closure_references": list(closure_references)}
+                    if schema_version == 2
+                    else {}
+                ),
+                "secondary_effects": list(secondary_effects),
             }
         )
         return self._success(
@@ -1257,9 +1304,21 @@ class GitHubProvider:
         )
 
     def _landing_parameters(self, request: ServiceOperationRequest) -> dict[str, Any]:
+        raw_parameters = request.parameters
+        base_fields = {"assurance", "integration_ref", "merge_method"}
+        observed_fields = base_fields | {
+            "title",
+            "body",
+            "draft",
+            "expected_secondary_effects",
+        }
         parameters = _exact_parameters(
-            request.parameters,
-            fields={"assurance", "integration_ref", "merge_method"},
+            raw_parameters,
+            fields=(
+                observed_fields
+                if set(raw_parameters) == observed_fields
+                else base_fields
+            ),
             capability="landing.invoke",
         )
         integration_ref = _branch_ref(
@@ -1269,6 +1328,30 @@ class GitHubProvider:
             raise GitHubProviderError("GitHub landing assurance is invalid")
         if parameters["merge_method"] not in {"merge", "rebase", "squash"}:
             raise GitHubProviderError("GitHub merge method is invalid")
+        observe_effects = "expected_secondary_effects" in parameters
+        title: str | None = None
+        body: str | None = None
+        draft: bool | None = None
+        if observe_effects:
+            try:
+                title = require_string(
+                    parameters["title"], field="landing title", max_bytes=512
+                )
+                body = require_string(
+                    parameters["body"],
+                    field="landing body",
+                    max_bytes=32768,
+                    allow_empty=True,
+                )
+            except ValidationError as exc:
+                raise GitHubProviderError(str(exc)) from exc
+            draft = parameters["draft"]
+            if not isinstance(draft, bool):
+                raise GitHubProviderError("GitHub landing draft must be a boolean")
+            if parameters["expected_secondary_effects"] != []:
+                raise GitHubProviderError(
+                    "GitHub landing expected secondary effects are invalid"
+                )
         if (
             request.target.expected_revision is None
             or request.target.desired_revision is None
@@ -1278,6 +1361,10 @@ class GitHubProvider:
             "assurance": "head_enforced",
             "integration_ref": integration_ref,
             "merge_method": parameters["merge_method"],
+            "observe_effects": observe_effects,
+            "title": title,
+            "body": body,
+            "draft": draft,
         }
 
     def _landing(self, invocation: _Invocation) -> ServiceOperationResponse:
@@ -1303,14 +1390,36 @@ class GitHubProvider:
             or observed != request.target.expected_revision
         ):
             return self._landing_settlement(invocation, pull, observed)
+        if parameters["observe_effects"]:
+            observed_effects, failure = self._pull_secondary_effects(
+                invocation, pull["number"]
+            )
+            if failure is not None:
+                return failure
+            assert observed_effects is not None
+            if (
+                pull["title"] != parameters["title"]
+                or pull["body"] != parameters["body"]
+                or pull["draft"] is not parameters["draft"]
+                or observed_effects[1]
+            ):
+                return self._landing_settlement(invocation, pull, observed)
+        merge_body: dict[str, Any] = {
+            "merge_method": parameters["merge_method"],
+            "sha": request.target.desired_revision,
+        }
+        if parameters["observe_effects"]:
+            merge_body.update(
+                {
+                    "commit_title": parameters["title"],
+                    "commit_message": parameters["body"],
+                }
+            )
         merge = self._call(
             invocation,
             "PUT",
             _repository_endpoint(request.mapping.repository, f"pulls/{number}/merge"),
-            body={
-                "merge_method": parameters["merge_method"],
-                "sha": request.target.desired_revision,
-            },
+            body=merge_body,
         )
         if merge.status not in {200, 405, 409, 422}:
             return self._failure_for_response(invocation, merge)
@@ -1365,28 +1474,79 @@ class GitHubProvider:
                 raise GitHubProviderError(
                     "GitHub landed change has no landing revision"
                 )
-            landing_tree, failure = self._get_commit_tree(invocation, landing_revision)
-            if failure is not None:
-                return failure
-            assert landing_tree is not None
-            reachable, failure = self._landing_revision_reachable(
-                invocation,
-                landing_revision=landing_revision,
-                primary_revision=observed_revision,
-            )
-            if failure is not None:
-                return failure
-            assert reachable is not None
             parameters = self._landing_parameters(request)
-            result = LandingReadback.from_mapping(
-                {
+            observed_effects: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+            if parameters["observe_effects"]:
+                observed_effects, failure = self._pull_secondary_effects(
+                    invocation,
+                    pull["number"],
+                    observation_after_effect=True,
+                )
+                if failure is not None:
+                    return failure
+                assert observed_effects is not None
+            landing_commit, failure = self._get_commit(invocation, landing_revision)
+            if failure is not None:
+                return failure
+            assert landing_commit is not None
+            if parameters["observe_effects"]:
+                first_parent_status, failure = self._first_parent_status(
+                    invocation,
+                    landing_revision=landing_revision,
+                    primary_revision=observed_revision,
+                )
+                if failure is not None:
+                    return failure
+                assert first_parent_status is not None
+                assert observed_effects is not None
+                closure_references, secondary_effects = observed_effects
+                head_revision, failure = self._get_optional_ref(
+                    invocation,
+                    "refs/heads/" + pull["head_ref"],
+                    observation_after_effect=True,
+                )
+                if failure is not None:
+                    return failure
+                effects = list(secondary_effects)
+                if head_revision is None:
+                    effects.append("ref.delete:refs/heads/" + pull["head_ref"])
+                result_value = {
+                    "schema_version": 2,
+                    "change_id": str(pull["number"]),
+                    "base_ref": parameters["integration_ref"],
+                    "head_ref": "refs/heads/" + pull["head_ref"],
+                    "candidate_revision": pull["head_sha"],
+                    "landing_revision": landing_revision,
+                    "landing_tree": landing_commit["tree"],
+                    "landing_parent_revisions": list(landing_commit["parents"]),
+                    "landing_commit_message": landing_commit["message"],
+                    "primary_ref": parameters["integration_ref"],
+                    "primary_revision": observed_revision,
+                    "first_parent_status": first_parent_status,
+                    "title": pull["title"],
+                    "body": pull["body"],
+                    "draft": pull["draft"],
+                    "state": pull["state"],
+                    "closure_references": list(closure_references),
+                    "secondary_effects": sorted(effects),
+                }
+            else:
+                reachable, failure = self._landing_revision_reachable(
+                    invocation,
+                    landing_revision=landing_revision,
+                    primary_revision=observed_revision,
+                )
+                if failure is not None:
+                    return failure
+                assert reachable is not None
+                result_value = {
                     "schema_version": 1,
                     "change_id": str(pull["number"]),
                     "base_ref": parameters["integration_ref"],
                     "head_ref": "refs/heads/" + pull["head_ref"],
                     "candidate_revision": pull["head_sha"],
                     "landing_revision": landing_revision,
-                    "landing_tree": landing_tree,
+                    "landing_tree": landing_commit["tree"],
                     "primary_ref": parameters["integration_ref"],
                     "primary_revision": observed_revision,
                     "landing_revision_reachable": reachable,
@@ -1397,7 +1557,7 @@ class GitHubProvider:
                     "state": pull["state"],
                     "secondary_effects": [],
                 }
-            ).to_dict()
+            result = LandingReadback.from_mapping(result_value).to_dict()
         return self._success(
             invocation,
             provider_status=200,
@@ -1408,9 +1568,9 @@ class GitHubProvider:
             result=result,
         )
 
-    def _get_commit_tree(
+    def _get_commit(
         self, invocation: _Invocation, revision: str
-    ) -> tuple[str | None, ServiceOperationResponse | None]:
+    ) -> tuple[dict[str, Any] | None, ServiceOperationResponse | None]:
         response = self._call(
             invocation,
             "GET",
@@ -1425,13 +1585,56 @@ class GitHubProvider:
         document = _object(response.body, subject="commit")
         tree = _object(document.get("tree"), subject="commit tree")
         tree_revision = tree.get("sha")
+        raw_parents = _array(document.get("parents"), subject="commit parents")
+        message = document.get("message")
         if (
             document.get("sha") != revision
             or not isinstance(tree_revision, str)
             or re.fullmatch(r"[0-9a-f]{40}", tree_revision) is None
+            or not isinstance(message, str)
+            or not message
+            or len(message.encode("utf-8")) > 65536
+            or len(raw_parents) > 16
         ):
             raise GitHubProviderError("GitHub commit response is invalid")
-        return tree_revision, None
+        parents: list[str] = []
+        for raw_parent in raw_parents:
+            parent = _object(raw_parent, subject="commit parent").get("sha")
+            if (
+                not isinstance(parent, str)
+                or GIT_OBJECT_ID_RE.fullmatch(parent) is None
+                or parent in parents
+            ):
+                raise GitHubProviderError("GitHub commit response is invalid")
+            parents.append(parent)
+        return {
+            "tree": tree_revision,
+            "parents": tuple(parents),
+            "message": message,
+        }, None
+
+    def _first_parent_status(
+        self,
+        invocation: _Invocation,
+        *,
+        landing_revision: str,
+        primary_revision: str,
+    ) -> tuple[str | None, ServiceOperationResponse | None]:
+        if landing_revision == primary_revision:
+            return "contains", None
+        revision = primary_revision
+        for _ in range(MAX_FIRST_PARENT_OBSERVATIONS):
+            commit, failure = self._get_commit(invocation, revision)
+            if failure is not None:
+                return None, failure
+            assert commit is not None
+            parents = commit["parents"]
+            if not parents:
+                return "absent", None
+            revision = parents[0]
+            if revision == landing_revision:
+                return "contains", None
+        return "truncated", None
 
     def _landing_revision_reachable(
         self,
@@ -1465,6 +1668,94 @@ class GitHubProvider:
             raise GitHubProviderError("GitHub comparison response is invalid")
         return (
             status in {"ahead", "identical"} and merge_base["sha"] == landing_revision
+        ), None
+
+    def _pull_secondary_effects(
+        self,
+        invocation: _Invocation,
+        number: int,
+        *,
+        observation_after_effect: bool = False,
+    ) -> tuple[
+        tuple[tuple[str, ...], tuple[str, ...]] | None,
+        ServiceOperationResponse | None,
+    ]:
+        owner, name = invocation.request.mapping.repository.split("/", 1)
+        response = self._call(
+            invocation,
+            "POST",
+            "graphql",
+            body={
+                "query": _PULL_EFFECTS_QUERY,
+                "variables": {"name": name, "number": number, "owner": owner},
+            },
+            read_only=True,
+        )
+        if response.status != 200:
+            return None, self._failure_for_response(
+                invocation,
+                response,
+                observation_after_effect=observation_after_effect,
+            )
+        document = _object(response.body, subject="pull effects")
+        if set(document) != {"data"}:
+            raise GitHubProviderError("GitHub pull effects response is invalid")
+        data = _object(document.get("data"), subject="pull effects data")
+        if set(data) != {"repository"}:
+            raise GitHubProviderError("GitHub pull effects response is invalid")
+        repository = _object(data.get("repository"), subject="pull effects repository")
+        if set(repository) != {"pullRequest"}:
+            raise GitHubProviderError("GitHub pull effects response is invalid")
+        pull = _object(
+            repository.get("pullRequest"), subject="pull effects pull request"
+        )
+        if set(pull) != {"closingIssuesReferences"}:
+            raise GitHubProviderError("GitHub pull effects response is invalid")
+        references = _object(
+            pull.get("closingIssuesReferences"),
+            subject="pull effects closure references",
+        )
+        if set(references) != {"nodes", "pageInfo"}:
+            raise GitHubProviderError("GitHub pull effects response is invalid")
+        nodes = _array(references.get("nodes"), subject="pull effects nodes")
+        page_info = _object(
+            references.get("pageInfo"), subject="pull effects page information"
+        )
+        if (
+            set(page_info) != {"hasNextPage"}
+            or page_info.get("hasNextPage") is not False
+            or len(nodes) > 64
+        ):
+            raise GitHubProviderError("GitHub pull effects response is invalid")
+        closure_references: list[str] = []
+        for raw_node in nodes:
+            node = _object(raw_node, subject="pull effects closure reference")
+            if set(node) != {"number", "repository"}:
+                raise GitHubProviderError("GitHub pull effects response is invalid")
+            issue_number = node.get("number")
+            issue_repository = _object(
+                node.get("repository"), subject="pull effects issue repository"
+            )
+            repository_name = issue_repository.get("nameWithOwner")
+            if (
+                set(issue_repository) != {"nameWithOwner"}
+                or isinstance(issue_number, bool)
+                or not isinstance(issue_number, int)
+                or PULL_NUMBER_RE.fullmatch(str(issue_number)) is None
+                or not isinstance(repository_name, str)
+                or GITHUB_REPOSITORY_RE.fullmatch(repository_name) is None
+            ):
+                raise GitHubProviderError("GitHub pull effects response is invalid")
+            closure_references.append(
+                f"github:{invocation.request.mapping.host}/"
+                f"{repository_name}/issues/{issue_number}"
+            )
+        if len(set(closure_references)) != len(closure_references):
+            raise GitHubProviderError("GitHub pull effects response is ambiguous")
+        normalized = tuple(sorted(closure_references))
+        return (
+            normalized,
+            tuple(f"issue.close:{reference}" for reference in normalized),
         ), None
 
     def _get_pull(

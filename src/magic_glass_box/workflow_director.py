@@ -513,6 +513,11 @@ class WorkflowDirector:
                     return False
                 if effect["state"] in {"failed", "uncertain"}:
                     return False
+                if (
+                    effect["state"] == "confirmed"
+                    and effect["conforms_intent"] is not True
+                ):
+                    return False
                 if effect["state"] == "pending":
                     operation = self.database.get_service_operation(
                         effect["service_operation_id"]

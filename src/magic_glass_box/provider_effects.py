@@ -9,11 +9,13 @@ from .domain import ValidationError, canonical_json, content_sha256, require_str
 from .git_refs import normalize_branch_ref
 
 PROVIDER_EFFECT_READBACK_SCHEMA_VERSION = 1
+OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION = 2
 MAX_SECONDARY_EFFECTS = 64
 
 _CHANGE_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 _OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SECONDARY_EFFECT_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,31}:[^\s]{1,223}$")
+_REMOTE_REFERENCE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,31}:[^\s]{1,223}$")
 _WORKFLOW_INTENT_ID_PATTERNS = {
     "project_id": re.compile(r"^boxp_[0-9a-f]{32}$"),
     "work_item_id": re.compile(r"^wki_[0-9a-f]{32}$"),
@@ -44,13 +46,15 @@ def _document(value: object, *, subject: str) -> Mapping[str, Any]:
     return value
 
 
-def _schema_version(value: object, *, subject: str) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value != PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
-    ):
-        raise ValidationError(f"{subject} schema_version must be 1")
+def _schema_version(
+    value: object,
+    *,
+    subject: str,
+    supported: frozenset[int] = frozenset({PROVIDER_EFFECT_READBACK_SCHEMA_VERSION}),
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in supported:
+        versions = " or ".join(str(item) for item in sorted(supported))
+        raise ValidationError(f"{subject} schema_version must be {versions}")
     return value
 
 
@@ -84,6 +88,38 @@ def _secondary_effects(value: object) -> tuple[str, ...]:
     if len(set(effects)) != len(effects):
         raise ValidationError("provider secondary_effects must be unique")
     return effects
+
+
+def _closure_references(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > MAX_SECONDARY_EFFECTS:
+        raise ValidationError(
+            "provider closure_references must contain at most 64 entries"
+        )
+    references = tuple(
+        _identifier(
+            item,
+            field="provider closure reference",
+            pattern=_REMOTE_REFERENCE_RE,
+        )
+        for item in value
+    )
+    if len(set(references)) != len(references):
+        raise ValidationError("provider closure_references must be unique")
+    return references
+
+
+def _validate_closure_effects(
+    closure_references: tuple[str, ...], secondary_effects: tuple[str, ...]
+) -> None:
+    observed = {
+        effect.removeprefix("issue.close:")
+        for effect in secondary_effects
+        if effect.startswith("issue.close:")
+    }
+    if observed != set(closure_references):
+        raise ValidationError(
+            "provider closure references do not match secondary effects"
+        )
 
 
 @dataclass(frozen=True)
@@ -253,27 +289,41 @@ class ChangeOpenReadback:
     body: str
     draft: bool
     state: str
+    closure_references: tuple[str, ...]
     secondary_effects: tuple[str, ...]
 
     @classmethod
     def from_mapping(cls, value: object) -> ChangeOpenReadback:
         subject = "change-open readback"
         document = _document(value, subject=subject)
+        schema_version = _schema_version(
+            document.get("schema_version"),
+            subject=subject,
+            supported=frozenset(
+                {
+                    PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
+                    OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
+                }
+            ),
+        )
+        expected = {
+            "schema_version",
+            "change_id",
+            "base_ref",
+            "head_ref",
+            "base_revision",
+            "head_revision",
+            "title",
+            "body",
+            "draft",
+            "state",
+            "secondary_effects",
+        }
+        if schema_version == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            expected.add("closure_references")
         _exact_fields(
             document,
-            expected={
-                "schema_version",
-                "change_id",
-                "base_ref",
-                "head_ref",
-                "base_revision",
-                "head_revision",
-                "title",
-                "body",
-                "draft",
-                "state",
-                "secondary_effects",
-            },
+            expected=expected,
             subject=subject,
         )
         draft = document["draft"]
@@ -282,8 +332,16 @@ class ChangeOpenReadback:
         state = document["state"]
         if state not in {"open", "closed"}:
             raise ValidationError("change-open state is invalid")
+        closure_references = (
+            _closure_references(document["closure_references"])
+            if schema_version == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
+            else ()
+        )
+        secondary_effects = _secondary_effects(document["secondary_effects"])
+        if schema_version == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            _validate_closure_effects(closure_references, secondary_effects)
         return cls(
-            schema_version=_schema_version(document["schema_version"], subject=subject),
+            schema_version=schema_version,
             change_id=_identifier(
                 document["change_id"],
                 field="change-open change_id",
@@ -308,11 +366,12 @@ class ChangeOpenReadback:
             ),
             draft=draft,
             state=state,
-            secondary_effects=_secondary_effects(document["secondary_effects"]),
+            closure_references=closure_references,
+            secondary_effects=secondary_effects,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "change_id": self.change_id,
             "base_ref": self.base_ref,
@@ -325,6 +384,9 @@ class ChangeOpenReadback:
             "state": self.state,
             "secondary_effects": list(self.secondary_effects),
         }
+        if self.schema_version == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            result["closure_references"] = list(self.closure_references)
+        return result
 
 
 @dataclass(frozen=True)
@@ -336,58 +398,131 @@ class LandingReadback:
     candidate_revision: str
     landing_revision: str
     landing_tree: str
+    landing_parent_revisions: tuple[str, ...]
+    landing_commit_message: str
     primary_ref: str
     primary_revision: str
-    landing_revision_reachable: bool
-    merge_method: str
+    first_parent_status: str
     title: str
     body: str
     draft: bool
     state: str
+    closure_references: tuple[str, ...]
     secondary_effects: tuple[str, ...]
+    _legacy_landing_revision_reachable: bool | None = None
+    _legacy_merge_method: str | None = None
 
     @classmethod
     def from_mapping(cls, value: object) -> LandingReadback:
         subject = "landing readback"
         document = _document(value, subject=subject)
+        schema_version = _schema_version(
+            document.get("schema_version"),
+            subject=subject,
+            supported=frozenset(
+                {
+                    PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
+                    OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
+                }
+            ),
+        )
+        common = {
+            "schema_version",
+            "change_id",
+            "base_ref",
+            "head_ref",
+            "candidate_revision",
+            "landing_revision",
+            "landing_tree",
+            "primary_ref",
+            "primary_revision",
+            "title",
+            "body",
+            "draft",
+            "state",
+            "secondary_effects",
+        }
+        if schema_version == PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            expected = common | {"landing_revision_reachable", "merge_method"}
+        else:
+            expected = common | {
+                "landing_parent_revisions",
+                "landing_commit_message",
+                "first_parent_status",
+                "closure_references",
+            }
         _exact_fields(
             document,
-            expected={
-                "schema_version",
-                "change_id",
-                "base_ref",
-                "head_ref",
-                "candidate_revision",
-                "landing_revision",
-                "landing_tree",
-                "primary_ref",
-                "primary_revision",
-                "landing_revision_reachable",
-                "merge_method",
-                "title",
-                "body",
-                "draft",
-                "state",
-                "secondary_effects",
-            },
+            expected=expected,
             subject=subject,
         )
-        reachable = document["landing_revision_reachable"]
-        if not isinstance(reachable, bool):
-            raise ValidationError(
-                "landing readback landing_revision_reachable must be a boolean"
-            )
-        merge_method = document["merge_method"]
-        if merge_method not in {"merge", "rebase", "squash"}:
-            raise ValidationError("landing readback merge_method is invalid")
+        legacy_reachable: bool | None = None
+        legacy_merge_method: str | None = None
+        if schema_version == PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            legacy_reachable = document["landing_revision_reachable"]
+            if not isinstance(legacy_reachable, bool):
+                raise ValidationError(
+                    "landing readback landing_revision_reachable must be a boolean"
+                )
+            legacy_merge_method = document["merge_method"]
+            if legacy_merge_method not in {"merge", "rebase", "squash"}:
+                raise ValidationError("landing readback merge_method is invalid")
         draft = document["draft"]
         if not isinstance(draft, bool):
             raise ValidationError("landing readback draft must be a boolean")
         state = document["state"]
         if state not in {"open", "closed"}:
             raise ValidationError("landing readback state is invalid")
+        if (
+            schema_version == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION
+            and state != "closed"
+        ):
+            raise ValidationError("landing readback v2 state must be closed")
+        landing_revision = _revision(
+            document["landing_revision"], field="landing landing_revision"
+        )
+        primary_revision = _revision(
+            document["primary_revision"], field="landing primary_revision"
+        )
+        if schema_version == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            raw_parents = document["landing_parent_revisions"]
+            if not isinstance(raw_parents, list) or not 1 <= len(raw_parents) <= 16:
+                raise ValidationError(
+                    "landing readback parent revisions must contain 1 to 16 entries"
+                )
+            landing_parent_revisions = tuple(
+                _revision(item, field="landing parent revision") for item in raw_parents
+            )
+            if len(set(landing_parent_revisions)) != len(landing_parent_revisions):
+                raise ValidationError(
+                    "landing readback parent revisions must be unique"
+                )
+            landing_commit_message = require_string(
+                document["landing_commit_message"],
+                field="landing commit message",
+                max_bytes=65536,
+            )
+            first_parent_status = document["first_parent_status"]
+            if first_parent_status not in {"contains", "absent", "truncated"}:
+                raise ValidationError("landing readback first_parent_status is invalid")
+            if (
+                landing_revision == primary_revision
+                and first_parent_status != "contains"
+            ):
+                raise ValidationError(
+                    "landing readback primary revision contradicts first-parent status"
+                )
+            closure_references = _closure_references(document["closure_references"])
+        else:
+            landing_parent_revisions = ()
+            landing_commit_message = ""
+            first_parent_status = "contains" if legacy_reachable else "absent"
+            closure_references = ()
+        secondary_effects = _secondary_effects(document["secondary_effects"])
+        if schema_version == OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            _validate_closure_effects(closure_references, secondary_effects)
         return cls(
-            schema_version=_schema_version(document["schema_version"], subject=subject),
+            schema_version=schema_version,
             change_id=_identifier(
                 document["change_id"], field="landing change_id", pattern=_CHANGE_ID_RE
             ),
@@ -397,20 +532,17 @@ class LandingReadback:
                 document["candidate_revision"],
                 field="landing candidate_revision",
             ),
-            landing_revision=_revision(
-                document["landing_revision"], field="landing landing_revision"
-            ),
+            landing_revision=landing_revision,
             landing_tree=_revision(
                 document["landing_tree"], field="landing landing_tree"
             ),
+            landing_parent_revisions=landing_parent_revisions,
+            landing_commit_message=landing_commit_message,
             primary_ref=_branch_ref(
                 document["primary_ref"], field="landing primary_ref"
             ),
-            primary_revision=_revision(
-                document["primary_revision"], field="landing primary_revision"
-            ),
-            landing_revision_reachable=reachable,
-            merge_method=merge_method,
+            primary_revision=primary_revision,
+            first_parent_status=first_parent_status,
             title=require_string(
                 document["title"], field="landing title", max_bytes=512
             ),
@@ -422,11 +554,14 @@ class LandingReadback:
             ),
             draft=draft,
             state=state,
-            secondary_effects=_secondary_effects(document["secondary_effects"]),
+            closure_references=closure_references,
+            secondary_effects=secondary_effects,
+            _legacy_landing_revision_reachable=legacy_reachable,
+            _legacy_merge_method=legacy_merge_method,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "change_id": self.change_id,
             "base_ref": self.base_ref,
@@ -436,11 +571,28 @@ class LandingReadback:
             "landing_tree": self.landing_tree,
             "primary_ref": self.primary_ref,
             "primary_revision": self.primary_revision,
-            "landing_revision_reachable": self.landing_revision_reachable,
-            "merge_method": self.merge_method,
             "title": self.title,
             "body": self.body,
             "draft": self.draft,
             "state": self.state,
             "secondary_effects": list(self.secondary_effects),
         }
+        if self.schema_version == PROVIDER_EFFECT_READBACK_SCHEMA_VERSION:
+            result.update(
+                {
+                    "landing_revision_reachable": (
+                        self._legacy_landing_revision_reachable
+                    ),
+                    "merge_method": self._legacy_merge_method,
+                }
+            )
+        else:
+            result.update(
+                {
+                    "landing_parent_revisions": list(self.landing_parent_revisions),
+                    "landing_commit_message": self.landing_commit_message,
+                    "first_parent_status": self.first_parent_status,
+                    "closure_references": list(self.closure_references),
+                }
+            )
+        return result

@@ -28,6 +28,9 @@ from magic_glass_box.domain import (
     WorkItemEnvelope,
 )
 from magic_glass_box.krab import KrabIdentity
+from magic_glass_box.storage.schema import (
+    WORKFLOW_PROVIDER_EFFECT_CONFORMANCE_SCHEMA,
+)
 
 
 class DatabaseTests(unittest.TestCase):
@@ -174,6 +177,40 @@ class DatabaseTests(unittest.TestCase):
             connection.close()
 
         self.assertEqual(self.database.status()["schema_version"], SCHEMA_VERSION)
+
+    def test_provider_effect_conformance_migration_never_upgrades_unobserved_change(
+        self,
+    ) -> None:
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.execute(
+            "CREATE TABLE workflow_provider_effects ("
+            "capability_name TEXT NOT NULL, state TEXT NOT NULL) STRICT"
+        )
+        connection.executemany(
+            "INSERT INTO workflow_provider_effects VALUES (?, ?)",
+            (
+                ("refs.publish", "confirmed"),
+                ("change.open", "confirmed"),
+                ("change.open", "uncertain"),
+            ),
+        )
+
+        Database._execute_statements(
+            connection, WORKFLOW_PROVIDER_EFFECT_CONFORMANCE_SCHEMA
+        )
+
+        self.assertEqual(
+            connection.execute(
+                "SELECT capability_name, state, conforms_intent "
+                "FROM workflow_provider_effects ORDER BY rowid"
+            ).fetchall(),
+            [
+                ("refs.publish", "confirmed", 1),
+                ("change.open", "confirmed", 0),
+                ("change.open", "uncertain", None),
+            ],
+        )
 
     def test_concurrent_initializers_converge_on_one_current_schema(self) -> None:
         path = Path(self.temporary.name) / "concurrent-control-plane.db"

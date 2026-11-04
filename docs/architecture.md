@@ -252,8 +252,9 @@ project-activity projection.
   controllers, capabilities, resource limits, manual wakes, owner authority,
   and merge method. Schema v48 translates the activated landing intent through
   pinned `refs.publish` and `change.open` operations, derives the provider
-  target only from confirmed normalized read-back, and requires an exact
-  squash tree/reachability proof before workflow completion. Missing or
+  target only from confirmed conformant normalized read-back, and requires an
+  exact squash tree, parent, message, and first-parent-chain proof before
+  workflow completion. Missing or
   mismatched landing evidence holds the integration target for its activation
   owner instead of becoming inferred success.
   Schema v49 requires a separate owner-authored closeout declaration and an
@@ -261,6 +262,12 @@ project-activity projection.
   receipt closure, and secondary-effect absence all agree. Deadline-bearing
   follow-up obligations retain their already-passing baseline evidence and
   remain visible as `closed, N open`; they do not weaken the gate.
+- Schema v51 separates a provider fact's durable confirmation from its
+  conformance with portable intent. Activated change-open and landing read-back
+  v2 retain observed closure effects, commit parents and message, and bounded
+  first-parent status. Only a confirmed conformant change fact may derive a
+  target; squash proof requires exact tree, base parent, commit message,
+  first-parent membership, and no undeclared side effect.
 - Schemas v32-v35 generalize immutable role bindings and add the bounded
   `discovery-v1` configuration, evidence ledger, and restart-safe director.
   Investigator and coordinator runs remain read-only; a `GO`, `NO_GO`, or
