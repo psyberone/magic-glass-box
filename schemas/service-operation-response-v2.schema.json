@@ -80,6 +80,43 @@
       ]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "succeeded" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "provider_status": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 299
+          },
+          "error_code": { "type": "null" },
+          "retry_after_seconds": { "type": "null" },
+          "receipt": { "$ref": "#/$defs/receipt" }
+        }
+      },
+      "else": {
+        "properties": {
+          "error_code": { "type": "string" },
+          "receipt": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": { "enum": ["retryable", "throttled"] }
+        },
+        "required": ["outcome"]
+      },
+      "else": {
+        "properties": { "retry_after_seconds": { "type": "null" } }
+      }
+    }
+  ],
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },

@@ -1,8 +1,9 @@
 PYTHON ?= .venv/bin/python
+UV ?= uv
 MUTMUT ?= "$(PYTHON)" scripts/run_mutmut.py
 MUTMUT_RUN_ARGS ?= --max-children 4
 
-.PHONY: test lint coverage mutation mutation-clean quality candidate-test gate-test integration-test service-sidecar-test live-supervisor
+.PHONY: test lint coverage mutation mutation-clean quality dependency-lock dependency-audit candidate-test gate-test integration-test service-sidecar-test live-supervisor
 .PHONY: require-git
 
 require-git:
@@ -32,6 +33,14 @@ mutation-clean:
 	$(MAKE) PYTHON="$(PYTHON)" mutation
 
 quality: lint coverage
+
+dependency-lock:
+	$(UV) lock --python 3.11
+	$(UV) export --frozen --extra development --no-emit-project \
+		--format requirements-txt --output-file requirements-development.lock
+
+dependency-audit:
+	"$(PYTHON)" -m pip_audit -r requirements-development.lock --disable-pip
 
 candidate-test: require-git
 	PYTHONPATH=src "$(PYTHON)" -m unittest tests.test_candidates -v

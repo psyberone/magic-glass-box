@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import tomllib
 import types
 import unittest
 from pathlib import Path
@@ -15,6 +16,8 @@ CHECKER = ROOT / "scripts" / "check_mutation_score.py"
 MAKEFILE = ROOT / "Makefile"
 MUTMUT_RUNNER = ROOT / "scripts" / "run_mutmut.py"
 PYPROJECT = ROOT / "pyproject.toml"
+PANOPTICON = ROOT / "panopticon.yml"
+DEVELOPMENT_LOCK = ROOT / "requirements-development.lock"
 
 
 class MutationScoreGateTests(unittest.TestCase):
@@ -128,10 +131,41 @@ class MutationScoreGateTests(unittest.TestCase):
 
         self.assertEqual(events, ["pin", "cli"])
 
-    def test_mutation_dependencies_pin_a_compatible_pytest_major(self) -> None:
+    def test_development_toolchain_excludes_the_vulnerable_pytest_range(
+        self,
+    ) -> None:
         pyproject = PYPROJECT.read_text(encoding="utf-8")
 
-        self.assertIn('"pytest>=8,<9"', pyproject)
+        self.assertIn('"pytest>=9.0.3,<10"', pyproject)
+        self.assertIn('"mutmut==3.8.1"', pyproject)
+        self.assertIn('"pip-audit==2.10.1"', pyproject)
+
+    def test_mutation_exclusions_do_not_hide_sql_or_raised_exceptions(self) -> None:
+        configuration = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+        patterns = configuration["tool"]["mutmut"]["do_not_mutate_patterns"]
+
+        self.assertEqual(
+            patterns,
+            [r"^\s*(?:field|subject|help|description|prog)\s*="],
+        )
+
+    def test_development_lock_is_hashed_and_auditable(self) -> None:
+        lock = DEVELOPMENT_LOCK.read_text(encoding="utf-8")
+
+        self.assertRegex(lock, r"(?m)^pytest==9\.[0-9.]+")
+        self.assertIn("--hash=sha256:", lock)
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+        self.assertIn("dependency-audit:", makefile)
+        self.assertIn(
+            '"$(PYTHON)" -m pip_audit -r requirements-development.lock',
+            makefile,
+        )
+
+    def test_panopticon_has_a_final_runtime_and_test_catch_all(self) -> None:
+        configuration = PANOPTICON.read_text(encoding="utf-8")
+
+        self.assertIn("- src/magic_glass_box/**", configuration)
+        self.assertIn("- tests/**", configuration)
 
     def test_official_code_gates_fail_when_git_is_unavailable(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")

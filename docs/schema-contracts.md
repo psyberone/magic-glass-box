@@ -364,6 +364,24 @@ the absence of undeclared secondary effects. These relational checks cannot be
 granted by the portable schemas. Schema v49 is future-only: existing and
 pre-policy histories receive no synthetic declaration, obligation, or proof.
 
+M18 external-review remediation R4 publishes
+`state-backup-manifest-v1.schema.json`. The manifest inventories one coherent
+SQLite online snapshot and the retained-result set referenced by that exact
+snapshot, records the application version and optional build revision, and
+states the excluded reconstructable, ephemeral, and externally managed state.
+Runtime verification is intentionally stronger than portable structural
+validation: it enforces private ownership and modes, exact directory contents,
+canonical JSON, file and inventory digests, the current database schema,
+SQLite integrity and foreign keys, and database-to-result agreement before a
+backup is published or restored.
+
+The same remediation aligns portable worker-facing contracts with their
+runtime parsers. Service-operation response v1 and v2 now express outcome,
+HTTP-status, error, retry, and receipt consistency. Discovery, advisory, and
+scope-review documents reject blank required text and unsafe repository paths.
+Closeout declarations reject duplicate obligations and blank reasons, while
+closeout obligations distinguish open deadline state from resolved provenance.
+
 Schema validation is useful adapter-side preflight, but it is not an acceptance
 decision. Magic Glass Box's runtime acceptance paths are authoritative and
 additionally enforce invariants that portable JSON Schema cannot express,

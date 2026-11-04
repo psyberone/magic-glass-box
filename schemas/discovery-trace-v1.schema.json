@@ -38,8 +38,18 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,31}$"
     },
-    "text2048": {"type": "string", "minLength": 1, "maxLength": 2048},
-    "text4096": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "text2048": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "\\S"
+    },
+    "text4096": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S"
+    },
     "sourceRef": {
       "type": "object",
       "additionalProperties": false,
@@ -61,7 +71,12 @@
       "additionalProperties": false,
       "required": ["path", "line_start", "line_end", "summary"],
       "properties": {
-        "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?=.*\\S)(?!/)(?!.*//)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\)(?!.*/$).+$"
+        },
         "line_start": {"type": "integer", "minimum": 1, "maximum": 10000000},
         "line_end": {"type": "integer", "minimum": 1, "maximum": 10000000},
         "summary": {"$ref": "#/$defs/text2048"}

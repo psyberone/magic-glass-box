@@ -2202,7 +2202,7 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v49; external-review remediation R1-R3 complete; R4+ pending**
+schema v49; external-review remediation R1-R4 complete; R5+ pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2429,6 +2429,31 @@ usage handling killed 15/15. The effective result is 86/97 (88.66%). The eleven
 adjudicated survivors change only equivalent SQLite keyword casing,
 non-contractual diagnostics or internal read-chunk tuning, or the
 non-contractual default expiry batch size.
+
+External-review remediation R4 aligns published machine contracts with their
+runtime validators and adds a coherent operator-owned recovery boundary. The
+service-operation, discovery, advisory, workflow-scope, and closeout schemas
+now reject the same blank, unsafe, contradictory, and status-dependent values
+as the control plane without inventing stricter provider or workflow semantics.
+One published backup manifest inventories an online SQLite snapshot and every
+authoritative retained result. `backup create`, `backup verify`, and `backup
+restore` preserve WAL-consistent state through private staging and atomic
+publication, reject corruption or unexpected content, and restore only into a
+fresh private state root. Reconstructable candidate repositories and ephemeral
+workspaces and gateway files remain explicitly outside the backup; credentials
+remain external.
+
+The development toolchain now has a hashed reproducible lock, pinned mutation
+and dependency-audit tools, a clean advisory scan, and explicit lock/audit
+targets. Panopticon ownership covers the new runtime, AI, execution, and
+prescription surfaces plus a final source-and-test catchall. Mutation
+configuration copies every required project artifact and no longer suppresses
+broad SQL or raised-exception behavior. R4's final gate passes 1,584 tests at
+87% aggregate statement-plus-branch coverage with clean format, lint, lock,
+package-consistency, and diff checks. The dependency audit reports no known
+vulnerabilities. A clean focused mutation campaign over state backup and
+restore killed 775/951 mutants (81.49%), counting all three timeouts against
+the required 80% floor.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

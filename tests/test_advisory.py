@@ -319,6 +319,19 @@ class AdvisoryContractTests(unittest.TestCase):
                 with self.assertRaises(SchemaValidationError):
                     validator.validate({**value, "unknown": True})
 
+        blind_schema = json.loads(
+            (repository / "schemas/advisory-blind-review-v1.schema.json").read_text()
+        )
+        blind_validator = Draft202012Validator(blind_schema)
+        blank = blind_review_value(summary=" \n\t ")
+        unsafe_path = blind_review_value()
+        unsafe_path["findings"][0]["evidence"][0]["path"] = "../outside"  # type: ignore[index]
+        for value in (blank, unsafe_path):
+            with self.assertRaises(SchemaValidationError):
+                blind_validator.validate(value)
+            with self.assertRaises(ValidationError):
+                AdvisoryBlindReview.from_mapping(value)
+
 
 class AdvisoryConfigurationStorageTests(unittest.TestCase):
     def setUp(self) -> None:

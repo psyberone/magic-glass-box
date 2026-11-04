@@ -14,6 +14,9 @@ groups:
     - src/magic_glass_box/provider.py
     - src/magic_glass_box/gateway.py
     - src/magic_glass_box/gateway_contracts.py
+    - src/magic_glass_box/inference.py
+    - src/magic_glass_box/openai_chatgpt.py
+    - src/magic_glass_box/openai_chatgpt_cli.py
     - src/magic_glass_box/worker_transport.py
     - examples/provider-policy.json
     - examples/anthropic-provider-policy.json
@@ -37,7 +40,14 @@ groups:
   SandboxExecution:
     match:
     - src/magic_glass_box/orchestration.py
+    - src/magic_glass_box/execution.py
+    - src/magic_glass_box/execution_operations.py
+    - src/magic_glass_box/execution_provider.py
+    - src/magic_glass_box/execution_provider_cli.py
     - src/magic_glass_box/executor.py
+    - src/magic_glass_box/remote_runner.py
+    - src/magic_glass_box/service_sidecar.py
+    - src/magic_glass_box/sidecar.py
     - src/magic_glass_box/workspace.py
     - src/magic_glass_box/results.py
     - src/magic_glass_box/storage/runs.py
@@ -93,12 +103,16 @@ groups:
     match:
     - src/magic_glass_box/workflows.py
     - src/magic_glass_box/workflow_director.py
+    - src/magic_glass_box/workflow_policy.py
+    - src/magic_glass_box/workflow_closeout.py
     - src/magic_glass_box/workflow_scope.py
+    - src/magic_glass_box/provider_effects.py
     - src/magic_glass_box/discovery.py
     - src/magic_glass_box/discovery_director.py
     - src/magic_glass_box/advisory.py
     - src/magic_glass_box/advisory_director.py
     - src/magic_glass_box/storage/workflows.py
+    - src/magic_glass_box/storage/workflow_policies.py
     - src/magic_glass_box/storage/discovery.py
     - src/magic_glass_box/storage/advisory.py
     - schemas/discovery-*.json
@@ -165,3 +179,18 @@ groups:
     panels:
     - OPS
     - SEC
+  CatchAll:
+    # First-match routing above keeps specialist ownership. These final globs
+    # make newly added runtime modules and tests visible to review instead of
+    # silently falling outside the audit matrix.
+    match:
+    - src/magic_glass_box/**
+    tests:
+    - tests/**
+    panels:
+    - ARC
+    - DAT
+    - OPS
+    - QAL
+    - SEC
+    - TST

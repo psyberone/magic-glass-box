@@ -64,6 +64,7 @@ from .service_sidecar import (
     ServiceSidecarError,
     ServiceSidecarSpec,
 )
+from .state_backup import StateBackup
 from .supervision import Supervisor, SupervisorError
 from .worker_transport import WorkerTransportError
 from .workflow_closeout import WorkflowCloseoutDeclaration
@@ -265,6 +266,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("init", help="initialize the private state database")
     commands.add_parser("status", help="validate state and show object counts")
+
+    backup = commands.add_parser(
+        "backup", help="create and restore coherent state backups"
+    )
+    backup_commands = backup.add_subparsers(dest="backup_command", required=True)
+    backup_create = backup_commands.add_parser(
+        "create", help="create one coherent private state backup"
+    )
+    backup_create.add_argument("destination", type=Path)
+    backup_verify = backup_commands.add_parser(
+        "verify", help="verify one state backup without restoring it"
+    )
+    backup_verify.add_argument("backup", type=Path)
+    backup_restore = backup_commands.add_parser(
+        "restore", help="restore one backup into a new private state directory"
+    )
+    backup_restore.add_argument("backup", type=Path)
+    backup_restore.add_argument("target_state_directory", type=Path)
 
     control_room = commands.add_parser(
         "control-room", help="inspect redacted operational state"
@@ -1634,6 +1653,13 @@ def _dispatch(
         return control.initialize()
     if args.command == "status":
         return control.database.status()
+    if args.command == "backup":
+        if args.backup_command == "create":
+            return StateBackup(control.database).create(args.destination)
+        if args.backup_command == "verify":
+            return StateBackup.verify(args.backup)
+        if args.backup_command == "restore":
+            return StateBackup.restore(args.backup, args.target_state_directory)
     if args.command == "control-room" and args.control_room_command == "show":
         return control.control_room_snapshot(
             history_limit=args.history_limit,

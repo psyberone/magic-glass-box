@@ -21,7 +21,12 @@
     "baseline_evidence_id": { "type": "string", "pattern": "^gev_[0-9a-f]{32}$" },
     "deadline": { "type": "string", "format": "date-time" },
     "deadline_state": { "enum": ["pending", "overdue", "resolved"] },
-    "reason": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S"
+    },
     "state": { "enum": ["open", "resolved"] },
     "version": { "type": "integer", "minimum": 1 },
     "resolved_by": { "type": ["string", "null"], "maxLength": 128 },
@@ -29,5 +34,36 @@
     "created_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" },
     "resolved_at": { "type": ["string", "null"], "format": "date-time" }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "state": { "const": "open" } },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "deadline_state": { "enum": ["pending", "overdue"] },
+          "resolved_by": { "type": "null" },
+          "resolution": { "type": "null" },
+          "resolved_at": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "deadline_state": { "const": "resolved" },
+          "resolved_by": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{2,31}$"
+          },
+          "resolution": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "resolved_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  ]
 }

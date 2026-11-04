@@ -16,9 +16,10 @@ dependencies = []
 development = [
     "coverage[toml]",
     "jsonschema[format]",
-    "mutmut==3.6.0",
+    "mutmut==3.8.1",
+    "pip-audit==2.10.1",
     "PyJWT[crypto]>=2.10,<3",
-    "pytest>=8,<9",
+    "pytest>=9.0.3,<10",
     "rfc3339-validator>=0.1.4,<0.2",
     "ruff",
 ]
@@ -61,16 +62,21 @@ show_missing = true
 
 [tool.mutmut]
 source_paths = ["src/magic_glass_box"]
-also_copy = ["Makefile", "scripts/", "schemas/", "examples/", "docker/", "tests/"]
-# SQLite keywords are case-insensitive, so Mutmut's lower/upper string
-# transformations are equivalent mutants. Database behavior is exercised by
-# the integration tests, including invalid SQL produced by other mutations.
-# Human-readable validation diagnostics and argparse prose are likewise not
-# protocol fields. Tests bind exception types, normalized error codes, and CLI
-# behavior without making capitalization or wording a compatibility surface.
+also_copy = [
+    "Makefile",
+    "panopticon.yml",
+    "requirements-development.lock",
+    "scripts/",
+    "schemas/",
+    "examples/",
+    "docker/",
+    "tests/",
+]
+# Human-readable field labels and argparse prose are not protocol fields. Tests
+# bind exception types, normalized error codes, and CLI behavior without making
+# capitalization or wording a compatibility surface. SQL and exception paths
+# remain inside the mutation surface.
 do_not_mutate_patterns = [
-    '^\s*"(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA|BEGIN|COMMIT|ROLLBACK)\b',
-    '^\s*raise\s+(?:ExecutionOperationError|ExecutionProviderCLIError|ExecutionProviderError|GatewayContractError|GitHubProviderError|GitHubProviderCLIError|JiraProviderError|JiraProviderCLIError|JiraTransportError|RemoteRunnerError|ValidationError|argparse\.ArgumentTypeError)\b',
     '^\s*(?:field|subject|help|description|prog)\s*=',
 ]
 do_not_mutate = [

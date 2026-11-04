@@ -860,6 +860,43 @@ class ServiceSidecarSchemaContractTests(unittest.TestCase):
         assert isinstance(request, ServiceOperationRequest)
         response.validate_correlation(request)
 
+    def test_response_outcome_fields_match_runtime_for_both_generations(self) -> None:
+        for version in (1, 2):
+            validator, response = self.load_version(
+                "service-operation-response", version
+            )
+            inconsistent = []
+
+            failed_with_receipt = copy.deepcopy(response)
+            failed_with_receipt.update({"outcome": "denied", "error_code": "denied"})
+            inconsistent.append(failed_with_receipt)
+
+            success_with_error = copy.deepcopy(response)
+            success_with_error["error_code"] = "unexpected"
+            inconsistent.append(success_with_error)
+
+            success_with_non_success_status = copy.deepcopy(response)
+            success_with_non_success_status["provider_status"] = 500
+            inconsistent.append(success_with_non_success_status)
+
+            denied_with_retry = copy.deepcopy(response)
+            denied_with_retry.update(
+                {
+                    "outcome": "denied",
+                    "error_code": "denied",
+                    "receipt": None,
+                    "retry_after_seconds": 30,
+                }
+            )
+            inconsistent.append(denied_with_retry)
+
+            for candidate in inconsistent:
+                with self.subTest(version=version, candidate=candidate):
+                    with self.assertRaises(SchemaValidationError):
+                        validator.validate(candidate)
+                    with self.assertRaises(ValidationError):
+                        ServiceOperationResponse.from_mapping(candidate)
+
     def test_jira_reference_examples_match_v2_runtime_contracts(self) -> None:
         documents = (
             (

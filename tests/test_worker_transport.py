@@ -547,17 +547,28 @@ class ProviderHTTPTransportTests(unittest.TestCase):
             second = http.client.HTTPConnection(
                 "127.0.0.1", server.server_port, timeout=1
             )
-            second.request(
-                "POST",
-                "/v1/responses",
-                body='{"model":"x","stream":true}',
-                headers={"Content-Type": "application/json"},
-            )
-            response = second.getresponse()
-            response.read()
-            second.close()
+            try:
+                second.request(
+                    "POST",
+                    "/v1/responses",
+                    body='{"model":"x","stream":true}',
+                    headers={"Content-Type": "application/json"},
+                )
+                response = second.getresponse()
+                response.read()
+                self.assertEqual(response.status, 503)
+            except (
+                BrokenPipeError,
+                ConnectionResetError,
+                http.client.RemoteDisconnected,
+            ):
+                # The server rejects the socket immediately after accept. The
+                # kernel may deliver that close before the client finishes its
+                # request body, in which case no HTTP response is observable.
+                pass
+            finally:
+                second.close()
 
-            self.assertEqual(response.status, 503)
             self.assertEqual(len(gateway.calls), 1)
         finally:
             release.set()

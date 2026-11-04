@@ -8,6 +8,8 @@ policy, project context, credentials, and human interaction. Its sister project,
 This repository currently contains the first executable vertical slice:
 
 - private SQLite control-plane state with immutable schema migrations;
+- coherent live SQLite-plus-results backups with canonical integrity manifests,
+  atomic publication, read-only verification, and fresh-directory restore;
 - local users linked to stable Krab user IDs rather than bearer tokens;
 - versioned project context and versioned agent profiles;
 - a strict, provider-neutral work-item import contract with atomic create,
@@ -133,7 +135,8 @@ This repository currently contains the first executable vertical slice:
   reconcile interrupted ones, inspect or apply retained results, materialize,
   reconstruct, list, or verify trusted candidates, and manage exact-input gate
   policy, review, validation, evidence, readiness, dependency, refold, queue,
-  landing-plan, receipt, and bounded-workflow state.
+  landing-plan, receipt, bounded-workflow state, and coherent state backup and
+  restore.
 
 The complete networkless path has been exercised against a live Git repository
 and Docker engine. A run receives only the files tracked at its resolved commit;
@@ -180,6 +183,21 @@ These commands use the platform state directory. Passing `--db` is supported,
 but the retained-result and candidate stores are created beside that database;
 do not point it into a source checkout unless the whole state location is
 ignored and treated as disposable local control-plane data.
+
+Backups use SQLite's online snapshot semantics and retain every authoritative
+result bundle referenced by that snapshot:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  backup create /absolute/private/backups/mgb-2026-11-03
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  backup verify /absolute/private/backups/mgb-2026-11-03
+```
+
+Restore publishes only into a new state directory; it never replaces live
+state or performs process cutover. See
+[docs/state-backup.md](docs/state-backup.md) for the exact contents,
+exclusions, restore procedure, and credential boundary.
 
 An operator can bind a private Krab token by reference, then use the typed
 coordinator surface for project/session discovery, bounded inbox reads,
@@ -605,10 +623,15 @@ the Makefile then uses `.venv/bin/python` by default while preserving explicit
 `PYTHON=` overrides.
 
 ```console
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -e '.[development]'
+uv sync --frozen --extra development
 make test
+make dependency-audit
 ```
+
+`uv.lock` and the exported hashed `requirements-development.lock` pin the
+reviewed development toolchain. Run `make dependency-lock` deliberately when
+updating that toolchain, review both generated files, and rerun the audit and
+quality gates.
 
 An installed package exposes the `magic-glass-box` control-plane command and
 the `magic-glass-box-worker` entry point used inside compatible vendor images.

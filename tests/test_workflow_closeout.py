@@ -213,6 +213,47 @@ class WorkflowCloseoutDeclarationTests(unittest.TestCase):
             declaration,
         )
 
+        declaration_schema = json.loads(
+            (
+                self.repository / "schemas/workflow-closeout-declaration-v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        declaration_validator = Draft202012Validator(declaration_schema)
+        blank_reason = copy.deepcopy(declaration)
+        blank_reason["obligations"][0]["reason"] = " \n\t "
+        with self.assertRaises(SchemaValidationError):
+            declaration_validator.validate(blank_reason)
+        with self.assertRaises(ValidationError):
+            WorkflowCloseoutDeclaration.from_mapping(blank_reason)
+
+        projection_schema = json.loads(
+            (
+                self.repository / "schemas/workflow-closeout-obligation-v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        projection_validator = Draft202012Validator(
+            projection_schema, format_checker=FormatChecker()
+        )
+        projection = json.loads(
+            (self.repository / "examples/workflow-closeout-obligation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        open_with_resolution = {
+            **projection,
+            "resolution": "already done",
+            "resolved_at": "2026-11-03T18:00:00Z",
+            "resolved_by": "operator",
+        }
+        resolved_without_resolution = {
+            **projection,
+            "state": "resolved",
+            "deadline_state": "resolved",
+        }
+        for candidate in (open_with_resolution, resolved_without_resolution):
+            with self.assertRaises(SchemaValidationError):
+                projection_validator.validate(candidate)
+
     def test_identical_declarations_are_reusable_across_executions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Database(Path(temporary) / "control-plane.db")

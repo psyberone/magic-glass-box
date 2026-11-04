@@ -661,6 +661,7 @@ class CLITests(unittest.TestCase):
                 (
                     ("init", "initialize the private state database"),
                     ("status", "validate state and show object counts"),
+                    ("backup", "create and restore coherent state backups"),
                     ("control-room", "inspect redacted operational state"),
                     ("user", "manage local users"),
                     ("krab", "manage and query Krab connections"),
@@ -692,6 +693,18 @@ class CLITests(unittest.TestCase):
                     (
                         "integration",
                         "order, refold, and land exact candidates",
+                    ),
+                ),
+            ),
+            ("backup",): (
+                "backup_command",
+                True,
+                (
+                    ("create", "create one coherent private state backup"),
+                    ("verify", "verify one state backup without restoring it"),
+                    (
+                        "restore",
+                        "restore one backup into a new private state directory",
                     ),
                 ),
             ),
@@ -1638,6 +1651,33 @@ class CLITests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(room["summary"]["users"], 1)
         self.assertEqual(room["snapshot"]["history_limit"], 0)
+
+    def test_backup_create_verify_and_restore_are_available_through_cli(self) -> None:
+        self.invoke("init")
+        backup_temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(backup_temporary.cleanup)
+        backup_root = Path(backup_temporary.name)
+        backup = backup_root / "state-1"
+        restored_state = backup_root / "restored-state"
+
+        status, created, _ = self.invoke("backup", "create", str(backup))
+        self.assertEqual(status, 0)
+        self.assertEqual(created["schema_version"], 1)
+        self.assertTrue((backup / "control-plane.db").is_file())
+
+        status, verified, _ = self.invoke("backup", "verify", str(backup))
+        self.assertEqual(status, 0)
+        self.assertEqual(verified, created)
+
+        status, restored, _ = self.invoke(
+            "backup", "restore", str(backup), str(restored_state)
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(restored["state_directory"], str(restored_state))
+        self.assertEqual(
+            Database(restored_state / "control-plane.db").status()["schema_version"],
+            SCHEMA_VERSION,
+        )
 
     def test_error_is_structured_and_nonzero(self) -> None:
         self.invoke("init")
@@ -2684,6 +2724,7 @@ class CLITests(unittest.TestCase):
             {
                 "init": "initialize the private state database",
                 "status": "validate state and show object counts",
+                "backup": "create and restore coherent state backups",
                 "control-room": "inspect redacted operational state",
                 "user": "manage local users",
                 "krab": "manage and query Krab connections",
@@ -2711,6 +2752,11 @@ class CLITests(unittest.TestCase):
             },
         )
         expected_nested = {
+            "backup": {
+                "create": "create one coherent private state backup",
+                "verify": "verify one state backup without restoring it",
+                "restore": "restore one backup into a new private state directory",
+            },
             "control-room": {
                 "show": "show one consistent redacted snapshot",
                 "serve": "serve the interactive loopback control room",

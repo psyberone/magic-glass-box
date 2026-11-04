@@ -347,6 +347,30 @@ class DiscoveryContractTests(unittest.TestCase):
                 with self.assertRaises(SchemaValidationError):
                     validator.validate(invalid)
 
+        trace_schema = json.loads(
+            (repository / "schemas/discovery-trace-v1.schema.json").read_text()
+        )
+        trace_validator = Draft202012Validator(trace_schema)
+        invalid_trace = trace_value(summary=" \n\t ")
+        unsafe_evidence = trace_value()
+        unsafe_evidence["findings"][0]["evidence"][0]["path"] = "/etc/passwd"  # type: ignore[index]
+        for value in (invalid_trace, unsafe_evidence):
+            with self.assertRaises(SchemaValidationError):
+                trace_validator.validate(value)
+            with self.assertRaises(ValidationError):
+                DiscoveryTrace.from_mapping(value)
+
+        ruling_schema = json.loads(
+            (repository / "schemas/discovery-ruling-v1.schema.json").read_text()
+        )
+        ruling_validator = Draft202012Validator(ruling_schema)
+        unsafe_scope = ruling_value()
+        unsafe_scope["work_ready_brief"]["scope_paths"] = ["../outside"]  # type: ignore[index]
+        with self.assertRaises(SchemaValidationError):
+            ruling_validator.validate(unsafe_scope)
+        with self.assertRaises(ValidationError):
+            DiscoveryRuling.from_mapping(unsafe_scope)
+
 
 class DiscoveryConfigurationStorageTests(unittest.TestCase):
     def setUp(self) -> None:

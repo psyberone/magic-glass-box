@@ -38,8 +38,18 @@
   ],
   "$defs": {
     "key": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
-    "text2048": {"type": "string", "minLength": 1, "maxLength": 2048},
-    "text4096": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "text2048": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "\\S"
+    },
+    "text4096": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S"
+    },
     "reviewerRole": {
       "enum": ["reviewer_one", "reviewer_two", "reviewer_three"]
     },

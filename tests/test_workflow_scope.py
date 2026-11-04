@@ -193,6 +193,16 @@ class WorkflowScopeReviewTests(unittest.TestCase):
                 }
             )
 
+        blank_summary = scope_review_value()
+        blank_summary["must_results"][0]["summary"] = " \n\t "  # type: ignore[index]
+        blank_evidence = scope_review_value()
+        blank_evidence["probes"][0]["evidence"] = [" \n\t "]  # type: ignore[index]
+        for candidate in (blank_summary, blank_evidence):
+            with self.assertRaises(SchemaValidationError):
+                validator.validate(candidate)
+            with self.assertRaises(ValidationError):
+                WorkflowScopeReview.from_mapping(candidate)
+
 
 if __name__ == "__main__":
     unittest.main()

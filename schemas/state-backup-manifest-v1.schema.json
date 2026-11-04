@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:state-backup-manifest:v1",
+  "title": "Magic Glass Box State Backup Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "application",
+    "created_at",
+    "database",
+    "excluded_state",
+    "retained_results",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["build_revision", "name", "version"],
+      "properties": {
+        "name": { "const": "magic-glass-box" },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "\\S"
+        },
+        "build_revision": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "file", "schema_version", "sha256"],
+      "properties": {
+        "file": { "const": "control-plane.db" },
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "retained_results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changed_bytes",
+        "changed_paths",
+        "count",
+        "directory",
+        "inventory_sha256"
+      ],
+      "properties": {
+        "directory": { "const": "results" },
+        "count": { "type": "integer", "minimum": 0 },
+        "changed_paths": { "type": "integer", "minimum": 0 },
+        "changed_bytes": { "type": "integer", "minimum": 0 },
+        "inventory_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "excluded_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_store", "credentials", "gateways", "workspaces"],
+      "properties": {
+        "candidate_store": {
+          "const": "reconstructable_from_database_and_results"
+        },
+        "credentials": { "const": "external_operator_managed" },
+        "gateways": { "const": "ephemeral" },
+        "workspaces": { "const": "ephemeral" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

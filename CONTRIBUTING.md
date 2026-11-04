@@ -19,13 +19,16 @@ changes should still be verified in proportion to their risk.
 Create the development environment once, then use the Makefile entry points:
 
 ```console
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -e '.[development]'
+uv sync --frozen --extra development
 make test
 ```
 
-Every gate defaults to `.venv/bin/python`, so the test runner, Ruff, coverage,
-Mutmut, and the mutation-score checker use one dependency set. An explicit
+`uv.lock` is the authoritative resolution and
+`requirements-development.lock` is its hashed, auditable export. Run
+`make dependency-lock` only as a deliberate toolchain update, review both
+generated files, then run `uv sync --frozen --extra development`. Every gate
+defaults to `.venv/bin/python`, so the test runner, Ruff, coverage, Mutmut,
+pip-audit, and the mutation-score checker use one dependency set. An explicit
 interpreter remains supported, for example `make PYTHON=/opt/python/bin/python
 test`. The mutation command is independently overridable and may contain
 arguments, for example `make MUTMUT='uv run mutmut' mutation`. On a machine
@@ -40,6 +43,7 @@ Run the fast gate while developing:
 
 ```console
 make quality
+make dependency-audit
 ```
 
 Provider-neutral service-sidecar changes also have a focused contract,
@@ -52,7 +56,10 @@ make service-sidecar-test
 The project requires at least **85% aggregate statement-and-branch coverage**
 over the `magic_glass_box` package, using Coverage.py's combined percentage
 with branch measurement enabled. Coverage is a floor and a gap-finding tool,
-not a substitute for assertions that demonstrate useful behavior.
+not a substitute for assertions that demonstrate useful behavior. Per-module
+percentages remain useful review signals, but they are not silently promoted
+into a different release policy; low-risk diagnostics and high-risk authority
+boundaries do not become equivalent merely because they occupy one module.
 
 Run mutation testing before merging a substantial behavior change:
 
