@@ -333,6 +333,25 @@ _CONTRACTS = {
         ),
         follow_up_actions=("submit_exact_head_review",),
     ),
+    GatewayCapability.WORKFLOW_REVIEWER_MEASUREMENT_SUBMIT: _contract(
+        GatewayCapability.WORKFLOW_REVIEWER_MEASUREMENT_SUBMIT,
+        "_submit_reviewer_measurement",
+        ("measurement", "idempotency_key"),
+        _object(
+            {
+                "measurement": _ref("workflow-reviewer-measurement-v1.schema.json"),
+                "idempotency_key": _IDEMPOTENCY_KEY,
+            }
+        ),
+        _result(
+            "measurement_id",
+            "content_sha256",
+            "policy_id",
+            "reviewer_attempt_id",
+            "agent_action",
+        ),
+        follow_up_actions=("continue_review",),
+    ),
     GatewayCapability.INTERACTION_OPEN: _contract(
         GatewayCapability.INTERACTION_OPEN,
         "_open_interaction",

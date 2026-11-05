@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "kind": "reviewer_finding",
+  "finding_classes": ["regression", "scope_must_failure"],
+  "policy_id": "gpl_11111111111111111111111111111111",
+  "reviewer_run_id": "run_22222222222222222222222222222222",
+  "reviewer_attempt_id": "att_33333333333333333333333333333333",
+  "review_evidence_id": "gev_44444444444444444444444444444444",
+  "review_entry_id": "wle_55555555555555555555555555555555",
+  "scope_review_id": "wsr_66666666666666666666666666666666",
+  "maintainer_review_id": null,
+  "gate_name": null
+}

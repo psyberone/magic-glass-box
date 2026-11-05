@@ -551,6 +551,33 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_wake_ack.add_argument("wake_id")
     workflow_wake_ack.add_argument("--expected-version", required=True, type=int)
     workflow_wake_ack.add_argument("--acknowledged-by", required=True)
+    workflow_wake_transition = workflow_commands.add_parser(
+        "wake-transition",
+        help="record explicit delivery, expiry, or escalation for one wake",
+    )
+    workflow_wake_transition.add_argument("wake_id")
+    workflow_wake_transition.add_argument(
+        "--state", required=True, choices=("delivered", "expired", "escalated")
+    )
+    workflow_wake_transition.add_argument("--expected-version", required=True, type=int)
+    workflow_wake_transition.add_argument("--actor", required=True)
+    workflow_wake_availability = workflow_commands.add_parser(
+        "wake-availability",
+        help="record recipient availability separately from wake acknowledgement",
+    )
+    workflow_wake_availability.add_argument("wake_id")
+    workflow_wake_availability.add_argument(
+        "--state",
+        required=True,
+        choices=("available", "unavailable_until", "blocked_on"),
+    )
+    workflow_wake_availability.add_argument(
+        "--expected-version", required=True, type=int
+    )
+    workflow_wake_availability.add_argument("--unavailable-until")
+    workflow_wake_availability.add_argument("--blocked-on")
+    workflow_wake_availability.add_argument("--observed-by", required=True)
+    workflow_wake_availability.add_argument("--idempotency-key", required=True)
     for verb in ("config-create", "config-revise"):
         configuration = workflow_commands.add_parser(
             verb,
@@ -1875,6 +1902,23 @@ def _dispatch(
                 args.wake_id,
                 expected_version=args.expected_version,
                 acknowledged_by_handle=args.acknowledged_by,
+            )
+        if args.workflow_command == "wake-transition":
+            return control.transition_workflow_manual_wake(
+                args.wake_id,
+                expected_version=args.expected_version,
+                target_state=args.state,
+                actor_handle=args.actor,
+            )
+        if args.workflow_command == "wake-availability":
+            return control.record_workflow_wake_availability(
+                args.wake_id,
+                expected_wake_version=args.expected_version,
+                state=args.state,
+                unavailable_until=args.unavailable_until,
+                blocked_on=args.blocked_on,
+                observed_by_handle=args.observed_by,
+                idempotency_key=args.idempotency_key,
             )
         if args.workflow_command in {"config-create", "config-revise"}:
             kwargs = {

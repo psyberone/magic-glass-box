@@ -111,6 +111,37 @@ class ProviderEffectReadbackTests(unittest.TestCase):
             with self.subTest(state=projection["state"]):
                 self.assertTrue(list(validator.iter_errors(projection)))
 
+    def test_target_hold_projection_enforces_lift_lifecycle(self) -> None:
+        schema = json.loads(
+            (
+                self.repository / "schemas" / "integration-target-hold-v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        example = json.loads(
+            (self.repository / "examples" / "integration-target-hold.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        contradictory = (
+            {
+                **example,
+                "lifted_by": "owner",
+                "lifted_at": "2026-11-02T12:03:00+00:00",
+            },
+            {
+                **example,
+                "state": "lifted",
+                "version": 2,
+                "lifted_by": None,
+                "lifted_at": None,
+            },
+        )
+
+        for projection in contradictory:
+            with self.subTest(state=projection["state"]):
+                self.assertTrue(list(validator.iter_errors(projection)))
+
     def test_workflow_provider_intent_is_project_and_artifact_bound(self) -> None:
         value = {
             "schema_version": 1,

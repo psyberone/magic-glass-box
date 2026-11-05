@@ -405,6 +405,36 @@ first-parent chain, and no undeclared closure or ref-deletion effect. A missing
 read-back is uncertain; an absent or truncated first-parent observation is a
 mismatch and opens the ordinary immutable landing hold.
 
+Control-plane schema v52 reconciles the remaining bounded M17 lifecycle and
+review contracts:
+
+- `workflow-manual-wake-v1.schema.json` distinguishes requested, delivered,
+  acknowledged, expired, and escalated wake state; projects the observed wake
+  binding; and retains the latest recipient-authored availability fact without
+  treating availability as acknowledgement;
+- `integration-target-hold-v1.schema.json` distinguishes landing-proof holds
+  from a workflow-requester/activation-owner `post_landing_regression` hold,
+  with exact placer and idempotency provenance while preserving owner-only lift
+  authority;
+- `workflow-reviewer-measurement-v1.schema.json` binds one bounded command and
+  result summary to exact gate inputs, reviewer attempt, architecture,
+  interpreter, code origin, non-zero collected/executed counts, relevant tool
+  presence/version, structured-result semantics, and output digest; the stored
+  control-plane record separately binds the observed sandbox image and pinned
+  read-only profile; and
+- `workflow-round-cause-v1.schema.json` gives each reviewer, maintainer, or gate
+  correction one canonical finding-class set and exact source provenance.
+
+Reviewer measurements are accepted only during the exact active gate-bound
+reviewer attempt, from its pinned read-only profile and observed image, and
+only when that profile has no credentials or provider-invocation authority.
+They never create gate evidence or affect readiness. Correction causes live in
+the immutable workflow event stream; a correction-limit event also contains a
+canonical count of finding classes accumulated across prior rounds and the
+final rejected correction request. Existing executions and holds migrate
+without synthetic measurements, availability claims, coordinator actions, or
+new workflow authority.
+
 M18 external-review remediation R4 publishes
 `state-backup-manifest-v1.schema.json`. The manifest inventories one coherent
 SQLite online snapshot and the retained-result set referenced by that exact

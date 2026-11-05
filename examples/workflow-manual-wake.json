@@ -1,6 +1,22 @@
 {
   "acknowledged_at": "2026-11-02T15:01:00.000000+00:00",
   "acknowledged_by": "owner",
+  "availability": {
+    "id": "wao_55555555555555555555555555555555",
+    "sequence": 1,
+    "wake_version": 1,
+    "state": "available",
+    "unavailable_until": null,
+    "blocked_on": null,
+    "observed_by": "owner",
+    "idempotency_key": "availability-0001",
+    "created_at": "2026-11-02T15:00:30.000000+00:00"
+  },
+  "binding_observation": {
+    "status": "observed",
+    "wake_class": "human_turn_only",
+    "observed_at": "2026-11-02T15:01:00.000000+00:00"
+  },
   "correction_round": 0,
   "events": [
     {

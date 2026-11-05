@@ -2202,7 +2202,8 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v51; external-review remediation R1-R6 complete; R7 pending**
+schema v52; external-review remediation R1-R7 complete; two-project live exit
+proof pending**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2520,6 +2521,47 @@ then added exact collection, byte, correlation, read-shape, graph, propagation,
 and mixed-version regressions; all 27 fail on direct replay. Diagnostic prose,
 equivalent SQL casing, and subject-label mutations were not promoted into
 protocol behavior.
+
+External-review remediation R7 reconciles the remaining accepted M17 seams
+without expanding M18 into the deferred plugin or follow-up ecosystems. Manual
+wakes now retain explicit delivery, acknowledgement, expiry, escalation, and
+recipient-authored availability as distinct observed facts. The exact workflow
+requester or activation owner may place an idempotent post-landing regression
+hold, but only the pinned activation owner may lift it. Responsibility and
+attention project those states without guessing availability or automatically
+advancing manual work.
+
+One credential-free reviewer gateway capability records a bounded supplemental
+measurement against the exact policy, candidate, active reviewer attempt,
+read-only profile, and observed sandbox image. The artifact retains non-zero
+execution counts, relevant tool presence/version, and the declared meaning of
+its structured result fields. It deliberately cannot create gate evidence or
+satisfy readiness. Every correction round now carries an
+immutable typed reviewer or maintainer cause, and the replacement producer is
+bound from that cause rather than re-deriving the latest surrounding feedback.
+At the correction ceiling, the ruling retains the final cause plus a canonical
+finding-class summary across the loop. Mid-flight executions continue to use
+their starting activation version; tests exercise that pin after a newer
+activation changes the local concurrency contract.
+
+The owner-approved R7 boundary defers the full follow-up proposal/admission/
+disposition system, external break-glass reconciliation, stage-boundary
+activation rebind, and a separate measurement-review topology until after the
+M18 live proof. None receives inferred authority in this slice.
+
+R7's final gate passes 1,639 tests at 87% aggregate statement-plus-branch
+coverage with clean format, lint, frozen lock, source/wheel schema catalog,
+dependency audit, and diff checks. A broad serial changed-surface mutation
+sample killed 1,194/1,473 mutants (81.06%) with no timeout, crash, suspicious,
+or uncovered outcome before it was deliberately stopped when the measured
+remaining associations projected beyond 100 hours. Complete bounded replays
+then killed 317/354 reviewer-measurement mutants (89.55%), 201/234 reviewer
+storage mutants (85.90%), and 182/204 typed-round-cause mutants (89.22%). All
+ten selected manual-wake transition/availability mutants and the lost gateway
+idempotency propagation mutant also fail on direct replay. Remaining reviewed
+survivors alter non-contractual diagnostics, equivalent SQL casing, bounded
+defaults outside the published contract, or checks already implied by a
+stronger validated invariant.
 
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,

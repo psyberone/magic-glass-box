@@ -703,7 +703,7 @@ class WorkItemServiceImportTests(unittest.TestCase):
             )
 
     def test_schema_forty_three_retains_an_immutable_import_ledger(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 51)
+        self.assertEqual(SCHEMA_VERSION, 52)
         operation = self.complete_get()
         imported = self.database.import_work_item_from_service_operation(
             project_key="demo-project",
@@ -735,7 +735,7 @@ class WorkItemServiceImportTests(unittest.TestCase):
         second = database.initialize()
 
         self.assertEqual(first, second)
-        self.assertEqual(first["schema_version"], 51)
+        self.assertEqual(first["schema_version"], 52)
         self.assertEqual(first["counts"]["work_item_service_imports"], 0)
         with closing(database.connect()) as connection:
             tables = {

@@ -721,7 +721,7 @@ class DiscoveryConfigurationStorageTests(unittest.TestCase):
         first = migrated.initialize()
         second = migrated.initialize()
 
-        self.assertEqual(SCHEMA_VERSION, 51)
+        self.assertEqual(SCHEMA_VERSION, 52)
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], SCHEMA_VERSION)
         definitions = migrated.list_workflow_template_definitions()

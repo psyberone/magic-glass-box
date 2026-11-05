@@ -578,6 +578,14 @@ class DatabaseCore:
                     "SELECT COUNT(*) FROM workflow_manual_wake_events",
                 ),
                 (
+                    "workflow_wake_availability_observations",
+                    "SELECT COUNT(*) FROM workflow_wake_availability_observations",
+                ),
+                (
+                    "workflow_reviewer_measurements",
+                    "SELECT COUNT(*) FROM workflow_reviewer_measurements",
+                ),
+                (
                     "workflow_configurations",
                     "SELECT COUNT(*) FROM workflow_configurations",
                 ),

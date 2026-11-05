@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "inputs": {
+    "policy_id": "gpl_11111111111111111111111111111111",
+    "candidate_id": "cnd_22222222222222222222222222222222",
+    "repository_identity": "boxp_33333333333333333333333333333333",
+    "integration_ref": "refs/heads/main",
+    "expected_base_revision": "4444444444444444444444444444444444444444",
+    "head_revision": "5555555555555555555555555555555555555555",
+    "tree_revision": "6666666666666666666666666666666666666666",
+    "object_format": "sha1",
+    "policy_revision": "7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "attempt_id": "att_88888888888888888888888888888888",
+  "name": "focused-tests",
+  "command": ["python", "-m", "pytest", "tests/test_exact.py"],
+  "architecture": "arm64",
+  "code_origin": "/workspace/src/magic_glass_box",
+  "code_origin_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+  "interpreter": "CPython 3.13.7",
+  "tool_observations": [
+    { "name": "pytest", "status": "present", "version": "pytest 9.0.1" },
+    { "name": "pytest-xdist", "status": "absent", "version": null }
+  ],
+  "exit_code": 0,
+  "duration_ms": 321,
+  "collected_count": 3,
+  "executed_count": 3,
+  "output_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "output_bytes": 1234,
+  "result_field_semantics": {
+    "exit_code": "process exit status from the exact argv",
+    "collected_count": "tests selected by the exact pytest command",
+    "executed_count": "selected tests that reached an outcome",
+    "output_sha256": "SHA-256 of combined stdout and stderr bytes"
+  },
+  "comparison_rules": ["normalize generated timestamps"]
+}

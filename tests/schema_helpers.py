@@ -47,6 +47,15 @@ def downgrade_workflow_policy_activation(connection: sqlite3.Connection) -> None
         DROP TABLE IF EXISTS workflow_provider_intents;
         DROP TABLE IF EXISTS integration_target_holds;
         DROP TABLE IF EXISTS workflow_provider_landing_proofs;
+        DROP TRIGGER IF EXISTS workflow_reviewer_measurement_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_reviewer_measurement_immutable_update;
+        DROP INDEX IF EXISTS workflow_reviewer_measurement_attempt;
+        DROP INDEX IF EXISTS workflow_reviewer_measurement_policy;
+        DROP TABLE IF EXISTS workflow_reviewer_measurements;
+        DROP TRIGGER IF EXISTS workflow_wake_availability_immutable_delete;
+        DROP TRIGGER IF EXISTS workflow_wake_availability_immutable_update;
+        DROP INDEX IF EXISTS workflow_wake_availability_latest;
+        DROP TABLE IF EXISTS workflow_wake_availability_observations;
         DROP TRIGGER IF EXISTS workflow_manual_wake_event_immutable_delete;
         DROP TRIGGER IF EXISTS workflow_manual_wake_event_immutable_update;
         DROP TRIGGER IF EXISTS workflow_manual_wake_immutable_delete;

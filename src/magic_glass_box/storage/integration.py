@@ -21,6 +21,7 @@ from ..integration import (
     ProviderLandingReceipt,
     ProviderLandingRequest,
 )
+from ..krab import IDEMPOTENCY_KEY_RE
 from ..provider_effects import (
     OBSERVED_PROVIDER_EFFECT_READBACK_SCHEMA_VERSION,
     LandingReadback,
@@ -2432,10 +2433,13 @@ class IntegrationStorage:
     ) -> sqlite3.Row | None:
         return connection.execute(
             "SELECT hold.id, hold.integration_ref_id, "
-            "hold.workflow_execution_id, hold.landing_proof_id, hold.reason, "
+            "hold.workflow_execution_id, hold.landing_proof_id, "
+            "hold.placement_kind, hold.reason, hold.reason_summary, "
+            "placer.handle AS placed_by, hold.idempotency_key, "
             "hold.state, hold.version, lifter.handle AS lifted_by, "
             "hold.created_at, hold.updated_at, hold.lifted_at "
             "FROM integration_target_holds hold "
+            "JOIN users placer ON placer.id = hold.placed_by "
             "LEFT JOIN users lifter ON lifter.id = hold.lifted_by "
             "WHERE (? IS NULL OR hold.id = ?) "
             "AND (? IS NULL OR hold.integration_ref_id = ?) "
@@ -2469,6 +2473,7 @@ class IntegrationStorage:
             "execution.workflow_activation_version_id, "
             "activation.content_sha256 AS activation_sha256, "
             "activation.spec_json AS activation_spec_json, "
+            "activation.acknowledged_by AS activation_owner, "
             "policy.id AS workflow_policy_id, policy.version AS policy_version, "
             "policy.content_sha256 AS policy_sha256, queue.integration_ref_id "
             "FROM workflow_landing_bindings binding "
@@ -2610,8 +2615,10 @@ class IntegrationStorage:
             connection.execute(
                 "INSERT INTO integration_target_holds "
                 "(id, integration_ref_id, workflow_execution_id, "
-                "landing_proof_id, reason, state, version, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'open', 1, ?, ?)",
+                "landing_proof_id, placement_kind, reason, reason_summary, "
+                "placed_by, idempotency_key, state, version, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, 'landing_proof', ?, NULL, ?, "
+                "NULL, 'open', 1, ?, ?)",
                 (
                     hold_id,
                     authority["integration_ref_id"],
@@ -2622,6 +2629,7 @@ class IntegrationStorage:
                         if status == "uncertain"
                         else "landing_mismatch"
                     ),
+                    authority["activation_owner"],
                     now,
                     now,
                 ),
@@ -2659,6 +2667,120 @@ class IntegrationStorage:
                 assert stored is not None
                 result.append(self._integration_target_hold_record(stored))
             return result
+
+    def place_integration_target_hold(
+        self,
+        execution_id: str,
+        *,
+        expected_execution_version: int,
+        reason_summary: str,
+        placed_by: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Let the requester or activation owner place a safe-direction hold."""
+
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        expected_execution_version = self._expected_version(expected_execution_version)
+        reason_summary = require_string(
+            reason_summary, field="reason_summary", max_bytes=4096
+        )
+        placed_by = require_string(placed_by, field="placed_by", max_bytes=64)
+        idempotency_key = require_string(
+            idempotency_key, field="idempotency_key", max_bytes=128
+        )
+        if IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None:
+            raise ValidationError("integration target hold idempotency key is invalid")
+        hold_id = self.new_id("lth")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, placed_by, role="integration target hold placer"
+                )
+                authority = connection.execute(
+                    "SELECT execution.version, execution.requested_by, "
+                    "activation.acknowledged_by AS activation_owner, "
+                    "queue.integration_ref_id FROM workflow_executions execution "
+                    "JOIN workflow_activation_versions activation ON "
+                    "activation.id = execution.workflow_activation_version_id "
+                    "JOIN workflow_landing_bindings binding ON "
+                    "binding.execution_id = execution.id "
+                    "JOIN integration_queue_items queue ON queue.id = "
+                    "binding.queue_item_id WHERE execution.id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if authority is None:
+                    raise ConflictError(
+                        "workflow has no activated integration target authority"
+                    )
+                existing = connection.execute(
+                    "SELECT id, workflow_execution_id, reason_summary FROM "
+                    "integration_target_holds WHERE placed_by = ? "
+                    "AND idempotency_key = ?",
+                    (placed_by, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["workflow_execution_id"] != execution_id
+                        or existing["reason_summary"] != reason_summary
+                    ):
+                        raise ConflictError(
+                            "integration target hold idempotency key was reused"
+                        )
+                    stored = self._integration_target_hold_row(
+                        connection, hold_id=existing["id"]
+                    )
+                    assert stored is not None
+                    result = self._integration_target_hold_record(stored)
+                    connection.commit()
+                    return result
+                if authority["version"] != expected_execution_version:
+                    raise ConcurrentUpdateError("workflow execution version changed")
+                if placed_by not in {
+                    authority["requested_by"],
+                    authority["activation_owner"],
+                }:
+                    raise ConflictError(
+                        "only the workflow requester or activation owner may "
+                        "place a target hold"
+                    )
+                connection.execute(
+                    "INSERT INTO integration_target_holds "
+                    "(id, integration_ref_id, workflow_execution_id, "
+                    "landing_proof_id, placement_kind, reason, reason_summary, "
+                    "placed_by, idempotency_key, state, version, created_at, "
+                    "updated_at) VALUES (?, ?, ?, NULL, 'coordinator', "
+                    "'post_landing_regression', ?, ?, ?, 'open', 1, ?, ?)",
+                    (
+                        hold_id,
+                        authority["integration_ref_id"],
+                        execution_id,
+                        reason_summary,
+                        placed_by,
+                        idempotency_key,
+                        now,
+                        now,
+                    ),
+                )
+                stored = self._integration_target_hold_row(connection, hold_id=hold_id)
+                assert stored is not None
+                result = self._integration_target_hold_record(stored)
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "integration target hold could not be placed"
+                ) from exc
+        return result
 
     def lift_integration_target_hold(
         self,

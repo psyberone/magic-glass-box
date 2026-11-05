@@ -5,21 +5,82 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "created_at", "id", "integration_ref_id", "landing_proof_id", "lifted_at",
-    "lifted_by", "reason", "state", "updated_at", "version",
-    "workflow_execution_id"
+    "created_at", "id", "idempotency_key", "integration_ref_id",
+    "landing_proof_id", "lifted_at", "lifted_by", "placed_by",
+    "placement_kind", "reason", "reason_summary", "state", "updated_at",
+    "version", "workflow_execution_id"
   ],
   "properties": {
     "id": { "type": "string", "pattern": "^lth_[0-9a-f]{32}$" },
     "integration_ref_id": { "type": "string", "pattern": "^irf_[0-9a-f]{32}$" },
     "workflow_execution_id": { "type": "string", "pattern": "^wfx_[0-9a-f]{32}$" },
-    "landing_proof_id": { "type": "string", "pattern": "^wlp_[0-9a-f]{32}$" },
-    "reason": { "enum": ["landing_mismatch", "landing_uncertain"] },
+    "landing_proof_id": {
+      "oneOf": [
+        { "type": "string", "pattern": "^wlp_[0-9a-f]{32}$" },
+        { "type": "null" }
+      ]
+    },
+    "placement_kind": { "enum": ["landing_proof", "coordinator"] },
+    "reason": {
+      "enum": [
+        "landing_mismatch", "landing_uncertain", "post_landing_regression"
+      ]
+    },
+    "reason_summary": { "type": ["string", "null"], "x-max-utf8-bytes": 4096 },
+    "placed_by": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "idempotency_key": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+        { "type": "null" }
+      ]
+    },
     "state": { "enum": ["open", "lifted"] },
     "version": { "type": "integer", "minimum": 1 },
     "lifted_by": { "type": ["string", "null"], "maxLength": 128 },
     "created_at": { "type": "string", "format": "date-time" },
     "updated_at": { "type": "string", "format": "date-time" },
     "lifted_at": { "type": ["string", "null"], "format": "date-time" }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "placement_kind": { "const": "landing_proof" } } },
+      "then": {
+        "properties": {
+          "landing_proof_id": { "type": "string" },
+          "reason": { "enum": ["landing_mismatch", "landing_uncertain"] },
+          "reason_summary": { "type": "null" },
+          "idempotency_key": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "placement_kind": { "const": "coordinator" } } },
+      "then": {
+        "properties": {
+          "landing_proof_id": { "type": "null" },
+          "reason": { "const": "post_landing_regression" },
+          "reason_summary": { "type": "string", "minLength": 1 },
+          "idempotency_key": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "open" } } },
+      "then": {
+        "properties": {
+          "lifted_by": { "type": "null" },
+          "lifted_at": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "lifted" } } },
+      "then": {
+        "properties": {
+          "lifted_by": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "lifted_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  ]
 }

@@ -5,10 +5,11 @@ from datetime import datetime
 from typing import Any
 
 from .candidates import GitCandidateStore, NoCandidateChangesError
-from .domain import SupervisionPolicy
+from .domain import SupervisionPolicy, ValidationError
 from .executor import DockerExecutor
 from .results import WorkspaceResultStore
 from .service import ControlPlane
+from .workflow_rounds import WorkflowRoundCause
 
 
 @dataclass(frozen=True)
@@ -211,13 +212,33 @@ class WorkflowDirector:
             ],
         )
         if effective_outcome == "changes_requested":
+            finding_classes: set[str] = set()
+            if scope_review is not None:
+                if scope_review["failed_must_keys"]:
+                    finding_classes.add("scope_must_failure")
+                if scope_review["regression_probe_keys"]:
+                    finding_classes.add("regression")
+            if not finding_classes:
+                finding_classes.add("review_finding")
             return self._request_correction(
                 execution,
                 policy_id=gate["policy_id"],
-                evidence_id=evidence["id"],
-                review_entry_id=verdict["work_log_entry_id"],
-                scope_review_id=(None if scope_review is None else scope_review["id"]),
                 source="independent_review",
+                cause=WorkflowRoundCause(
+                    schema_version=1,
+                    kind="reviewer_finding",
+                    finding_classes=tuple(sorted(finding_classes)),
+                    policy_id=gate["policy_id"],
+                    reviewer_run_id=reviewer["id"],
+                    reviewer_attempt_id=verdict["reviewer_attempt_id"],
+                    review_evidence_id=evidence["id"],
+                    review_entry_id=verdict["work_log_entry_id"],
+                    scope_review_id=(
+                        None if scope_review is None else scope_review["id"]
+                    ),
+                    maintainer_review_id=None,
+                    gate_name=None,
+                ),
             )
 
         evidence_by_name: dict[str, dict[str, Any]] = {}
@@ -333,8 +354,20 @@ class WorkflowDirector:
             return self._request_correction(
                 execution,
                 policy_id=gate["policy_id"],
-                maintainer_review_id=review["id"],
                 source="maintainer_review",
+                cause=WorkflowRoundCause(
+                    schema_version=1,
+                    kind="maintainer_request",
+                    finding_classes=("product_disposition",),
+                    policy_id=gate["policy_id"],
+                    reviewer_run_id=None,
+                    reviewer_attempt_id=None,
+                    review_evidence_id=None,
+                    review_entry_id=None,
+                    scope_review_id=None,
+                    maintainer_review_id=review["id"],
+                    gate_name=None,
+                ),
             )
         readiness = self.database.gate_readiness(gate["policy_id"])
         if not readiness["ready"]:
@@ -377,6 +410,10 @@ class WorkflowDirector:
                 queue_item_id=queue["id"],
             )
             return True
+
+        target_hold = landing["target_hold"]
+        if target_hold is not None and target_hold["placement_kind"] == "coordinator":
+            return False
 
         mode = execution["spec"]["landing_mode"]
         if mode == "provider" and landing["plan_id"] is not None:
@@ -628,46 +665,45 @@ class WorkflowDirector:
                 raise RuntimeError("workflow correction has no previous gate")
             policy = self.database.get_gate_policy(previous["policy_id"])
             source_revision = policy["head_revision"]
-            maintainer_reviews = self.database.list_maintainer_reviews(
-                previous["policy_id"]
-            )
-            if (
-                maintainer_reviews
-                and maintainer_reviews[0]["decision"] == "changes_requested"
-            ):
-                kwargs["change_policy_id"] = previous["policy_id"]
-                kwargs["change_maintainer_review_id"] = maintainer_reviews[0]["id"]
-            else:
-                reviewer = self.database.find_workflow_run(
-                    execution["id"], correction_round - 1, "reviewer"
-                )
-                if reviewer is None:
-                    raise RuntimeError("workflow correction has no reviewer run")
-                verdict = self.database.get_typed_review_verdict(
-                    previous["policy_id"], reviewer["id"]
-                )
-                evidence = next(
-                    (
-                        item
-                        for item in self.database.list_gate_evidence(
-                            previous["policy_id"]
-                        )
-                        if item["gate_name"] == "independent-review"
-                        and item["outcome"] == "failed"
-                        and item["reviewer_run_id"] == reviewer["id"]
-                    ),
-                    None,
-                )
-                if verdict is None or evidence is None:
-                    raise RuntimeError(
-                        "workflow correction has no exact failed review evidence"
+            correction_event = next(
+                (
+                    event
+                    for event in reversed(execution["events"])
+                    if event["kind"]
+                    in {"workflow.correction_started", "workflow.ruling_resolved"}
+                    and event["metadata"]["to_correction_round"] == correction_round
+                    and "round_cause" in event["metadata"]
+                    and (
+                        event["kind"] == "workflow.correction_started"
+                        or event["metadata"].get("decision") == "continue"
                     )
+                ),
+                None,
+            )
+            if correction_event is None:
+                raise RuntimeError("workflow correction has no immutable cause")
+            try:
+                cause = WorkflowRoundCause.from_mapping(
+                    correction_event["metadata"]["round_cause"]
+                )
+            except (KeyError, TypeError, ValidationError) as exc:
+                raise RuntimeError("workflow correction cause is invalid") from exc
+            if cause.policy_id != previous["policy_id"]:
+                raise RuntimeError("workflow correction cause is for another policy")
+            if cause.kind == "maintainer_request":
+                kwargs["change_policy_id"] = previous["policy_id"]
+                kwargs["change_maintainer_review_id"] = cause.maintainer_review_id
+            elif cause.kind == "reviewer_finding":
                 kwargs.update(
                     {
                         "change_policy_id": previous["policy_id"],
-                        "change_review_evidence_id": evidence["id"],
-                        "change_review_entry_id": verdict["work_log_entry_id"],
+                        "change_review_evidence_id": cause.review_evidence_id,
+                        "change_review_entry_id": cause.review_entry_id,
                     }
+                )
+            else:
+                raise RuntimeError(
+                    "workflow gate-error correction needs an explicit ruling"
                 )
         requester = self.database.get_user(execution["requested_by"])
         return self.database.create_run(
@@ -732,22 +768,28 @@ class WorkflowDirector:
         *,
         policy_id: str,
         source: str,
-        evidence_id: str | None = None,
-        review_entry_id: str | None = None,
-        scope_review_id: str | None = None,
-        maintainer_review_id: str | None = None,
+        cause: WorkflowRoundCause,
     ) -> bool:
         correction_round = execution["correction_round"]
         if correction_round >= execution["spec"]["max_correction_rounds"]:
-            return self._ruling(execution, "correction_limit", policy_id=policy_id)
-        metadata = {"policy_id": policy_id, "feedback_source": source}
-        if evidence_id is not None:
-            metadata["review_evidence_id"] = evidence_id
-            metadata["review_entry_id"] = review_entry_id
-        if scope_review_id is not None:
-            metadata["scope_review_id"] = scope_review_id
-        if maintainer_review_id is not None:
-            metadata["maintainer_review_id"] = maintainer_review_id
+            return self._ruling(
+                execution,
+                "correction_limit",
+                policy_id=policy_id,
+                round_cause=cause,
+            )
+        metadata = {
+            "policy_id": policy_id,
+            "feedback_source": source,
+            "round_cause": cause.to_dict(),
+        }
+        if cause.review_evidence_id is not None:
+            metadata["review_evidence_id"] = cause.review_evidence_id
+            metadata["review_entry_id"] = cause.review_entry_id
+        if cause.scope_review_id is not None:
+            metadata["scope_review_id"] = cause.scope_review_id
+        if cause.maintainer_review_id is not None:
+            metadata["maintainer_review_id"] = cause.maintainer_review_id
         self.database.advance_workflow_execution(
             execution["id"],
             expected_version=execution["version"],
@@ -770,6 +812,7 @@ class WorkflowDirector:
         gate_name: str | None = None,
         provider_landing_id: str | None = None,
         landing_plan_id: str | None = None,
+        round_cause: WorkflowRoundCause | None = None,
     ) -> bool:
         self.database.open_workflow_ruling(
             execution["id"],
@@ -780,6 +823,7 @@ class WorkflowDirector:
             gate_name=gate_name,
             provider_landing_id=provider_landing_id,
             landing_plan_id=landing_plan_id,
+            round_cause=round_cause,
         )
         return True
 

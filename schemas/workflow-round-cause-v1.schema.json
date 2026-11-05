@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:magic-glass-box:schema:workflow-round-cause:v1",
+  "title": "Magic Glass Box Workflow Round Cause v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "finding_classes",
+    "gate_name",
+    "kind",
+    "maintainer_review_id",
+    "policy_id",
+    "review_entry_id",
+    "review_evidence_id",
+    "reviewer_attempt_id",
+    "reviewer_run_id",
+    "schema_version",
+    "scope_review_id"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "enum": ["reviewer_finding", "maintainer_request", "gate_error"] },
+    "finding_classes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" }
+    },
+    "policy_id": { "type": "string", "pattern": "^gpl_[0-9a-f]{32}$" },
+    "reviewer_run_id": { "$ref": "#/$defs/nullableRun" },
+    "reviewer_attempt_id": { "$ref": "#/$defs/nullableAttempt" },
+    "review_evidence_id": { "$ref": "#/$defs/nullableEvidence" },
+    "review_entry_id": { "$ref": "#/$defs/nullableEntry" },
+    "scope_review_id": { "$ref": "#/$defs/nullableScope" },
+    "maintainer_review_id": { "$ref": "#/$defs/nullableMaintainer" },
+    "gate_name": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "reviewer_finding" } } },
+      "then": {
+        "properties": {
+          "reviewer_run_id": { "type": "string" },
+          "reviewer_attempt_id": { "type": "string" },
+          "review_evidence_id": { "type": "string" },
+          "review_entry_id": { "type": "string" },
+          "maintainer_review_id": { "type": "null" },
+          "gate_name": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "maintainer_request" } } },
+      "then": {
+        "properties": {
+          "reviewer_run_id": { "type": "null" },
+          "reviewer_attempt_id": { "type": "null" },
+          "review_evidence_id": { "type": "null" },
+          "review_entry_id": { "type": "null" },
+          "scope_review_id": { "type": "null" },
+          "maintainer_review_id": { "type": "string" },
+          "gate_name": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "gate_error" } } },
+      "then": {
+        "properties": {
+          "reviewer_run_id": { "type": "null" },
+          "reviewer_attempt_id": { "type": "null" },
+          "review_evidence_id": { "type": "null" },
+          "review_entry_id": { "type": "null" },
+          "scope_review_id": { "type": "null" },
+          "maintainer_review_id": { "type": "null" },
+          "gate_name": { "type": "string" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nullableRun": { "oneOf": [{ "type": "string", "pattern": "^run_[0-9a-f]{32}$" }, { "type": "null" }] },
+    "nullableAttempt": { "oneOf": [{ "type": "string", "pattern": "^att_[0-9a-f]{32}$" }, { "type": "null" }] },
+    "nullableEvidence": { "oneOf": [{ "type": "string", "pattern": "^gev_[0-9a-f]{32}$" }, { "type": "null" }] },
+    "nullableEntry": { "oneOf": [{ "type": "string", "pattern": "^wle_[0-9a-f]{32}$" }, { "type": "null" }] },
+    "nullableScope": { "oneOf": [{ "type": "string", "pattern": "^wsr_[0-9a-f]{32}$" }, { "type": "null" }] },
+    "nullableMaintainer": { "oneOf": [{ "type": "string", "pattern": "^mrv_[0-9a-f]{32}$" }, { "type": "null" }] }
+  }
+}

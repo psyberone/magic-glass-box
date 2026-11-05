@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 51
+SCHEMA_VERSION = 52
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -6701,6 +6701,231 @@ END
 WHERE state = 'confirmed';
 """
 
+WORKFLOW_ACCEPTED_CONTRACT_RECONCILIATION_SCHEMA = """
+DROP TRIGGER workflow_manual_wake_event_immutable_update;
+DROP TRIGGER workflow_manual_wake_event_immutable_delete;
+ALTER TABLE workflow_manual_wake_events
+    RENAME TO workflow_manual_wake_events_v51;
+CREATE TABLE workflow_manual_wake_events (
+    wake_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'wake.requested', 'wake.delivered', 'wake.acknowledged',
+            'wake.expired', 'wake.escalated'
+        )
+    ),
+    from_state TEXT,
+    to_state TEXT NOT NULL CHECK (
+        to_state IN (
+            'requested', 'delivered', 'acknowledged', 'expired', 'escalated'
+        )
+    ),
+    actor_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (wake_id, sequence),
+    FOREIGN KEY (wake_id)
+        REFERENCES workflow_manual_wakes(id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE RESTRICT
+) STRICT;
+INSERT INTO workflow_manual_wake_events (
+    wake_id, sequence, kind, from_state, to_state, actor_id, created_at
+)
+SELECT
+    wake_id, sequence, kind, from_state, to_state, actor_id, created_at
+FROM workflow_manual_wake_events_v51;
+DROP TABLE workflow_manual_wake_events_v51;
+CREATE TRIGGER workflow_manual_wake_event_immutable_update
+BEFORE UPDATE ON workflow_manual_wake_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow manual wake events are immutable');
+END;
+CREATE TRIGGER workflow_manual_wake_event_immutable_delete
+BEFORE DELETE ON workflow_manual_wake_events
+BEGIN
+    SELECT RAISE(ABORT, 'workflow manual wake events are immutable');
+END;
+
+CREATE TABLE workflow_wake_availability_observations (
+    id TEXT PRIMARY KEY,
+    wake_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    wake_version INTEGER NOT NULL CHECK (wake_version >= 1),
+    state TEXT NOT NULL CHECK (
+        state IN ('available', 'unavailable_until', 'blocked_on')
+    ),
+    unavailable_until TEXT,
+    blocked_on TEXT,
+    observed_by TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (wake_id, sequence),
+    UNIQUE (wake_id, idempotency_key),
+    FOREIGN KEY (wake_id)
+        REFERENCES workflow_manual_wakes(id) ON DELETE RESTRICT,
+    FOREIGN KEY (observed_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'available'
+            AND unavailable_until IS NULL AND blocked_on IS NULL)
+        OR
+        (state = 'unavailable_until'
+            AND unavailable_until IS NOT NULL AND blocked_on IS NULL)
+        OR
+        (state = 'blocked_on'
+            AND unavailable_until IS NULL AND blocked_on IS NOT NULL)
+    )
+) STRICT;
+
+CREATE INDEX workflow_wake_availability_latest
+    ON workflow_wake_availability_observations(wake_id, sequence DESC);
+
+CREATE TRIGGER workflow_wake_availability_immutable_update
+BEFORE UPDATE ON workflow_wake_availability_observations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow wake availability is immutable');
+END;
+CREATE TRIGGER workflow_wake_availability_immutable_delete
+BEFORE DELETE ON workflow_wake_availability_observations
+BEGIN
+    SELECT RAISE(ABORT, 'workflow wake availability cannot be deleted');
+END;
+
+CREATE TABLE workflow_reviewer_measurements (
+    id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    reviewer_run_id TEXT NOT NULL,
+    reviewer_attempt_id TEXT NOT NULL,
+    profile_version_id TEXT NOT NULL,
+    image_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    measurement_json TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (reviewer_run_id, idempotency_key),
+    UNIQUE (reviewer_attempt_id, content_sha256),
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (reviewer_attempt_id)
+        REFERENCES run_attempts(id) ON DELETE RESTRICT,
+    FOREIGN KEY (profile_version_id)
+        REFERENCES agent_profile_versions(id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX workflow_reviewer_measurement_policy
+    ON workflow_reviewer_measurements(policy_id, created_at, id);
+CREATE INDEX workflow_reviewer_measurement_attempt
+    ON workflow_reviewer_measurements(reviewer_attempt_id, created_at, id);
+
+CREATE TRIGGER workflow_reviewer_measurement_immutable_update
+BEFORE UPDATE ON workflow_reviewer_measurements
+BEGIN
+    SELECT RAISE(ABORT, 'workflow reviewer measurements are immutable');
+END;
+CREATE TRIGGER workflow_reviewer_measurement_immutable_delete
+BEFORE DELETE ON workflow_reviewer_measurements
+BEGIN
+    SELECT RAISE(ABORT, 'workflow reviewer measurements cannot be deleted');
+END;
+
+DROP TRIGGER integration_target_hold_identity_immutable;
+DROP TRIGGER integration_target_hold_immutable_delete;
+DROP INDEX integration_target_hold_execution;
+DROP INDEX integration_target_one_open_hold;
+ALTER TABLE integration_target_holds RENAME TO integration_target_holds_v51;
+
+CREATE TABLE integration_target_holds (
+    id TEXT PRIMARY KEY,
+    integration_ref_id TEXT NOT NULL,
+    workflow_execution_id TEXT NOT NULL,
+    landing_proof_id TEXT UNIQUE,
+    placement_kind TEXT NOT NULL CHECK (
+        placement_kind IN ('landing_proof', 'coordinator')
+    ),
+    reason TEXT NOT NULL CHECK (
+        reason IN (
+            'landing_mismatch', 'landing_uncertain',
+            'post_landing_regression'
+        )
+    ),
+    reason_summary TEXT,
+    placed_by TEXT NOT NULL,
+    idempotency_key TEXT,
+    state TEXT NOT NULL CHECK (state IN ('open', 'lifted')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    lifted_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    lifted_at TEXT,
+    FOREIGN KEY (integration_ref_id)
+        REFERENCES integration_refs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_proof_id)
+        REFERENCES workflow_provider_landing_proofs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (placed_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (lifted_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (placement_kind = 'landing_proof'
+            AND landing_proof_id IS NOT NULL
+            AND reason IN ('landing_mismatch', 'landing_uncertain')
+            AND reason_summary IS NULL AND idempotency_key IS NULL)
+        OR
+        (placement_kind = 'coordinator'
+            AND landing_proof_id IS NULL
+            AND reason = 'post_landing_regression'
+            AND reason_summary IS NOT NULL AND idempotency_key IS NOT NULL)
+    ),
+    CHECK (
+        (state = 'open' AND lifted_by IS NULL AND lifted_at IS NULL)
+        OR
+        (state = 'lifted' AND lifted_by IS NOT NULL AND lifted_at IS NOT NULL)
+    )
+) STRICT;
+
+INSERT INTO integration_target_holds (
+    id, integration_ref_id, workflow_execution_id, landing_proof_id,
+    placement_kind, reason, reason_summary, placed_by, idempotency_key,
+    state, version, lifted_by, created_at, updated_at, lifted_at
+)
+SELECT
+    old.id, old.integration_ref_id, old.workflow_execution_id,
+    old.landing_proof_id, 'landing_proof', old.reason, NULL,
+    activation.acknowledged_by, NULL, old.state, old.version, old.lifted_by,
+    old.created_at, old.updated_at, old.lifted_at
+FROM integration_target_holds_v51 old
+JOIN workflow_executions execution
+    ON execution.id = old.workflow_execution_id
+JOIN workflow_activation_versions activation
+    ON activation.id = execution.workflow_activation_version_id;
+
+DROP TABLE integration_target_holds_v51;
+
+CREATE UNIQUE INDEX integration_target_one_open_hold
+    ON integration_target_holds(integration_ref_id) WHERE state = 'open';
+CREATE UNIQUE INDEX integration_target_hold_idempotency
+    ON integration_target_holds(placed_by, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE INDEX integration_target_hold_execution
+    ON integration_target_holds(workflow_execution_id, created_at, id);
+
+CREATE TRIGGER integration_target_hold_identity_immutable
+BEFORE UPDATE OF
+    id, integration_ref_id, workflow_execution_id, landing_proof_id,
+    placement_kind, reason, reason_summary, placed_by, idempotency_key,
+    created_at
+ON integration_target_holds
+BEGIN
+    SELECT RAISE(ABORT, 'integration target hold identity is immutable');
+END;
+CREATE TRIGGER integration_target_hold_immutable_delete
+BEFORE DELETE ON integration_target_holds
+BEGIN
+    SELECT RAISE(ABORT, 'integration target holds cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -6758,7 +6983,8 @@ SCHEMA_V47 = SCHEMA_V46 + WORKFLOW_MANUAL_WAKE_SCHEMA + WORKFLOW_RESOURCE_RULING
 SCHEMA_V48 = SCHEMA_V47 + WORKFLOW_LANDING_PROOF_SCHEMA
 SCHEMA_V49 = SCHEMA_V48 + WORKFLOW_CLOSEOUT_SCHEMA
 SCHEMA_V50 = SCHEMA_V49 + WORKFLOW_CORRECTION_CEILING_EXTENSION_SCHEMA
-SCHEMA = SCHEMA_V50 + WORKFLOW_PROVIDER_EFFECT_CONFORMANCE_SCHEMA
+SCHEMA_V51 = SCHEMA_V50 + WORKFLOW_PROVIDER_EFFECT_CONFORMANCE_SCHEMA
+SCHEMA = SCHEMA_V51 + WORKFLOW_ACCEPTED_CONTRACT_RECONCILIATION_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -6810,4 +7036,5 @@ MIGRATIONS = {
     48: WORKFLOW_CLOSEOUT_SCHEMA,
     49: WORKFLOW_CORRECTION_CEILING_EXTENSION_SCHEMA,
     50: WORKFLOW_PROVIDER_EFFECT_CONFORMANCE_SCHEMA,
+    51: WORKFLOW_ACCEPTED_CONTRACT_RECONCILIATION_SCHEMA,
 }

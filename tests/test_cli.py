@@ -210,6 +210,16 @@ class FakeControlPlane:
     ) -> dict[str, object]:
         return self._called("workflow.wake-ack", wake_id=wake_id, **kwargs)
 
+    def transition_workflow_manual_wake(
+        self, wake_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("workflow.wake-transition", wake_id=wake_id, **kwargs)
+
+    def record_workflow_wake_availability(
+        self, wake_id: str, **kwargs: object
+    ) -> dict[str, object]:
+        return self._called("workflow.wake-availability", wake_id=wake_id, **kwargs)
+
     def declare_workflow_closeout(
         self, execution_id: str, **kwargs: object
     ) -> dict[str, object]:
@@ -798,6 +808,15 @@ class CLITests(unittest.TestCase):
                         "acknowledge one exact workflow manual wake",
                     ),
                     (
+                        "wake-transition",
+                        "record explicit delivery, expiry, or escalation for one wake",
+                    ),
+                    (
+                        "wake-availability",
+                        "record recipient availability separately from "
+                        "wake acknowledgement",
+                    ),
+                    (
                         "config-create",
                         "create a versioned workflow configuration",
                     ),
@@ -1265,6 +1284,17 @@ class CLITests(unittest.TestCase):
                     "--expected-version",
                     "--acknowledged-by",
                 ),
+                ("workflow", "wake-transition"): (
+                    "--state",
+                    "--expected-version",
+                    "--actor",
+                ),
+                ("workflow", "wake-availability"): (
+                    "--state",
+                    "--expected-version",
+                    "--observed-by",
+                    "--idempotency-key",
+                ),
                 ("workflow", "closeout-declare"): (
                     "--expected-version",
                     "--spec",
@@ -1605,6 +1635,16 @@ class CLITests(unittest.TestCase):
                     "active",
                     "cancelled",
                     "completed",
+                ),
+                (("workflow", "wake-transition"), "state"): (
+                    "delivered",
+                    "expired",
+                    "escalated",
+                ),
+                (("workflow", "wake-availability"), "state"): (
+                    "available",
+                    "unavailable_until",
+                    "blocked_on",
                 ),
                 (("discovery", "list"), "state"): (
                     "active",
@@ -2798,6 +2838,12 @@ class CLITests(unittest.TestCase):
                 "wake-show": "show one durable workflow manual wake",
                 "wake-list": "list durable workflow manual wakes",
                 "wake-ack": "acknowledge one exact workflow manual wake",
+                "wake-transition": (
+                    "record explicit delivery, expiry, or escalation for one wake"
+                ),
+                "wake-availability": (
+                    "record recipient availability separately from wake acknowledgement"
+                ),
                 "config-create": "create a versioned workflow configuration",
                 "config-revise": "append an immutable configuration revision",
                 "config-show": "show one workflow configuration revision",
@@ -3593,6 +3639,57 @@ class CLITests(unittest.TestCase):
                         "wake_id": "wwk_" + "1" * 32,
                         "expected_version": 1,
                         "acknowledged_by_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "wake-transition",
+                    "wwk_" + "1" * 32,
+                    "--state",
+                    "delivered",
+                    "--expected-version",
+                    "1",
+                    "--actor",
+                    "operator",
+                ],
+                (
+                    "workflow.wake-transition",
+                    {
+                        "wake_id": "wwk_" + "1" * 32,
+                        "expected_version": 1,
+                        "target_state": "delivered",
+                        "actor_handle": "operator",
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
+                    "wake-availability",
+                    "wwk_" + "1" * 32,
+                    "--state",
+                    "blocked_on",
+                    "--expected-version",
+                    "2",
+                    "--blocked-on",
+                    "maintainer",
+                    "--observed-by",
+                    "operator",
+                    "--idempotency-key",
+                    "wake-availability-0001",
+                ],
+                (
+                    "workflow.wake-availability",
+                    {
+                        "wake_id": "wwk_" + "1" * 32,
+                        "expected_wake_version": 2,
+                        "state": "blocked_on",
+                        "unavailable_until": None,
+                        "blocked_on": "maintainer",
+                        "observed_by_handle": "operator",
+                        "idempotency_key": "wake-availability-0001",
                     },
                 ),
             ),

@@ -44,6 +44,7 @@
         },
         "reason": {
           "enum": [
+            "closeout_declaration",
             "closeout_obligation",
             "execution_terminal",
             "landing_admission",
@@ -53,8 +54,11 @@
             "landing_target_hold",
             "maintainer_disposition",
             "manual_wake_acknowledgement",
+            "manual_wake_escalated",
+            "manual_wake_expired",
             "manual_wake_missing",
             "provider_effect_dispatch",
+            "provider_effect_mismatch",
             "provider_effect_receipt",
             "provider_effect_unresolved",
             "provider_intent",

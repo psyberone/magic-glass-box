@@ -8,6 +8,7 @@ from ..candidates import CandidateError, CandidateManifest
 from ..domain import (
     AgentProfileSpec,
     AttemptState,
+    GatewayCapability,
     ProjectContext,
     RunState,
     ValidationError,
@@ -26,10 +27,46 @@ from ..gates import (
     normalize_integration_ref,
     parse_gate_evidence,
 )
+from ..krab import IDEMPOTENCY_KEY_RE
+from ..reviewer_measurement import ReviewerMeasurement
 from .errors import ConflictError, NotFoundError, StorageError
 
 
 class GateStorage:
+    @staticmethod
+    def _reviewer_measurement_record(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            measurement = ReviewerMeasurement.from_mapping(
+                json.loads(row["measurement_json"])
+            )
+        except (ValidationError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageError("stored reviewer measurement is invalid") from exc
+        expected = {
+            "policy_id": measurement.inputs.policy_id,
+            "reviewer_attempt_id": measurement.attempt_id,
+            "schema_version": measurement.schema_version,
+            "content_sha256": measurement.digest,
+        }
+        if any(row[field] != value for field, value in expected.items()):
+            raise StorageError(
+                "stored reviewer measurement columns do not match its artifact"
+            )
+        return {
+            "id": row["id"],
+            **expected,
+            "reviewer_run_id": row["reviewer_run_id"],
+            "profile_version_id": row["profile_version_id"],
+            "image_id": row["image_id"],
+            "measurement": measurement.to_dict(),
+            "idempotency_key": row["idempotency_key"],
+            "created_at": row["created_at"],
+            "authority": {
+                "credentials_exposed": False,
+                "effect_authority": False,
+                "workspace_mode": "read_only",
+            },
+        }
+
     @staticmethod
     def _policy_columns(alias: str | None = None) -> str:
         prefix = "" if alias is None else f"{alias}."
@@ -983,6 +1020,196 @@ class GateStorage:
                 (policy_id, limit),
             ).fetchall()
         return [self._evidence_record(row) for row in rows]
+
+    def submit_reviewer_measurement(
+        self,
+        reviewer_run_id: str,
+        measurement: ReviewerMeasurement,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        reviewer_run_id = require_string(
+            reviewer_run_id, field="reviewer_run_id", max_bytes=64
+        )
+        if not isinstance(measurement, ReviewerMeasurement):
+            raise ValidationError("measurement must be a ReviewerMeasurement")
+        idempotency_key = require_string(
+            idempotency_key, field="idempotency_key", max_bytes=128
+        )
+        if IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None:
+            raise ValidationError("reviewer measurement idempotency key is invalid")
+        measurement_id = self.new_id("rvm")
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                policy_row = connection.execute(
+                    f"SELECT {self._policy_columns('policy')} "  # noqa: S608
+                    "FROM integration_gate_policies policy "
+                    "JOIN integration_gate_review_runs review "
+                    "ON review.policy_id = policy.id WHERE review.run_id = ?",
+                    (reviewer_run_id,),
+                ).fetchone()
+                if policy_row is None:
+                    raise ConflictError(
+                        "reviewer measurement requires a gate-bound reviewer run"
+                    )
+                policy_record = self._policy_record(policy_row)
+                policy = GatePolicyManifest.from_mapping(policy_record["manifest"])
+                try:
+                    measurement.inputs.assert_matches(policy)
+                except GateError as exc:
+                    raise ConflictError(
+                        "reviewer measurement does not match the exact policy inputs"
+                    ) from exc
+                authority = connection.execute(
+                    "SELECT review.policy_id, review.candidate_id, "
+                    "run.state AS run_state, run.source_revision AS run_revision, "
+                    "attempt.state AS attempt_state, "
+                    "attempt.source_revision AS attempt_revision, "
+                    "attempt.profile_version_id, attempt.image_id, "
+                    "profile.spec_json, profile.content_sha256 "
+                    "FROM integration_gate_review_runs review "
+                    "JOIN runs run ON run.id = review.run_id "
+                    "JOIN run_attempts attempt ON attempt.run_id = run.id "
+                    "JOIN agent_profile_versions profile "
+                    "ON profile.id = attempt.profile_version_id "
+                    "WHERE review.run_id = ? AND attempt.id = ?",
+                    (reviewer_run_id, measurement.attempt_id),
+                ).fetchone()
+                if authority is None:
+                    raise ConflictError(
+                        "reviewer measurement attempt is not bound to this run"
+                    )
+                if (
+                    authority["policy_id"] != measurement.inputs.policy_id
+                    or authority["candidate_id"] != measurement.inputs.candidate_id
+                ):
+                    raise ConflictError(
+                        "reviewer measurement belongs to another policy candidate"
+                    )
+                if (
+                    authority["run_state"] != RunState.RUNNING.value
+                    or authority["attempt_state"] != AttemptState.RUNNING.value
+                ):
+                    raise ConflictError(
+                        "reviewer measurement requires the active reviewer attempt"
+                    )
+                if (
+                    authority["run_revision"] != policy.head_revision
+                    or authority["attempt_revision"] != policy.head_revision
+                ):
+                    raise ConflictError(
+                        "reviewer measurement did not run at the exact policy head"
+                    )
+                try:
+                    profile = AgentProfileSpec.from_mapping(
+                        json.loads(authority["spec_json"])
+                    )
+                except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+                    raise StorageError("stored reviewer profile is invalid") from exc
+                if profile.digest != authority["content_sha256"]:
+                    raise StorageError("stored reviewer profile digest does not match")
+                if profile.workspace_mode is not WorkspaceMode.READ_ONLY:
+                    raise ConflictError(
+                        "reviewer measurement requires a read-only workspace"
+                    )
+                if profile.credential_names or (
+                    GatewayCapability.PROVIDER_INVOKE in profile.gateway_capabilities
+                ):
+                    raise ConflictError(
+                        "reviewer measurement requires a credential-free reviewer"
+                    )
+                if authority["image_id"] is None:
+                    raise ConflictError(
+                        "reviewer measurement requires an observed sandbox image"
+                    )
+                existing = connection.execute(
+                    "SELECT * FROM workflow_reviewer_measurements "
+                    "WHERE reviewer_run_id = ? AND idempotency_key = ?",
+                    (reviewer_run_id, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["content_sha256"] != measurement.digest:
+                        raise ConflictError(
+                            "reviewer measurement idempotency key was reused"
+                        )
+                    connection.commit()
+                    return self._reviewer_measurement_record(existing)
+                connection.execute(
+                    "INSERT INTO workflow_reviewer_measurements "
+                    "(id, policy_id, reviewer_run_id, reviewer_attempt_id, "
+                    "profile_version_id, image_id, schema_version, "
+                    "measurement_json, content_sha256, idempotency_key, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                    (
+                        measurement_id,
+                        measurement.inputs.policy_id,
+                        reviewer_run_id,
+                        measurement.attempt_id,
+                        authority["profile_version_id"],
+                        authority["image_id"],
+                        measurement.canonical,
+                        measurement.digest,
+                        idempotency_key,
+                        now,
+                    ),
+                )
+                stored = connection.execute(
+                    "SELECT * FROM workflow_reviewer_measurements WHERE id = ?",
+                    (measurement_id,),
+                ).fetchone()
+                assert stored is not None
+                result = self._reviewer_measurement_record(stored)
+                connection.commit()
+            except (
+                ConflictError,
+                GateError,
+                NotFoundError,
+                StorageError,
+                ValidationError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "reviewer measurement could not be recorded"
+                ) from exc
+        return result
+
+    def list_reviewer_measurements(
+        self,
+        policy_id: str,
+        *,
+        reviewer_run_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+        if reviewer_run_id is not None:
+            reviewer_run_id = require_string(
+                reviewer_run_id, field="reviewer_run_id", max_bytes=64
+            )
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 500
+        ):
+            raise ValueError("limit must be between 1 and 500")
+        with self._read_snapshot() as connection:
+            known = connection.execute(
+                "SELECT 1 FROM integration_gate_policies WHERE id = ?",
+                (policy_id,),
+            ).fetchone()
+            if known is None:
+                raise NotFoundError(f"gate policy not found: {policy_id}")
+            rows = connection.execute(
+                "SELECT * FROM workflow_reviewer_measurements "
+                "WHERE policy_id = ? AND (? IS NULL OR reviewer_run_id = ?) "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (policy_id, reviewer_run_id, reviewer_run_id, limit),
+            ).fetchall()
+        return [self._reviewer_measurement_record(row) for row in rows]
 
     def _gate_readiness(
         self, connection: sqlite3.Connection, policy_id: str

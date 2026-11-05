@@ -1076,6 +1076,7 @@ class GatewayCapability(StrEnum):
     ADVISORY_CHALLENGE_SUBMIT = "advisory.challenge.submit"
     ADVISORY_REPORT_SUBMIT = "advisory.report.submit"
     WORKFLOW_SCOPE_REVIEW_SUBMIT = "workflow.scope-review.submit"
+    WORKFLOW_REVIEWER_MEASUREMENT_SUBMIT = "workflow.reviewer-measurement.submit"
     INTERACTION_OPEN = "interaction.open"
     INTERACTION_READ = "interaction.read"
     HANDOFF_SUBMIT = "handoff.submit"

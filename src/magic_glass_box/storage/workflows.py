@@ -45,6 +45,7 @@ from ..workflow_closeout import (
     validate_delivery_closeout,
 )
 from ..workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
+from ..workflow_rounds import WorkflowRoundCause
 from ..workflow_scope import WorkflowScopeReview
 from ..workflows import (
     ADVISORY_REVIEW_TEMPLATE_ID,
@@ -1507,7 +1508,8 @@ class WorkflowStorage:
                 )
         if execution["state"] != "active":
             hold = connection.execute(
-                "SELECT id, version, reason, integration_ref_id, landing_proof_id "
+                "SELECT id, version, placement_kind, reason, integration_ref_id, "
+                "landing_proof_id "
                 "FROM integration_target_holds WHERE workflow_execution_id = ? "
                 "AND state = 'open' ORDER BY created_at, id LIMIT 1",
                 (execution_id,),
@@ -1520,6 +1522,7 @@ class WorkflowStorage:
                     {
                         "hold_id": hold["id"],
                         "hold_version": hold["version"],
+                        "hold_placement_kind": hold["placement_kind"],
                         "hold_reason": hold["reason"],
                         "integration_ref_id": hold["integration_ref_id"],
                         "landing_proof_id": hold["landing_proof_id"],
@@ -1549,7 +1552,8 @@ class WorkflowStorage:
                 },
             )
         hold = connection.execute(
-            "SELECT id, version, reason, integration_ref_id, landing_proof_id "
+            "SELECT id, version, placement_kind, reason, integration_ref_id, "
+            "landing_proof_id "
             "FROM integration_target_holds WHERE workflow_execution_id = ? "
             "AND state = 'open' ORDER BY created_at, id LIMIT 1",
             (execution_id,),
@@ -1562,6 +1566,7 @@ class WorkflowStorage:
                 {
                     "hold_id": hold["id"],
                     "hold_version": hold["version"],
+                    "hold_placement_kind": hold["placement_kind"],
                     "hold_reason": hold["reason"],
                     "integration_ref_id": hold["integration_ref_id"],
                     "landing_proof_id": hold["landing_proof_id"],
@@ -1592,7 +1597,8 @@ class WorkflowStorage:
             run = connection.execute(
                 "SELECT binding.run_id, binding.generation, run.state, "
                 "run.version, wake.id AS wake_id, wake.state AS wake_state, "
-                "wake.version AS wake_version FROM workflow_run_bindings binding "
+                "wake.version AS wake_version, wake.updated_at AS wake_updated_at "
+                "FROM workflow_run_bindings binding "
                 "JOIN runs run ON run.id = binding.run_id "
                 "LEFT JOIN workflow_manual_wakes wake ON wake.run_id = run.id "
                 "WHERE binding.execution_id = ? "
@@ -1622,12 +1628,18 @@ class WorkflowStorage:
                 "run_id": run["run_id"],
                 "wake_id": run["wake_id"],
                 "wake_version": run["wake_version"],
+                "wake_state": run["wake_state"],
+                "wake_updated_at": run["wake_updated_at"],
             }
             if run["wake_state"] != "acknowledged":
+                reason = {
+                    "expired": "manual_wake_expired",
+                    "escalated": "manual_wake_escalated",
+                }.get(run["wake_state"], "manual_wake_acknowledgement")
                 return fact(
                     "action_required",
                     "owner",
-                    "manual_wake_acknowledgement",
+                    reason,
                     wake_basis,
                 )
             if run["state"] == "queued":
@@ -3748,6 +3760,57 @@ class WorkflowStorage:
             raise ValidationError("workflow transition event is invalid")
         if not isinstance(metadata, dict):
             raise ValidationError("workflow transition metadata must be an object")
+        if event_kind == "workflow.correction_started":
+            raw_cause = metadata.get("round_cause")
+            if not isinstance(raw_cause, dict):
+                raise ValidationError(
+                    "workflow correction metadata requires round_cause"
+                )
+            round_cause = WorkflowRoundCause.from_mapping(raw_cause)
+            if (
+                target_stage != "build"
+                or target_correction_round != expected_correction_round + 1
+            ):
+                raise ValidationError(
+                    "workflow correction must advance exactly one build round"
+                )
+            if (
+                metadata.get("policy_id", round_cause.policy_id)
+                != round_cause.policy_id
+            ):
+                raise ValidationError(
+                    "workflow correction policy_id contradicts round_cause"
+                )
+            if round_cause.kind == "reviewer_finding":
+                expected_provenance = {
+                    "feedback_source": "independent_review",
+                    "review_evidence_id": round_cause.review_evidence_id,
+                    "review_entry_id": round_cause.review_entry_id,
+                    "scope_review_id": round_cause.scope_review_id,
+                    "maintainer_review_id": None,
+                }
+            elif round_cause.kind == "maintainer_request":
+                expected_provenance = {
+                    "feedback_source": "maintainer_review",
+                    "review_evidence_id": None,
+                    "review_entry_id": None,
+                    "scope_review_id": None,
+                    "maintainer_review_id": round_cause.maintainer_review_id,
+                }
+            else:
+                expected_provenance = {}
+            if any(
+                metadata.get(field) != expected
+                for field, expected in expected_provenance.items()
+            ):
+                raise ValidationError(
+                    "workflow correction provenance contradicts round_cause"
+                )
+            metadata = {**metadata, "round_cause": round_cause.to_dict()}
+        elif "round_cause" in metadata:
+            raise ValidationError(
+                "workflow transition only accepts round_cause for a correction"
+            )
         metadata_json = canonical_json(metadata)
         if len(metadata_json.encode("utf-8")) > 16 * 1024:
             raise ValidationError("workflow transition metadata is too large")
@@ -4638,6 +4701,36 @@ class WorkflowStorage:
                 ) from exc
         return self.get_workflow_execution(execution_id)
 
+    @staticmethod
+    def _workflow_ruling_round_cause(
+        connection: sqlite3.Connection,
+        *,
+        execution_id: str,
+        ruling_id: str,
+    ) -> WorkflowRoundCause | None:
+        row = connection.execute(
+            "SELECT metadata_json FROM workflow_execution_events "
+            "WHERE execution_id = ? AND kind = 'workflow.ruling_opened' "
+            "AND json_extract(metadata_json, '$.ruling_id') = ? "
+            "ORDER BY sequence DESC LIMIT 1",
+            (execution_id, ruling_id),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            metadata = json.loads(row["metadata_json"])
+            raw_cause = metadata.get("round_cause")
+            if raw_cause is None:
+                return None
+            return WorkflowRoundCause.from_mapping(raw_cause)
+        except (
+            AttributeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValidationError,
+        ) as exc:
+            raise StorageError("stored workflow ruling round cause is invalid") from exc
+
     def open_workflow_ruling(
         self,
         execution_id: str,
@@ -4649,6 +4742,7 @@ class WorkflowStorage:
         gate_name: str | None = None,
         provider_landing_id: str | None = None,
         landing_plan_id: str | None = None,
+        round_cause: WorkflowRoundCause | None = None,
     ) -> dict[str, Any]:
         execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
         self._positive_integer(expected_version, field="expected_version")
@@ -4666,8 +4760,21 @@ class WorkflowStorage:
         }
         if kind not in allowed:
             raise ValidationError("workflow ruling kind is invalid")
+        if kind == "correction_limit":
+            if not isinstance(round_cause, WorkflowRoundCause):
+                raise ValidationError(
+                    "correction-limit ruling requires one typed round cause"
+                )
+        elif round_cause is not None:
+            raise ValidationError(
+                "workflow ruling only accepts round_cause at the correction limit"
+            )
         if policy_id is not None:
             policy_id = require_string(policy_id, field="policy_id", max_bytes=64)
+            if round_cause is not None and round_cause.policy_id != policy_id:
+                raise ValidationError(
+                    "workflow ruling policy_id contradicts round_cause"
+                )
         if run_id is not None:
             run_id = require_string(run_id, field="run_id", max_bytes=64)
         if gate_name is not None:
@@ -4710,6 +4817,16 @@ class WorkflowStorage:
                     (execution_id, expected_version, kind),
                 ).fetchone()
                 if existing is not None:
+                    if round_cause is not None:
+                        existing_cause = self._workflow_ruling_round_cause(
+                            connection,
+                            execution_id=execution_id,
+                            ruling_id=existing["id"],
+                        )
+                        if existing_cause != round_cause:
+                            raise ConflictError(
+                                "workflow ruling round cause changed on replay"
+                            )
                     connection.commit()
                     return self._workflow_ruling_record(connection, existing)
                 if execution["version"] != expected_version:
@@ -4828,6 +4945,39 @@ class WorkflowStorage:
                     "run_id": run_id,
                     "gate_name": gate_name,
                 }
+                if round_cause is not None:
+                    finding_class_counts: dict[str, int] = {}
+                    prior_causes = connection.execute(
+                        "SELECT metadata_json FROM workflow_execution_events "
+                        "WHERE execution_id = ? AND ("
+                        "kind = 'workflow.correction_started' OR ("
+                        "kind = 'workflow.ruling_resolved' "
+                        "AND json_extract(metadata_json, '$.decision') = 'continue' "
+                        "AND json_type(metadata_json, '$.round_cause') = 'object')) "
+                        "ORDER BY sequence",
+                        (execution_id,),
+                    ).fetchall()
+                    for prior in prior_causes:
+                        prior_metadata = json.loads(prior["metadata_json"])
+                        prior_cause = WorkflowRoundCause.from_mapping(
+                            prior_metadata["round_cause"]
+                        )
+                        for finding_class in prior_cause.finding_classes:
+                            finding_class_counts[finding_class] = (
+                                finding_class_counts.get(finding_class, 0) + 1
+                            )
+                    for finding_class in round_cause.finding_classes:
+                        finding_class_counts[finding_class] = (
+                            finding_class_counts.get(finding_class, 0) + 1
+                        )
+                    event_metadata["round_cause"] = round_cause.to_dict()
+                    event_metadata["finding_class_summary"] = [
+                        {
+                            "finding_class": finding_class,
+                            "round_count": finding_class_counts[finding_class],
+                        }
+                        for finding_class in sorted(finding_class_counts)
+                    ]
                 if provider_landing_id is not None:
                     event_metadata["provider_landing_id"] = provider_landing_id
                 if landing_plan_id is not None:
@@ -4854,6 +5004,7 @@ class WorkflowStorage:
                 ConflictError,
                 NotFoundError,
                 StorageError,
+                ValidationError,
             ):
                 connection.rollback()
                 raise
@@ -4994,8 +5145,26 @@ class WorkflowStorage:
                                 "workflow correction ceiling exception has already "
                                 "been used"
                             )
+                        round_cause = self._workflow_ruling_round_cause(
+                            connection,
+                            execution_id=ruling["execution_id"],
+                            ruling_id=ruling_id,
+                        )
+                        if round_cause is None:
+                            raise ConflictError(
+                                "correction-limit continuation requires its typed "
+                                "round cause"
+                            )
+                        if (
+                            ruling["policy_id"] is not None
+                            and ruling["policy_id"] != round_cause.policy_id
+                        ):
+                            raise StorageError(
+                                "stored correction-limit cause is for another policy"
+                            )
                         target_stage = "build"
                         target_round = execution["correction_round"] + 1
+                        resolution_metadata["round_cause"] = round_cause.to_dict()
                         try:
                             configuration = WorkflowConfigurationSpec.from_mapping(
                                 json.loads(execution["configuration_spec_json"])

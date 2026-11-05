@@ -30,11 +30,17 @@ from magic_glass_box.domain import (
     canonical_json,
 )
 from magic_glass_box.executor import SandboxResult
+from magic_glass_box.gates import ExactGateInputs, GatePolicyManifest
 from magic_glass_box.github_provider import GitHubProvider
 from magic_glass_box.integration import LandingReceiptRequest
 from magic_glass_box.jira_provider import JiraProvider
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.results import WorkspaceResultStore
+from magic_glass_box.reviewer_measurement import (
+    ReviewerMeasurement,
+    ReviewerResultFieldSemantics,
+    ReviewerToolObservation,
+)
 from magic_glass_box.service import ControlPlane
 from magic_glass_box.service_sidecar import (
     ServiceOperationRequest,
@@ -50,6 +56,7 @@ from magic_glass_box.workflow_policy import (
     WorkflowActivationSpec,
     WorkflowPolicySpec,
 )
+from magic_glass_box.workflow_rounds import WorkflowRoundCause
 from magic_glass_box.workflow_scope import WorkflowScopeReview
 from magic_glass_box.workflows import (
     IMPLEMENTATION_TEMPLATE_REVISION,
@@ -97,6 +104,26 @@ def git(binary: Path, *arguments: str, cwd: Path) -> str:
         check=True,
     )
     return completed.stdout.decode("utf-8", "strict").strip()
+
+
+def gate_round_cause(
+    *,
+    policy_id: str = "gpl_" + "f" * 32,
+    finding_classes: tuple[str, ...] = ("gate_error",),
+) -> WorkflowRoundCause:
+    return WorkflowRoundCause(
+        schema_version=1,
+        kind="gate_error",
+        finding_classes=finding_classes,
+        policy_id=policy_id,
+        reviewer_run_id=None,
+        reviewer_attempt_id=None,
+        review_evidence_id=None,
+        review_entry_id=None,
+        scope_review_id=None,
+        maintainer_review_id=None,
+        gate_name="review_gate",
+    )
 
 
 class WorkflowDirectorTests(unittest.TestCase):
@@ -878,7 +905,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             execution, before="base\n", after="candidate\n"
         )
         policy = self.database.get_gate_policy(gate["policy_id"])
-        regression = self.scope_review(head_finding="present")
+        regression = self.scope_review(must_outcome="failed", head_finding="present")
         accepted: dict[str, object] = {}
 
         def submit_scope(_attempt: dict[str, object]) -> None:
@@ -1000,6 +1027,10 @@ class WorkflowDirectorTests(unittest.TestCase):
             correction["events"][-1]["metadata"]["scope_review_id"],
             accepted["id"],
         )
+        self.assertEqual(
+            correction["events"][-1]["metadata"]["round_cause"]["finding_classes"],
+            ["regression", "scope_must_failure"],
+        )
         evidence = next(
             item
             for item in self.database.list_gate_evidence(gate["policy_id"])
@@ -1069,6 +1100,285 @@ class WorkflowDirectorTests(unittest.TestCase):
                 after="candidate\n",
                 review_outcome="approved",
             )
+
+    def test_reviewer_measurement_is_credential_free_supplemental_evidence(
+        self,
+    ) -> None:
+        current_reviewer = self.database.get_agent_profile("Reviewer")
+        self.database.add_agent_profile_version(
+            name="Reviewer",
+            spec=AgentProfileSpec.create(
+                image="reviewer@sha256:measurement",
+                command=["reviewer", "run"],
+                network_mode="gateway_only",
+                workspace_mode="read_only",
+                gateway_capabilities=[
+                    "run.describe",
+                    "work.append",
+                    "workflow.scope-review.submit",
+                    "workflow.reviewer-measurement.submit",
+                ],
+            ),
+            krab_identity_id=current_reviewer["krab_identity_id"],
+            created_by=self.user["id"],
+        )
+        execution = self.start_execution(
+            configuration_name="reviewer-measurement",
+            external_id="workflow-reviewer-measurement",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "manual",
+            },
+        )
+        review, gate, reviewer = self.drive_build_to_review(
+            execution, before="base\n", after="measured\n"
+        )
+        policy_record = self.database.get_gate_policy(gate["policy_id"])
+        policy = GatePolicyManifest.from_mapping(policy_record["manifest"])
+        submitted: list[dict[str, object]] = []
+
+        def measure(attempt: dict[str, object]) -> None:
+            measurement = ReviewerMeasurement(
+                schema_version=1,
+                inputs=ExactGateInputs.from_policy(gate["policy_id"], policy),
+                attempt_id=attempt["id"],
+                name="focused-tests",
+                command=("python", "-m", "pytest", "tests/test_exact.py"),
+                architecture="arm64",
+                code_origin="/workspace/src/magic_glass_box",
+                code_origin_sha256="9" * 64,
+                interpreter="CPython 3.13.7",
+                tool_observations=(
+                    ReviewerToolObservation(
+                        name="pytest", status="present", version="pytest 9.0.1"
+                    ),
+                ),
+                exit_code=0,
+                duration_ms=321,
+                collected_count=3,
+                executed_count=3,
+                output_sha256="a" * 64,
+                output_bytes=1234,
+                result_field_semantics=ReviewerResultFieldSemantics(
+                    exit_code="process exit status from the exact argv",
+                    collected_count="tests selected by the exact pytest command",
+                    executed_count="selected tests that reached an outcome",
+                    output_sha256=("SHA-256 of combined stdout and stderr bytes"),
+                ),
+                comparison_rules=("normalize generated timestamps",),
+            )
+            stored = self.control.submit_reviewer_measurement(
+                reviewer["id"],
+                measurement=measurement,
+                idempotency_key="reviewer-measurement-0001",
+            )
+            submitted.append(stored)
+            self.assertEqual(
+                self.control.submit_reviewer_measurement(
+                    reviewer["id"],
+                    measurement=measurement,
+                    idempotency_key="reviewer-measurement-0001",
+                ),
+                stored,
+            )
+            self.assertRegex(stored["id"], r"^rvm_[0-9a-f]{32}$")
+            self.assertEqual(
+                set(stored),
+                {
+                    "id",
+                    "policy_id",
+                    "reviewer_attempt_id",
+                    "schema_version",
+                    "content_sha256",
+                    "reviewer_run_id",
+                    "profile_version_id",
+                    "image_id",
+                    "measurement",
+                    "idempotency_key",
+                    "created_at",
+                    "authority",
+                },
+            )
+            self.assertEqual(stored["policy_id"], gate["policy_id"])
+            self.assertEqual(stored["reviewer_run_id"], reviewer["id"])
+            self.assertEqual(stored["reviewer_attempt_id"], attempt["id"])
+            self.assertEqual(
+                stored["profile_version_id"], attempt["profile_version_id"]
+            )
+            self.assertEqual(stored["image_id"], attempt["image_id"])
+            self.assertEqual(stored["measurement"], measurement.to_dict())
+            self.assertEqual(stored["idempotency_key"], "reviewer-measurement-0001")
+            self.assertIsInstance(stored["created_at"], str)
+            self.assertEqual(
+                stored["authority"],
+                {
+                    "credentials_exposed": False,
+                    "effect_authority": False,
+                    "workspace_mode": "read_only",
+                },
+            )
+            self.assertEqual(self.database.list_gate_evidence(gate["policy_id"]), [])
+            readiness = self.database.gate_readiness(gate["policy_id"])
+            self.assertFalse(readiness["ready"])
+            self.assertEqual(readiness["pending_count"], 1)
+
+        self.finish_run(
+            reviewer,
+            source_revision=policy.head_revision,
+            before="measured\n",
+            after="measured\n",
+            review_outcome="approved",
+            while_running=measure,
+        )
+        self.assertEqual(len(submitted), 1)
+        measurements = self.control.list_reviewer_measurements(
+            gate["policy_id"], reviewer_run_id=reviewer["id"]
+        )
+        self.assertEqual(measurements, submitted)
+        self.assertEqual(measurements[0]["image_id"], "sha256:" + "2" * 64)
+        for valid_limit in (1, 500):
+            with self.subTest(limit=valid_limit):
+                self.assertEqual(
+                    self.control.list_reviewer_measurements(
+                        gate["policy_id"], limit=valid_limit
+                    ),
+                    submitted,
+                )
+        for invalid_limit in (True, "1", 0, 501):
+            with self.subTest(limit=invalid_limit), self.assertRaises(ValueError):
+                self.control.list_reviewer_measurements(
+                    gate["policy_id"], limit=invalid_limit
+                )
+        with self.assertRaises(ValidationError):
+            self.control.list_reviewer_measurements(
+                gate["policy_id"], reviewer_run_id="r" * 65
+            )
+        with self.assertRaises(ValidationError):
+            self.control.list_reviewer_measurements("g" * 65)
+        with self.assertRaises(ValidationError):
+            self.control.submit_reviewer_measurement(
+                "r" * 65,
+                measurement=ReviewerMeasurement.from_mapping(
+                    submitted[0]["measurement"]
+                ),
+                idempotency_key="reviewer-measurement-overlong-run",
+            )
+
+        with self.assertRaisesRegex(ConflictError, "active reviewer attempt"):
+            self.control.submit_reviewer_measurement(
+                reviewer["id"],
+                measurement=ReviewerMeasurement.from_mapping(
+                    submitted[0]["measurement"]
+                ),
+                idempotency_key="reviewer-measurement-after-finish",
+            )
+        self.assertEqual(
+            self.database.get_workflow_execution(review["id"])["stage"], "review"
+        )
+
+        self.database.add_agent_profile_version(
+            name="Reviewer",
+            spec=AgentProfileSpec.create(
+                image="reviewer@sha256:credentialed-measurement",
+                command=["reviewer", "run"],
+                network_mode="gateway_only",
+                workspace_mode="read_only",
+                credential_names=["krab"],
+                gateway_capabilities=[
+                    "run.describe",
+                    "work.append",
+                    "interaction.read",
+                    "workflow.scope-review.submit",
+                    "workflow.reviewer-measurement.submit",
+                ],
+            ),
+            krab_identity_id=current_reviewer["krab_identity_id"],
+            created_by=self.user["id"],
+        )
+        credentialed_execution = self.start_execution(
+            configuration_name="credentialed-reviewer-measurement",
+            external_id="workflow-credentialed-reviewer-measurement",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": False,
+                "validations": [],
+                "max_correction_rounds": 2,
+                "landing_mode": "manual",
+            },
+        )
+        _credentialed_review, credentialed_gate, credentialed_reviewer = (
+            self.drive_build_to_review(
+                credentialed_execution,
+                before="base\n",
+                after="credentialed\n",
+            )
+        )
+        credentialed_policy_record = self.database.get_gate_policy(
+            credentialed_gate["policy_id"]
+        )
+        credentialed_policy = GatePolicyManifest.from_mapping(
+            credentialed_policy_record["manifest"]
+        )
+
+        def reject_credentialed_measurement(attempt: dict[str, object]) -> None:
+            credentialed_measurement = ReviewerMeasurement(
+                schema_version=1,
+                inputs=ExactGateInputs.from_policy(
+                    credentialed_gate["policy_id"], credentialed_policy
+                ),
+                attempt_id=attempt["id"],
+                name="focused-tests",
+                command=("python", "-m", "pytest"),
+                architecture="arm64",
+                code_origin="/workspace/src",
+                code_origin_sha256="9" * 64,
+                interpreter="CPython 3.13.7",
+                tool_observations=(
+                    ReviewerToolObservation(
+                        name="pytest", status="present", version="pytest 9.0.1"
+                    ),
+                ),
+                exit_code=0,
+                duration_ms=1,
+                collected_count=1,
+                executed_count=1,
+                output_sha256="a" * 64,
+                output_bytes=1,
+                result_field_semantics=ReviewerResultFieldSemantics(
+                    exit_code="process exit status from the exact argv",
+                    collected_count="tests selected by the exact pytest command",
+                    executed_count="selected tests that reached an outcome",
+                    output_sha256=("SHA-256 of combined stdout and stderr bytes"),
+                ),
+                comparison_rules=(),
+            )
+            with self.assertRaisesRegex(ConflictError, "credential-free reviewer"):
+                self.control.submit_reviewer_measurement(
+                    credentialed_reviewer["id"],
+                    measurement=credentialed_measurement,
+                    idempotency_key="credentialed-measurement-rejected",
+                )
+
+        self.finish_run(
+            credentialed_reviewer,
+            source_revision=credentialed_policy.head_revision,
+            before="credentialed\n",
+            after="credentialed\n",
+            review_outcome="approved",
+            while_running=reject_credentialed_measurement,
+        )
+        self.assertEqual(
+            self.control.list_reviewer_measurements(
+                credentialed_gate["policy_id"],
+                reviewer_run_id=credentialed_reviewer["id"],
+            ),
+            [],
+        )
 
     def issue_provider_workflow_landing(
         self, *, configuration_name: str, external_id: str
@@ -1160,7 +1470,7 @@ class WorkflowDirectorTests(unittest.TestCase):
         return issued_execution, gate, issued
 
     def start_activated_provider_execution(
-        self, *, external_id: str
+        self, *, external_id: str, requested_by: str | None = None
     ) -> tuple[dict[str, object], dict[str, object], dict[str, dict[str, object]]]:
         sidecar_document = github_sidecar_spec(
             self.root / "activated-github.sock"
@@ -1315,7 +1625,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             expected_thread_version=1,
             expected_activation_version=1,
             idempotency_key=f"activated-{external_id}",
-            requested_by=self.user["id"],
+            requested_by=self.user["id"] if requested_by is None else requested_by,
         )
         return execution, activation, bindings
 
@@ -3017,6 +3327,120 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertEqual(lifted["state"], "lifted")
         self.assertEqual(lifted["lifted_by"], "operator")
         self.assertEqual(self.control.list_integration_target_holds(open_only=True), [])
+
+    def test_workflow_requester_may_hold_a_target_but_only_owner_may_lift(self) -> None:
+        coordinator = self.database.create_user(
+            "workflow-coordinator", "Workflow Coordinator"
+        )
+        unrelated = self.database.create_user("hold-outsider", "Hold Outsider")
+        execution, _activation, _bindings = self.start_activated_provider_execution(
+            external_id="coordinator-target-hold",
+            requested_by=coordinator["id"],
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/coordinator-target-hold",
+            title="Prove activated provider authority",
+            body="Do not issue provider effects while this target is held.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+
+        with self.assertRaisesRegex(ConflictError, "requester or activation owner"):
+            self.control.place_integration_target_hold(
+                enqueued["id"],
+                expected_execution_version=enqueued["version"],
+                reason_summary="A post-landing regression needs owner review.",
+                placed_by_handle=unrelated["handle"],
+                idempotency_key="target-hold-outsider",
+            )
+        hold = self.control.place_integration_target_hold(
+            enqueued["id"],
+            expected_execution_version=enqueued["version"],
+            reason_summary="A post-landing regression needs owner review.",
+            placed_by_handle=coordinator["handle"],
+            idempotency_key="target-hold-coordinator",
+        )
+        self.assertEqual(hold["placement_kind"], "coordinator")
+        self.assertEqual(hold["reason"], "post_landing_regression")
+        self.assertEqual(hold["placed_by"], "workflow-coordinator")
+        self.assertIsNone(hold["landing_proof_id"])
+        self.assertEqual(
+            self.control.place_integration_target_hold(
+                enqueued["id"],
+                expected_execution_version=enqueued["version"],
+                reason_summary="A post-landing regression needs owner review.",
+                placed_by_handle=coordinator["handle"],
+                idempotency_key="target-hold-coordinator",
+            ),
+            hold,
+        )
+        with self.assertRaisesRegex(ConflictError, "idempotency"):
+            self.control.place_integration_target_hold(
+                enqueued["id"],
+                expected_execution_version=enqueued["version"],
+                reason_summary="A different concern cannot reuse the authority.",
+                placed_by_handle=coordinator["handle"],
+                idempotency_key="target-hold-coordinator",
+            )
+        projected = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(projected["landing"]["target_hold"], hold)
+        self.assertEqual(projected["responsibility"]["holder"], "owner")
+        self.assertEqual(projected["responsibility"]["reason"], "landing_target_hold")
+        self.assertFalse(
+            self.director().advance(
+                projected["id"], expected_version=projected["version"]
+            )
+        )
+        paused = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(paused["landing"]["provider_intent"]["effects"], {})
+
+        with self.assertRaisesRegex(ConflictError, "activation owner"):
+            self.control.lift_integration_target_hold(
+                hold["id"],
+                expected_version=hold["version"],
+                lifted_by_handle=coordinator["handle"],
+            )
+        lifted = self.control.lift_integration_target_hold(
+            hold["id"],
+            expected_version=hold["version"],
+            lifted_by_handle="operator",
+        )
+        self.assertEqual(lifted["state"], "lifted")
+        self.assertEqual(lifted["lifted_by"], "operator")
+        self.assertFalse(
+            self.director().advance(paused["id"], expected_version=paused["version"])
+        )
+        resumed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertEqual(
+            set(resumed["landing"]["provider_intent"]["effects"]),
+            {"refs.publish"},
+        )
+        later = self.control.place_integration_target_hold(
+            resumed["id"],
+            expected_execution_version=resumed["version"],
+            reason_summary="A later regression has separate hold identity.",
+            placed_by_handle=coordinator["handle"],
+            idempotency_key="target-hold-later",
+        )
+        self.assertNotEqual(later["id"], hold["id"])
+        self.assertEqual(
+            self.control.place_integration_target_hold(
+                resumed["id"],
+                expected_execution_version=resumed["version"],
+                reason_summary="A post-landing regression needs owner review.",
+                placed_by_handle=coordinator["handle"],
+                idempotency_key="target-hold-coordinator",
+            ),
+            lifted,
+        )
 
     def test_two_projects_reconcile_lost_receipts_and_isolate_target_holds(
         self,
@@ -4843,6 +5267,19 @@ class WorkflowDirectorTests(unittest.TestCase):
             for item in self.database.list_gate_evidence(gate_one["policy_id"])
             if item["gate_name"] == "independent-review"
         )
+        round_cause = {
+            "schema_version": 1,
+            "kind": "reviewer_finding",
+            "finding_classes": ["review_finding"],
+            "policy_id": gate_one["policy_id"],
+            "reviewer_run_id": reviewer_one["id"],
+            "reviewer_attempt_id": verdict_one["reviewer_attempt_id"],
+            "review_evidence_id": evidence_one["id"],
+            "review_entry_id": verdict_one["work_log_entry_id"],
+            "scope_review_id": None,
+            "maintainer_review_id": None,
+            "gate_name": None,
+        }
         self.assert_transition_event(
             correction["events"][-1],
             kind="workflow.correction_started",
@@ -4855,6 +5292,7 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "feedback_source": "independent_review",
                 "review_evidence_id": evidence_one["id"],
                 "review_entry_id": verdict_one["work_log_entry_id"],
+                "round_cause": round_cause,
             },
         )
 
@@ -5351,6 +5789,88 @@ class WorkflowDirectorTests(unittest.TestCase):
             self.database.find_workflow_run(oversized["id"], 8, "producer")
         )
 
+    def test_correction_transition_requires_one_typed_round_cause(self) -> None:
+        review = self.database.advance_workflow_execution(
+            self.execution["id"],
+            expected_version=self.execution["version"],
+            expected_stage="build",
+            expected_correction_round=0,
+            target_stage="review",
+            target_correction_round=0,
+            event_kind="workflow.review_started",
+            metadata={},
+        )
+
+        with self.assertRaisesRegex(ValidationError, "round_cause"):
+            self.database.advance_workflow_execution(
+                review["id"],
+                expected_version=review["version"],
+                expected_stage="review",
+                expected_correction_round=0,
+                target_stage="build",
+                target_correction_round=1,
+                event_kind="workflow.correction_started",
+                metadata={},
+            )
+
+        cause = gate_round_cause()
+        corrected = self.database.advance_workflow_execution(
+            review["id"],
+            expected_version=review["version"],
+            expected_stage="review",
+            expected_correction_round=0,
+            target_stage="build",
+            target_correction_round=1,
+            event_kind="workflow.correction_started",
+            metadata={"round_cause": cause.to_dict()},
+        )
+        self.assertEqual(
+            corrected["events"][-1]["metadata"]["round_cause"], cause.to_dict()
+        )
+
+    def test_correction_transition_rejects_flattened_provenance_drift(self) -> None:
+        review = self.database.advance_workflow_execution(
+            self.execution["id"],
+            expected_version=self.execution["version"],
+            expected_stage="build",
+            expected_correction_round=0,
+            target_stage="review",
+            target_correction_round=0,
+            event_kind="workflow.review_started",
+            metadata={},
+        )
+        cause = WorkflowRoundCause(
+            schema_version=1,
+            kind="reviewer_finding",
+            finding_classes=("review_finding",),
+            policy_id="gpl_" + "1" * 32,
+            reviewer_run_id="run_" + "2" * 32,
+            reviewer_attempt_id="att_" + "3" * 32,
+            review_evidence_id="gev_" + "4" * 32,
+            review_entry_id="wle_" + "5" * 32,
+            scope_review_id=None,
+            maintainer_review_id=None,
+            gate_name=None,
+        )
+
+        with self.assertRaisesRegex(ValidationError, "contradicts round_cause"):
+            self.database.advance_workflow_execution(
+                review["id"],
+                expected_version=review["version"],
+                expected_stage="review",
+                expected_correction_round=0,
+                target_stage="build",
+                target_correction_round=1,
+                event_kind="workflow.correction_started",
+                metadata={
+                    "policy_id": cause.policy_id,
+                    "feedback_source": "independent_review",
+                    "review_evidence_id": "gev_" + "6" * 32,
+                    "review_entry_id": cause.review_entry_id,
+                    "round_cause": cause.to_dict(),
+                },
+            )
+
     def test_failed_producer_opens_a_ruling_without_creating_a_candidate(self) -> None:
         self.assertFalse(
             self.director().advance(
@@ -5607,6 +6127,19 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "policy_id": gate["policy_id"],
                 "feedback_source": "maintainer_review",
                 "maintainer_review_id": disposition["id"],
+                "round_cause": {
+                    "schema_version": 1,
+                    "kind": "maintainer_request",
+                    "finding_classes": ["product_disposition"],
+                    "policy_id": gate["policy_id"],
+                    "reviewer_run_id": None,
+                    "reviewer_attempt_id": None,
+                    "review_evidence_id": None,
+                    "review_entry_id": None,
+                    "scope_review_id": None,
+                    "maintainer_review_id": disposition["id"],
+                    "gate_name": None,
+                },
             },
         )
         self.assertFalse(
@@ -5802,7 +6335,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             target_stage="build",
             target_correction_round=1,
             event_kind="workflow.correction_started",
-            metadata={},
+            metadata={"round_cause": gate_round_cause().to_dict()},
         )
         review_one = self.database.advance_workflow_execution(
             build_one["id"],
@@ -5822,7 +6355,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             target_stage="build",
             target_correction_round=2,
             event_kind="workflow.correction_started",
-            metadata={},
+            metadata={"round_cause": gate_round_cause().to_dict()},
         )
         review_two = self.database.advance_workflow_execution(
             build_two["id"],
@@ -5838,6 +6371,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             review_two["id"],
             expected_version=review_two["version"],
             kind="correction_limit",
+            round_cause=gate_round_cause(),
         )
 
         self.assertEqual(ruling["state"], "open")
@@ -5852,8 +6386,19 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "policy_id": None,
                 "run_id": None,
                 "gate_name": None,
+                "round_cause": gate_round_cause().to_dict(),
+                "finding_class_summary": [
+                    {"finding_class": "gate_error", "round_count": 3}
+                ],
             },
         )
+        with self.assertRaisesRegex(ConflictError, "round cause"):
+            self.database.open_workflow_ruling(
+                review_two["id"],
+                expected_version=review_two["version"],
+                kind="correction_limit",
+                round_cause=gate_round_cause(policy_id="gpl_" + "e" * 32),
+            )
         self.assertEqual(self.database.enqueue_supervisor_actions(), [])
         continued = self.control.resolve_workflow_ruling(
             ruling["id"],
@@ -5877,17 +6422,45 @@ class WorkflowDirectorTests(unittest.TestCase):
                 "to_stage": "build",
                 "from_correction_round": 2,
                 "to_correction_round": 3,
+                "round_cause": gate_round_cause().to_dict(),
             },
         )
         actions = self.database.enqueue_supervisor_actions()
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0]["subject_version"], resumed["version"])
+        review_three = self.database.advance_workflow_execution(
+            resumed["id"],
+            expected_version=resumed["version"],
+            expected_stage="build",
+            expected_correction_round=3,
+            target_stage="review",
+            target_correction_round=3,
+            event_kind="workflow.review_started",
+            metadata={},
+        )
+        final_cause = gate_round_cause(finding_classes=("regression",))
+        final_ruling = self.database.open_workflow_ruling(
+            review_three["id"],
+            expected_version=review_three["version"],
+            kind="correction_limit",
+            round_cause=final_cause,
+        )
+        final_opened = self.database.get_workflow_execution(review_three["id"])
+        self.assertEqual(final_opened["rulings"][-1]["id"], final_ruling["id"])
+        self.assertEqual(
+            final_opened["events"][-1]["metadata"]["finding_class_summary"],
+            [
+                {"finding_class": "gate_error", "round_count": 3},
+                {"finding_class": "regression", "round_count": 1},
+            ],
+        )
 
     def test_ruling_resolution_rejects_a_changed_execution(self) -> None:
         ruling = self.database.open_workflow_ruling(
             self.execution["id"],
             expected_version=self.execution["version"],
             kind="correction_limit",
+            round_cause=gate_round_cause(),
         )
         moved = self.database.advance_workflow_execution(
             self.execution["id"],
@@ -5917,6 +6490,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             self.execution["id"],
             expected_version=self.execution["version"],
             kind="correction_limit",
+            round_cause=gate_round_cause(),
         )
 
         resolved = self.control.resolve_workflow_ruling(
@@ -5968,13 +6542,14 @@ class WorkflowDirectorTests(unittest.TestCase):
                 target_stage="build",
                 target_correction_round=correction_round + 1,
                 event_kind="workflow.correction_started",
-                metadata={},
+                metadata={"round_cause": gate_round_cause().to_dict()},
             )
         self.assertEqual((current["stage"], current["correction_round"]), ("build", 8))
         ruling = self.database.open_workflow_ruling(
             current["id"],
             expected_version=current["version"],
             kind="correction_limit",
+            round_cause=gate_round_cause(),
         )
 
         with self.assertRaisesRegex(ConflictError, "absolute correction-round limit"):
@@ -6055,6 +6630,30 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         self.assertIsNone(
             self.database.find_workflow_run(execution["id"], 2, "producer")
+        )
+
+        ruling = stopped["rulings"][0]
+        self.control.resolve_workflow_ruling(
+            ruling["id"],
+            expected_version=ruling["version"],
+            decision="continue",
+            resolved_by_handle="operator",
+        )
+        resumed = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual((resumed["stage"], resumed["correction_round"]), ("build", 2))
+
+        self.assertFalse(
+            self.director().advance(resumed["id"], expected_version=resumed["version"])
+        )
+        replacement = self.database.find_workflow_run(execution["id"], 2, "producer")
+        self.assertIsNotNone(replacement)
+        run = self.database.get_run_execution(replacement["id"])
+        self.assertEqual(
+            (
+                run["changes_requested"]["source"],
+                run["changes_requested"]["policy_id"],
+            ),
+            ("independent_review", gate_one["policy_id"]),
         )
 
     def test_approved_review_reuses_exact_evidence_and_runs_validation_once(

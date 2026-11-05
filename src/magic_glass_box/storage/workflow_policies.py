@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
 from ..domain import (
     ValidationError,
     canonical_json,
+    parse_rfc3339_timestamp,
     require_string,
     validate_name,
     validate_project_key,
@@ -22,6 +24,8 @@ from .errors import (
 
 
 class WorkflowPolicyStorage:
+    _WAKE_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+
     @staticmethod
     def _workflow_policy_positive_version(value: object, *, field: str) -> int:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -717,7 +721,29 @@ class WorkflowPolicyStorage:
             "WHERE event.wake_id = ? ORDER BY event.sequence",
             (row["id"],),
         ).fetchall()
-        return {**dict(row), "events": [dict(event) for event in events]}
+        availability = connection.execute(
+            "SELECT observation.id, observation.sequence, "
+            "observation.wake_version, observation.state, "
+            "observation.unavailable_until, observation.blocked_on, "
+            "observer.handle AS observed_by, observation.idempotency_key, "
+            "observation.created_at FROM "
+            "workflow_wake_availability_observations observation "
+            "JOIN users observer ON observer.id = observation.observed_by "
+            "WHERE observation.wake_id = ? "
+            "ORDER BY observation.sequence DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        observed = row["acknowledged_at"] is not None
+        return {
+            **dict(row),
+            "events": [dict(event) for event in events],
+            "availability": None if availability is None else dict(availability),
+            "binding_observation": {
+                "status": "observed" if observed else "unobserved",
+                "wake_class": row["wake_class"],
+                "observed_at": row["acknowledged_at"],
+            },
+        }
 
     def get_workflow_manual_wake(self, wake_id: str) -> dict[str, Any]:
         wake_id = require_string(wake_id, field="wake_id", max_bytes=64)
@@ -792,10 +818,11 @@ class WorkflowPolicyStorage:
                     raise ConflictError(
                         "workflow manual wake may only be acknowledged by its recipient"
                     )
-                if wake["state"] != "requested":
+                if wake["state"] not in {"requested", "delivered"}:
                     raise ConflictError(
-                        f"workflow manual wake is not requested: {wake['state']}"
+                        f"workflow manual wake cannot be acknowledged: {wake['state']}"
                     )
+                from_state = wake["state"]
                 changed = connection.execute(
                     "UPDATE workflow_manual_wakes SET state = 'acknowledged', "
                     "version = version + 1, acknowledged_by = ?, updated_at = ?, "
@@ -809,9 +836,15 @@ class WorkflowPolicyStorage:
                 connection.execute(
                     "INSERT INTO workflow_manual_wake_events "
                     "(wake_id, sequence, kind, from_state, to_state, actor_id, "
-                    "created_at) VALUES (?, ?, 'wake.acknowledged', 'requested', "
+                    "created_at) VALUES (?, ?, 'wake.acknowledged', ?, "
                     "'acknowledged', ?, ?)",
-                    (wake_id, expected_version + 1, acknowledged_by, now),
+                    (
+                        wake_id,
+                        expected_version + 1,
+                        from_state,
+                        acknowledged_by,
+                        now,
+                    ),
                 )
                 connection.commit()
             except (
@@ -826,5 +859,230 @@ class WorkflowPolicyStorage:
                 connection.rollback()
                 raise ConflictError(
                     "workflow manual wake could not be acknowledged"
+                ) from exc
+        return self.get_workflow_manual_wake(wake_id)
+
+    def transition_workflow_manual_wake(
+        self,
+        wake_id: str,
+        *,
+        expected_version: int,
+        target_state: str,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        """Record one explicit manual wake delivery, expiry, or escalation."""
+
+        wake_id = require_string(wake_id, field="wake_id", max_bytes=64)
+        expected_version = self._workflow_policy_positive_version(
+            expected_version, field="expected wake version"
+        )
+        if target_state not in {"delivered", "expired", "escalated"}:
+            raise ValidationError("workflow manual wake target state is invalid")
+        actor_id = require_string(actor_id, field="actor_id", max_bytes=64)
+        transitions = {
+            "requested": {"delivered", "expired", "escalated"},
+            "delivered": {"expired", "escalated"},
+            "expired": {"escalated"},
+        }
+        now = self.now()
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(connection, actor_id, role="workflow wake observer")
+                wake = connection.execute(
+                    "SELECT wake.state, wake.version, wake.recipient_id, "
+                    "execution.requested_by FROM workflow_manual_wakes wake "
+                    "JOIN workflow_executions execution "
+                    "ON execution.id = wake.execution_id WHERE wake.id = ?",
+                    (wake_id,),
+                ).fetchone()
+                if wake is None:
+                    raise NotFoundError(f"workflow manual wake not found: {wake_id}")
+                if wake["version"] != expected_version:
+                    raise ConcurrentUpdateError(
+                        f"workflow manual wake version is {wake['version']}, "
+                        f"expected {expected_version}"
+                    )
+                if actor_id not in {wake["recipient_id"], wake["requested_by"]}:
+                    raise ConflictError(
+                        "workflow manual wake transition requires its recipient "
+                        "or workflow requester"
+                    )
+                if target_state not in transitions.get(wake["state"], set()):
+                    raise ConflictError(
+                        "workflow manual wake transition is not allowed: "
+                        f"{wake['state']} -> {target_state}"
+                    )
+                changed = connection.execute(
+                    "UPDATE workflow_manual_wakes SET state = ?, "
+                    "version = version + 1, updated_at = ? "
+                    "WHERE id = ? AND version = ?",
+                    (target_state, now, wake_id, expected_version),
+                ).rowcount
+                if changed != 1:
+                    raise ConcurrentUpdateError(
+                        "workflow manual wake changed concurrently"
+                    )
+                connection.execute(
+                    "INSERT INTO workflow_manual_wake_events "
+                    "(wake_id, sequence, kind, from_state, to_state, actor_id, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        wake_id,
+                        expected_version + 1,
+                        f"wake.{target_state}",
+                        wake["state"],
+                        target_state,
+                        actor_id,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow manual wake transition could not be recorded"
+                ) from exc
+        return self.get_workflow_manual_wake(wake_id)
+
+    def record_workflow_wake_availability(
+        self,
+        wake_id: str,
+        *,
+        expected_wake_version: int,
+        state: str,
+        unavailable_until: str | None,
+        blocked_on: str | None,
+        observed_by: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Append one recipient-authored availability fact for an exact wake."""
+
+        wake_id = require_string(wake_id, field="wake_id", max_bytes=64)
+        expected_wake_version = self._workflow_policy_positive_version(
+            expected_wake_version, field="expected wake version"
+        )
+        if state not in {"available", "unavailable_until", "blocked_on"}:
+            raise ValidationError("workflow wake availability state is invalid")
+        if state == "available":
+            if unavailable_until is not None or blocked_on is not None:
+                raise ValidationError("available wake has no delay or blocker")
+        elif state == "unavailable_until":
+            if unavailable_until is None or blocked_on is not None:
+                raise ValidationError(
+                    "unavailable-until wake requires only one timestamp"
+                )
+            parse_rfc3339_timestamp(
+                unavailable_until, field="workflow wake unavailable_until"
+            )
+        else:
+            if unavailable_until is not None or blocked_on is None:
+                raise ValidationError("blocked wake requires only one blocker")
+            blocked_on = require_string(
+                blocked_on, field="workflow wake blocked_on", max_bytes=256
+            )
+        observed_by = require_string(observed_by, field="observed_by", max_bytes=64)
+        idempotency_key = require_string(
+            idempotency_key, field="idempotency_key", max_bytes=128
+        )
+        if self._WAKE_IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None:
+            raise ValidationError("workflow wake idempotency key is invalid")
+        now = self.now()
+        observation_id = self.new_id("wao")
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                self._active_user(
+                    connection, observed_by, role="workflow wake recipient"
+                )
+                wake = connection.execute(
+                    "SELECT version, recipient_id FROM workflow_manual_wakes "
+                    "WHERE id = ?",
+                    (wake_id,),
+                ).fetchone()
+                if wake is None:
+                    raise NotFoundError(f"workflow manual wake not found: {wake_id}")
+                existing = connection.execute(
+                    "SELECT id, wake_version, state, unavailable_until, blocked_on, "
+                    "observed_by FROM workflow_wake_availability_observations "
+                    "WHERE wake_id = ? AND idempotency_key = ?",
+                    (wake_id, idempotency_key),
+                ).fetchone()
+                expected = (
+                    expected_wake_version,
+                    state,
+                    unavailable_until,
+                    blocked_on,
+                    observed_by,
+                )
+                if existing is not None:
+                    actual = tuple(
+                        existing[field]
+                        for field in (
+                            "wake_version",
+                            "state",
+                            "unavailable_until",
+                            "blocked_on",
+                            "observed_by",
+                        )
+                    )
+                    if actual != expected:
+                        raise ConflictError("workflow wake idempotency key was reused")
+                    connection.commit()
+                    return self.get_workflow_manual_wake(wake_id)
+                if wake["version"] != expected_wake_version:
+                    raise ConcurrentUpdateError(
+                        f"workflow manual wake version is {wake['version']}, "
+                        f"expected {expected_wake_version}"
+                    )
+                if wake["recipient_id"] != observed_by:
+                    raise ConflictError(
+                        "workflow wake availability may only be recorded by "
+                        "its recipient"
+                    )
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM "
+                    "workflow_wake_availability_observations WHERE wake_id = ?",
+                    (wake_id,),
+                ).fetchone()["sequence"]
+                connection.execute(
+                    "INSERT INTO workflow_wake_availability_observations "
+                    "(id, wake_id, sequence, wake_version, state, "
+                    "unavailable_until, blocked_on, observed_by, idempotency_key, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        observation_id,
+                        wake_id,
+                        sequence,
+                        expected_wake_version,
+                        state,
+                        unavailable_until,
+                        blocked_on,
+                        observed_by,
+                        idempotency_key,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except (
+                ConcurrentUpdateError,
+                ConflictError,
+                NotFoundError,
+                StorageError,
+            ):
+                connection.rollback()
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise ConflictError(
+                    "workflow wake availability could not be recorded"
                 ) from exc
         return self.get_workflow_manual_wake(wake_id)

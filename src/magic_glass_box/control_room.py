@@ -2464,18 +2464,35 @@ class ControlRoom:
                 )
         for workflow in workflows or []:
             responsibility = workflow["responsibility"]
-            if responsibility.get("reason") == "manual_wake_acknowledgement":
+            if responsibility.get("reason") in {
+                "manual_wake_acknowledgement",
+                "manual_wake_expired",
+                "manual_wake_escalated",
+            }:
+                wake_reason = responsibility["reason"]
                 add(
                     {
-                        "kind": "workflow.manual_wake_requested",
-                        "severity": "action",
+                        "kind": {
+                            "manual_wake_acknowledgement": (
+                                "workflow.manual_wake_requested"
+                            ),
+                            "manual_wake_expired": "workflow.manual_wake_expired",
+                            "manual_wake_escalated": ("workflow.manual_wake_escalated"),
+                        }[wake_reason],
+                        "severity": (
+                            "warning"
+                            if wake_reason == "manual_wake_escalated"
+                            else "action"
+                        ),
                         "subject_type": "workflow_manual_wake",
                         "subject_id": responsibility["basis"]["wake_id"],
                         "workflow_execution_id": workflow["id"],
                         "run_id": responsibility["basis"]["run_id"],
                         "wake_version": responsibility["basis"]["wake_version"],
+                        "wake_state": responsibility["basis"]["wake_state"],
+                        "wake_updated_at": responsibility["basis"]["wake_updated_at"],
                     },
-                    workflow["updated_at"],
+                    responsibility["basis"]["wake_updated_at"],
                 )
             elif responsibility.get("reason") == "provider_effect_mismatch":
                 add(

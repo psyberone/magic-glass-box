@@ -54,6 +54,7 @@ from magic_glass_box.provider import (
     ProviderRateLimitError,
     ProviderUpstreamError,
 )
+from magic_glass_box.reviewer_measurement import ReviewerMeasurement
 from magic_glass_box.service import (
     AcceptedInteractionResponse,
     AcceptedProviderResponse,
@@ -239,6 +240,7 @@ class FakeGatewayControl:
         self.discovery_calls: list[tuple[str, str, object, str]] = []
         self.advisory_calls: list[tuple[str, str, object, str]] = []
         self.workflow_scope_calls: list[tuple[str, WorkflowScopeReview, str]] = []
+        self.reviewer_measurement_calls: list[tuple[str, ReviewerMeasurement, str]] = []
         self.provider_failure: Exception | None = None
         self.human_response_body = "Proceed with option B."
         self.provider_response_text = "done"
@@ -510,6 +512,21 @@ class FakeGatewayControl:
             "failed_must_keys": list(review.failed_must_keys),
             "regression_probe_keys": list(review.regression_probe_keys),
             "follow_up_probe_keys": list(review.follow_up_probe_keys),
+        }
+
+    def submit_reviewer_measurement(
+        self,
+        run_id: str,
+        *,
+        measurement: ReviewerMeasurement,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.reviewer_measurement_calls.append((run_id, measurement, idempotency_key))
+        return {
+            "id": "rvm_" + "e" * 32,
+            "policy_id": measurement.inputs.policy_id,
+            "reviewer_attempt_id": measurement.attempt_id,
+            "content_sha256": measurement.digest,
         }
 
 
@@ -1078,6 +1095,50 @@ class RunGatewayTests(unittest.TestCase):
             self.assertFalse(rejected["ok"])
             self.assertEqual(rejected["error"]["code"], "invalid_request")
         self.assertEqual(len(self.control.workflow_scope_calls), 1)
+
+    def test_reviewer_measurement_uses_one_typed_supplemental_surface(self) -> None:
+        measurement = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "examples"
+                / "workflow-reviewer-measurement.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        response = self.gateway.handle(
+            request(
+                "workflow.reviewer-measurement.submit",
+                {
+                    "measurement": measurement,
+                    "idempotency_key": "reviewer-measurement-0001",
+                },
+            )
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["measurement_id"], "rvm_" + "e" * 32)
+        self.assertEqual(response["result"]["agent_action"], "continue_review")
+        self.assertEqual(self.control.reviewer_measurement_calls[0][0], RUN_ID)
+        self.assertIsInstance(
+            self.control.reviewer_measurement_calls[0][1], ReviewerMeasurement
+        )
+        self.assertEqual(
+            self.control.reviewer_measurement_calls[0][2],
+            "reviewer-measurement-0001",
+        )
+
+        rejected = self.gateway.handle(
+            request(
+                "workflow.reviewer-measurement.submit",
+                {
+                    "measurement": {**measurement, "provider_token": "secret"},
+                    "idempotency_key": "reviewer-measurement-0002",
+                },
+            )
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["error"]["code"], "invalid_request")
+        self.assertEqual(len(self.control.reviewer_measurement_calls), 1)
 
     def test_work_memory_operations_are_typed_and_bound_to_the_run(self) -> None:
         entry = {

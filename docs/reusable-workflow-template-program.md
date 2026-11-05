@@ -158,6 +158,34 @@ owner-acknowledged project activation, policy version on every new record, and
 no synthetic backfill. In-flight work finishes under its starting policy unless
 the owner records an exact stage-boundary rebind.
 
+### M18 R7 scope ruling
+
+R7 implements the accepted seams that can strengthen the first portable
+workflow without creating a second orchestration system. Manual wakes retain
+explicit delivery, expiry, escalation, and recipient-authored availability as
+separate observed facts. The workflow requester or pinned activation owner may
+place a safe-direction post-landing target hold, while only that activation
+owner may lift it.
+Reviewer-authored measurements are exact-input, credential-free, read-only
+sandbox observations with no gate outcome or provider-effect authority. Every
+reviewer or maintainer correction records one typed immutable cause, and a
+correction-limit ruling summarizes the finding classes across the full loop.
+
+The owner-approved R7 boundary deliberately defers three larger mechanisms
+until after M18's live proof:
+
+- the complete follow-up proposal, admission, disposition, and publication
+  ecosystem;
+- owner-authorized external break-glass reconciliation; and
+- stage-boundary activation rebinds.
+
+Those paths fail closed in M18: no proposal grants work or publication
+authority, no external correction becomes workflow evidence, and an execution
+continues under its starting activation version. The fixed measurement-review
+seat/topology also remains deferred. R7 publishes only the supplemental
+reviewer-measurement artifact needed to retain honest observations without
+mistaking them for immutable validation or an independent verdict.
+
 ## Accepted M17 exit contract
 
 M18 implements one versioned portable policy for the existing

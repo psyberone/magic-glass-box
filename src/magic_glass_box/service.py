@@ -108,6 +108,7 @@ from .provider import (
     provider_recovery_error,
 )
 from .results import WorkspaceResultStore
+from .reviewer_measurement import ReviewerMeasurement
 from .runtime import RuntimeLaunch
 from .service_sidecar import (
     ServiceOperationRequest,
@@ -768,6 +769,24 @@ class ControlPlane:
     ) -> list[dict[str, Any]]:
         return self.database.list_integration_target_holds(open_only=open_only)
 
+    def place_integration_target_hold(
+        self,
+        execution_id: str,
+        *,
+        expected_execution_version: int,
+        reason_summary: str,
+        placed_by_handle: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        placer = self.database.get_user(placed_by_handle)
+        return self.database.place_integration_target_hold(
+            execution_id,
+            expected_execution_version=expected_execution_version,
+            reason_summary=reason_summary,
+            placed_by=placer["id"],
+            idempotency_key=idempotency_key,
+        )
+
     def lift_integration_target_hold(
         self,
         hold_id: str,
@@ -881,6 +900,32 @@ class ControlPlane:
             reviewer=provenance["reviewer"],
         )
         return self.database.record_gate_evidence(evidence, recorded_by=recorder["id"])
+
+    def submit_reviewer_measurement(
+        self,
+        reviewer_run_id: str,
+        *,
+        measurement: ReviewerMeasurement,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self.database.submit_reviewer_measurement(
+            reviewer_run_id,
+            measurement,
+            idempotency_key=idempotency_key,
+        )
+
+    def list_reviewer_measurements(
+        self,
+        policy_id: str,
+        *,
+        reviewer_run_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.database.list_reviewer_measurements(
+            policy_id,
+            reviewer_run_id=reviewer_run_id,
+            limit=limit,
+        )
 
     def record_maintainer_review(
         self,
@@ -2189,6 +2234,44 @@ class ControlPlane:
             wake_id,
             expected_version=expected_version,
             acknowledged_by=recipient["id"],
+        )
+
+    def transition_workflow_manual_wake(
+        self,
+        wake_id: str,
+        *,
+        expected_version: int,
+        target_state: str,
+        actor_handle: str,
+    ) -> dict[str, Any]:
+        actor = self.database.get_user(actor_handle)
+        return self.database.transition_workflow_manual_wake(
+            wake_id,
+            expected_version=expected_version,
+            target_state=target_state,
+            actor_id=actor["id"],
+        )
+
+    def record_workflow_wake_availability(
+        self,
+        wake_id: str,
+        *,
+        expected_wake_version: int,
+        state: str,
+        unavailable_until: str | None,
+        blocked_on: str | None,
+        observed_by_handle: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        observer = self.database.get_user(observed_by_handle)
+        return self.database.record_workflow_wake_availability(
+            wake_id,
+            expected_wake_version=expected_wake_version,
+            state=state,
+            unavailable_until=unavailable_until,
+            blocked_on=blocked_on,
+            observed_by=observer["id"],
+            idempotency_key=idempotency_key,
         )
 
     def revise_workflow_configuration(

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError as SchemaValidationError
 
 from magic_glass_box.control_room import ControlRoom
@@ -19,6 +19,7 @@ from magic_glass_box.db import (
     SCHEMA_V47,
     SCHEMA_V48,
     SCHEMA_V49,
+    SCHEMA_V51,
     SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
@@ -39,11 +40,28 @@ from magic_glass_box.workflow_policy import (
     WorkflowActivationSpec,
     WorkflowPolicySpec,
 )
+from magic_glass_box.workflow_rounds import WorkflowRoundCause
 from magic_glass_box.workflows import (
     IMPLEMENTATION_TEMPLATE_REVISION,
     WorkflowConfigurationSpec,
 )
 from tests.test_service_sidecars import sidecar_spec
+
+
+def gate_round_cause() -> WorkflowRoundCause:
+    return WorkflowRoundCause(
+        schema_version=1,
+        kind="gate_error",
+        finding_classes=("gate_error",),
+        policy_id="gpl_" + "f" * 32,
+        reviewer_run_id=None,
+        reviewer_attempt_id=None,
+        review_evidence_id=None,
+        review_entry_id=None,
+        scope_review_id=None,
+        maintainer_review_id=None,
+        gate_name="review_gate",
+    )
 
 
 class WorkflowPolicySpecTests(unittest.TestCase):
@@ -342,6 +360,70 @@ class WorkflowPolicyPublishedSchemaTests(unittest.TestCase):
                         {**example, "provider": "github"}
                     )
 
+    def test_manual_wake_schema_rejects_contradictory_observations(self) -> None:
+        schema = json.loads(
+            (
+                self.repository / "schemas" / "workflow-manual-wake-v1.schema.json"
+            ).read_text()
+        )
+        example = json.loads(
+            (self.repository / "examples" / "workflow-manual-wake.json").read_text()
+        )
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        contradictory = []
+
+        available_with_delay = copy.deepcopy(example)
+        available_with_delay["availability"]["unavailable_until"] = (
+            "2030-11-04T12:00:00+00:00"
+        )
+        contradictory.append(available_with_delay)
+
+        unavailable_without_delay = copy.deepcopy(example)
+        unavailable_without_delay["availability"]["state"] = "unavailable_until"
+        contradictory.append(unavailable_without_delay)
+
+        blocked_with_delay = copy.deepcopy(example)
+        blocked_with_delay["availability"].update(
+            {
+                "state": "blocked_on",
+                "blocked_on": "owner decision",
+                "unavailable_until": "2030-11-04T12:00:00+00:00",
+            }
+        )
+        contradictory.append(blocked_with_delay)
+
+        unobserved_with_timestamp = copy.deepcopy(example)
+        unobserved_with_timestamp["binding_observation"]["status"] = "unobserved"
+        contradictory.append(unobserved_with_timestamp)
+
+        requested_but_acknowledged = copy.deepcopy(example)
+        requested_but_acknowledged["state"] = "requested"
+        contradictory.append(requested_but_acknowledged)
+
+        for projection in contradictory:
+            with self.subTest(projection=projection):
+                self.assertTrue(list(validator.iter_errors(projection)))
+
+    def test_responsibility_schema_covers_runtime_reason_vocabulary(self) -> None:
+        schema = json.loads(
+            (
+                self.repository / "schemas" / "workflow-responsibility-v1.schema.json"
+            ).read_text()
+        )
+        example = json.loads(
+            (self.repository / "examples" / "workflow-responsibility.json").read_text()
+        )
+        validator = Draft202012Validator(schema)
+
+        for reason in (
+            "closeout_declaration",
+            "provider_effect_mismatch",
+            "manual_wake_expired",
+            "manual_wake_escalated",
+        ):
+            with self.subTest(reason=reason):
+                validator.validate({**example, "reason": reason})
+
 
 class WorkflowResponsibilityProjectionTests(unittest.TestCase):
     @staticmethod
@@ -400,7 +482,8 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
                     state TEXT NOT NULL,
-                    version INTEGER NOT NULL
+                    version INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 CREATE TABLE integration_queue_items (
                     id TEXT PRIMARY KEY,
@@ -443,6 +526,7 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     workflow_execution_id TEXT NOT NULL,
                     state TEXT NOT NULL,
                     version INTEGER NOT NULL,
+                    placement_kind TEXT NOT NULL,
                     reason TEXT NOT NULL,
                     integration_ref_id TEXT NOT NULL,
                     landing_proof_id TEXT NOT NULL,
@@ -494,8 +578,14 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                 )
                 if wake_state is not None:
                     connection.execute(
-                        "INSERT INTO workflow_manual_wakes VALUES (?, ?, ?, ?)",
-                        ("wwk_1", "run_1", wake_state, 6),
+                        "INSERT INTO workflow_manual_wakes VALUES (?, ?, ?, ?, ?)",
+                        (
+                            "wwk_1",
+                            "run_1",
+                            wake_state,
+                            6,
+                            "2026-11-02T13:00:00+00:00",
+                        ),
                     )
             if landing_state is not None:
                 connection.execute(
@@ -561,7 +651,8 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
             if target_hold:
                 connection.execute(
                     "INSERT INTO integration_target_holds VALUES "
-                    "('ith_1', 'wfx_1', 'open', 4, 'landing_mismatch', "
+                    "('ith_1', 'wfx_1', 'open', 4, 'landing_proof', "
+                    "'landing_mismatch', "
                     "'irf_1', 'wlp_1', '2026-11-02T13:00:00+00:00')"
                 )
             if exhausted_action:
@@ -602,6 +693,8 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
             "run_id": "run_1",
             "wake_id": "wwk_1",
             "wake_version": 6,
+            "wake_state": "requested",
+            "wake_updated_at": "2026-11-02T13:00:00+00:00",
         }
         landing_basis = {"queue_item_id": "inq_1", "queue_version": 8}
         cases = (
@@ -632,6 +725,7 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     {
                         "hold_id": "ith_1",
                         "hold_version": 4,
+                        "hold_placement_kind": "landing_proof",
                         "hold_reason": "landing_mismatch",
                         "integration_ref_id": "irf_1",
                         "landing_proof_id": "wlp_1",
@@ -649,6 +743,7 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     {
                         "hold_id": "ith_1",
                         "hold_version": 4,
+                        "hold_placement_kind": "landing_proof",
                         "hold_reason": "landing_mismatch",
                         "integration_ref_id": "irf_1",
                         "landing_proof_id": "wlp_1",
@@ -730,7 +825,7 @@ class WorkflowResponsibilityProjectionTests(unittest.TestCase):
                     "action_required",
                     "control_plane",
                     "run_launch",
-                    wake_basis,
+                    {**wake_basis, "wake_state": "acknowledged"},
                 ),
             ),
             (
@@ -1605,6 +1700,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         self.assertEqual(status["counts"]["workflow_manual_wakes"], 0)
         self.assertEqual(status["counts"]["workflow_manual_wake_events"], 0)
+        self.assertEqual(status["counts"]["workflow_wake_availability_observations"], 0)
         self.assertEqual(migrated.list_workflow_manual_wakes(), [])
 
     def test_schema_migrates_v47_without_synthesizing_landing_proofs(self) -> None:
@@ -1621,6 +1717,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         self.assertEqual(status["counts"]["workflow_provider_landing_proofs"], 0)
         self.assertEqual(status["counts"]["integration_target_holds"], 0)
+        self.assertEqual(status["counts"]["workflow_reviewer_measurements"], 0)
         self.assertEqual(migrated.list_integration_target_holds(), [])
 
     def test_schema_migrates_v48_without_synthesizing_closeout_authority(self) -> None:
@@ -1653,6 +1750,22 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
 
         self.assertEqual(status["schema_version"], SCHEMA_VERSION)
         self.assertEqual(status["counts"]["workflow_correction_ceiling_extensions"], 0)
+
+    def test_schema_migrates_v51_without_synthesizing_r7_authority(self) -> None:
+        path = self.root / "v51.db"
+        with sqlite3.connect(path) as connection:
+            Database._execute_statements(connection, SCHEMA_V51)
+            connection.execute("PRAGMA user_version = 51")
+            connection.commit()
+        path.chmod(0o600)
+        migrated = Database(path)
+
+        status = migrated.initialize()
+
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(status["counts"]["workflow_wake_availability_observations"], 0)
+        self.assertEqual(status["counts"]["workflow_reviewer_measurements"], 0)
+        self.assertEqual(migrated.list_integration_target_holds(), [])
 
     def test_attempt_admission_bypasses_only_pre_workflow_schema_versions(
         self,
@@ -1894,7 +2007,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
                 target_stage="build",
                 target_correction_round=correction_round + 1,
                 event_kind="workflow.correction_started",
-                metadata={},
+                metadata={"round_cause": gate_round_cause().to_dict()},
             )
         review = self.database.advance_workflow_execution(
             execution["id"],
@@ -1910,6 +2023,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             review["id"],
             expected_version=review["version"],
             kind="correction_limit",
+            round_cause=gate_round_cause(),
         )
         intruder = self.database.create_user("intruder", "Intruding User")
 
@@ -1993,6 +2107,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             review_four["id"],
             expected_version=review_four["version"],
             kind="correction_limit",
+            round_cause=gate_round_cause(),
         )
         with (
             self.database.connect() as connection,
@@ -2035,6 +2150,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             execution["id"],
             expected_version=execution["version"],
             kind="correction_limit",
+            round_cause=gate_round_cause(),
         )
 
         with self.assertRaisesRegex(ConflictError, "ceiling has not been reached"):
@@ -2111,6 +2227,15 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(wake["version"], 1)
         self.assertEqual(wake["recipient"], "owner")
         self.assertIsNone(wake["acknowledged_by"])
+        self.assertIsNone(wake["availability"])
+        self.assertEqual(
+            wake["binding_observation"],
+            {
+                "status": "unobserved",
+                "wake_class": "human_turn_only",
+                "observed_at": None,
+            },
+        )
         self.assertEqual(
             [
                 {
@@ -2142,6 +2267,8 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
                     "run_id": run["id"],
                     "wake_id": wake["id"],
                     "wake_version": 1,
+                    "wake_state": "requested",
+                    "wake_updated_at": wake["updated_at"],
                 },
             },
         )
@@ -2188,6 +2315,11 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(acknowledged["state"], "acknowledged")
         self.assertEqual(acknowledged["version"], 2)
         self.assertEqual(acknowledged["acknowledged_by"], "owner")
+        self.assertEqual(acknowledged["binding_observation"]["status"], "observed")
+        self.assertEqual(
+            acknowledged["binding_observation"]["observed_at"],
+            acknowledged["acknowledged_at"],
+        )
         self.assertEqual(
             [
                 (
@@ -2235,6 +2367,290 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             expected_run_version=1,
         )
         self.assertEqual(attempt["state"], "preparing")
+
+    def test_manual_wake_observes_delivery_and_availability_independently(self) -> None:
+        self.activate()
+        work_item = self.create_work_item("manual-wake-observation")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="manual-wake-observation",
+        )
+        self.create_producer_run(execution, work_item)
+        wake = self.database.list_workflow_manual_wakes(execution_id=execution["id"])[0]
+        other = self.database.create_user("wake-other", "Wake Other")
+
+        invalid_observations = (
+            ("available", "2030-11-04T12:00:00Z", None),
+            ("available", None, "owner decision"),
+            ("unavailable_until", None, None),
+            (
+                "unavailable_until",
+                "2030-11-04T12:00:00Z",
+                "owner decision",
+            ),
+            ("blocked_on", "2030-11-04T12:00:00Z", "owner decision"),
+            ("blocked_on", None, None),
+        )
+        for index, (state, unavailable_until, blocked_on) in enumerate(
+            invalid_observations
+        ):
+            with (
+                self.subTest(state=state, index=index),
+                self.assertRaises(ValidationError),
+            ):
+                self.database.record_workflow_wake_availability(
+                    wake["id"],
+                    expected_wake_version=1,
+                    state=state,
+                    unavailable_until=unavailable_until,
+                    blocked_on=blocked_on,
+                    observed_by=self.user["id"],
+                    idempotency_key=f"wake-availability-invalid-{index}",
+                )
+
+        with self.assertRaisesRegex(ConflictError, "recipient"):
+            self.database.record_workflow_wake_availability(
+                wake["id"],
+                expected_wake_version=1,
+                state="available",
+                unavailable_until=None,
+                blocked_on=None,
+                observed_by=other["id"],
+                idempotency_key="wake-availability-other",
+            )
+        observed = self.database.record_workflow_wake_availability(
+            wake["id"],
+            expected_wake_version=1,
+            state="unavailable_until",
+            unavailable_until="2030-11-04T12:00:00Z",
+            blocked_on=None,
+            observed_by=self.user["id"],
+            idempotency_key="wake-availability-delay",
+        )
+        self.assertEqual((observed["state"], observed["version"]), ("requested", 1))
+        self.assertEqual(observed["availability"]["state"], "unavailable_until")
+        self.assertEqual(observed["availability"]["wake_version"], 1)
+        self.assertEqual(observed["availability"]["observed_by"], "owner")
+        self.assertEqual(
+            self.database.record_workflow_wake_availability(
+                wake["id"],
+                expected_wake_version=1,
+                state="unavailable_until",
+                unavailable_until="2030-11-04T12:00:00Z",
+                blocked_on=None,
+                observed_by=self.user["id"],
+                idempotency_key="wake-availability-delay",
+            )["availability"]["id"],
+            observed["availability"]["id"],
+        )
+        blocked = self.database.record_workflow_wake_availability(
+            wake["id"],
+            expected_wake_version=1,
+            state="blocked_on",
+            unavailable_until=None,
+            blocked_on="owner decision",
+            observed_by=self.user["id"],
+            idempotency_key="wake-availability-blocked",
+        )
+        self.assertEqual(
+            (
+                blocked["availability"]["state"],
+                blocked["availability"]["blocked_on"],
+                blocked["availability"]["unavailable_until"],
+            ),
+            ("blocked_on", "owner decision", None),
+        )
+        available = self.database.record_workflow_wake_availability(
+            wake["id"],
+            expected_wake_version=1,
+            state="available",
+            unavailable_until=None,
+            blocked_on=None,
+            observed_by=self.user["id"],
+            idempotency_key="wake-availability-ready",
+        )
+        self.assertEqual(available["availability"]["state"], "available")
+        with self.assertRaisesRegex(ConflictError, "idempotency"):
+            self.database.record_workflow_wake_availability(
+                wake["id"],
+                expected_wake_version=1,
+                state="available",
+                unavailable_until=None,
+                blocked_on=None,
+                observed_by=self.user["id"],
+                idempotency_key="wake-availability-delay",
+            )
+
+        delivered = self.database.transition_workflow_manual_wake(
+            wake["id"],
+            expected_version=1,
+            target_state="delivered",
+            actor_id=self.user["id"],
+        )
+        self.assertEqual((delivered["state"], delivered["version"]), ("delivered", 2))
+        self.assertEqual(delivered["binding_observation"]["status"], "unobserved")
+        acknowledged = self.database.acknowledge_workflow_manual_wake(
+            wake["id"],
+            expected_version=2,
+            acknowledged_by=self.user["id"],
+        )
+        self.assertEqual(
+            [event["kind"] for event in acknowledged["events"]],
+            ["wake.requested", "wake.delivered", "wake.acknowledged"],
+        )
+        self.assertEqual(acknowledged["binding_observation"]["status"], "observed")
+        self.assertEqual(acknowledged["availability"]["state"], "available")
+
+    def test_manual_wake_transition_matrix_retains_each_observed_path(self) -> None:
+        self.activate()
+
+        def new_wake(label: str) -> dict[str, object]:
+            work_item = self.create_work_item(f"manual-wake-{label}")
+            execution = self.start_activated(
+                work_item,
+                expected_activation_version=1,
+                idempotency_key=f"manual-wake-{label}",
+            )
+            self.create_producer_run(execution, work_item)
+            return self.database.list_workflow_manual_wakes(
+                execution_id=execution["id"]
+            )[0]
+
+        direct_escalation = new_wake("direct-escalation")
+        escalated = self.database.transition_workflow_manual_wake(
+            direct_escalation["id"],
+            expected_version=1,
+            target_state="escalated",
+            actor_id=self.user["id"],
+        )
+        self.assertEqual(
+            [(event["from_state"], event["to_state"]) for event in escalated["events"]],
+            [(None, "requested"), ("requested", "escalated")],
+        )
+
+        for target_state in ("expired", "escalated"):
+            wake = new_wake(f"delivered-{target_state}")
+            delivered = self.database.transition_workflow_manual_wake(
+                wake["id"],
+                expected_version=1,
+                target_state="delivered",
+                actor_id=self.user["id"],
+            )
+            terminal = self.database.transition_workflow_manual_wake(
+                wake["id"],
+                expected_version=delivered["version"],
+                target_state=target_state,
+                actor_id=self.user["id"],
+            )
+            self.assertEqual(
+                [
+                    (event["from_state"], event["to_state"])
+                    for event in terminal["events"]
+                ],
+                [
+                    (None, "requested"),
+                    ("requested", "delivered"),
+                    ("delivered", target_state),
+                ],
+            )
+
+    def test_manual_wake_expiry_and_escalation_are_explicit_manual_facts(self) -> None:
+        self.activate()
+        work_item = self.create_work_item("manual-wake-escalation")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="manual-wake-escalation",
+        )
+        self.create_producer_run(execution, work_item)
+        wake = self.database.list_workflow_manual_wakes(execution_id=execution["id"])[0]
+
+        expired_at = "2030-11-04T12:00:00.000000+00:00"
+        with mock.patch.object(self.database, "now", return_value=expired_at):
+            expired = self.database.transition_workflow_manual_wake(
+                wake["id"],
+                expected_version=1,
+                target_state="expired",
+                actor_id=self.user["id"],
+            )
+        self.assertEqual(expired["state"], "expired")
+        expired_execution = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            expired_execution["responsibility"]["reason"], "manual_wake_expired"
+        )
+        self.assertEqual(
+            expired_execution["responsibility"]["basis"]["wake_updated_at"],
+            expired_at,
+        )
+        responsibility_schema = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "schemas"
+                / "workflow-responsibility-v1.schema.json"
+            ).read_text()
+        )
+        Draft202012Validator(responsibility_schema).validate(
+            expired_execution["responsibility"]
+        )
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value="2030-11-04T13:00:00.000000+00:00",
+        ):
+            expired_attention = next(
+                item
+                for item in ControlRoom(self.database).snapshot()["attention"]
+                if item["kind"] == "workflow.manual_wake_expired"
+            )
+        self.assertEqual(expired_attention["severity"], "action")
+        self.assertEqual(expired_attention["age_seconds"], 3600)
+        self.assertEqual(expired_attention["wake_updated_at"], expired_at)
+
+        escalated_at = "2030-11-04T14:00:00.000000+00:00"
+        with mock.patch.object(self.database, "now", return_value=escalated_at):
+            escalated = self.database.transition_workflow_manual_wake(
+                wake["id"],
+                expected_version=2,
+                target_state="escalated",
+                actor_id=self.user["id"],
+            )
+        self.assertEqual(escalated["state"], "escalated")
+        self.assertEqual(
+            [event["kind"] for event in escalated["events"]],
+            ["wake.requested", "wake.expired", "wake.escalated"],
+        )
+        escalated_execution = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            escalated_execution["responsibility"]["reason"],
+            "manual_wake_escalated",
+        )
+        self.assertEqual(
+            escalated_execution["responsibility"]["basis"]["wake_updated_at"],
+            escalated_at,
+        )
+        Draft202012Validator(responsibility_schema).validate(
+            escalated_execution["responsibility"]
+        )
+        with mock.patch.object(
+            self.database,
+            "now",
+            return_value="2030-11-04T15:30:00.000000+00:00",
+        ):
+            escalated_attention = next(
+                item
+                for item in ControlRoom(self.database).snapshot()["attention"]
+                if item["kind"] == "workflow.manual_wake_escalated"
+            )
+        self.assertEqual(escalated_attention["severity"], "warning")
+        self.assertEqual(escalated_attention["age_seconds"], 5400)
+        self.assertEqual(escalated_attention["wake_updated_at"], escalated_at)
+        with self.assertRaisesRegex(ConflictError, "cannot be acknowledged"):
+            self.database.acknowledge_workflow_manual_wake(
+                wake["id"],
+                expected_version=3,
+                acknowledged_by=self.user["id"],
+            )
 
     def test_manual_wake_belongs_to_the_activation_owner_not_the_requester(
         self,
@@ -2641,6 +3057,21 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         pinned_wake = self.database.list_workflow_manual_wakes(
             execution_id=pinned_execution["id"]
         )[0]
+        self.assertEqual(
+            pinned_wake["workflow_activation_version_id"],
+            first_activation["workflow_activation_version_id"],
+        )
+        self.assertNotEqual(
+            pinned_wake["workflow_activation_version_id"],
+            revised["workflow_activation_version_id"],
+        )
+        self.assertEqual(
+            self.database.get_workflow_execution(pinned_execution["id"])[
+                "portable_policy"
+            ]["resources"]["shared_host_concurrency"],
+            1,
+        )
+        self.assertEqual(revised["spec"]["resources"]["shared_host_concurrency"], 2)
         self.database.acknowledge_workflow_manual_wake(
             pinned_wake["id"],
             expected_version=pinned_wake["version"],

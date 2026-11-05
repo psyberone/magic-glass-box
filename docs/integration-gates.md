@@ -88,6 +88,23 @@ Review profiles are required to use `workspace_mode: read_only`. That check is
 performed when review runs and replacements are created and again when review
 evidence is accepted; it is not merely a reviewer prompt convention.
 
+A reviewer may additionally submit a published
+`workflow-reviewer-measurement-v1` artifact through the narrow
+`workflow.reviewer-measurement.submit` gateway capability. The artifact binds
+the exact policy/candidate inputs and active attempt to one bounded argv,
+architecture, interpreter, code-origin digest, exit status, typed tool
+presence/version observations, non-zero collected/executed counts, duration,
+output digest, and the declared semantics of the structured result fields.
+Admission rechecks the exact policy head, read-only workspace, active attempt,
+observed image, and absence of credentials or provider invocation authority;
+the stored control-plane record binds that authoritative image and pinned
+profile to the reviewer-authored artifact.
+
+This is supplemental code-as-run context, not validation authority. It has no
+outcome field, creates no gate evidence, and cannot change readiness. Immutable
+validation continues to run through the configured control-plane validation
+executor after review approval.
+
 `run.describe` gives that reviewer two distinct bounded inputs. The
 control-plane-attested `change_set` binds the exact base, head, tree, result
 digest, total path and byte counts, and up to 64 sorted path operations with

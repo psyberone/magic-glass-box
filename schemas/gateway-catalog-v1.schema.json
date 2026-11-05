@@ -25,7 +25,7 @@
     },
     "operations": {
       "type": "array",
-      "maxItems": 17,
+      "maxItems": 18,
       "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/operation"

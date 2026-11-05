@@ -55,6 +55,7 @@ from .provider import (
     ProviderRateLimitError,
     ProviderUpstreamError,
 )
+from .reviewer_measurement import ReviewerMeasurement
 from .service import AcceptedInteractionResponse, AcceptedProviderResponse
 from .workflow_scope import WorkflowScopeReview
 
@@ -155,6 +156,14 @@ class GatewayControlPlane(Protocol):
         run_id: str,
         *,
         review: WorkflowScopeReview,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def submit_reviewer_measurement(
+        self,
+        run_id: str,
+        *,
+        measurement: ReviewerMeasurement,
         idempotency_key: str,
     ) -> dict[str, Any]: ...
 
@@ -752,6 +761,28 @@ class RunGateway:
             "failed_must_keys": stored["failed_must_keys"],
             "regression_probe_keys": stored["regression_probe_keys"],
             "follow_up_probe_keys": stored["follow_up_probe_keys"],
+        }
+
+    def _submit_reviewer_measurement(self, payload: object) -> dict[str, Any]:
+        item = self._operation_payload(
+            GatewayCapability.WORKFLOW_REVIEWER_MEASUREMENT_SUBMIT,
+            payload,
+        )
+        measurement_value = item["measurement"]
+        if not isinstance(measurement_value, Mapping):
+            raise _RequestFailure("invalid_request", "measurement must be an object")
+        measurement = ReviewerMeasurement.from_mapping(measurement_value)
+        stored = self.control.submit_reviewer_measurement(
+            self.run_id,
+            measurement=measurement,
+            idempotency_key=self._idempotency_key(item["idempotency_key"]),
+        )
+        return {
+            "measurement_id": stored["id"],
+            "content_sha256": stored["content_sha256"],
+            "policy_id": stored["policy_id"],
+            "reviewer_attempt_id": stored["reviewer_attempt_id"],
+            "agent_action": "continue_review",
         }
 
     def _invoke_provider(self, payload: object) -> dict[str, Any]:

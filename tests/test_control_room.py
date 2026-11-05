@@ -45,6 +45,7 @@ from magic_glass_box.krab import (
 )
 from magic_glass_box.results import ResultManifest
 from magic_glass_box.service import ControlPlane
+from magic_glass_box.workflow_rounds import WorkflowRoundCause
 from magic_glass_box.workflows import WorkflowConfigurationSpec
 
 
@@ -2991,6 +2992,19 @@ class ControlRoomTests(unittest.TestCase):
             execution["id"],
             expected_version=execution["version"],
             kind="correction_limit",
+            round_cause=WorkflowRoundCause(
+                schema_version=1,
+                kind="gate_error",
+                finding_classes=("gate_error",),
+                policy_id="gpl_" + "f" * 32,
+                reviewer_run_id=None,
+                reviewer_attempt_id=None,
+                review_evidence_id=None,
+                review_entry_id=None,
+                scope_review_id=None,
+                maintainer_review_id=None,
+                gate_name="review_gate",
+            ),
         )
         ruling_snapshot = ControlRoom(self.database).snapshot()
         projected = ruling_snapshot["workflows"][0]

@@ -7,6 +7,8 @@
   "required": [
     "acknowledged_at",
     "acknowledged_by",
+    "availability",
+    "binding_observation",
     "correction_round",
     "events",
     "execution_id",
@@ -35,11 +37,18 @@
         { "type": "null" }
       ]
     },
+    "availability": {
+      "oneOf": [
+        { "$ref": "#/$defs/availability" },
+        { "type": "null" }
+      ]
+    },
+    "binding_observation": { "$ref": "#/$defs/bindingObservation" },
     "correction_round": { "type": "integer", "minimum": 0, "maximum": 8 },
     "events": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 2,
+      "maxItems": 4,
       "items": { "$ref": "#/$defs/event" }
     },
     "execution_id": { "type": "string", "pattern": "^wfx_[0-9a-f]{32}$" },
@@ -60,7 +69,101 @@
       "pattern": "^wav_[0-9a-f]{32}$"
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "acknowledged" } } },
+      "then": {
+        "properties": {
+          "acknowledged_at": { "type": "string", "format": "date-time" },
+          "acknowledged_by": { "$ref": "#/$defs/handle" },
+          "binding_observation": {
+            "properties": { "status": { "const": "observed" } }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "acknowledged_at": { "type": "null" },
+          "acknowledged_by": { "type": "null" },
+          "binding_observation": {
+            "properties": { "status": { "const": "unobserved" } }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blocked_on", "created_at", "id", "idempotency_key", "observed_by",
+        "sequence", "state", "unavailable_until", "wake_version"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^wao_[0-9a-f]{32}$" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "wake_version": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["available", "unavailable_until", "blocked_on"] },
+        "unavailable_until": { "type": ["string", "null"], "format": "date-time" },
+        "blocked_on": { "type": ["string", "null"], "x-max-utf8-bytes": 256 },
+        "observed_by": { "$ref": "#/$defs/handle" },
+        "idempotency_key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "available" } } },
+          "then": {
+            "properties": {
+              "unavailable_until": { "type": "null" },
+              "blocked_on": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "state": { "const": "unavailable_until" } }
+          },
+          "then": {
+            "properties": {
+              "unavailable_until": { "type": "string", "format": "date-time" },
+              "blocked_on": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "const": "blocked_on" } } },
+          "then": {
+            "properties": {
+              "unavailable_until": { "type": "null" },
+              "blocked_on": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "bindingObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at", "status", "wake_class"],
+      "properties": {
+        "status": { "enum": ["unobserved", "observed"] },
+        "wake_class": { "const": "human_turn_only" },
+        "observed_at": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "unobserved" } } },
+          "then": { "properties": { "observed_at": { "type": "null" } } },
+          "else": {
+            "properties": {
+              "observed_at": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      ]
+    },
     "handle": {
       "type": "string",
       "minLength": 1,
@@ -99,8 +202,13 @@
             { "type": "null" }
           ]
         },
-        "kind": { "enum": ["wake.requested", "wake.acknowledged"] },
-        "sequence": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "kind": {
+          "enum": [
+            "wake.requested", "wake.delivered", "wake.acknowledged",
+            "wake.expired", "wake.escalated"
+          ]
+        },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 4 },
         "to_state": {
           "enum": [
             "requested",
