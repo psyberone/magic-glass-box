@@ -48,7 +48,11 @@ from magic_glass_box.service_sidecar import (
     ServiceOperationSpec,
     ServiceSidecarSpec,
 )
-from magic_glass_box.storage.errors import ConcurrentUpdateError, ConflictError
+from magic_glass_box.storage.errors import (
+    ConcurrentUpdateError,
+    ConflictError,
+    NotFoundError,
+)
 from magic_glass_box.supervision import Supervisor
 from magic_glass_box.workflow_closeout import WorkflowCloseoutDeclaration
 from magic_glass_box.workflow_director import WORKFLOW_RUN_SUPERVISION, WorkflowDirector
@@ -6493,6 +6497,23 @@ class WorkflowDirectorTests(unittest.TestCase):
             round_cause=gate_round_cause(),
         )
 
+        with self.assertRaisesRegex(ValidationError, "continue decision"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="cancel",
+                resolved_by_handle="operator",
+                validation_correction_review_id="mrv_" + "a" * 32,
+            )
+        with self.assertRaisesRegex(ConflictError, "another ruling"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+                validation_correction_review_id="mrv_" + "a" * 32,
+            )
+
         resolved = self.control.resolve_workflow_ruling(
             ruling["id"],
             expected_version=ruling["version"],
@@ -6904,6 +6925,331 @@ class WorkflowDirectorTests(unittest.TestCase):
             ["passed", "failed", "failed"],
         )
         self.assertEqual(len(requests), 3)
+
+    def test_failed_validation_can_route_exact_owner_feedback_to_producer(self) -> None:
+        execution = self.start_execution(
+            configuration_name="validation-correction",
+            external_id="workflow-director-validation-correction",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": True,
+                "validations": [
+                    {
+                        "name": "unit",
+                        "image_id": "sha256:" + "9" * 64,
+                        "command": ["python", "-m", "unittest"],
+                    }
+                ],
+                "max_correction_rounds": 2,
+                "landing_mode": "manual",
+            },
+        )
+        review, gate, reviewer = self.drive_build_to_review(
+            execution, before="base\n", after="unformatted\n"
+        )
+        policy = self.database.get_gate_policy(gate["policy_id"])
+        self.finish_run(
+            reviewer,
+            source_revision=policy["head_revision"],
+            before="unformatted\n",
+            after="unformatted\n",
+            review_outcome="approved",
+        )
+
+        class Executor:
+            @staticmethod
+            def execute(_request: object) -> SandboxResult:
+                return SandboxResult(
+                    container_id="b" * 64,
+                    container_name="validation",
+                    image_id="sha256:" + "9" * 64,
+                    exit_code=2,
+                    stdout="ruff format --check failed",
+                )
+
+        director = WorkflowDirector(
+            self.control, self.results, self.candidates, Executor()
+        )
+        self.assertTrue(
+            director.advance(review["id"], expected_version=review["version"])
+        )
+        stopped = self.database.get_workflow_execution(execution["id"])
+        ruling = stopped["rulings"][-1]
+        failed_evidence = next(
+            evidence
+            for evidence in self.database.list_gate_evidence(gate["policy_id"])
+            if evidence["gate_name"] == "validation:unit"
+        )
+        changes = self.control.record_maintainer_review(
+            gate["policy_id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Correct the validation failure",
+                "details": ["Format the new test signature with Ruff."],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        self.control.resolve_workflow_ruling(
+            ruling["id"],
+            expected_version=ruling["version"],
+            decision="continue",
+            resolved_by_handle="operator",
+            validation_correction_review_id=changes["id"],
+        )
+
+        correcting = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            (correcting["stage"], correcting["correction_round"]), ("build", 1)
+        )
+        cause = WorkflowRoundCause.from_mapping(
+            correcting["events"][-1]["metadata"]["round_cause"]
+        )
+        self.assertEqual(
+            (
+                cause.kind,
+                cause.finding_classes,
+                cause.policy_id,
+                cause.maintainer_review_id,
+            ),
+            (
+                "maintainer_request",
+                ("validation_failure",),
+                gate["policy_id"],
+                changes["id"],
+            ),
+        )
+        self.assertEqual(
+            correcting["events"][-1]["metadata"]["failed_evidence_id"],
+            failed_evidence["id"],
+        )
+
+        self.assertFalse(
+            director.advance(correcting["id"], expected_version=correcting["version"])
+        )
+        correction = self.database.find_workflow_run(execution["id"], 1, "producer")
+        self.assertIsNotNone(correction)
+        correction_execution = self.database.get_run_execution(correction["id"])
+        self.assertEqual(correction["source_revision"], policy["head_revision"])
+        self.assertEqual(
+            correction_execution["changes_requested"],
+            {
+                "policy_id": gate["policy_id"],
+                "candidate_id": gate["candidate_id"],
+                "source": "maintainer_review",
+                "maintainer_review": changes,
+            },
+        )
+
+    def test_validation_correction_rejects_feedback_from_another_actor(self) -> None:
+        execution = self.start_execution(
+            configuration_name="validation-correction-authority",
+            external_id="workflow-director-validation-correction-authority",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": True,
+                "validations": [
+                    {
+                        "name": "unit",
+                        "image_id": "sha256:" + "9" * 64,
+                        "command": ["python", "-m", "unittest"],
+                    }
+                ],
+                "max_correction_rounds": 1,
+                "landing_mode": "manual",
+            },
+        )
+        review, gate, reviewer = self.drive_build_to_review(
+            execution, before="base\n", after="invalid\n"
+        )
+        policy = self.database.get_gate_policy(gate["policy_id"])
+        self.finish_run(
+            reviewer,
+            source_revision=policy["head_revision"],
+            before="invalid\n",
+            after="invalid\n",
+            review_outcome="approved",
+        )
+
+        class Executor:
+            @staticmethod
+            def execute(_request: object) -> SandboxResult:
+                return SandboxResult(
+                    container_id="b" * 64,
+                    container_name="validation",
+                    image_id="sha256:" + "9" * 64,
+                    exit_code=1,
+                )
+
+        director = WorkflowDirector(
+            self.control, self.results, self.candidates, Executor()
+        )
+        self.assertTrue(
+            director.advance(review["id"], expected_version=review["version"])
+        )
+        stopped = self.database.get_workflow_execution(execution["id"])
+        ruling = stopped["rulings"][-1]
+        with self.assertRaisesRegex(NotFoundError, "maintainer review"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+                validation_correction_review_id="mrv_" + "f" * 32,
+            )
+        self.database.create_user("other-maintainer", "Other Maintainer")
+        changes = self.control.record_maintainer_review(
+            gate["policy_id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Unowned correction request",
+                "details": ["Change the candidate."],
+            },
+            recorded_by_handle="other-maintainer",
+            expected_policy_revision=policy["policy_revision"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "ruling resolver"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+                validation_correction_review_id=changes["id"],
+            )
+
+        approved = self.control.record_maintainer_review(
+            gate["policy_id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "approved",
+                "summary": "Candidate accepted",
+                "details": [],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy["policy_revision"],
+        )
+        with self.assertRaisesRegex(ConflictError, "current exact-policy"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+                validation_correction_review_id=changes["id"],
+            )
+        with self.assertRaisesRegex(ConflictError, "changes-requested"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+                validation_correction_review_id=approved["id"],
+            )
+
+        unchanged = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            (unchanged["stage"], unchanged["correction_round"]), ("review", 0)
+        )
+        self.assertEqual(unchanged["rulings"][-1]["state"], "open")
+
+    def test_validation_correction_respects_the_configured_round_limit(self) -> None:
+        execution = self.start_execution(
+            configuration_name="validation-correction-limit",
+            external_id="workflow-director-validation-correction-limit",
+            spec={
+                "schema_version": 1,
+                "review_separation": "different_profile_and_identity",
+                "maintainer_approval": True,
+                "validations": [
+                    {
+                        "name": "unit",
+                        "image_id": "sha256:" + "9" * 64,
+                        "command": ["python", "-m", "unittest"],
+                    }
+                ],
+                "max_correction_rounds": 1,
+                "landing_mode": "manual",
+            },
+        )
+        review_zero, gate_zero, reviewer_zero = self.drive_build_to_review(
+            execution, before="base\n", after="round-zero\n"
+        )
+        policy_zero = self.database.get_gate_policy(gate_zero["policy_id"])
+        self.finish_run(
+            reviewer_zero,
+            source_revision=policy_zero["head_revision"],
+            before="round-zero\n",
+            after="round-zero\n",
+            review_outcome="changes_requested",
+        )
+        director = self.director()
+        self.assertTrue(
+            director.advance(review_zero["id"], expected_version=review_zero["version"])
+        )
+        correction = self.database.get_workflow_execution(execution["id"])
+        review_one, gate_one, reviewer_one = self.drive_build_to_review(
+            correction, before="round-zero\n", after="round-one\n"
+        )
+        policy_one = self.database.get_gate_policy(gate_one["policy_id"])
+        self.finish_run(
+            reviewer_one,
+            source_revision=policy_one["head_revision"],
+            before="round-one\n",
+            after="round-one\n",
+            review_outcome="approved",
+        )
+
+        class FailingExecutor:
+            @staticmethod
+            def execute(_request: object) -> SandboxResult:
+                return SandboxResult(
+                    container_id="b" * 64,
+                    container_name="validation",
+                    image_id="sha256:" + "9" * 64,
+                    exit_code=1,
+                )
+
+        validation_director = WorkflowDirector(
+            self.control, self.results, self.candidates, FailingExecutor()
+        )
+        self.assertTrue(
+            validation_director.advance(
+                review_one["id"], expected_version=review_one["version"]
+            )
+        )
+        stopped = self.database.get_workflow_execution(execution["id"])
+        ruling = stopped["rulings"][-1]
+        changes = self.control.record_maintainer_review(
+            gate_one["policy_id"],
+            review_request={
+                "schema_version": 1,
+                "decision": "changes_requested",
+                "summary": "Another correction is required",
+                "details": ["Correct the validation failure."],
+            },
+            recorded_by_handle="operator",
+            expected_policy_revision=policy_one["policy_revision"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "correction-round limit"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+                validation_correction_review_id=changes["id"],
+            )
+
+        unchanged = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            (unchanged["stage"], unchanged["correction_round"]), ("review", 1)
+        )
+        self.assertEqual(unchanged["rulings"][-1]["state"], "open")
 
 
 if __name__ == "__main__":

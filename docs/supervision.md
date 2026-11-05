@@ -144,8 +144,14 @@ explicit operator boundary. A correction-limit ruling may authorize one
 additional bounded round. A validation-failed ruling may rerun that exact
 immutable validation once, and an exact failed-provider-landing ruling may
 authorize one retry of that attempt. Each retry requires its own ruling; neither
-path can alter the pinned command, image, policy, or candidate. Other rulings
-can only cancel.
+path can alter the pinned command, image, policy, or candidate. When validation
+has instead exposed a candidate defect, the resolver may name a current exact-
+policy `changes_requested` maintainer review that they authored. Resolution
+then advances to one bounded correction round at the failed head, binds that
+review into the producer's structured `changes_requested` input, and requires
+fresh independent review and validation. Without that explicit review ID,
+`continue` retains its immutable-validation retry meaning. Other rulings can
+only cancel.
 
 For activated workflows, only the activation's pinned owner may resolve a
 ruling, including cancellation. A correction-limit continuation is available

@@ -431,10 +431,25 @@ PYTHONPATH=src python3.11 -m magic_glass_box \
   --decision continue --resolved-by operator
 ```
 
-Only a correction-limit ruling or an exact failed-provider-landing ruling may
-continue. The latter authorizes one retry of that failed attempt; any ruling
-may be explicitly cancelled. After a matching landed receipt, schema v30
-atomically writes a bounded control-plane outcome, seals the work thread, and
+Continuing a validation-failed ruling normally reruns the exact immutable
+validation. If that failure exposed a candidate defect, the same owner may
+instead record an exact `changes_requested` maintainer review and name it while
+resolving the ruling:
+
+```console
+PYTHONPATH=src python3.11 -m magic_glass_box \
+  workflow ruling-resolve wri_<id> --expected-version 1 \
+  --decision continue --resolved-by operator \
+  --validation-correction-review-id mrv_<id>
+```
+
+That explicit pairing starts one bounded correction round at the failed
+candidate head, returns the structured feedback to the pinned producer role,
+and requires fresh review and validation. The review must be the current exact-
+policy `changes_requested` record authored by the ruling resolver. A failed
+provider landing may likewise authorize one retry of its exact attempt; any
+ruling may be explicitly cancelled. After a matching landed receipt, the
+control plane atomically writes a bounded outcome, seals the work thread, and
 completes the workflow. See
 [docs/workflow-templates.md](docs/workflow-templates.md).
 

@@ -657,6 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--decision", required=True, choices=("continue", "cancel")
     )
     workflow_ruling_resolve.add_argument("--resolved-by", required=True)
+    workflow_ruling_resolve.add_argument("--validation-correction-review-id")
     workflow_provider_intent = workflow_commands.add_parser(
         "provider-intent",
         help="bind project-local publication and change metadata to a workflow",
@@ -1976,11 +1977,17 @@ def _dispatch(
         if args.workflow_command == "ruling-show":
             return control.get_workflow_ruling(args.ruling_id)
         if args.workflow_command == "ruling-resolve":
+            correction: dict[str, str] = {}
+            if args.validation_correction_review_id is not None:
+                correction["validation_correction_review_id"] = (
+                    args.validation_correction_review_id
+                )
             return control.resolve_workflow_ruling(
                 args.ruling_id,
                 expected_version=args.expected_version,
                 decision=args.decision,
                 resolved_by_handle=args.resolved_by,
+                **correction,
             )
         if args.workflow_command == "provider-intent":
             return control.configure_workflow_provider_intent(

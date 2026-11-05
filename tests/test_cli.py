@@ -3290,6 +3290,31 @@ class CLITests(unittest.TestCase):
             (
                 [
                     "workflow",
+                    "ruling-resolve",
+                    "wri_" + "5" * 32,
+                    "--expected-version",
+                    "1",
+                    "--decision",
+                    "continue",
+                    "--resolved-by",
+                    "operator",
+                    "--validation-correction-review-id",
+                    "mrv_" + "6" * 32,
+                ],
+                (
+                    "workflow.ruling-resolve",
+                    {
+                        "ruling_id": "wri_" + "5" * 32,
+                        "expected_version": 1,
+                        "decision": "continue",
+                        "resolved_by_handle": "operator",
+                        "validation_correction_review_id": "mrv_" + "6" * 32,
+                    },
+                ),
+            ),
+            (
+                [
+                    "workflow",
                     "provider-target",
                     "wfx_" + "4" * 32,
                     "--expected-version",

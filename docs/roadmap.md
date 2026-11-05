@@ -2202,8 +2202,8 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v52; external-review remediation R1-R7 complete; two-project live exit
-proof pending**
+schema v52; external-review remediation R1-R8 complete; two-project live exit
+proof resumed**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2563,6 +2563,26 @@ survivors alter non-contractual diagnostics, equivalent SQL casing, bounded
 defaults outside the published contract, or checks already implied by a
 stronger validated invariant.
 
+External-review remediation R8 closes the live proof's validation-to-producer
+correction seam without weakening the existing explicit retry ruling. An
+activation owner may pair a `validation_failed` ruling's `continue` decision
+with the current exact-policy `changes_requested` maintainer review recorded by
+that same actor. The workflow then consumes one configured correction round,
+records an immutable `validation_failure` round cause, returns to `build`, and
+delivers the exact bounded request to the original producer role. Omitting the
+review identity retains the old exact-validation retry; a stale, foreign,
+approved, cross-policy, wrong-ruling, or over-ceiling request fails closed. The
+CLI exposes only the exact review identifier and the durable review remains the
+authority artifact rather than transient validation output.
+
+R8's final gate passes 1,645 tests at 87% aggregate statement-plus-branch
+coverage with clean Ruff format and lint. A fresh-association, serial focused
+mutation pass killed 12/14 generated mutants on the new correction path
+(85.71%). The two survivors alter only defensive diagnostic prose for an
+unreachable corrupt configuration and the already-substring-bound correction-
+limit message; neither changes authority, routing, state, or the published
+artifact.
+
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,
 coordinator fidelity disposition, and independent technical approval.
@@ -2607,6 +2627,199 @@ runs in a disposable job container rather than the controller. The complete
 design and acceptance boundary are in
 [containerized-runner-appliance.md](containerized-runner-appliance.md).
 
+## Milestone 19.5: work readiness and human-approved plans
+
+**Status: planned workflow-authority slice after M19 and before M20**
+
+Extend the fixed implementation prescription with an explicit pre-build
+boundary. An authorized human or agent may select a work item for consideration,
+but selection is only an admission fact: it does not authorize implementation.
+A pinned planning role first evaluates the exact imported work-item version
+against the project charter and a small declared work-readiness standard. Work
+that is sufficiently specified advances to planning; work that is not returns
+durable, actionable deficiencies to its human owner for refinement.
+
+This is not a generic ticket-writing agent, an arbitrary workflow graph, or a
+forge-specific status machine. MGB does not silently fill in missing product
+decisions and does not need write access to the source ticket system. A human
+may revise the ticket at its source or revise the imported work item; either
+path creates a new pinned version that must pass readiness again.
+
+The initial readiness contract asks only whether the agent has enough
+authoritative information to avoid starving or inventing scope:
+
+- an identifiable problem or desired outcome;
+- bounded acceptance evidence that can distinguish success from failure;
+- the relevant project context, constraints, and known non-goals; and
+- no unresolved ambiguity that would materially change product behavior,
+  authority, destructive effects, or the expected validation boundary.
+
+The assessment is a versioned artifact with `work_ready` or
+`needs_refinement`, exact work-item and context identities, a bounded rationale,
+and specific missing-information items. A failure returns responsibility to the
+selector or configured human owner and cannot create a producer run. Reminder
+or provider synchronization may be added later through narrow sidecar effects;
+the portable workflow itself records only the durable MGB state.
+
+Once ready, the same configured planning role may produce a versioned plan. The
+plan pins the work-ready brief, project-context version, source revision, and
+declared execution environment, and records:
+
+- proposed scope and explicitly excluded work;
+- intended changes and affected components at an appropriate level of detail;
+- RED-first verification, relevant happy and sad paths, and required evidence;
+- dependencies, sequencing, risks, assumptions, and unresolved questions; and
+- any expected provider or remote-execution effects without granting authority
+  to perform them.
+
+A human with the project-local plan-disposition authority records `approved` or
+`changes_requested` against the exact plan digest. The planner cannot approve
+its own plan. Changes requested return the same planning role to a new plan
+revision with the prior feedback attached. Approval authorizes the workflow to
+create the implementation producer against that exact plan; it does not approve
+the resulting code, waive independent review or validation, grant landing
+authority, or permit material scope expansion. A material change to the work
+item, project context, source baseline, environment, or plan invalidates the
+approval and requires an explicit replan or owner ruling rather than guessed
+continuation.
+
+Every transition uses optimistic versions and immutable artifact links. A
+restart reconstructs selection, readiness responsibility, the current plan,
+its disposition, and the single next authorized action without reading an
+agent transcript. Unauthorized selection, self-approval, stale plan approval,
+duplicate disposition, implementation before approval, and implementation
+against a superseded plan all fail closed.
+
+**Exit proof:** select one deliberately incomplete owned work item, return it
+with actionable readiness deficiencies, import its corrected version, produce a
+plan, exercise one human `changes_requested` planning round, approve the exact
+revised plan, and prove that only then can the pinned producer begin. Repeat
+across coordinator restarts, reject a stale approval and a planner self-
+approval, and carry the approved plan identity through candidate review,
+validation, and the final audit trail without treating plan approval as product
+or landing approval.
+
+## Milestone 20: collaborative project workspace
+
+**Status: planned product surface after M19.5**
+
+Turn the completed M4 control room and the run-scoped worker gateway into two
+purpose-built views of one durable project. A human developer should be able to
+follow work visually and take authorized action without entering an agent
+container; an agent should be able to inspect and advance the same project
+through narrow typed capabilities without receiving a human session, reusable
+credential, or generic control-plane API.
+
+This milestone does not create a second workflow engine, ledger, or chat store.
+The browser, CLI, and agent gateway use the same service operations, optimistic
+versions, project/work-item/thread identities, candidates, gates, rulings, and
+audit events. Krab remains the private message carrier, and MGB continues to
+retain only bounded interaction metadata rather than message bodies or
+transcripts.
+
+### M20A: read-only project workspace and process map
+
+- Add a project switcher and one project home that presents the charter and
+  context revision, admitted work queue, assignments, active seats, runs,
+  candidates, gates, provider effects, closeout obligations, and attention
+  items from one coherent read snapshot.
+- Give each work item a visual process map derived from its pinned workflow
+  policy: current stage, completed stages, active role/seat, readiness
+  disposition, plan revision and approval, pending human action,
+  correction-loop count, validation and review gates, maintainer approval,
+  landing readiness, and open closeout obligations. The renderer may display
+  only declared topology; it never invents transitions or turns a portable
+  policy into an arbitrary graph language.
+- Present the append-only audit trail as a linked event timeline with exact
+  actor, role, run, attempt, candidate, evidence digest, transition, and time
+  provenance. Visible untrusted titles and labels remain escaped. Private
+  prompts, responses, work-log bodies, handoffs, provider payloads, credential
+  references, and transcripts remain excluded.
+- Preserve the existing redacted fleet overview as the fast operational view.
+  The project workspace is an authorized detail surface, not a reason to make
+  the global control-room projection less conservative.
+- Start with accessible server-rendered HTML and local CSS on the loopback-only
+  control room. Keyboard navigation, semantic status text, usable contrast,
+  narrow-screen layout, and a clear manual refresh path are acceptance
+  requirements. Automatic refresh or streaming is a later security-reviewed
+  enhancement, not a prerequisite for the first slice.
+
+**Checkpoint proof:** a human can open one project and accurately identify
+what is running, who or what owns it, what has already happened, why it is
+blocked, and the single next authorized action. Restarting the web process
+reconstructs the same view solely from durable state. Cross-project records,
+private content, and stale terminal history outside the declared bound do not
+leak into it.
+
+### M20B: human developer action surface
+
+- Bind every browser session to one active MGB user and its authorized project
+  role/Krab identity. Per-process access and CSRF capabilities remain necessary
+  transport controls; they do not substitute for durable human authority.
+- Expose the existing versioned operations needed for ordinary development:
+  select work for readiness review, return actionable refinement needs, approve
+  or request changes on an exact plan, start or cancel approved work,
+  claim/reassign an assignment, retry an eligible run, answer a
+  question/approval/choice, reconcile uncertain work, inspect a candidate,
+  record a review verdict, request changes, return the exact work to its
+  authorized developer seat, record maintainer approval, and close the work
+  item when its obligations permit it.
+- Make every action preview its target, expected version, authority, effect,
+  and likely next state. A stale page, inactive user, wrong project, wrong
+  role, wrong candidate head, or already-consumed action fails closed and
+  returns the refreshed durable state rather than guessing.
+- Show suggested local Git commands and a proposed pull-request title/body when
+  the accepted workflow reaches manual landing. The workspace does not gain
+  forge credentials or silently push, open, approve, or merge a change.
+- Keep administrative configuration and ordinary developer work visually
+  distinct. Rare authority changes remain deliberate operator actions rather
+  than convenient buttons beside routine review and correction controls.
+
+**Checkpoint proof:** two separately authorized humans cannot answer, approve,
+cancel, or review on one another's behalf. A maintainer can request changes,
+the same authorized developer role receives the durable correction round, and
+no browser action bypasses the existing service/storage authority checks.
+
+### M20C: agent parity and shared-project dogfood
+
+- Publish a bounded project-workspace capability map for agents using the
+  existing self-describing gateway. It composes narrow operations such as
+  project/run description, work listing and claim, work-log append/checkpoint,
+  interaction open/poll, handoff, result/candidate submission, and the exact
+  review or correction operations authorized for that role. There is no
+  generic database, HTTP, shell, or workflow-transition escape hatch.
+- Define a parity matrix that names which durable facts and actions are human
+  only, agent only, shared, or deliberately redacted. Both surfaces must refer
+  to the same IDs and versions; presentation differences cannot create a
+  second meaning for project, work item, assignment, candidate, gate, or
+  completion.
+- Dogfood one complete correction loop on an owned project: a human or
+  authorized agent selects the work; the planning role records readiness and a
+  plan; a human approves its exact revision; a developer agent claims the
+  authorized implementation and records progress; the agent asks a durable
+  question; the human answers; the agent submits a candidate; an independent
+  reviewer requests changes; the original developer seat resumes; fresh exact-
+  head evidence passes; and a maintainer approves closeout. The project
+  workspace must visibly follow every transition without reading a transcript
+  or polling private agent state.
+- Repeat the proof across an orchestrator restart and with one intentionally
+  stale browser action. Cross-project access, wrong-role agent operations,
+  stale versions, duplicate submissions, and replayed human actions must fail
+  closed while the shared timeline remains coherent.
+
+**Exit proof:** a human developer and at least two independently authorized
+agent roles collaborate on the same durable project from their respective
+surfaces, approve an exact implementation plan, complete a code
+changes-requested loop, and produce one truthful visual audit chain from work
+selection through maintainer disposition. Usability testing confirms that a
+developer unfamiliar with the implementation can find the current stage,
+owner, blocker, approved plan, evidence, and next action without consulting the
+database or CLI help.
+
+Defer native desktop/mobile clients, a separate TUI, customizable dashboards,
+arbitrary workflow drawing, provider-specific panels, transcript search, and
+plugin-supplied browser code until this shared-project proof is complete.
+
 ## Unsequenced candidate: project baseline drift awareness
 
 **Status: accepted roadmap need; sequencing deferred**
@@ -2614,8 +2827,8 @@ design and acceptance boundary are in
 MGB may operate beside human developers and other automation that advance the
 authoritative repository independently. Add a provider-neutral, read-only
 baseline observer so MGB can detect and route those changes without silently
-pulling code into a running workspace. This candidate does not expand M18 or
-M19. It may reuse exact base, environment, and invalidation facts those
+pulling code into a running workspace. This candidate does not expand M18,
+M19, or M20. It may reuse exact base, environment, and invalidation facts those
 milestones already require, but its watcher, dependency analysis, notification,
 and context-amendment behavior remain a separate future slice.
 
@@ -2671,7 +2884,7 @@ landed breaking dependency update; declared-versus-resolved version mismatch;
 durable notification and acknowledgement; accepted and rejected context
 amendments; and unavailable observation without guessed fallback.
 
-## Milestone 20+: provider breadth by demonstrated need
+## Milestone 21+: provider breadth by demonstrated need
 
 **Status: candidates, not commitments**
 

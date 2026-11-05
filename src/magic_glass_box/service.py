@@ -2614,6 +2614,7 @@ class ControlPlane:
         expected_version: int,
         decision: str,
         resolved_by_handle: str,
+        validation_correction_review_id: str | None = None,
     ) -> dict[str, Any]:
         resolver = self.database.get_user(resolved_by_handle)
         return self.database.resolve_workflow_ruling(
@@ -2621,6 +2622,7 @@ class ControlPlane:
             expected_version=expected_version,
             decision=decision,
             resolved_by=resolver["id"],
+            validation_correction_review_id=validation_correction_review_id,
         )
 
     def configure_workflow_provider_landing(

@@ -5070,11 +5070,22 @@ class WorkflowStorage:
         expected_version: int,
         decision: str,
         resolved_by: str,
+        validation_correction_review_id: str | None = None,
     ) -> dict[str, Any]:
         ruling_id = require_string(ruling_id, field="ruling_id", max_bytes=64)
         self._positive_integer(expected_version, field="expected_version")
         if decision not in {"continue", "cancel"}:
             raise ValidationError("workflow ruling decision is invalid")
+        if validation_correction_review_id is not None:
+            validation_correction_review_id = require_string(
+                validation_correction_review_id,
+                field="validation_correction_review_id",
+                max_bytes=64,
+            )
+            if decision != "continue":
+                raise ValidationError(
+                    "a validation correction requires a continue decision"
+                )
         now = self.now()
         with self._connection() as connection:
             try:
@@ -5089,6 +5100,13 @@ class WorkflowStorage:
                     raise ConcurrentUpdateError("workflow ruling version changed")
                 if ruling["state"] != "open":
                     raise ConflictError("workflow ruling is not open")
+                if (
+                    validation_correction_review_id is not None
+                    and ruling["kind"] != "validation_failed"
+                ):
+                    raise ConflictError(
+                        "validation correction review is for another ruling"
+                    )
                 execution = connection.execute(
                     "SELECT execution.state, execution.stage, "
                     "execution.correction_round, execution.version, "
@@ -5214,6 +5232,77 @@ class WorkflowStorage:
                         resolution_metadata["failed_evidence_id"] = failed_evidence[
                             "id"
                         ]
+                        if validation_correction_review_id is not None:
+                            correction_review = connection.execute(
+                                "SELECT id, policy_id, decision, recorded_by "
+                                "FROM integration_maintainer_reviews WHERE id = ?",
+                                (validation_correction_review_id,),
+                            ).fetchone()
+                            if correction_review is None:
+                                raise NotFoundError(
+                                    "maintainer review not found: "
+                                    + validation_correction_review_id
+                                )
+                            latest_review = connection.execute(
+                                "SELECT id FROM integration_maintainer_reviews "
+                                "WHERE policy_id = ? ORDER BY sequence DESC LIMIT 1",
+                                (ruling["policy_id"],),
+                            ).fetchone()
+                            if (
+                                correction_review["policy_id"] != ruling["policy_id"]
+                                or latest_review is None
+                                or latest_review["id"] != correction_review["id"]
+                            ):
+                                raise ConflictError(
+                                    "validation correction requires the current "
+                                    "exact-policy maintainer review"
+                                )
+                            if correction_review["decision"] != "changes_requested":
+                                raise ConflictError(
+                                    "validation correction requires a "
+                                    "changes-requested maintainer review"
+                                )
+                            if correction_review["recorded_by"] != resolved_by:
+                                raise ConflictError(
+                                    "validation correction review and ruling resolver "
+                                    "must be the same actor"
+                                )
+                            try:
+                                configuration = WorkflowConfigurationSpec.from_mapping(
+                                    json.loads(execution["configuration_spec_json"])
+                                )
+                            except (
+                                json.JSONDecodeError,
+                                TypeError,
+                                ValidationError,
+                            ) as exc:
+                                raise StorageError(
+                                    "stored workflow configuration is invalid"
+                                ) from exc
+                            if (
+                                execution["correction_round"]
+                                >= configuration.max_correction_rounds
+                            ):
+                                raise ConflictError(
+                                    "validation correction reached the configured "
+                                    "correction-round limit"
+                                )
+                            cause = WorkflowRoundCause(
+                                schema_version=1,
+                                kind="maintainer_request",
+                                finding_classes=("validation_failure",),
+                                policy_id=ruling["policy_id"],
+                                reviewer_run_id=None,
+                                reviewer_attempt_id=None,
+                                review_evidence_id=None,
+                                review_entry_id=None,
+                                scope_review_id=None,
+                                maintainer_review_id=correction_review["id"],
+                                gate_name=None,
+                            )
+                            target_stage = "build"
+                            target_round = execution["correction_round"] + 1
+                            resolution_metadata["round_cause"] = cause.to_dict()
                     elif ruling["kind"] == "landing_failed":
                         if execution["stage"] != "landing":
                             raise ConflictError(
