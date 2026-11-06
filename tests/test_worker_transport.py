@@ -311,6 +311,86 @@ class FileGatewayClientTests(unittest.TestCase):
             finally:
                 manager.close()
 
+    def test_live_sized_provider_reply_survives_progress_without_redispatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            root = Path(temporary) / "gateway"
+            control = ProviderControl()
+            invoke = control.invoke_provider
+            body = "data: " + ("x" * 116_622) + "\n\n"
+
+            def delayed_invoke(*args: Any, **kwargs: Any) -> AcceptedProviderResponse:
+                accepted = invoke(*args, **kwargs)
+                time.sleep(0.25)
+                return AcceptedProviderResponse(
+                    invocation_id=accepted.invocation_id,
+                    grant_name=accepted.grant_name,
+                    provider=accepted.provider,
+                    model=accepted.model,
+                    status_code=accepted.status_code,
+                    request_bytes=accepted.request_bytes,
+                    response_bytes=len(body.encode()),
+                    untrusted_response={
+                        "body": body,
+                        "content_type": "text/event-stream",
+                        "protocol": "openai-responses",
+                    },
+                )
+
+            control.invoke_provider = delayed_invoke  # type: ignore[method-assign]
+            manager = FileGatewayManager(root, control, poll_interval=0.005)
+            server: _TransportServer | None = None
+            server_thread: threading.Thread | None = None
+            connection: http.client.HTTPConnection | None = None
+            try:
+                with mock.patch(
+                    "magic_glass_box.gateway.GATEWAY_PROGRESS_INTERVAL_SECONDS",
+                    0.02,
+                ):
+                    endpoint = manager.open(
+                        RUN_ID,
+                        capabilities=("provider.invoke",),
+                        credential_names=("openai-main",),
+                    )
+                transport = ProviderHTTPTransport(
+                    FileGatewayClient(endpoint.directory, timeout=0.1),
+                    dialect="openai-responses",
+                    grant="openai-main",
+                )
+                server = _TransportServer(("127.0.0.1", 0), transport)
+                server_thread = threading.Thread(target=server.serve_forever)
+                server_thread.start()
+
+                with mock.patch(
+                    "magic_glass_box.worker_transport.PROVIDER_GATEWAY_TIMEOUT_SECONDS",
+                    0.1,
+                ):
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_port, timeout=2
+                    )
+                    connection.request(
+                        "POST",
+                        "/v1/responses",
+                        body='{"model":"worker-model","stream":true}',
+                        headers={"Content-Type": "application/json"},
+                    )
+                    response = connection.getresponse()
+                    received = response.read()
+
+                self.assertEqual(response.status, 200)
+                self.assertEqual(received, body.encode())
+                self.assertEqual(len(control.calls), 1)
+            finally:
+                if connection is not None:
+                    connection.close()
+                if server is not None:
+                    server.shutdown()
+                    server.server_close()
+                if server_thread is not None:
+                    server_thread.join(timeout=2)
+                manager.close()
+
     def test_stale_provider_progress_cannot_extend_the_wait_forever(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
             mailbox = Path(temporary) / "mailbox"

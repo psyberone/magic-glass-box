@@ -797,6 +797,7 @@ class InferenceDispatchServiceTests(unittest.TestCase):
             )
         invocation = self.database.list_provider_invocations(run["id"])[0]
         self.assertEqual(invocation["outcome"], "ambiguous")
+
         self.assertEqual(invocation["accounting_status"], "conservative")
         self.assertEqual(invocation["accounted_microusd"], 10_000)
         budget = ControlRoom(self.database).snapshot()["provider_budgets"][0]
@@ -811,6 +812,42 @@ class InferenceDispatchServiceTests(unittest.TestCase):
                 run["id"], grant_name="budget-main", request={"input": "retry"}
             )
         self.assertEqual(len(self.client.calls), 1)
+
+    def test_ambiguous_attempt_failure_requires_and_retains_provider_evidence(
+        self,
+    ) -> None:
+        run = self.create_run()
+        self.client.outcome = "ambiguous"
+        self.client.error_code = "reply_lost"
+        self.client.provider_status = None
+        with self.assertRaisesRegex(ProviderError, "ambiguous"):
+            self.control.invoke_provider(
+                run["id"], grant_name="example-main", request={"input": "one"}
+            )
+
+        invocation = self.database.list_provider_invocations(run["id"])[-1]
+        attempt = self.database.get_run(run["id"])["attempts"][-1]
+        with self.database.connect() as connection:
+            self.assertEqual(
+                self.database._failure_class_from_provider_ledger(
+                    connection, run["id"]
+                ),
+                "provider_ambiguous",
+            )
+        failed = self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="orchestrator-inference-test",
+            expected_attempt_version=attempt["version"],
+            reason="provider reply was not attributable",
+            failure_class="provider_ambiguous",
+        )
+
+        self.assertEqual(invocation["outcome"], "ambiguous")
+        self.assertEqual(failed["failure_class"], "provider_ambiguous")
+        self.assertEqual(
+            failed["events"][-1]["metadata"]["failure_class"],
+            "provider_ambiguous",
+        )
 
     def test_ambiguous_invocation_cannot_release_reserved_budget(self) -> None:
         with self.assertRaisesRegex(ValidationError, "ambiguous"):

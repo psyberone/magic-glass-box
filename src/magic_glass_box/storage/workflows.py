@@ -2536,6 +2536,25 @@ class WorkflowStorage:
             ).fetchone()
         return None if row is None else self.get_run(row["run_id"])
 
+    def list_workflow_runs(self, execution_id: str) -> list[dict[str, Any]]:
+        """Return every immutable run generation for one workflow execution."""
+
+        execution_id = require_string(execution_id, field="execution_id", max_bytes=64)
+        with self._read_snapshot() as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM workflow_executions WHERE id = ?", (execution_id,)
+                ).fetchone()
+                is None
+            ):
+                raise NotFoundError(f"workflow execution not found: {execution_id}")
+            rows = connection.execute(
+                "SELECT run_id FROM workflow_run_bindings WHERE execution_id = ? "
+                "ORDER BY correction_round, role, generation",
+                (execution_id,),
+            ).fetchall()
+            return [self._get_run(connection, row["run_id"]) for row in rows]
+
     def bind_workflow_gate(
         self,
         execution_id: str,
@@ -4756,6 +4775,7 @@ class WorkflowStorage:
             "landing_authority_mismatch",
             "landing_cancelled",
             "landing_refold_required",
+            "no_candidate_changes",
             "resource_exhausted",
         }
         if kind not in allowed:
@@ -4777,6 +4797,16 @@ class WorkflowStorage:
                 )
         if run_id is not None:
             run_id = require_string(run_id, field="run_id", max_bytes=64)
+        if (
+            kind
+            in {
+                "producer_failed",
+                "reviewer_failed",
+                "no_candidate_changes",
+            }
+            and run_id is None
+        ):
+            raise ValidationError("workflow run ruling requires one exact run")
         if gate_name is not None:
             gate_name = require_string(gate_name, field="gate_name", max_bytes=128)
         if provider_landing_id is not None:
@@ -4863,13 +4893,16 @@ class WorkflowStorage:
                         raise ConflictError("workflow ruling policy is not current")
                 if run_id is not None:
                     bound_run = connection.execute(
-                        "SELECT 1 FROM workflow_run_bindings WHERE execution_id = ? "
-                        "AND correction_round = ? AND run_id = ? "
-                        "AND generation = (SELECT MAX(latest.generation) "
+                        "SELECT binding.role, run.state "
+                        "FROM workflow_run_bindings binding "
+                        "JOIN runs run ON run.id = binding.run_id "
+                        "WHERE binding.execution_id = ? "
+                        "AND binding.correction_round = ? AND binding.run_id = ? "
+                        "AND binding.generation = (SELECT MAX(latest.generation) "
                         "FROM workflow_run_bindings latest "
                         "WHERE latest.execution_id = ? "
                         "AND latest.correction_round = ? "
-                        "AND latest.role = workflow_run_bindings.role)",
+                        "AND latest.role = binding.role)",
                         (
                             execution_id,
                             execution["correction_round"],
@@ -4880,6 +4913,31 @@ class WorkflowStorage:
                     ).fetchone()
                     if bound_run is None:
                         raise ConflictError("workflow ruling run is not current")
+                    if kind in {"producer_failed", "reviewer_failed"}:
+                        expected_role = (
+                            "producer" if kind == "producer_failed" else "reviewer"
+                        )
+                        expected_stage = (
+                            "build" if expected_role == "producer" else "review"
+                        )
+                        if (
+                            bound_run["state"] != "failed"
+                            or bound_run["role"] != expected_role
+                            or execution["stage"] != expected_stage
+                        ):
+                            raise ConflictError(
+                                "workflow failure ruling does not match a current "
+                                "failed run"
+                            )
+                    if kind == "no_candidate_changes" and (
+                        bound_run["state"] != "succeeded"
+                        or bound_run["role"] != "producer"
+                        or execution["stage"] != "build"
+                    ):
+                        raise ConflictError(
+                            "no-candidate judgment does not match the current "
+                            "successful producer"
+                        )
                 if provider_landing_id is not None:
                     provider_landing = connection.execute(
                         "SELECT pl.state FROM integration_provider_landings pl "
@@ -5110,10 +5168,11 @@ class WorkflowStorage:
                 execution = connection.execute(
                     "SELECT execution.state, execution.stage, "
                     "execution.correction_round, execution.version, "
-                    "execution.requested_by, "
+                    "execution.requested_by, execution.created_at, "
                     "execution.workflow_activation_version_id, "
                     "configuration.spec_json AS configuration_spec_json, "
-                    "activation.acknowledged_by AS activation_owner "
+                    "activation.acknowledged_by AS activation_owner, "
+                    "activation.spec_json AS activation_spec_json "
                     "FROM workflow_executions execution "
                     "JOIN workflow_configuration_versions configuration "
                     "ON configuration.id = execution.configuration_version_id "
@@ -5140,6 +5199,36 @@ class WorkflowStorage:
                 resolution_metadata: dict[str, Any] = {}
                 ceiling_extension: dict[str, Any] | None = None
                 if decision == "continue":
+                    if execution[
+                        "workflow_activation_version_id"
+                    ] is not None and execution["stage"] in {
+                        "build",
+                        "review",
+                        "maintainer",
+                    }:
+                        try:
+                            activation = WorkflowActivationSpec.from_mapping(
+                                json.loads(execution["activation_spec_json"])
+                            )
+                            elapsed = datetime.fromisoformat(
+                                now
+                            ) - datetime.fromisoformat(execution["created_at"])
+                        except (
+                            json.JSONDecodeError,
+                            TypeError,
+                            ValueError,
+                            ValidationError,
+                        ) as exc:
+                            raise StorageError(
+                                "stored workflow activation wall time is invalid"
+                            ) from exc
+                        if (
+                            elapsed.total_seconds()
+                            >= activation.resources.wall_time_seconds
+                        ):
+                            raise ConflictError(
+                                "activated workflow wall time is exhausted"
+                            )
                     if ruling["kind"] == "resource_exhausted":
                         raise ConflictError(
                             "an exhausted workflow resource ceiling cannot be "
@@ -5209,6 +5298,40 @@ class WorkflowStorage:
                             "authorized_bound": target_round,
                             "single_use": True,
                         }
+                    elif ruling["kind"] in {"producer_failed", "reviewer_failed"}:
+                        role = (
+                            "producer"
+                            if ruling["kind"] == "producer_failed"
+                            else "reviewer"
+                        )
+                        expected_stage = "build" if role == "producer" else "review"
+                        if execution["stage"] != expected_stage:
+                            raise ConflictError(
+                                "workflow failure ruling is outside its run stage"
+                            )
+                        if ruling["run_id"] is None:
+                            raise ConflictError(
+                                "workflow failure ruling has no failed run"
+                            )
+                        successor_run_id = self._create_workflow_failure_retry_locked(
+                            connection,
+                            source_run_id=ruling["run_id"],
+                            execution_id=ruling["execution_id"],
+                            correction_round=execution["correction_round"],
+                            role=role,
+                            ruling_id=ruling_id,
+                            requested_by=resolved_by,
+                            now=now,
+                        )
+                        target_stage = execution["stage"]
+                        target_round = execution["correction_round"]
+                        resolution_metadata.update(
+                            {
+                                "failure_retry_sequence": 1,
+                                "predecessor_run_id": ruling["run_id"],
+                                "successor_run_id": successor_run_id,
+                            }
+                        )
                     elif ruling["kind"] == "validation_failed":
                         if execution["stage"] != "review":
                             raise ConflictError(
@@ -5350,9 +5473,9 @@ class WorkflowStorage:
                         target_round = execution["correction_round"]
                     else:
                         raise ConflictError(
-                            "only a correction-limit, validation-failed, "
-                            "landing-failed, or refold-required ruling can "
-                            "continue the workflow"
+                            "only a failed run, correction-limit, "
+                            "validation-failed, landing-failed, or refold-required "
+                            "ruling can continue the workflow"
                         )
                     target_state = "active"
                     cancel_reason = None

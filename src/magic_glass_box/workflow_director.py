@@ -9,6 +9,7 @@ from .domain import SupervisionPolicy, ValidationError
 from .executor import DockerExecutor
 from .results import WorkspaceResultStore
 from .service import ControlPlane
+from .service_sidecar import ServiceSidecarAmbiguousError
 from .workflow_rounds import WorkflowRoundCause
 
 
@@ -113,7 +114,9 @@ class WorkflowDirector:
                     candidate_store=self.candidate_store,
                 )
             except NoCandidateChangesError:
-                return self._ruling(execution, "producer_failed", run_id=producer["id"])
+                return self._ruling(
+                    execution, "no_candidate_changes", run_id=producer["id"]
+                )
             return False
 
         gate = self.database.get_workflow_gate(execution["id"], correction_round)
@@ -568,18 +571,29 @@ class WorkflowDirector:
                         self.control.settle_workflow_provider_effect(effect["id"])
                         return False
                     owner_id = f"workflow-effect-{effect['id']}"
-                    if operation["state"] in {"pending", "retryable", "throttled"}:
-                        self.control.execute_service_operation(
-                            operation["id"],
-                            owner_id=owner_id,
-                            expected_version=operation["version"],
-                        )
-                    elif operation["state"] == "uncertain":
-                        self.control.reconcile_service_operation(
-                            operation["id"],
-                            owner_id=owner_id,
-                            expected_version=operation["version"],
-                        )
+                    try:
+                        if operation["state"] in {
+                            "pending",
+                            "retryable",
+                            "throttled",
+                        }:
+                            self.control.execute_service_operation(
+                                operation["id"],
+                                owner_id=owner_id,
+                                expected_version=operation["version"],
+                            )
+                        elif operation["state"] == "uncertain":
+                            self.control.reconcile_service_operation(
+                                operation["id"],
+                                owner_id=owner_id,
+                                expected_version=operation["version"],
+                            )
+                    except ServiceSidecarAmbiguousError:
+                        # Dispatch owns the durable ambiguous state. Leave this
+                        # prescription action pending so a replacement controller can
+                        # reconcile the exact operation rather than exhausting
+                        # workflow advancement at the same execution version.
+                        return False
                     return False
             if target is None or target.get("intent_id") is None:
                 self.control.derive_workflow_provider_target(

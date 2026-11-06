@@ -233,6 +233,7 @@ class ArtifactStorage:
                 "SELECT ra.id, ra.run_id, ra.sequence, ra.runtime_adapter, "
                 "ra.state, ra.version, ra.source_revision, ra.container_id, "
                 "ra.container_name, ra.image_id, ra.exit_code, ra.reason, "
+                "ra.failure_class, "
                 "ra.owner_id, ra.heartbeat_at, ra.lease_expires_at, "
                 "ra.cancel_requested_at, ra.cancel_requested_by, ra.cancel_reason, "
                 "ra.created_at, ra.started_at, ra.finished_at, "

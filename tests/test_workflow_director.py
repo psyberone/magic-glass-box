@@ -46,6 +46,7 @@ from magic_glass_box.service_sidecar import (
     ServiceOperationRequest,
     ServiceOperationResponse,
     ServiceOperationSpec,
+    ServiceSidecarAmbiguousError,
     ServiceSidecarSpec,
 )
 from magic_glass_box.storage.errors import (
@@ -2109,6 +2110,125 @@ class WorkflowDirectorTests(unittest.TestCase):
             current["landing"]["provider_target"]["resource_id"], change_id
         )
         return current
+
+    def test_provider_effect_transport_ambiguity_defers_for_replacement_reconcile(
+        self,
+    ) -> None:
+        execution, _activation, _bindings = self.start_activated_provider_execution(
+            external_id="activated-effect-controller-restart"
+        )
+        landing, _gate = self.drive_approved_to_landing(execution)
+        self.assertTrue(
+            self.director().advance(landing["id"], expected_version=landing["version"])
+        )
+        enqueued = self.database.get_workflow_execution(execution["id"])
+        self.control.configure_workflow_provider_intent(
+            enqueued["id"],
+            expected_version=enqueued["version"],
+            head_ref="refs/heads/mgb/activated-effect-controller-restart",
+            title="Prove activated provider authority",
+            body="Lose one response after the provider accepted the effect.",
+            draft=False,
+            configured_by_handle="operator",
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        issued = self.database.get_workflow_execution(enqueued["id"])
+        effect = issued["landing"]["provider_intent"]["effects"]["refs.publish"]
+
+        class LostReceiptClient:
+            @staticmethod
+            def invoke(_request: ServiceOperationRequest) -> ServiceOperationResponse:
+                raise ServiceSidecarAmbiguousError("receipt lost after dispatch")
+
+        interrupted_control = ControlPlane(
+            self.database, service_client_factory=lambda _path: LostReceiptClient()
+        )
+        interrupted = WorkflowDirector(
+            interrupted_control,
+            self.results,
+            self.candidates,
+            self.validation_executor,
+        )
+
+        class Coordinator:
+            @staticmethod
+            def execute(_run_id: str) -> dict[str, object]:
+                return {}
+
+            @staticmethod
+            def reconcile(_run_id: str | None = None) -> list[dict[str, object]]:
+                return []
+
+        class Transport:
+            @staticmethod
+            def remind_interaction(*_args: object, **_kwargs: object) -> int:
+                return 1
+
+        supervisor = Supervisor(
+            self.database,
+            Coordinator(),
+            Transport(),
+            workflow_director=interrupted,
+            poll_interval=0.05,
+            action_lease_seconds=10,
+            action_timeout=1,
+        )
+        self.addCleanup(supervisor.close)
+        supervisor.tick(wait=True)
+        uncertain = self.database.get_service_operation(effect["service_operation_id"])
+        self.assertEqual(uncertain["state"], "uncertain")
+        self.assertEqual(
+            [
+                (attempt["phase"], attempt["outcome"])
+                for attempt in uncertain["attempts"]
+            ],
+            [("invoke", "ambiguous")],
+        )
+        actions = [
+            action
+            for action in self.database.list_supervisor_actions()
+            if action["workflow_execution_id"] == issued["id"]
+            and action["subject_version"] == issued["version"]
+        ]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["state"], "pending")
+        self.assertEqual(actions[0]["attempt_count"], 0)
+
+        requests: list[ServiceOperationRequest] = []
+
+        class ReconcileClient:
+            @staticmethod
+            def invoke(request: ServiceOperationRequest) -> ServiceOperationResponse:
+                requests.append(request)
+                return self.activated_effect_response(request)
+
+        replacement_control = ControlPlane(
+            Database(self.database.path),
+            service_client_factory=lambda _path: ReconcileClient(),
+        )
+        replacement = WorkflowDirector(
+            replacement_control,
+            self.results,
+            self.candidates,
+            self.validation_executor,
+        )
+        current = replacement_control.database.get_workflow_execution(issued["id"])
+        self.assertFalse(
+            replacement.advance(current["id"], expected_version=current["version"])
+        )
+        self.assertEqual([request.phase for request in requests], ["reconcile"])
+        settled = replacement_control.database.get_service_operation(
+            effect["service_operation_id"]
+        )
+        self.assertEqual(settled["state"], "succeeded")
+        self.assertEqual(
+            [(attempt["phase"], attempt["outcome"]) for attempt in settled["attempts"]],
+            [("invoke", "ambiguous"), ("reconcile", "succeeded")],
+        )
 
     def complete_provider_operation(
         self,
@@ -4925,6 +5045,53 @@ class WorkflowDirectorTests(unittest.TestCase):
         )
         self.assertEqual(reruled["rulings"][-1]["state"], "open")
 
+    def test_activated_wall_time_does_not_block_a_landing_failure_ruling(self) -> None:
+        enqueued, _gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-failure-after-wall-time"
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        self.complete_provider_operation(issued, outcome="denied")
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        failed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertTrue(
+            self.director().advance(failed["id"], expected_version=failed["version"])
+        )
+        ruled = self.database.get_workflow_execution(failed["id"])
+        ruling = ruled["rulings"][-1]
+        self.assertEqual(ruling["kind"], "landing_failed")
+        after_wall_time = (
+            datetime.fromisoformat(ruled["created_at"]) + timedelta(seconds=10800)
+        ).isoformat(timespec="microseconds")
+
+        with mock.patch.object(self.database, "now", return_value=after_wall_time):
+            resolved = self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+            )
+
+        self.assertEqual(resolved["decision"], "continue")
+        self.assertEqual(
+            self.database.get_workflow_execution(ruled["id"])["stage"], "landing"
+        )
+
     def test_provider_landing_waits_without_consuming_retries_when_dependency_blocks(
         self,
     ) -> None:
@@ -5934,42 +6101,40 @@ class WorkflowDirectorTests(unittest.TestCase):
             ),
             1,
         )
-        with self.assertRaisesRegex(ConflictError, "correction-limit"):
-            self.control.resolve_workflow_ruling(
-                ruling["id"],
-                expected_version=ruling["version"],
-                decision="continue",
-                resolved_by_handle="operator",
-            )
         resolved = self.control.resolve_workflow_ruling(
             ruling["id"],
             expected_version=ruling["version"],
-            decision="cancel",
+            decision="continue",
             resolved_by_handle="operator",
         )
         self.assertEqual(
-            (resolved["state"], resolved["decision"]), ("resolved", "cancel")
+            (resolved["state"], resolved["decision"]), ("resolved", "continue")
         )
         self.assertEqual(resolved["resolved_by"], "operator")
-        cancelled = self.database.get_workflow_execution(self.execution["id"])
-        self.assertEqual(cancelled["state"], "cancelled")
-        self.assertEqual(cancelled["stage"], "build")
+        continued = self.database.get_workflow_execution(self.execution["id"])
+        self.assertEqual(continued["state"], "active")
+        self.assertEqual(continued["stage"], "build")
+        successor = self.database.find_workflow_run(continued["id"], 0, "producer")
+        self.assertEqual(successor["predecessor_run_id"], producer["id"])
         self.assertEqual(
-            cancelled["events"][-1]["metadata"],
+            continued["events"][-1]["metadata"],
             {
                 "ruling_id": ruling["id"],
-                "decision": "cancel",
+                "decision": "continue",
                 "from_stage": "build",
                 "to_stage": "build",
                 "from_correction_round": 0,
                 "to_correction_round": 0,
+                "failure_retry_sequence": 1,
+                "predecessor_run_id": producer["id"],
+                "successor_run_id": successor["id"],
             },
         )
         with self.assertRaisesRegex(ConflictError, "not open"):
             self.control.resolve_workflow_ruling(
                 ruling["id"],
                 expected_version=resolved["version"],
-                decision="cancel",
+                decision="continue",
                 resolved_by_handle="operator",
             )
 
@@ -5997,11 +6162,19 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertEqual(stopped["stage"], "build")
         self.assertEqual(
             [(ruling["kind"], ruling["run_id"]) for ruling in stopped["rulings"]],
-            [("producer_failed", producer["id"])],
+            [("no_candidate_changes", producer["id"])],
         )
         self.assertEqual(
             self.database.list_candidates(producer_run_id=producer["id"]), []
         )
+        ruling = stopped["rulings"][0]
+        with self.assertRaisesRegex(ConflictError, "only a failed run"):
+            self.control.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by_handle="operator",
+            )
 
     def test_other_candidate_errors_remain_fail_closed(self) -> None:
         self.assertFalse(

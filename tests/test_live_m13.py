@@ -16,6 +16,7 @@ from scripts.check_live_m13 import (
     PROFILE_IDENTITIES,
     SCOPE_DECISION_COPY_ONLY,
     _advisory_spec,
+    _ConnectorWaves,
     _discovery_spec,
     _KrabFixture,
     _load_scope_answer,
@@ -30,6 +31,43 @@ from scripts.check_live_m13 import (
 
 
 class LiveM13ContractTests(unittest.TestCase):
+    def test_connector_wave_does_not_interrupt_a_still_active_run(self) -> None:
+        class Ledger:
+            runs: list[dict[str, str]] = []
+
+            def iter_active_runs(self):
+                yield from self.runs
+
+        ledger = Ledger()
+        started: list[object] = []
+        stopped: list[object] = []
+
+        def start() -> object:
+            process = object()
+            started.append(process)
+            return process
+
+        def stop(process: object) -> tuple[str, str]:
+            stopped.append(process)
+            return "", ""
+
+        waves = _ConnectorWaves(ledger, start=start, stop=stop)
+        ledger.runs = [{"id": "run_1", "state": "running"}]
+        waves.before_tick()
+        ledger.runs = [
+            {"id": "run_1", "state": "running"},
+            {"id": "run_2", "state": "queued"},
+        ]
+        waves.before_tick()
+
+        self.assertEqual(len(started), 1)
+        self.assertEqual(stopped, [])
+
+        ledger.runs = [{"id": "run_2", "state": "queued"}]
+        waves.before_tick()
+        self.assertEqual(len(started), 2)
+        self.assertEqual(stopped, [started[0]])
+
     def test_work_item_requires_an_explicit_bounded_scope_choice(self) -> None:
         item = _work_item()
 

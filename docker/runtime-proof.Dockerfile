@@ -7,13 +7,25 @@ ARG CLAUDE_CODE_VERSION=2.1.296
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-        ca-certificates python3 python3-coverage python3-venv \
+        ca-certificates \
+        git \
+        make \
+        patch \
+        python3 \
+        python3-coverage \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install --global --omit=dev \
         "@openai/codex@${CODEX_VERSION}" \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
+
+RUN codex_native="$(find \
+        /usr/local/lib/node_modules/@openai/codex/node_modules \
+        -type f -path '*/vendor/*/bin/codex' -print -quit)" \
+    && test -n "${codex_native}" \
+    && ln -s "${codex_native}" /usr/local/bin/apply_patch
 
 WORKDIR /opt/magic-glass-box-source
 COPY pyproject.toml README.md ./

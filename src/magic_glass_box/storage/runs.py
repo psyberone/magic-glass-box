@@ -903,6 +903,336 @@ class RunStorage:
             profile_name=validate_name(profile_name, field="profile name"),
         )
 
+    def _create_workflow_failure_retry_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_run_id: str,
+        execution_id: str,
+        correction_round: int,
+        role: str,
+        ruling_id: str,
+        requested_by: str,
+        now: str,
+    ) -> str:
+        """Create the ruling-authorized retry in the caller's transaction."""
+
+        source = connection.execute(
+            "SELECT r.project_id, r.context_version_id, r.profile_version_id, "
+            "r.work_item_version_id, r.work_thread_id, r.state, r.version, "
+            "r.source_revision, r.krab_session_id, r.krab_claim_id, "
+            "r.supervision_policy_json, p.active AS project_active, "
+            "wt.state AS thread_state, ap.active AS profile_active, "
+            "av.spec_json AS profile_spec_json, "
+            "av.content_sha256 AS profile_content_sha256, "
+            "binding.correction_round, binding.role, binding.generation, "
+            "execution.state AS execution_state, "
+            "execution.stage AS execution_stage, "
+            "(SELECT attempt.failure_class FROM run_attempts attempt "
+            "WHERE attempt.run_id = r.id ORDER BY attempt.sequence DESC LIMIT 1) "
+            "AS failure_class "
+            "FROM runs r JOIN projects p ON p.id = r.project_id "
+            "JOIN work_threads wt ON wt.id = r.work_thread_id "
+            "JOIN agent_profile_versions av ON av.id = r.profile_version_id "
+            "JOIN agent_profiles ap ON ap.id = av.profile_id "
+            "JOIN workflow_run_bindings binding ON binding.run_id = r.id "
+            "JOIN workflow_executions execution "
+            "ON execution.id = binding.execution_id "
+            "WHERE r.id = ? AND binding.execution_id = ?",
+            (source_run_id, execution_id),
+        ).fetchone()
+        if source is None:
+            raise ConflictError("workflow failure ruling run is not current")
+        if source["state"] != "failed":
+            raise ConflictError("workflow failure retry requires a failed run")
+        if source["failure_class"] not in {"agent_failure", "gateway_timeout"}:
+            if source["failure_class"] == "provider_ambiguous":
+                raise ConflictError(
+                    "ambiguous provider transport cannot be retried or replayed"
+                )
+            raise ConflictError(
+                "workflow failure retry requires a classified attempt failure"
+            )
+        if (
+            connection.execute(
+                "SELECT 1 FROM provider_invocations WHERE run_id = ? "
+                "AND outcome IN ('dispatching', 'ambiguous') LIMIT 1",
+                (source_run_id,),
+            ).fetchone()
+            is not None
+        ):
+            raise ConflictError(
+                "ambiguous provider transport cannot be retried or replayed"
+            )
+        if source["execution_state"] != "active":
+            raise ConflictError("workflow execution is not active")
+        expected_stage = "build" if role == "producer" else "review"
+        if source["execution_stage"] != expected_stage:
+            raise ConflictError("workflow failure ruling is outside its run stage")
+        if source["correction_round"] != correction_round or source["role"] != role:
+            raise ConflictError("workflow failure ruling run binding changed")
+        latest_generation = connection.execute(
+            "SELECT MAX(generation) FROM workflow_run_bindings "
+            "WHERE execution_id = ? AND correction_round = ? AND role = ?",
+            (execution_id, correction_round, role),
+        ).fetchone()[0]
+        if latest_generation != source["generation"]:
+            raise ConflictError("workflow failure ruling run is not current")
+        if source["generation"] != 1:
+            raise ConflictError("workflow failure retry ceiling is exhausted")
+        if (
+            connection.execute(
+                "SELECT 1 FROM runs WHERE predecessor_run_id = ? LIMIT 1",
+                (source_run_id,),
+            ).fetchone()
+            is not None
+        ):
+            raise ConflictError("workflow failure retry successor already exists")
+        if source["thread_state"] != "active":
+            raise ConflictError("run work thread is not active")
+        if not source["project_active"]:
+            raise ConflictError("run project is not active")
+        if not source["profile_active"]:
+            raise ConflictError("run profile is not active")
+        try:
+            profile_spec = AgentProfileSpec.from_mapping(
+                json.loads(source["profile_spec_json"])
+            )
+            source_policy = SupervisionPolicy.from_mapping(
+                json.loads(source["supervision_policy_json"])
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            raise StorageError("stored workflow retry input is invalid") from exc
+        if profile_spec.digest != source["profile_content_sha256"]:
+            raise StorageError("stored agent profile digest does not match")
+
+        authority_rows = connection.execute(
+            "SELECT rpg.authority_name, pg.id, pg.state, pg.grant_kind, "
+            "pg.expires_at, pcb.inference_connector_id, "
+            "connector.state AS connector_state, allowance.max_invocations "
+            "FROM run_provider_grants rpg "
+            "JOIN provider_grants pg ON pg.id = rpg.provider_grant_id "
+            "JOIN run_provider_invocation_allowances allowance "
+            "ON allowance.run_id = rpg.run_id "
+            "AND allowance.provider_grant_id = rpg.provider_grant_id "
+            "LEFT JOIN provider_connector_bindings pcb "
+            "ON pcb.provider_grant_id = pg.id "
+            "LEFT JOIN inference_connectors connector "
+            "ON connector.id = pcb.inference_connector_id "
+            "WHERE rpg.run_id = ? ORDER BY rpg.authority_name",
+            (source_run_id,),
+        ).fetchall()
+        unavailable = next(
+            (
+                row["authority_name"]
+                for row in authority_rows
+                if row["state"] != "active"
+                or row["grant_kind"] != "connector"
+                or row["inference_connector_id"] is None
+                or row["connector_state"] != "active"
+                or (row["expires_at"] is not None and row["expires_at"] <= now)
+            ),
+            None,
+        )
+        if unavailable is not None:
+            raise ConflictError(f"pinned provider grant is unavailable: {unavailable}")
+
+        replacement_run_id = self.new_id("run")
+        connection.execute(
+            "INSERT INTO runs "
+            "(id, project_id, context_version_id, profile_version_id, "
+            "work_item_version_id, work_thread_id, requested_by, state, "
+            "version, source_revision, krab_session_id, krab_claim_id, "
+            "supervision_policy_json, created_at, updated_at, "
+            "predecessor_run_id, replacement_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?, ?, "
+            "'retry')",
+            (
+                replacement_run_id,
+                source["project_id"],
+                source["context_version_id"],
+                source["profile_version_id"],
+                source["work_item_version_id"],
+                source["work_thread_id"],
+                requested_by,
+                source["source_revision"],
+                source["krab_session_id"],
+                source["krab_claim_id"],
+                source["supervision_policy_json"],
+                now,
+                now,
+                source_run_id,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO workflow_run_bindings "
+            "(run_id, execution_id, correction_round, role, generation, "
+            "created_at) VALUES (?, ?, ?, ?, 2, ?)",
+            (replacement_run_id, execution_id, correction_round, role, now),
+        )
+        self._create_workflow_manual_wake(
+            connection,
+            run_id=replacement_run_id,
+            execution_id=execution_id,
+            correction_round=correction_round,
+            role=role,
+            now=now,
+        )
+
+        review_target = connection.execute(
+            "SELECT policy_id, candidate_id FROM integration_gate_review_runs "
+            "WHERE run_id = ?",
+            (source_run_id,),
+        ).fetchone()
+        change_target = connection.execute(
+            "SELECT policy_id, candidate_id, review_evidence_id, review_entry_id "
+            "FROM integration_gate_change_runs WHERE run_id = ?",
+            (source_run_id,),
+        ).fetchone()
+        maintainer_change_target = connection.execute(
+            "SELECT policy_id, candidate_id, maintainer_review_id "
+            "FROM integration_gate_maintainer_change_runs WHERE run_id = ?",
+            (source_run_id,),
+        ).fetchone()
+        if (
+            sum(
+                target is not None
+                for target in (review_target, change_target, maintainer_change_target)
+            )
+            > 1
+        ):
+            raise StorageError(
+                "run has conflicting review and changes-requested bindings"
+            )
+        if review_target is not None:
+            connection.execute(
+                "INSERT INTO integration_gate_review_runs "
+                "(run_id, policy_id, candidate_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    replacement_run_id,
+                    review_target["policy_id"],
+                    review_target["candidate_id"],
+                    now,
+                ),
+            )
+        if change_target is not None:
+            connection.execute(
+                "INSERT INTO integration_gate_change_runs "
+                "(run_id, policy_id, candidate_id, review_evidence_id, "
+                "review_entry_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    replacement_run_id,
+                    change_target["policy_id"],
+                    change_target["candidate_id"],
+                    change_target["review_evidence_id"],
+                    change_target["review_entry_id"],
+                    now,
+                ),
+            )
+        if maintainer_change_target is not None:
+            connection.execute(
+                "INSERT INTO integration_gate_maintainer_change_runs "
+                "(run_id, policy_id, candidate_id, maintainer_review_id, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    replacement_run_id,
+                    maintainer_change_target["policy_id"],
+                    maintainer_change_target["candidate_id"],
+                    maintainer_change_target["maintainer_review_id"],
+                    now,
+                ),
+            )
+
+        created_event: dict[str, Any] = {
+            "failure_retry_sequence": 1,
+            "predecessor_run_id": source_run_id,
+            "replacement_kind": "retry",
+            "workflow_ruling_id": ruling_id,
+        }
+        if source_policy != SupervisionPolicy.disabled():
+            created_event["supervision_policy_sha256"] = source_policy.digest
+        for target in (review_target, change_target, maintainer_change_target):
+            if target is not None:
+                created_event["candidate_id"] = target["candidate_id"]
+                created_event["gate_policy_id"] = target["policy_id"]
+        if change_target is not None:
+            created_event.update(
+                {
+                    "changes_requested": True,
+                    "feedback_source": "independent_review",
+                    "review_evidence_id": change_target["review_evidence_id"],
+                    "review_entry_id": change_target["review_entry_id"],
+                }
+            )
+        if maintainer_change_target is not None:
+            created_event.update(
+                {
+                    "changes_requested": True,
+                    "feedback_source": "maintainer_review",
+                    "maintainer_review_id": maintainer_change_target[
+                        "maintainer_review_id"
+                    ],
+                }
+            )
+        connection.execute(
+            "INSERT INTO run_events "
+            "(run_id, sequence, kind, from_state, to_state, metadata_json, "
+            "created_at) VALUES (?, 1, 'run.created', NULL, 'queued', ?, ?)",
+            (replacement_run_id, canonical_json(created_event), now),
+        )
+        for authority in authority_rows:
+            connection.execute(
+                "INSERT INTO run_provider_grants "
+                "(run_id, authority_name, provider_grant_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    replacement_run_id,
+                    authority["authority_name"],
+                    authority["id"],
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE run_provider_invocation_allowances "
+                "SET max_invocations = ?, updated_at = ? "
+                "WHERE run_id = ? AND provider_grant_id = ?",
+                (
+                    authority["max_invocations"],
+                    now,
+                    replacement_run_id,
+                    authority["id"],
+                ),
+            )
+
+        changed = connection.execute(
+            "UPDATE runs SET version = version + 1, updated_at = ? "
+            "WHERE id = ? AND version = ?",
+            (now, source_run_id, source["version"]),
+        ).rowcount
+        if changed != 1:
+            raise ConcurrentUpdateError("workflow failure run changed concurrently")
+        connection.execute(
+            "INSERT INTO run_events "
+            "(run_id, sequence, kind, from_state, to_state, metadata_json, "
+            "created_at) VALUES (?, ?, 'run.retry_created', 'failed', 'failed', "
+            "?, ?)",
+            (
+                source_run_id,
+                source["version"] + 1,
+                canonical_json(
+                    {
+                        "failure_retry_sequence": 1,
+                        "replacement_run_id": replacement_run_id,
+                        "requested_by": requested_by,
+                        "workflow_ruling_id": ruling_id,
+                    }
+                ),
+                now,
+            ),
+        )
+        return replacement_run_id
+
     def _create_replacement_run(
         self,
         run_id: str,
@@ -979,8 +1309,13 @@ class RunStorage:
                     )
 
                 workflow_binding = connection.execute(
-                    "SELECT execution_id, correction_round, role, generation "
-                    "FROM workflow_run_bindings WHERE run_id = ?",
+                    "SELECT binding.execution_id, binding.correction_round, "
+                    "binding.role, binding.generation, "
+                    "execution.workflow_activation_version_id "
+                    "FROM workflow_run_bindings binding "
+                    "JOIN workflow_executions execution "
+                    "ON execution.id = binding.execution_id "
+                    "WHERE binding.run_id = ?",
                     (run_id,),
                 ).fetchone()
                 discovery_binding = connection.execute(
@@ -1006,6 +1341,13 @@ class RunStorage:
                 ):
                     raise StorageError(
                         "run has conflicting directed-execution bindings"
+                    )
+                if (
+                    workflow_binding is not None
+                    and workflow_binding["workflow_activation_version_id"] is not None
+                ):
+                    raise ConflictError(
+                        "activated workflow replacement requires a workflow ruling"
                     )
 
                 review_target = connection.execute(

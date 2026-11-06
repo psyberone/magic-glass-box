@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 52
+SCHEMA_VERSION = 53
 STATE_DIRECTORY_NAME = "magic-glass-box"
 DATABASE_FILENAME = "control-plane.db"
 LEGACY_STATE_DIRECTORY_NAME = "hexadecapus"
@@ -6926,6 +6926,147 @@ BEGIN
 END;
 """
 
+ATTEMPT_FAILURE_CLASS_SCHEMA = """
+ALTER TABLE run_attempts ADD COLUMN failure_class TEXT CHECK (
+    failure_class IS NULL OR failure_class IN (
+        'agent_failure', 'gateway_timeout', 'provider_ambiguous'
+    )
+);
+
+DROP TRIGGER workflow_correction_ceiling_extension_immutable_update;
+DROP TRIGGER workflow_correction_ceiling_extension_immutable_delete;
+DROP INDEX workflow_correction_ceiling_execution;
+ALTER TABLE workflow_correction_ceiling_extensions
+    RENAME TO workflow_correction_ceiling_extensions_v52;
+
+DROP TRIGGER workflow_ruling_identity_immutable;
+DROP TRIGGER workflow_ruling_immutable_delete;
+DROP INDEX workflow_ruling_one_open;
+ALTER TABLE workflow_rulings RENAME TO workflow_rulings_v52;
+CREATE TABLE workflow_rulings (
+    id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL,
+    execution_version INTEGER NOT NULL CHECK (execution_version >= 1),
+    correction_round INTEGER NOT NULL CHECK (correction_round BETWEEN 0 AND 8),
+    kind TEXT NOT NULL CHECK (
+        kind IN (
+            'correction_limit', 'producer_failed', 'reviewer_failed',
+            'review_verdict_missing', 'validation_failed',
+            'landing_failed', 'landing_authority_mismatch', 'landing_cancelled',
+            'landing_refold_required', 'resource_exhausted',
+            'no_candidate_changes'
+        )
+    ),
+    state TEXT NOT NULL CHECK (state IN ('open', 'resolved')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    policy_id TEXT,
+    run_id TEXT,
+    gate_name TEXT,
+    provider_landing_id TEXT,
+    landing_plan_id TEXT,
+    resolved_by TEXT,
+    decision TEXT CHECK (decision IS NULL OR decision IN ('continue', 'cancel')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE (execution_id, execution_version, kind),
+    FOREIGN KEY (execution_id) REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (policy_id)
+        REFERENCES integration_gate_policies(id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (provider_landing_id)
+        REFERENCES integration_provider_landings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (landing_plan_id)
+        REFERENCES integration_landing_plans(id) ON DELETE RESTRICT,
+    FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (state = 'open' AND resolved_by IS NULL AND decision IS NULL
+            AND resolved_at IS NULL)
+        OR
+        (state = 'resolved' AND resolved_by IS NOT NULL AND decision IS NOT NULL
+            AND resolved_at IS NOT NULL)
+    ),
+    CHECK (
+        (kind = 'landing_failed' AND provider_landing_id IS NOT NULL
+            AND landing_plan_id IS NULL)
+        OR
+        (kind = 'landing_authority_mismatch'
+            AND (provider_landing_id IS NOT NULL) != (landing_plan_id IS NOT NULL))
+        OR
+        (kind NOT IN ('landing_failed', 'landing_authority_mismatch')
+            AND provider_landing_id IS NULL AND landing_plan_id IS NULL)
+    )
+) STRICT;
+INSERT INTO workflow_rulings (
+    id, execution_id, execution_version, correction_round, kind, state,
+    version, policy_id, run_id, gate_name, provider_landing_id,
+    landing_plan_id, resolved_by, decision, created_at, updated_at, resolved_at
+)
+SELECT
+    id, execution_id, execution_version, correction_round, kind, state,
+    version, policy_id, run_id, gate_name, provider_landing_id,
+    landing_plan_id, resolved_by, decision, created_at, updated_at, resolved_at
+FROM workflow_rulings_v52;
+
+CREATE TABLE workflow_correction_ceiling_extensions (
+    ruling_id TEXT PRIMARY KEY,
+    workflow_execution_id TEXT NOT NULL UNIQUE,
+    workflow_activation_version_id TEXT,
+    configured_bound INTEGER NOT NULL CHECK (configured_bound BETWEEN 1 AND 8),
+    exceeded_bound INTEGER NOT NULL CHECK (exceeded_bound BETWEEN 0 AND 7),
+    authorized_bound INTEGER NOT NULL CHECK (authorized_bound BETWEEN 1 AND 8),
+    authorized_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (ruling_id) REFERENCES workflow_rulings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_execution_id)
+        REFERENCES workflow_executions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (workflow_activation_version_id)
+        REFERENCES workflow_activation_versions(id) ON DELETE RESTRICT,
+    FOREIGN KEY (authorized_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (exceeded_bound >= configured_bound),
+    CHECK (authorized_bound = exceeded_bound + 1)
+) STRICT;
+INSERT INTO workflow_correction_ceiling_extensions (
+    ruling_id, workflow_execution_id, workflow_activation_version_id,
+    configured_bound, exceeded_bound, authorized_bound, authorized_by, created_at
+)
+SELECT
+    ruling_id, workflow_execution_id, workflow_activation_version_id,
+    configured_bound, exceeded_bound, authorized_bound, authorized_by, created_at
+FROM workflow_correction_ceiling_extensions_v52;
+
+DROP TABLE workflow_correction_ceiling_extensions_v52;
+DROP TABLE workflow_rulings_v52;
+
+CREATE UNIQUE INDEX workflow_ruling_one_open
+    ON workflow_rulings(execution_id) WHERE state = 'open';
+CREATE TRIGGER workflow_ruling_identity_immutable
+BEFORE UPDATE OF
+    id, execution_id, execution_version, correction_round, kind,
+    policy_id, run_id, gate_name, provider_landing_id, landing_plan_id, created_at
+ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow ruling identity is immutable');
+END;
+CREATE TRIGGER workflow_ruling_immutable_delete
+BEFORE DELETE ON workflow_rulings
+BEGIN
+    SELECT RAISE(ABORT, 'workflow rulings cannot be deleted');
+END;
+CREATE INDEX workflow_correction_ceiling_execution
+    ON workflow_correction_ceiling_extensions(workflow_execution_id, created_at);
+CREATE TRIGGER workflow_correction_ceiling_extension_immutable_update
+BEFORE UPDATE ON workflow_correction_ceiling_extensions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow correction ceiling extensions are immutable');
+END;
+CREATE TRIGGER workflow_correction_ceiling_extension_immutable_delete
+BEFORE DELETE ON workflow_correction_ceiling_extensions
+BEGIN
+    SELECT RAISE(ABORT, 'workflow correction ceiling extensions cannot be deleted');
+END;
+"""
+
 SCHEMA_V37 = (
     SCHEMA_V1
     + INTERACTION_SCHEMA
@@ -6984,7 +7125,8 @@ SCHEMA_V48 = SCHEMA_V47 + WORKFLOW_LANDING_PROOF_SCHEMA
 SCHEMA_V49 = SCHEMA_V48 + WORKFLOW_CLOSEOUT_SCHEMA
 SCHEMA_V50 = SCHEMA_V49 + WORKFLOW_CORRECTION_CEILING_EXTENSION_SCHEMA
 SCHEMA_V51 = SCHEMA_V50 + WORKFLOW_PROVIDER_EFFECT_CONFORMANCE_SCHEMA
-SCHEMA = SCHEMA_V51 + WORKFLOW_ACCEPTED_CONTRACT_RECONCILIATION_SCHEMA
+SCHEMA_V52 = SCHEMA_V51 + WORKFLOW_ACCEPTED_CONTRACT_RECONCILIATION_SCHEMA
+SCHEMA = SCHEMA_V52 + ATTEMPT_FAILURE_CLASS_SCHEMA
 MIGRATIONS = {
     1: INTERACTION_SCHEMA,
     2: WORK_ITEM_SCHEMA,
@@ -7037,4 +7179,5 @@ MIGRATIONS = {
     49: WORKFLOW_CORRECTION_CEILING_EXTENSION_SCHEMA,
     50: WORKFLOW_PROVIDER_EFFECT_CONFORMANCE_SCHEMA,
     51: WORKFLOW_ACCEPTED_CONTRACT_RECONCILIATION_SCHEMA,
+    52: ATTEMPT_FAILURE_CLASS_SCHEMA,
 }

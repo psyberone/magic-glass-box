@@ -2583,6 +2583,80 @@ unreachable corrupt configuration and the already-substring-bound correction-
 limit message; neither changes authority, routing, state, or the published
 artifact.
 
+External-review remediation R9 closes the retry-authority and evidence-truth
+gaps exposed by the first two-project live attempt. The reviewed attempt is a
+retained partial proof, not an M18 exit: both product candidates were genuine,
+but the controller did not interrupt an in-flight effect, exercise activated
+landing and closeout, or report every replacement execution and run
+generation. R9 is deliberately split into three honest checkpoints before the
+next live attempt.
+
+R9A makes failure retry a workflow ruling transition rather than a generic run
+operation. For an activated execution, ordinary retry and reassignment cannot
+create or substitute a workflow-bound successor. An activation-owner
+`continue` decision atomically creates at most one exact successor for the
+failed predecessor, execution version, correction round, and role. A succeeded
+predecessor, stale or foreign run, pre-created successor, resolved ruling,
+inactive or expired execution, or another open ruling fails closed. Admission
+rechecks active execution state, open rulings, and elapsed wall time. Failure
+retry does not consume a correction round; it has a separate durable ceiling
+of one retry per execution, round, and role unless a future owner-authorized
+single-use extension is explicitly designed and reviewed.
+
+R9B records why a run failed before deciding whether retry is appropriate.
+Attempt failure distinguishes agent failure, gateway timeout, ambiguous
+provider transport, and no-candidate-changes judgment. Gateway ambiguity is
+reconciled against durable gateway/provider records before the workflow can
+classify the attempt as safely retryable; an ambiguous call is never replayed.
+No-candidate-changes remains a judgment outcome and cannot use the
+infrastructure retry path. The live 409 mailbox/latch failure must be diagnosed
+and regression-tested before another paid live retry.
+
+R9C makes the proof report lineage- and generation-complete. It aggregates
+every execution for each prepared work item, including cancelled and replaced
+executions, every workflow-bound run generation, every ruling, candidate,
+provider invocation, token count, and accounted or estimated cost. Per-
+execution totals and grand totals are both retained. Every invocation records
+the controller commit and a dirty-tree digest; continuing an evidence
+directory under a changed controller fails closed unless the activation owner
+records an explicit code-change observation. Harness-authored wake facts are
+labelled as such, and genuine change requests derive from their durable round
+cause rather than a round counter.
+
+R9's acceptance tests include non-owner, succeeded-predecessor, stale and
+foreign predecessor, successor-before-ruling, second-continue, exhausted retry
+ceiling, expired execution, inactive execution, open-ruling admission, typed
+failure routing, ambiguous-provider reconciliation, lineage aggregation, and
+controller-drift refusal. RED-first happy and sad paths retain the 85%
+branch-aware coverage floor and an 80% focused meaningful mutation-kill floor.
+R9's pre-live implementation gate passes 1,667 tests at 87% aggregate
+statement-plus-branch coverage with clean Ruff format/lint, compilation, and
+diff checks. The fresh-association focused mutation campaign initially killed
+233/311 selected mutants; direct replay after strengthening exact
+classification, successor-event, identifier-boundary, and audit assertions
+killed 28 more meaningful survivors, for an effective 261/311 (83.92%).
+Reviewed survivors that change only equivalent SQL keyword/identifier casing
+or non-contractual diagnostic prose and labels were not promoted into product
+behavior.
+
+The pre-live internal review also found that a durable ambiguous service-sidecar
+effect could be stranded by exhausting its supervisor action. The director now
+defers that exact action at zero consumed attempts, and a replacement controller
+reconciles the same operation rather than replaying it. The M18 harness starts
+both exact registered GitHub sidecars, deliberately discards one accepted
+effect receipt per project, stops on the newly uncertain operation, records only
+bounded hash/receipt metadata, and requires a later controller invocation to
+reconcile it. Terminal completion and failed-invocation reporting are explicit,
+so the proof neither spins after both projects complete nor loses its controller
+and sandbox evidence when a run fails.
+
+After R9 passes internal review, the next clean two-project proof must pin the
+controller before preparation, force and reconcile one real interruption per
+project, exercise provider intent/effect, simultaneous hold isolation,
+missing-binding negatives, the M16 regressions, primary landing, and truthful
+closeout with one deferred obligation. Only the frozen record from that run is
+eligible for the Panopticon coordinator's final M18 fidelity disposition.
+
 **Exit:** two-project live evidence, restart and genuine correction-loop
 coverage when naturally triggered, truthful budget and closeout records,
 coordinator fidelity disposition, and independent technical approval.

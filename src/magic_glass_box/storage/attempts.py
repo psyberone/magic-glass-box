@@ -25,8 +25,23 @@ from .schema import (
     MIN_ATTEMPT_LEASE_SECONDS,
 )
 
+ATTEMPT_FAILURE_CLASSES = frozenset(
+    {"agent_failure", "gateway_timeout", "provider_ambiguous"}
+)
+
 
 class AttemptStorage:
+    @staticmethod
+    def _failure_class_from_provider_ledger(
+        connection: sqlite3.Connection, run_id: str
+    ) -> str:
+        ambiguous = connection.execute(
+            "SELECT 1 FROM provider_invocations WHERE run_id = ? "
+            "AND outcome IN ('dispatching', 'ambiguous') LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        return "provider_ambiguous" if ambiguous is not None else "agent_failure"
+
     @staticmethod
     def _select_recovery_result(
         connection: sqlite3.Connection, run_id: str
@@ -130,6 +145,7 @@ class AttemptStorage:
                     connection,
                     run_id=run_id,
                     project_id=run["project_id"],
+                    now=now,
                 )
                 sequence = connection.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_attempts "
@@ -238,6 +254,7 @@ class AttemptStorage:
         *,
         run_id: str,
         project_id: str,
+        now: str,
     ) -> None:
         if connection.execute("PRAGMA user_version").fetchone()[0] < 29:
             # Historical migration fixtures predate the workflow ledger. A
@@ -245,8 +262,13 @@ class AttemptStorage:
             # closed if its schema is incomplete.
             return
         binding = connection.execute(
-            "SELECT execution.workflow_activation_version_id, "
-            "activation.spec_json, wake.state AS wake_state "
+            "SELECT binding.execution_id, "
+            "execution.workflow_activation_version_id, execution.state, "
+            "execution.created_at, activation.spec_json, "
+            "wake.state AS wake_state, "
+            "EXISTS(SELECT 1 FROM workflow_rulings ruling "
+            "WHERE ruling.execution_id = binding.execution_id "
+            "AND ruling.state = 'open') AS has_open_ruling "
             "FROM workflow_run_bindings binding "
             "JOIN workflow_executions execution "
             "ON execution.id = binding.execution_id "
@@ -261,6 +283,10 @@ class AttemptStorage:
             binding is not None
             and binding["workflow_activation_version_id"] is not None
         ):
+            if binding["state"] != "active":
+                raise ConflictError("activated workflow execution is not active")
+            if binding["has_open_ruling"]:
+                raise ConflictError("activated workflow execution has an open ruling")
             if binding["wake_state"] is None:
                 raise ConflictError("activated workflow run has no manual wake")
             if binding["wake_state"] != "acknowledged":
@@ -271,6 +297,17 @@ class AttemptStorage:
                 )
             except (json.JSONDecodeError, TypeError, ValidationError) as exc:
                 raise StorageError("stored workflow activation is invalid") from exc
+            try:
+                elapsed = datetime.fromisoformat(now) - datetime.fromisoformat(
+                    binding["created_at"]
+                )
+            except (TypeError, ValueError) as exc:
+                raise StorageError("stored workflow wall time is invalid") from exc
+            if (
+                elapsed.total_seconds()
+                >= incoming_activation.resources.wall_time_seconds
+            ):
+                raise ConflictError("activated workflow wall time is exhausted")
 
         project_activation_row = connection.execute(
             "SELECT version.spec_json FROM workflow_activations activation "
@@ -754,6 +791,7 @@ class AttemptStorage:
                 if result is None:
                     raise ConflictError("run attempt result has not been captured")
                 reason: str | None = None
+                failure_class: str | None = None
                 if attempt["cancel_requested_at"] is not None:
                     outcome = AttemptState.CANCELLED
                     reason = attempt["cancel_reason"]
@@ -799,6 +837,9 @@ class AttemptStorage:
                     target = RunState.SUCCEEDED if exit_code == 0 else RunState.FAILED
                     if exit_code != 0:
                         reason = f"agent exited with code {exit_code}"
+                        failure_class = self._failure_class_from_provider_ledger(
+                            connection, attempt["run_id"]
+                        )
                     run_metadata: dict[str, Any] = {
                         "exit_code": exit_code,
                         "image_id": image_id,
@@ -807,6 +848,8 @@ class AttemptStorage:
                     }
                     if reason is not None:
                         run_metadata["reason"] = reason
+                    if failure_class is not None:
+                        run_metadata["failure_class"] = failure_class
                     run_changed = connection.execute(
                         "UPDATE runs SET state = ?, version = version + 1, "
                         "updated_at = ?, finished_at = ? "
@@ -844,6 +887,9 @@ class AttemptStorage:
                     if exit_code != 0:
                         outcome = AttemptState.FAILED
                         reason = f"agent exited with code {exit_code}"
+                        failure_class = self._failure_class_from_provider_ledger(
+                            connection, attempt["run_id"]
+                        )
                     elif handoff is None:
                         outcome = AttemptState.INTERRUPTED
                         reason = "worker exited while paused without a handoff"
@@ -870,6 +916,8 @@ class AttemptStorage:
                         )
                         if reason is not None:
                             run_metadata["reason"] = reason
+                        if failure_class is not None:
+                            run_metadata["failure_class"] = failure_class
                         finished_at = now if target is RunState.FAILED else None
                         run_changed = connection.execute(
                             "UPDATE runs SET state = ?, version = version + 1, "
@@ -908,12 +956,13 @@ class AttemptStorage:
 
                 changed = connection.execute(
                     "UPDATE run_attempts SET state = ?, version = version + 1, "
-                    "exit_code = ?, reason = ?, finished_at = ? "
+                    "exit_code = ?, reason = ?, failure_class = ?, finished_at = ? "
                     "WHERE id = ? AND version = ? AND owner_id = ?",
                     (
                         outcome.value,
                         exit_code,
                         reason,
+                        failure_class,
                         now,
                         attempt_id,
                         expected_attempt_version,
@@ -932,6 +981,8 @@ class AttemptStorage:
                     event_metadata["handoff_id"] = handoff["id"]
                 if reason is not None:
                     event_metadata["reason"] = reason
+                if failure_class is not None:
+                    event_metadata["failure_class"] = failure_class
                 event_sequence = connection.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 "
                     "FROM run_attempt_events WHERE attempt_id = ?",
@@ -969,6 +1020,7 @@ class AttemptStorage:
         expected_attempt_version: int,
         reason: str,
         interrupted: bool = False,
+        failure_class: str = "agent_failure",
     ) -> dict[str, Any]:
         """Close an active attempt after cleanup, preserving durable waits."""
 
@@ -983,6 +1035,8 @@ class AttemptStorage:
             raise ValidationError("expected_attempt_version must be a positive integer")
         if not isinstance(interrupted, bool):
             raise ValidationError("interrupted must be boolean")
+        if failure_class not in ATTEMPT_FAILURE_CLASSES:
+            raise ValidationError("attempt failure_class is invalid")
         now = self.now()
         with self._connection() as connection:
             try:
@@ -1024,6 +1078,20 @@ class AttemptStorage:
                         if interrupted or provider_paused
                         else AttemptState.FAILED
                     )
+                retained_failure_class = (
+                    None if cancellation_requested or provider_paused else failure_class
+                )
+                if retained_failure_class == "provider_ambiguous" and (
+                    connection.execute(
+                        "SELECT 1 FROM provider_invocations WHERE run_id = ? "
+                        "AND outcome IN ('dispatching', 'ambiguous') LIMIT 1",
+                        (attempt["run_id"],),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ConflictError(
+                        "provider-ambiguous failure requires durable provider evidence"
+                    )
                 if cancellation_requested:
                     cancellation_reason = attempt["cancel_reason"]
                     run_metadata = {
@@ -1057,7 +1125,10 @@ class AttemptStorage:
                     )
                     reason = cancellation_reason
                 elif run_state in {RunState.PREPARING, RunState.RUNNING}:
-                    run_metadata = {"reason": reason}
+                    run_metadata = {
+                        "failure_class": retained_failure_class,
+                        "reason": reason,
+                    }
                     if interrupted:
                         run_metadata["reconciled"] = True
                     changed = connection.execute(
@@ -1099,6 +1170,8 @@ class AttemptStorage:
                             else RunState.FAILED
                         )
                         run_metadata = {"reason": reason}
+                        if retained_failure_class is not None:
+                            run_metadata["failure_class"] = retained_failure_class
                         if interrupted:
                             run_metadata["reconciled"] = True
                         changed = connection.execute(
@@ -1138,11 +1211,13 @@ class AttemptStorage:
                     )
                 changed = connection.execute(
                     "UPDATE run_attempts SET state = ?, version = version + 1, "
-                    "reason = ?, finished_at = ? WHERE id = ? AND version = ? "
+                    "reason = ?, failure_class = ?, finished_at = ? "
+                    "WHERE id = ? AND version = ? "
                     "AND owner_id = ?",
                     (
                         outcome.value,
                         reason,
+                        retained_failure_class,
                         now,
                         attempt_id,
                         expected_attempt_version,
@@ -1171,7 +1246,16 @@ class AttemptStorage:
                         kind,
                         source_state,
                         outcome.value,
-                        canonical_json({"reason": reason}),
+                        canonical_json(
+                            {
+                                "reason": reason,
+                                **(
+                                    {}
+                                    if retained_failure_class is None
+                                    else {"failure_class": retained_failure_class}
+                                ),
+                            }
+                        ),
                         now,
                     ),
                 )

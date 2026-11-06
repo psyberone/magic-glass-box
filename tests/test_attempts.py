@@ -461,6 +461,7 @@ class RunAttemptTests(unittest.TestCase):
 
         self.assertEqual(completed["state"], "failed")
         self.assertEqual(completed["run_state"], "failed")
+        self.assertEqual(completed["failure_class"], "agent_failure")
         self.assertEqual(self.database.get_run(run["id"])["state"], "failed")
 
     def test_answered_active_attempt_interruption_requeues_its_checkpoint(
@@ -521,19 +522,79 @@ class RunAttemptTests(unittest.TestCase):
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(failed["run_state"], "failed")
         self.assertEqual(failed["reason"], "workspace preparation failed")
+        self.assertEqual(failed["failure_class"], "agent_failure")
         self.assertEqual(failed["events"][-1]["kind"], "attempt.failed")
         self.assertEqual(failed["events"][-1]["from_state"], "preparing")
         self.assertEqual(failed["events"][-1]["to_state"], "failed")
         self.assertEqual(
             failed["events"][-1]["metadata"],
-            {"reason": "workspace preparation failed"},
+            {
+                "failure_class": "agent_failure",
+                "reason": "workspace preparation failed",
+            },
         )
         run_event = self.database.get_run(run["id"])["events"][-1]
         self.assertEqual(run_event["kind"], "run.transitioned")
         self.assertEqual(run_event["from_state"], "preparing")
         self.assertEqual(run_event["to_state"], "failed")
         self.assertEqual(
-            run_event["metadata"], {"reason": "workspace preparation failed"}
+            run_event["metadata"],
+            {
+                "failure_class": "agent_failure",
+                "reason": "workspace preparation failed",
+            },
+        )
+
+    def test_attempt_failure_class_is_bounded_and_provider_ambiguity_needs_evidence(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValidationError, "failure_class"):
+            self.database.fail_run_attempt(
+                "att_" + "0" * 32,
+                owner_id=OWNER_ID,
+                expected_attempt_version=1,
+                reason="invalid class",
+                failure_class="retryable",
+            )
+
+        ambiguous_run = self.create_run()
+        ambiguous_attempt = self.database.begin_run_attempt(
+            ambiguous_run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
+        )
+        with self.assertRaisesRegex(ConflictError, "durable provider evidence"):
+            self.database.fail_run_attempt(
+                ambiguous_attempt["id"],
+                owner_id=OWNER_ID,
+                expected_attempt_version=ambiguous_attempt["version"],
+                reason="transport outcome unknown",
+                failure_class="provider_ambiguous",
+            )
+        self.assertEqual(
+            self.database.get_run_attempt(ambiguous_attempt["id"])["state"],
+            "preparing",
+        )
+
+        timeout_run = self.create_run()
+        timeout_attempt = self.database.begin_run_attempt(
+            timeout_run["id"],
+            runtime_adapter="docker",
+            owner_id=OWNER_ID,
+            expected_run_version=1,
+        )
+        timed_out = self.database.fail_run_attempt(
+            timeout_attempt["id"],
+            owner_id=OWNER_ID,
+            expected_attempt_version=timeout_attempt["version"],
+            reason="bounded gateway response timed out",
+            failure_class="gateway_timeout",
+        )
+        self.assertEqual(timed_out["failure_class"], "gateway_timeout")
+        self.assertEqual(
+            timed_out["events"][-1]["metadata"]["failure_class"],
+            "gateway_timeout",
         )
 
     def test_fail_attempt_validates_boundaries_and_records_interruption(self) -> None:
@@ -615,17 +676,26 @@ class RunAttemptTests(unittest.TestCase):
         self.assertEqual(interrupted["state"], "interrupted")
         self.assertEqual(interrupted["run_state"], "failed")
         self.assertEqual(interrupted["reason"], "x" * 4096)
+        self.assertEqual(interrupted["failure_class"], "agent_failure")
         self.assertEqual(interrupted["events"][-1]["kind"], "attempt.interrupted")
         self.assertEqual(interrupted["events"][-1]["sequence"], 2)
         self.assertEqual(interrupted["events"][-1]["from_state"], "preparing")
         self.assertEqual(interrupted["events"][-1]["to_state"], "interrupted")
-        self.assertEqual(interrupted["events"][-1]["metadata"], {"reason": "x" * 4096})
+        self.assertEqual(
+            interrupted["events"][-1]["metadata"],
+            {"failure_class": "agent_failure", "reason": "x" * 4096},
+        )
         run_event = self.database.get_run(run["id"])["events"][-1]
         self.assertEqual(run_event["sequence"], 3)
         self.assertEqual(run_event["from_state"], "preparing")
         self.assertEqual(run_event["to_state"], "failed")
         self.assertEqual(
-            run_event["metadata"], {"reason": "x" * 4096, "reconciled": True}
+            run_event["metadata"],
+            {
+                "failure_class": "agent_failure",
+                "reason": "x" * 4096,
+                "reconciled": True,
+            },
         )
 
     def test_successful_attempt_terminally_completes_its_run(self) -> None:
@@ -757,6 +827,7 @@ class RunAttemptTests(unittest.TestCase):
         self.assertEqual(completed["reason"], "agent exited with code -2147483648")
         expected_metadata = {
             "exit_code": -(1 << 31),
+            "failure_class": "agent_failure",
             "image_id": IMAGE_ID,
             "reason": "agent exited with code -2147483648",
             "result_id": result["id"],

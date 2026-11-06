@@ -204,7 +204,13 @@ class _ConnectorWaves:
 
     def before_tick(self) -> None:
         active = self._active_runs()
-        if not active or active == self.bound_runs:
+        if not active:
+            return
+        if self.process is not None and set(active).intersection(self.bound_runs):
+            # A supervisor tick may admit another queued run while a worker from
+            # the current wave is still using this connector. Keep the process
+            # alive until every run it was started for has left the executable
+            # set; rotating merely because the set grew severs the live worker.
             return
         self._stop_current()
         self.process = self.start()

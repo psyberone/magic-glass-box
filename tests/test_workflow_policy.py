@@ -20,6 +20,7 @@ from magic_glass_box.db import (
     SCHEMA_V48,
     SCHEMA_V49,
     SCHEMA_V51,
+    SCHEMA_V52,
     SCHEMA_VERSION,
     ConcurrentUpdateError,
     ConflictError,
@@ -1767,6 +1768,31 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
         self.assertEqual(status["counts"]["workflow_reviewer_measurements"], 0)
         self.assertEqual(migrated.list_integration_target_holds(), [])
 
+    def test_schema_migrates_v52_with_typed_failure_and_judgment_support(
+        self,
+    ) -> None:
+        path = self.root / "v52.db"
+        with sqlite3.connect(path) as connection:
+            Database._execute_statements(connection, SCHEMA_V52)
+            connection.execute("PRAGMA user_version = 52")
+            connection.commit()
+        path.chmod(0o600)
+        migrated = Database(path)
+
+        status = migrated.initialize()
+
+        self.assertEqual(status["schema_version"], SCHEMA_VERSION)
+        with sqlite3.connect(path) as connection:
+            attempt_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(run_attempts)")
+            }
+            ruling_sql = connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' "
+                "AND name = 'workflow_rulings'"
+            ).fetchone()[0]
+        self.assertIn("failure_class", attempt_columns)
+        self.assertIn("no_candidate_changes", ruling_sql)
+
     def test_attempt_admission_bypasses_only_pre_workflow_schema_versions(
         self,
     ) -> None:
@@ -1777,6 +1803,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             connection,
             run_id="run_legacy",
             project_id="project_legacy",
+            now="2026-11-06T12:00:00+00:00",
         )
 
         connection.execute("PRAGMA user_version = 29")
@@ -1785,6 +1812,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
                 connection,
                 run_id="run_current",
                 project_id="project_current",
+                now="2026-11-06T12:00:00+00:00",
             )
 
     def test_control_plane_exposes_owner_acknowledged_contracts(self) -> None:
@@ -2681,7 +2709,7 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
                 acknowledged_by=requester["id"],
             )
 
-    def test_replacement_run_requires_its_own_manual_wake(self) -> None:
+    def test_activated_workflow_replacement_requires_failure_ruling(self) -> None:
         self.activate()
         work_item = self.create_work_item("replacement-wake")
         execution = self.start_activated(
@@ -2698,30 +2726,334 @@ class WorkflowPolicyStorageTests(unittest.TestCase):
             expected_version=1,
             acknowledged_by=self.user["id"],
         )
-        cancelled = self.database.transition_run(
+        attempt = self.database.begin_run_attempt(
             original["id"],
-            target=RunState.CANCELLED,
-            expected_version=1,
-            reason="prove replacement wake isolation",
+            runtime_adapter="docker",
+            owner_id="replacement-worker",
+            expected_run_version=original["version"],
+        )
+        self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="replacement-worker",
+            expected_attempt_version=attempt["version"],
+            reason="prove ruling-bound replacement isolation",
+        )
+        failed = self.database.get_run(original["id"])
+
+        with self.assertRaisesRegex(ConflictError, "workflow ruling"):
+            self.database.retry_run(
+                original["id"],
+                requested_by=self.user["id"],
+                expected_run_version=failed["version"],
+            )
+        with self.assertRaisesRegex(ConflictError, "workflow ruling"):
+            self.database.reassign_run(
+                original["id"],
+                profile_name="Reviewer",
+                requested_by=self.user["id"],
+                expected_run_version=failed["version"],
+            )
+
+        self.assertEqual(
+            self.database.find_workflow_run(execution["id"], 0, "producer")["id"],
+            original["id"],
+        )
+        self.assertEqual(
+            len(self.database.list_workflow_manual_wakes(execution_id=execution["id"])),
+            1,
         )
 
-        replacement = self.database.retry_run(
+    def test_failure_ruling_rejects_succeeded_and_foreign_predecessors(self) -> None:
+        self.activate()
+        succeeded_item = self.create_work_item("succeeded-failure-predecessor")
+        succeeded_execution = self.start_activated(
+            succeeded_item,
+            expected_activation_version=1,
+            idempotency_key="succeeded-failure-predecessor",
+        )
+        succeeded_run = self.create_producer_run(succeeded_execution, succeeded_item)
+        preparing = self.database.transition_run(
+            succeeded_run["id"],
+            target=RunState.PREPARING,
+            expected_version=succeeded_run["version"],
+        )
+        running = self.database.transition_run(
+            succeeded_run["id"],
+            target=RunState.RUNNING,
+            expected_version=preparing["version"],
+            source_revision="a" * 40,
+        )
+        self.database.transition_run(
+            succeeded_run["id"],
+            target=RunState.SUCCEEDED,
+            expected_version=running["version"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "current failed run"):
+            self.database.open_workflow_ruling(
+                succeeded_execution["id"],
+                expected_version=succeeded_execution["version"],
+                kind="producer_failed",
+                run_id=succeeded_run["id"],
+            )
+
+        foreign_item = self.create_work_item("foreign-failure-predecessor")
+        foreign_execution = self.start_activated(
+            foreign_item,
+            expected_activation_version=1,
+            idempotency_key="foreign-failure-predecessor",
+        )
+        foreign_run = self.create_producer_run(foreign_execution, foreign_item)
+        with self.assertRaisesRegex(ConflictError, "run is not current"):
+            self.database.open_workflow_ruling(
+                succeeded_execution["id"],
+                expected_version=succeeded_execution["version"],
+                kind="producer_failed",
+                run_id=foreign_run["id"],
+            )
+
+    def test_failure_ruling_continue_atomically_creates_one_bounded_successor(
+        self,
+    ) -> None:
+        self.activate()
+        work_item = self.create_work_item("failure-ruling-successor")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="failure-ruling-successor",
+        )
+        original = self.create_producer_run(execution, work_item)
+        first_wake = self.database.list_workflow_manual_wakes(
+            execution_id=execution["id"]
+        )[0]
+        self.database.acknowledge_workflow_manual_wake(
+            first_wake["id"],
+            expected_version=first_wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+        attempt = self.database.begin_run_attempt(
             original["id"],
-            requested_by=self.user["id"],
-            expected_run_version=cancelled["version"],
+            runtime_adapter="docker",
+            owner_id="failure-worker-one",
+            expected_run_version=original["version"],
+        )
+        self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="failure-worker-one",
+            expected_attempt_version=attempt["version"],
+            reason="worker transport failed",
+            failure_class="gateway_timeout",
+        )
+        ruling = self.database.open_workflow_ruling(
+            execution["id"],
+            expected_version=execution["version"],
+            kind="producer_failed",
+            run_id=original["id"],
+        )
+
+        resolved = self.database.resolve_workflow_ruling(
+            ruling["id"],
+            expected_version=ruling["version"],
+            decision="continue",
+            resolved_by=self.user["id"],
+        )
+
+        self.assertEqual(
+            (resolved["state"], resolved["decision"]), ("resolved", "continue")
+        )
+        current = self.database.get_workflow_execution(execution["id"])
+        self.assertEqual(
+            (current["state"], current["stage"], current["correction_round"]),
+            ("active", "build", 0),
+        )
+        successor = self.database.find_workflow_run(execution["id"], 0, "producer")
+        self.assertNotEqual(successor["id"], original["id"])
+        self.assertTrue(successor["id"].startswith("run_"))
+        self.assertEqual(successor["predecessor_run_id"], original["id"])
+        self.assertEqual(successor["replacement_kind"], "retry")
+        generations = self.database.list_workflow_runs(execution["id"])
+        self.assertEqual(
+            [run["id"] for run in generations], [original["id"], successor["id"]]
+        )
+        self.assertEqual([run["workflow_generation"] for run in generations], [1, 2])
+        self.assertEqual(
+            successor["events"][0]["metadata"],
+            {
+                "failure_retry_sequence": 1,
+                "predecessor_run_id": original["id"],
+                "replacement_kind": "retry",
+                "workflow_ruling_id": ruling["id"],
+            },
+        )
+        predecessor = self.database.get_run(original["id"])
+        self.assertEqual(predecessor["events"][-1]["kind"], "run.retry_created")
+        self.assertEqual(predecessor["events"][-1]["sequence"], predecessor["version"])
+        self.assertEqual(
+            predecessor["events"][-1]["metadata"],
+            {
+                "failure_retry_sequence": 1,
+                "replacement_run_id": successor["id"],
+                "requested_by": self.user["id"],
+                "workflow_ruling_id": ruling["id"],
+            },
         )
         wakes = self.database.list_workflow_manual_wakes(execution_id=execution["id"])
         self.assertEqual(len(wakes), 2)
-        replacement_wake = wakes[-1]
-        self.assertEqual(replacement_wake["run_id"], replacement["id"])
-        self.assertEqual(replacement_wake["state"], "requested")
-        self.assertNotEqual(replacement_wake["id"], first_wake["id"])
-        with self.assertRaisesRegex(ConflictError, "manual wake"):
+        self.assertEqual(wakes[-1]["run_id"], successor["id"])
+        self.assertEqual(wakes[-1]["state"], "requested")
+        with self.assertRaisesRegex(ConflictError, "run is not current"):
+            self.database.open_workflow_ruling(
+                execution["id"],
+                expected_version=current["version"],
+                kind="producer_failed",
+                run_id=original["id"],
+            )
+
+        self.database.acknowledge_workflow_manual_wake(
+            wakes[-1]["id"],
+            expected_version=wakes[-1]["version"],
+            acknowledged_by=self.user["id"],
+        )
+        retry_attempt = self.database.begin_run_attempt(
+            successor["id"],
+            runtime_adapter="docker",
+            owner_id="failure-worker-two",
+            expected_run_version=successor["version"],
+        )
+        self.database.fail_run_attempt(
+            retry_attempt["id"],
+            owner_id="failure-worker-two",
+            expected_attempt_version=retry_attempt["version"],
+            reason="worker transport failed again",
+        )
+        second_ruling = self.database.open_workflow_ruling(
+            execution["id"],
+            expected_version=current["version"],
+            kind="producer_failed",
+            run_id=successor["id"],
+        )
+        with self.assertRaisesRegex(ConflictError, "retry ceiling"):
+            self.database.resolve_workflow_ruling(
+                second_ruling["id"],
+                expected_version=second_ruling["version"],
+                decision="continue",
+                resolved_by=self.user["id"],
+            )
+
+        with self.assertRaisesRegex(ValidationError, "execution_id"):
+            self.database.list_workflow_runs("x" * 65)
+
+    def test_provider_ambiguous_failure_cannot_create_a_retry_successor(self) -> None:
+        self.activate()
+        work_item = self.create_work_item("ambiguous-failure-no-replay")
+        execution = self.start_activated(
+            work_item,
+            expected_activation_version=1,
+            idempotency_key="ambiguous-failure-no-replay",
+        )
+        producer = self.create_producer_run(execution, work_item)
+        wake = self.database.list_workflow_manual_wakes(execution_id=execution["id"])[0]
+        self.database.acknowledge_workflow_manual_wake(
+            wake["id"],
+            expected_version=wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+        attempt = self.database.begin_run_attempt(
+            producer["id"],
+            runtime_adapter="docker",
+            owner_id="ambiguous-worker",
+            expected_run_version=producer["version"],
+        )
+        self.database.fail_run_attempt(
+            attempt["id"],
+            owner_id="ambiguous-worker",
+            expected_attempt_version=attempt["version"],
+            reason="provider reply was not attributable",
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE run_attempts SET failure_class = 'provider_ambiguous' "
+                "WHERE id = ?",
+                (attempt["id"],),
+            )
+        ruling = self.database.open_workflow_ruling(
+            execution["id"],
+            expected_version=execution["version"],
+            kind="producer_failed",
+            run_id=producer["id"],
+        )
+
+        with self.assertRaisesRegex(ConflictError, "cannot be retried or replayed"):
+            self.database.resolve_workflow_ruling(
+                ruling["id"],
+                expected_version=ruling["version"],
+                decision="continue",
+                resolved_by=self.user["id"],
+            )
+
+        self.assertEqual(
+            self.database.find_workflow_run(execution["id"], 0, "producer")["id"],
+            producer["id"],
+        )
+
+    def test_attempt_admission_rechecks_open_ruling_and_wall_time(self) -> None:
+        self.activate()
+        ruled_item = self.create_work_item("admission-open-ruling")
+        ruled_execution = self.start_activated(
+            ruled_item,
+            expected_activation_version=1,
+            idempotency_key="admission-open-ruling",
+        )
+        producer = self.create_producer_run(ruled_execution, ruled_item)
+        wake = self.database.list_workflow_manual_wakes(
+            execution_id=ruled_execution["id"]
+        )[0]
+        self.database.acknowledge_workflow_manual_wake(
+            wake["id"],
+            expected_version=wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+        self.database.open_workflow_ruling(
+            ruled_execution["id"],
+            expected_version=ruled_execution["version"],
+            kind="resource_exhausted",
+        )
+        with self.assertRaisesRegex(ConflictError, "open ruling"):
             self.database.begin_run_attempt(
-                replacement["id"],
+                producer["id"],
                 runtime_adapter="docker",
-                owner_id="replacement-worker",
-                expected_run_version=1,
+                owner_id="ruled-producer",
+                expected_run_version=producer["version"],
+            )
+
+        expired_item = self.create_work_item("admission-expired")
+        expired_execution = self.start_activated(
+            expired_item,
+            expected_activation_version=1,
+            idempotency_key="admission-expired",
+        )
+        expired_run = self.create_producer_run(expired_execution, expired_item)
+        expired_wake = self.database.list_workflow_manual_wakes(
+            execution_id=expired_execution["id"]
+        )[0]
+        self.database.acknowledge_workflow_manual_wake(
+            expired_wake["id"],
+            expected_version=expired_wake["version"],
+            acknowledged_by=self.user["id"],
+        )
+        observed = (
+            datetime.fromisoformat(expired_execution["created_at"])
+            + timedelta(seconds=10800)
+        ).isoformat(timespec="microseconds")
+        with (
+            mock.patch.object(self.database, "now", return_value=observed),
+            self.assertRaisesRegex(ConflictError, "wall time"),
+        ):
+            self.database.begin_run_attempt(
+                expired_run["id"],
+                runtime_adapter="docker",
+                owner_id="expired-worker",
+                expected_run_version=expired_run["version"],
             )
 
     def test_pre_policy_run_does_not_acquire_manual_wake_authority(self) -> None:

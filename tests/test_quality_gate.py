@@ -18,6 +18,7 @@ MUTMUT_RUNNER = ROOT / "scripts" / "run_mutmut.py"
 PYPROJECT = ROOT / "pyproject.toml"
 PANOPTICON = ROOT / "panopticon.yml"
 DEVELOPMENT_LOCK = ROOT / "requirements-development.lock"
+RUNTIME_DOCKERFILE = ROOT / "docker" / "runtime-proof.Dockerfile"
 
 
 class MutationScoreGateTests(unittest.TestCase):
@@ -176,6 +177,14 @@ class MutationScoreGateTests(unittest.TestCase):
         self.assertIn("candidate-test: require-git", makefile)
         self.assertIn("gate-test: require-git", makefile)
         self.assertIn("integration-test: require-git", makefile)
+
+    def test_runtime_proof_image_contains_basic_repository_tools(self) -> None:
+        dockerfile = RUNTIME_DOCKERFILE.read_text(encoding="utf-8")
+
+        for package in ("git", "make", "patch"):
+            with self.subTest(package=package):
+                self.assertRegex(dockerfile, rf"(?m)^\s*{package}\s+\\$")
+        self.assertIn("/usr/local/bin/apply_patch", dockerfile)
 
 
 if __name__ == "__main__":

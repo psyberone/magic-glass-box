@@ -637,6 +637,7 @@ class RunCoordinatorTests(unittest.TestCase):
             finished["events"][-1]["metadata"],
             {
                 "exit_code": 17,
+                "failure_class": "agent_failure",
                 "image_id": IMAGE_ID,
                 "reason": "agent exited with code 17",
                 "result_id": result["id"],
@@ -749,7 +750,10 @@ class RunCoordinatorTests(unittest.TestCase):
                 self.assertEqual(failed["events"][-1]["from_state"], expected_from)
                 self.assertEqual(
                     failed["events"][-1]["metadata"],
-                    {"reason": "execution failed: RuntimeError"},
+                    {
+                        "failure_class": "agent_failure",
+                        "reason": "execution failed: RuntimeError",
+                    },
                 )
                 attempt = failed["attempts"][0]
                 if after_callback:

@@ -4,6 +4,11 @@ import sqlite3
 
 
 def downgrade_workflow_policy_activation(connection: sqlite3.Connection) -> None:
+    attempt_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(run_attempts)")
+    }
+    if "failure_class" in attempt_columns:
+        connection.execute("ALTER TABLE run_attempts DROP COLUMN failure_class")
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(workflow_executions)")
     }
