@@ -171,6 +171,24 @@ class LiveM18ContractTests(unittest.TestCase):
         self.assertEqual(observation["kind"], "controller.code_change")
         self.assertEqual(observation["metadata"]["observed_by"], "operator")
 
+    def test_mgb_wheel_validation_builds_from_bounded_scratch_copy(self) -> None:
+        configuration = live_m18._configuration(
+            MGB_PROJECT,
+            "sha256:" + "a" * 64,
+        )
+        command = configuration.validations[0].command
+
+        self.assertEqual(command[:2], ("/bin/sh", "-c"))
+        recipe = command[2]
+        self.assertIn(
+            'cp -R /workspace/. "$TMPDIR/m18-build-source"',
+            recipe,
+        )
+        self.assertIn('cd "$TMPDIR/m18-build-source"', recipe)
+        self.assertIn('--outdir "$TMPDIR/m18-dist"', recipe)
+        self.assertNotIn("--outdir /tmp/m18-dist", recipe)
+        self.assertLess(recipe.index("make PYTHON="), recipe.index("cp -R "))
+
     def test_live_harness_starts_both_exact_registered_github_sidecars(self) -> None:
         specs = _github_specs(
             state_root=self.root,

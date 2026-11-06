@@ -2203,7 +2203,7 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 
 **Status: bounded implementation and internal quality gates complete through
 schema v52; external-review remediation R1-R8 complete; two-project live exit
-proof resumed**
+proof in final clean-restart remediation**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2683,6 +2683,30 @@ exit. It records 20 total successful provider invocations and 163,553 microusd
 of accounted subscription-equivalent usage. The exit proof therefore restarts
 from fresh state under the already-remediated controller; the partial evidence
 directory remains preserved for the audit trail.
+
+The first fresh-state run under the repaired controller then passed the
+credential-free carrier preflight and completed both producers plus both
+independent reviewers. Both candidates were genuine and both reviewers
+approved their exact candidate. Imitation Krab's full validation passed and
+reached maintainer disposition. Magic Glass Box's 1,669 candidate tests passed
+at 86% branch-aware coverage, but its subsequent wheel build correctly failed
+closed: the validation recipe asked setuptools to create `egg-info` inside the
+deliberately read-only candidate workspace. The resulting
+`validation_failed` owner ruling and pinned recipe remain untouched as a
+second honest partial proof; neither an approval nor passing tests were treated
+as readiness.
+
+The corrected recipe still runs quality directly against the immutable
+candidate, then copies that exact tree into the existing bounded validation
+tmpfs solely for wheel construction. A RED-first contract test rejects the old
+workspace-writing recipe. An exact non-root replay against the pinned
+validation image passed all 1,669 candidate tests at 86% coverage, and the
+scratch-copy build produced the wheel without creating anything in the source
+mount. The controller remediation gate passes 1,679 tests at 86% aggregate
+statement-plus-branch coverage with clean Ruff format and lint. Because an
+activated validation command is immutable authority, the failed execution is
+not rewritten or retried with a silently changed recipe; the final eligible
+two-project proof starts from a new state root under the committed controller.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

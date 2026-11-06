@@ -649,9 +649,11 @@ def _configuration(
             (
                 "set -eu; export RUFF_CACHE_DIR=/tmp/ruff-cache; "
                 "make PYTHON=/opt/mgb-validation/bin/python quality; "
-                "rm -rf /tmp/m18-dist; mkdir -p /tmp/m18-dist; "
+                'mkdir -p "$TMPDIR/m18-build-source" "$TMPDIR/m18-dist"; '
+                'cp -R /workspace/. "$TMPDIR/m18-build-source"; '
+                'cd "$TMPDIR/m18-build-source"; '
                 "/opt/mgb-validation/bin/python -m build --no-isolation --wheel "
-                "--outdir /tmp/m18-dist"
+                '--outdir "$TMPDIR/m18-dist"'
             ),
         ]
         rounds = 2
