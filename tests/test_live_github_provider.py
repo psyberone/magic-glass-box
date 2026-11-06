@@ -267,7 +267,11 @@ class LiveGitHubProviderProofTests(unittest.TestCase):
         self.assertNotIn("token", serialized.casefold())
 
         environment = _provider_environment(Path("/project/src"))
-        self.assertEqual(set(environment), {"PATH", "PYTHONPATH", "PYTHONUNBUFFERED"})
+        self.assertEqual(
+            set(environment),
+            {"PATH", "PYTHONDONTWRITEBYTECODE", "PYTHONPATH", "PYTHONUNBUFFERED"},
+        )
+        self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertNotIn("GH_TOKEN", environment)
         self.assertNotIn("GITHUB_TOKEN", environment)
 

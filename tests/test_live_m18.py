@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,8 @@ from scripts.check_live_m18 import (
     _LostReceiptClientFactory,
     _pin_controller_identity,
     _proof_status,
+    _registered_github_specs,
+    _resolve_github_source_root,
     _runtime_diagnostics,
     _start_github_providers,
     _usage_totals,
@@ -235,6 +238,166 @@ class LiveM18ContractTests(unittest.TestCase):
                 call.kwargs["candidate_root"] == self.root / "candidates"
                 for call in start.call_args_list
             )
+        )
+
+    def test_existing_state_retains_registered_github_authority(self) -> None:
+        registered = _github_specs(
+            state_root=self.root,
+            account="psyberone",
+            credential_scope_sha256="a" * 64,
+            base_deployment_sha256="b" * 64,
+        )
+        current = _github_specs(
+            state_root=self.root,
+            account="psyberone",
+            credential_scope_sha256="a" * 64,
+            base_deployment_sha256="c" * 64,
+        )
+        names = {
+            "github-m18-mgb": MGB_PROJECT,
+            "github-m18-ik": IK_PROJECT,
+        }
+
+        class Database:
+            @staticmethod
+            def get_service_sidecar(name: str) -> dict[str, object]:
+                spec = registered[names[name]]
+                return {
+                    "state": "active",
+                    "content_sha256": spec.digest,
+                    "spec": spec.to_dict(),
+                }
+
+        selected = _registered_github_specs(
+            Database(),  # type: ignore[arg-type]
+            expected=current,
+        )
+
+        self.assertEqual(selected, registered)
+        invalid = registered[MGB_PROJECT].to_dict()
+        invalid["mappings"][0]["repository"] = "intruder/repository"
+        with (
+            mock.patch.object(
+                Database,
+                "get_service_sidecar",
+                return_value={
+                    "state": "active",
+                    "content_sha256": live_m18.ServiceSidecarSpec.from_mapping(
+                        invalid
+                    ).digest,
+                    "spec": invalid,
+                },
+            ),
+            self.assertRaisesRegex(RuntimeError, "authority changed"),
+        ):
+            _registered_github_specs(
+                Database(),  # type: ignore[arg-type]
+                expected=current,
+            )
+
+    def test_changed_controller_recovers_exact_registered_github_source(self) -> None:
+        repository = self.root / "controller"
+        state = self.root / "state"
+        git_raw = shutil.which("git")
+        if git_raw is None:
+            self.skipTest("git is unavailable")
+        git = str(Path(git_raw).resolve())
+        package = repository / "src" / "magic_glass_box"
+        storage = package / "storage"
+        storage.mkdir(parents=True)
+        (package / "__init__.py").write_text("VERSION = 'old'\n", encoding="utf-8")
+        (package / "github_provider.py").write_text(
+            "PROVIDER = 'old'\n", encoding="utf-8"
+        )
+        (storage / "__init__.py").write_text("", encoding="utf-8")
+        (storage / "core.py").write_text("STATE = 'old'\n", encoding="utf-8")
+        live_m18._run_checked(
+            (git, "init", "--quiet", "--initial-branch", "main"), cwd=repository
+        )
+        live_m18._run_checked((git, "add", "."), cwd=repository)
+        live_m18._run_checked(
+            (
+                git,
+                "-c",
+                "user.name=MGB Tests",
+                "-c",
+                "user.email=mgb@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "old",
+            ),
+            cwd=repository,
+        )
+        old_commit = live_m18._run_checked((git, "rev-parse", "HEAD"), cwd=repository)
+        old_deployment = live_m18.workflow._github_deployment_sha256(repository / "src")
+        specs = _github_specs(
+            state_root=state,
+            account="psyberone",
+            credential_scope_sha256="a" * 64,
+            base_deployment_sha256=old_deployment,
+        )
+        (package / "github_provider.py").write_text(
+            "PROVIDER = 'new'\n", encoding="utf-8"
+        )
+        live_m18._run_checked((git, "add", "."), cwd=repository)
+        live_m18._run_checked(
+            (
+                git,
+                "-c",
+                "user.name=MGB Tests",
+                "-c",
+                "user.email=mgb@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "new",
+            ),
+            cwd=repository,
+        )
+        new_commit = live_m18._run_checked((git, "rev-parse", "HEAD"), cwd=repository)
+        state.mkdir()
+        (state / "observations.jsonl").write_text(
+            json.dumps(
+                {
+                    "kind": "controller.code_change",
+                    "metadata": {
+                        "previous": {"commit": old_commit},
+                        "replacement": {"commit": new_commit},
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        selected = _resolve_github_source_root(
+            project_root=repository,
+            current_source_root=repository / "src",
+            state_root=state,
+            current_commit=new_commit,
+            specs=specs,
+        )
+
+        self.assertNotEqual(selected, repository / "src")
+        self.assertEqual(
+            (selected / "magic_glass_box" / "github_provider.py").read_text(),
+            "PROVIDER = 'old'\n",
+        )
+        self.assertEqual(
+            (selected / "magic_glass_box" / "storage" / "core.py").read_text(),
+            "STATE = 'old'\n",
+        )
+        self.assertFalse((selected.parent / ".git").exists())
+        self.assertEqual(
+            _resolve_github_source_root(
+                project_root=repository,
+                current_source_root=repository / "src",
+                state_root=state,
+                current_commit=new_commit,
+                specs=specs,
+            ),
+            selected,
         )
 
     def test_usage_totals_are_complete_across_generations(self) -> None:

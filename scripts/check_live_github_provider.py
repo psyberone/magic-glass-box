@@ -159,6 +159,7 @@ def _valid_branch_ref(value: object) -> bool:
 def _provider_environment(source_root: Path) -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", os.defpath),
+        "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPATH": str(source_root),
         "PYTHONUNBUFFERED": "1",
     }

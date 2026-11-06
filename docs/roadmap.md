@@ -2655,6 +2655,20 @@ than risk another memory-pressure incident. It does not replace or inflate the
 accepted 41/50 result. The credential-free two-round-trip Docker preflight also
 passes after the root helper was pinned to its absolute immutable-image path.
 
+The first post-ruling continuation then failed closed before worker launch or
+quota use because the GitHub sidecars remained immutably registered to the
+pre-remediation controller deployment. R9 now keeps that separation honest:
+an owner-observed controller upgrade retains each exact registered authority,
+recovers its source from the prior observed commit into private proof state,
+verifies both the registered deployment identity and a full-tree digest, and
+launches the sidecar only from that pinned source. Provider subprocesses also
+disable bytecode writes so the recovered tree remains immutable. A real
+two-commit Git-history regression test proves that orchestration can advance
+on newer code without floating credential-bearing provider code or changing
+the registered authority. The resulting complete gate passes 1,678 tests at
+86% aggregate statement-plus-branch coverage with clean format, lint,
+compilation, and diff checks.
+
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
 ceiling, expired execution, inactive execution, open-ruling admission, typed

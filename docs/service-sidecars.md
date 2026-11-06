@@ -112,6 +112,12 @@ Before use, a sidecar registers:
 - an effective credential-scope fingerprint without the credential value; and
 - transport, response-size, duration, rate, and concurrency limits.
 
+A control-plane upgrade does not silently upgrade an already registered
+sidecar. Continuation must either launch the exact registered deployment from
+its pinned private source or create and deliberately bind a new immutable
+authority. Running newer controller-tree code while claiming the older
+deployment digest fails closed.
+
 Protocol v1 uses an operator-owned Unix socket beneath a mode-`0700` directory,
 with a mode-`0600` socket. Frames are length-prefixed, JSON is strict and
 duplicate-free, and one absolute deadline bounds connect, send, and receive.

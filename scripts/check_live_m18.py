@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -112,6 +115,17 @@ CONTROLLER_IDENTITY_NAME = "controller-identity.json"
 LOST_RECEIPT_DIRECTORY = "lost-receipts"
 MAX_DIAGNOSTIC_EVENTS = 32
 MAX_DIAGNOSTIC_TEXT = 2048
+MAX_CONTROLLER_OBSERVATIONS_BYTES = 1024 * 1024
+MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024
+CONTROLLER_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+GITHUB_SIDECAR_NAMES = {
+    MGB_PROJECT: "github-m18-mgb",
+    IK_PROJECT: "github-m18-ik",
+}
+GITHUB_REPOSITORIES = {
+    MGB_PROJECT: "psyberone/magic-glass-box",
+    IK_PROJECT: "psyberone/imitation-krab",
+}
 
 
 def _now() -> str:
@@ -808,6 +822,226 @@ def _github_specs(
             base_deployment_sha256=base_deployment_sha256,
         ),
     }
+
+
+def _registered_github_specs(
+    database: Database,
+    *,
+    expected: Mapping[str, ServiceSidecarSpec],
+) -> dict[str, ServiceSidecarSpec]:
+    """Retain immutable registered authorities across controller upgrades."""
+    selected: dict[str, ServiceSidecarSpec] = {}
+    for project_key in (MGB_PROJECT, IK_PROJECT):
+        registered = database.get_service_sidecar(GITHUB_SIDECAR_NAMES[project_key])
+        try:
+            spec = ServiceSidecarSpec.from_mapping(registered["spec"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"registered GitHub authority changed for {project_key}"
+            ) from exc
+        actual = spec.to_dict()
+        structural = expected[project_key].to_dict()
+        structural["deployment_sha256"] = spec.deployment_sha256
+        if (
+            registered.get("state") != "active"
+            or registered.get("content_sha256") != spec.digest
+            or actual != structural
+        ):
+            raise RuntimeError(f"registered GitHub authority changed for {project_key}")
+        selected[project_key] = spec
+    return selected
+
+
+def _github_specs_match_deployment(
+    specs: Mapping[str, ServiceSidecarSpec],
+    base_deployment_sha256: str,
+) -> bool:
+    return all(
+        specs[project_key].deployment_sha256
+        == _deployment_identity(
+            base_deployment_sha256,
+            project_key,
+            GITHUB_REPOSITORIES[project_key],
+        )
+        for project_key in (MGB_PROJECT, IK_PROJECT)
+    )
+
+
+def _source_tree_sha256(source_root: Path) -> str:
+    digest = hashlib.sha256()
+    files = 0
+    total = 0
+    for path in sorted(source_root.rglob("*")):
+        if path.is_dir():
+            continue
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError("pinned GitHub source contains an unsafe entry")
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError("pinned GitHub source is unavailable") from exc
+        files += 1
+        total += len(raw)
+        if total > MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES:
+            raise RuntimeError("pinned GitHub source exceeds its size bounds")
+        relative = path.relative_to(source_root).as_posix().encode("utf-8")
+        digest.update(relative + b"\0")
+        digest.update(len(raw).to_bytes(8, "big") + raw)
+    if files == 0:
+        raise RuntimeError("pinned GitHub source is empty")
+    return digest.hexdigest()
+
+
+def _materialize_controller_source(
+    *,
+    project_root: Path,
+    state_root: Path,
+    commit: str,
+) -> tuple[Path, str]:
+    if not isinstance(commit, str) or CONTROLLER_COMMIT_RE.fullmatch(commit) is None:
+        raise RuntimeError("controller source revision is invalid")
+    deployment_root = state_root / "deployments" / "github"
+    deployment_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(deployment_root, 0o700)
+    destination = deployment_root / commit
+    source_root = destination / "src"
+    manifest_path = destination / "manifest.json"
+    if destination.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("pinned GitHub source manifest is invalid") from exc
+        base_digest = workflow._github_deployment_sha256(source_root)
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schema_version") != 1
+            or manifest.get("commit") != commit
+            or manifest.get("base_deployment_sha256") != base_digest
+            or manifest.get("source_sha256") != _source_tree_sha256(source_root)
+        ):
+            raise RuntimeError("pinned GitHub source manifest is invalid")
+        return source_root, base_digest
+
+    git_raw = shutil.which("git")
+    if git_raw is None:
+        raise RuntimeError("git is required to pin GitHub provider source")
+    completed = subprocess.run(  # noqa: S603 - fixed local proof argv
+        (
+            str(Path(git_raw).resolve(strict=True)),
+            "-C",
+            str(project_root),
+            "archive",
+            "--format=tar",
+            commit,
+            "src/magic_glass_box",
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("registered GitHub source revision is unavailable")
+    archive_raw = completed.stdout
+    if not archive_raw or len(archive_raw) > MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES:
+        raise RuntimeError("pinned GitHub source archive exceeds its size bounds")
+
+    temporary = Path(tempfile.mkdtemp(prefix=".source-", dir=deployment_root))
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive_raw), mode="r:") as archive:
+            members = archive.getmembers()
+            if any(not (member.isdir() or member.isfile()) for member in members):
+                raise RuntimeError("pinned GitHub source archive is unsafe")
+            try:
+                archive.extractall(temporary, members=members, filter="data")
+            except (OSError, tarfile.TarError) as exc:
+                raise RuntimeError("pinned GitHub source archive is invalid") from exc
+            if not (temporary / "src" / "magic_glass_box").is_dir():
+                raise RuntimeError("pinned GitHub source archive is unsafe")
+        temporary_source = temporary / "src"
+        base_digest = workflow._github_deployment_sha256(temporary_source)
+        source_digest = _source_tree_sha256(temporary_source)
+        _write_private_json(
+            temporary / "manifest.json",
+            {
+                "schema_version": 1,
+                "commit": commit,
+                "base_deployment_sha256": base_digest,
+                "source_sha256": source_digest,
+            },
+        )
+        os.replace(temporary, destination)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    _append_observation(
+        state_root,
+        "sidecar.deployment_pinned",
+        "Recovered the exact registered GitHub sidecar source",
+        commit=commit,
+        base_deployment_sha256=base_digest,
+        source_sha256=source_digest,
+    )
+    return source_root, base_digest
+
+
+def _controller_commits(state_root: Path, current_commit: str) -> tuple[str, ...]:
+    candidates = [current_commit]
+    observations = state_root / OBSERVATIONS_NAME
+    if observations.exists():
+        raw = observations.read_bytes()
+        if len(raw) > MAX_CONTROLLER_OBSERVATIONS_BYTES:
+            raise RuntimeError("M18 observations exceed their recovery bound")
+        lines = raw.splitlines()
+        if len(lines) > 256:
+            raise RuntimeError("M18 observations exceed their recovery bound")
+        for line in reversed(lines):
+            try:
+                value = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+                raise RuntimeError("M18 observations are invalid") from exc
+            if (
+                not isinstance(value, dict)
+                or value.get("kind") != "controller.code_change"
+            ):
+                continue
+            metadata = value.get("metadata")
+            if not isinstance(metadata, dict):
+                raise RuntimeError("M18 controller observation is invalid")
+            for key in ("previous", "replacement"):
+                identity = metadata.get(key)
+                if isinstance(identity, dict):
+                    commit = identity.get("commit")
+                    if (
+                        isinstance(commit, str)
+                        and CONTROLLER_COMMIT_RE.fullmatch(commit) is not None
+                    ):
+                        candidates.append(commit)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _resolve_github_source_root(
+    *,
+    project_root: Path,
+    current_source_root: Path,
+    state_root: Path,
+    current_commit: str,
+    specs: Mapping[str, ServiceSidecarSpec],
+) -> Path:
+    current_digest = workflow._github_deployment_sha256(current_source_root)
+    if _github_specs_match_deployment(specs, current_digest):
+        return current_source_root
+    for commit in _controller_commits(state_root, current_commit):
+        if commit == current_commit:
+            continue
+        source_root, base_digest = _materialize_controller_source(
+            project_root=project_root,
+            state_root=state_root,
+            commit=commit,
+        )
+        if _github_specs_match_deployment(specs, base_digest):
+            return source_root
+    raise RuntimeError("registered GitHub deployment source is unavailable")
 
 
 def _start_github_providers(
@@ -1961,7 +2195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_account="psyberone",
     )
     github_deployment = workflow._github_deployment_sha256(source_root)
-    github_specs = _github_specs(
+    expected_github_specs = _github_specs(
         state_root=state_root,
         account=github_identity["account"],
         credential_scope_sha256=github_identity["credential_scope_sha256"],
@@ -1969,6 +2203,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     if fresh:
+        github_specs = expected_github_specs
+        github_source_root = source_root
         executions = _prepare_control_plane(
             control,
             state_root=state_root,
@@ -1983,6 +2219,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     else:
         assert existing_executions is not None
+        github_specs = _registered_github_specs(
+            database,
+            expected=expected_github_specs,
+        )
+        github_source_root = _resolve_github_source_root(
+            project_root=project_root,
+            current_source_root=source_root,
+            state_root=state_root,
+            current_commit=observed_controller["commit"],
+            specs=github_specs,
+        )
         executions = existing_executions
 
     connector = database.get_inference_connector(CONNECTOR_NAME)
@@ -2061,7 +2308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             specs=github_specs,
             candidate_store=candidate_store,
             state_root=state_root,
-            source_root=source_root,
+            source_root=github_source_root,
             gh_config_dir=gh_config_dir,
             gh_bin=gh_bin,
             git_bin=git_bin,
