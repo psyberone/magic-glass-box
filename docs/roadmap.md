@@ -2669,6 +2669,21 @@ the registered authority. The resulting complete gate passes 1,678 tests at
 86% aggregate statement-plus-branch coverage with clean format, lint,
 compilation, and diff checks.
 
+The repaired continuation then proved the carrier under the real paid path.
+The sole MGB producer retry completed successfully through the networkless
+worker, adding ten successful provider invocations without replaying the
+failed predecessor; its retained result remained available for later candidate
+materialization. IK's earlier producer result was materialized as a candidate.
+Before either review could advance, however, the IK execution reached its
+original 7,200-second wall-clock ceiling because the live-state remediation
+itself had occupied that elapsed interval. The director correctly opened a
+non-extendable `resource_exhausted` owner ruling. That state remains an honest
+partial proof rather than being cancelled, rewritten, or described as an M18
+exit. It records 20 total successful provider invocations and 163,553 microusd
+of accounted subscription-equivalent usage. The exit proof therefore restarts
+from fresh state under the already-remediated controller; the partial evidence
+directory remains preserved for the audit trail.
+
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
 ceiling, expired execution, inactive execution, open-ruling admission, typed
