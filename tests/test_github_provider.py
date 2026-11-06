@@ -12,6 +12,7 @@ from typing import Any
 from magic_glass_box.domain import WorkItemEnvelope, canonical_json, content_sha256
 from magic_glass_box.github_provider import (
     _PULL_EFFECTS_QUERY,
+    _PULL_MERGE_COMMIT_QUERY,
     GitHubAPIResponse,
     GitHubProvider,
     GitHubProviderError,
@@ -190,6 +191,18 @@ def interpreted_effects(*references: tuple[str, int]) -> dict[str, Any]:
                         ],
                         "pageInfo": {"hasNextPage": False},
                     }
+                }
+            }
+        }
+    }
+
+
+def interpreted_merge_commit(revision: str | None = MERGED) -> dict[str, Any]:
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "mergeCommit": None if revision is None else {"oid": revision}
                 }
             }
         }
@@ -1257,6 +1270,79 @@ class GitHubProviderTests(unittest.TestCase):
         self.assertEqual(response.outcome, "succeeded")
         self.assertEqual(response.receipt.observed_revision, MERGED)
         self.assertTrue(all(call["method"] == "GET" for call in api.calls))
+
+    def test_landing_reconcile_reads_merge_commit_when_rest_omits_it(self) -> None:
+        landed = pull(state="closed", merged=True)
+        landed["merge_commit_sha"] = None
+        api = FakeGitHubAPI(
+            [
+                api_response(200, landed),
+                api_response(200, ref(MERGED)),
+                api_response(200, interpreted_merge_commit()),
+                api_response(200, commit(MERGED)),
+            ]
+        )
+
+        response = GitHubProvider(self.spec, api).invoke(
+            request(
+                self.socket_path,
+                "landing.invoke",
+                phase="reconcile",
+                parameters={
+                    "assurance": "head_enforced",
+                    "integration_ref": "refs/heads/main",
+                    "merge_method": "squash",
+                },
+            )
+        )
+
+        self.assertEqual(response.outcome, "succeeded")
+        self.assertEqual(response.receipt.result["landing_revision"], MERGED)
+        self.assertEqual(api.calls[2]["method"], "POST")
+        self.assertEqual(api.calls[2]["endpoint"], "graphql")
+        self.assertEqual(api.calls[2]["body"]["query"], _PULL_MERGE_COMMIT_QUERY)
+        self.assertNotIn("PUT", {call["method"] for call in api.calls})
+
+    def test_landing_merge_commit_fallback_rejects_invalid_observation(self) -> None:
+        landed = pull(state="closed", merged=True)
+        landed["merge_commit_sha"] = None
+        invalid = (
+            interpreted_merge_commit(None),
+            {"data": {"repository": None}},
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {"mergeCommit": {"oid": "not-a-revision"}}
+                    }
+                }
+            },
+        )
+        for observation in invalid:
+            with self.subTest(observation=observation):
+                api = FakeGitHubAPI(
+                    [
+                        api_response(200, landed),
+                        api_response(200, ref(MERGED)),
+                        api_response(200, observation),
+                    ]
+                )
+
+                response = GitHubProvider(self.spec, api).invoke(
+                    request(
+                        self.socket_path,
+                        "landing.invoke",
+                        phase="reconcile",
+                        parameters={
+                            "assurance": "head_enforced",
+                            "integration_ref": "refs/heads/main",
+                            "merge_method": "squash",
+                        },
+                    )
+                )
+
+                self.assertEqual(response.outcome, "denied")
+                self.assertIsNone(response.receipt)
+                self.assertEqual(api.calls[-1]["endpoint"], "graphql")
 
     def test_landing_v2_uses_first_parent_not_graph_reachability(self) -> None:
         api = FakeGitHubAPI(

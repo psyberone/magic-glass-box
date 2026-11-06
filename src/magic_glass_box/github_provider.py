@@ -75,6 +75,14 @@ query MagicGlassBoxPullEffects($owner: String!, $name: String!, $number: Int!) {
 }
 """.strip()
 
+_PULL_MERGE_COMMIT_QUERY = """
+query MagicGlassBoxPullMergeCommit($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { mergeCommit { oid } }
+  }
+}
+""".strip()
+
 
 class GitHubProviderError(ValueError):
     """A GitHub provider contract or normalized upstream response is invalid."""
@@ -1471,9 +1479,14 @@ class GitHubProvider:
         if landed:
             landing_revision = pull["merge_commit_sha"]
             if landing_revision is None:
-                raise GitHubProviderError(
-                    "GitHub landed change has no landing revision"
+                landing_revision, failure = self._pull_merge_commit(
+                    invocation,
+                    pull["number"],
+                    observation_after_effect=True,
                 )
+                if failure is not None:
+                    return failure
+                assert landing_revision is not None
             parameters = self._landing_parameters(request)
             observed_effects: tuple[tuple[str, ...], tuple[str, ...]] | None = None
             if parameters["observe_effects"]:
@@ -1567,6 +1580,58 @@ class GitHubProvider:
             closed_references=(identity,) if landed else (),
             result=result,
         )
+
+    def _pull_merge_commit(
+        self,
+        invocation: _Invocation,
+        number: int,
+        *,
+        observation_after_effect: bool = False,
+    ) -> tuple[str | None, ServiceOperationResponse | None]:
+        owner, name = invocation.request.mapping.repository.split("/", 1)
+        response = self._call(
+            invocation,
+            "POST",
+            "graphql",
+            body={
+                "query": _PULL_MERGE_COMMIT_QUERY,
+                "variables": {"name": name, "number": number, "owner": owner},
+            },
+            read_only=True,
+        )
+        if response.status != 200:
+            return None, self._failure_for_response(
+                invocation,
+                response,
+                observation_after_effect=observation_after_effect,
+            )
+        document = _object(response.body, subject="pull merge commit")
+        if set(document) != {"data"}:
+            raise GitHubProviderError("GitHub pull merge commit response is invalid")
+        data = _object(document.get("data"), subject="pull merge commit data")
+        if set(data) != {"repository"}:
+            raise GitHubProviderError("GitHub pull merge commit response is invalid")
+        repository = _object(
+            data.get("repository"), subject="pull merge commit repository"
+        )
+        if set(repository) != {"pullRequest"}:
+            raise GitHubProviderError("GitHub pull merge commit response is invalid")
+        pull = _object(
+            repository.get("pullRequest"), subject="pull merge commit pull request"
+        )
+        if set(pull) != {"mergeCommit"}:
+            raise GitHubProviderError("GitHub pull merge commit response is invalid")
+        merge_commit = _object(
+            pull.get("mergeCommit"), subject="pull merge commit object"
+        )
+        revision = merge_commit.get("oid")
+        if (
+            set(merge_commit) != {"oid"}
+            or not isinstance(revision, str)
+            or GIT_OBJECT_ID_RE.fullmatch(revision) is None
+        ):
+            raise GitHubProviderError("GitHub pull merge commit response is invalid")
+        return revision, None
 
     def _get_commit(
         self, invocation: _Invocation, revision: str

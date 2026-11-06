@@ -22,6 +22,7 @@ from unittest.mock import patch
 from magic_glass_box.domain import canonical_json, content_sha256
 from magic_glass_box.github_provider import (
     _PULL_EFFECTS_QUERY,
+    _PULL_MERGE_COMMIT_QUERY,
     GitHubAPIResponse,
     GitHubProvider,
     GitHubProviderError,
@@ -360,6 +361,34 @@ class GitHubProviderCLITests(unittest.TestCase):
                     deadline="2099-01-01T00:00:00.000000+00:00",
                     response_limit_bytes=4096,
                 )
+
+    def test_api_transport_allows_fixed_merge_commit_graphql_read(self) -> None:
+        body = {
+            "query": _PULL_MERGE_COMMIT_QUERY,
+            "variables": {"name": "widgets", "number": 42, "owner": "acme"},
+        }
+        runner = FakeRunner(
+            [
+                GitHubCommandResult(
+                    returncode=0,
+                    stdout=included(200, {"data": {"repository": None}}),
+                    stderr=b"",
+                )
+            ]
+        )
+
+        response = self.client(runner).request(
+            "POST",
+            host="github.com",
+            endpoint="graphql",
+            body=body,
+            deadline="2099-01-01T00:00:00.000000+00:00",
+            response_limit_bytes=4096,
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(runner.calls[0]["argv"][-1], "graphql")
+        self.assertEqual(runner.calls[0]["stdin"], canonical_json(body).encode())
 
     def test_fixed_graphql_transport_failure_is_never_effect_ambiguous(self) -> None:
         body = {

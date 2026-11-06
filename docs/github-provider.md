@@ -182,6 +182,14 @@ the landing receipt must close exactly the same normalized pull-request
 identity. This proves proposal metadata and closure independently of the Git
 tree proof, without retaining a provider response envelope or URL.
 
+GitHub API version `2026-03-10` no longer supplies `merge_commit_sha` in the
+REST pull-request document. When that field is absent for a merged change, the
+carrier uses one additional fixed, read-only GraphQL query for only
+`mergeCommit.oid`. The query is allowlisted alongside the existing bounded
+closure-observation query; arbitrary GraphQL remains unavailable. The returned
+object ID still passes through the ordinary exact commit, tree, parent,
+primary-ref, and reachability checks before it can support a landing receipt.
+
 ## Live exit proof
 
 The destructive proof harness requires an exact clean clone, base revision,

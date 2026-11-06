@@ -34,6 +34,7 @@ from .domain import (
 )
 from .github_provider import (
     _PULL_EFFECTS_QUERY,
+    _PULL_MERGE_COMMIT_QUERY,
     PULL_NUMBER_RE,
     GitHubAPIResponse,
     GitHubProvider,
@@ -593,10 +594,10 @@ class GitHubCLI:
     ) -> bool:
         if method != "POST" or endpoint != "graphql" or not isinstance(body, dict):
             return False
-        if (
-            set(body) != {"query", "variables"}
-            or body.get("query") != _PULL_EFFECTS_QUERY
-        ):
+        if set(body) != {"query", "variables"} or body.get("query") not in {
+            _PULL_EFFECTS_QUERY,
+            _PULL_MERGE_COMMIT_QUERY,
+        }:
             return False
         variables = body.get("variables")
         if not isinstance(variables, dict) or set(variables) != {
