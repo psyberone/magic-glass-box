@@ -190,6 +190,18 @@ class LiveM18ContractTests(unittest.TestCase):
                     "spec": spec.to_dict(),
                 }
 
+        class CandidateStore:
+            calls = 0
+
+            def ensure_root(self) -> Path:
+                self.calls += 1
+                root = self_root / "candidates"
+                root.mkdir()
+                return root
+
+        self_root = self.root
+        candidate_store = CandidateStore()
+
         processes = [object(), object()]
         with (
             mock.patch.object(live_m18.workflow, "_clear_stale_socket") as clear,
@@ -201,6 +213,7 @@ class LiveM18ContractTests(unittest.TestCase):
             observed = _start_github_providers(
                 database=Database(),  # type: ignore[arg-type]
                 specs=specs,
+                candidate_store=candidate_store,  # type: ignore[arg-type]
                 state_root=self.root,
                 source_root=self.root / "source",
                 gh_config_dir=self.root / "gh-config",
@@ -209,6 +222,7 @@ class LiveM18ContractTests(unittest.TestCase):
             )
 
         self.assertEqual(observed, processes)
+        self.assertEqual(candidate_store.calls, 1)
         self.assertEqual(clear.call_count, 2)
         self.assertEqual(ensure.call_count, 2)
         self.assertEqual(start.call_count, 2)

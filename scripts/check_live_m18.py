@@ -807,6 +807,7 @@ def _start_github_providers(
     *,
     database: Database,
     specs: Mapping[str, ServiceSidecarSpec],
+    candidate_store: GitCandidateStore,
     state_root: Path,
     source_root: Path,
     gh_config_dir: Path,
@@ -817,6 +818,7 @@ def _start_github_providers(
         MGB_PROJECT: "github-m18-mgb",
         IK_PROJECT: "github-m18-ik",
     }
+    candidate_root = candidate_store.ensure_root()
     processes: list[subprocess.Popen[bytes]] = []
     try:
         for project_key in (MGB_PROJECT, IK_PROJECT):
@@ -843,7 +845,7 @@ def _start_github_providers(
                     git_bin=git_bin,
                     spec_path=spec_path,
                     socket_path=socket_path,
-                    candidate_root=state_root / "candidates",
+                    candidate_root=candidate_root,
                 )
             )
     except BaseException as exc:
@@ -1885,7 +1887,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
     )
     control = ControlPlane(database, service_client_factory=service_client_factory)
-    supervisor, gateways, result_store, _candidate_store = _build_supervisor(
+    supervisor, gateways, result_store, candidate_store = _build_supervisor(
         database=database,
         control=control,
         state_root=state_root,
@@ -1927,6 +1929,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         github_processes = _start_github_providers(
             database=database,
             specs=github_specs,
+            candidate_store=candidate_store,
             state_root=state_root,
             source_root=source_root,
             gh_config_dir=gh_config_dir,
