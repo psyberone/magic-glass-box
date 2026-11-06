@@ -399,6 +399,13 @@ class LiveM18ContractTests(unittest.TestCase):
             ),
             selected,
         )
+        recovery_observations = [
+            json.loads(line)
+            for line in (state / "observations.jsonl").read_text().splitlines()
+            if json.loads(line).get("kind") == "sidecar.deployment_pinned"
+        ]
+        self.assertEqual(len(recovery_observations), 1)
+        self.assertEqual(recovery_observations[0]["metadata"]["commit"], old_commit)
 
     def test_usage_totals_are_complete_across_generations(self) -> None:
         self.assertEqual(

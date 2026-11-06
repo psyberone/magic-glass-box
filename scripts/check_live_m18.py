@@ -897,7 +897,7 @@ def _materialize_controller_source(
     project_root: Path,
     state_root: Path,
     commit: str,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, bool]:
     if not isinstance(commit, str) or CONTROLLER_COMMIT_RE.fullmatch(commit) is None:
         raise RuntimeError("controller source revision is invalid")
     deployment_root = state_root / "deployments" / "github"
@@ -920,7 +920,7 @@ def _materialize_controller_source(
             or manifest.get("source_sha256") != _source_tree_sha256(source_root)
         ):
             raise RuntimeError("pinned GitHub source manifest is invalid")
-        return source_root, base_digest
+        return source_root, base_digest, False
 
     git_raw = shutil.which("git")
     if git_raw is None:
@@ -974,15 +974,7 @@ def _materialize_controller_source(
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    _append_observation(
-        state_root,
-        "sidecar.deployment_pinned",
-        "Recovered the exact registered GitHub sidecar source",
-        commit=commit,
-        base_deployment_sha256=base_digest,
-        source_sha256=source_digest,
-    )
-    return source_root, base_digest
+    return source_root, base_digest, True
 
 
 def _controller_commits(state_root: Path, current_commit: str) -> tuple[str, ...]:
@@ -995,7 +987,7 @@ def _controller_commits(state_root: Path, current_commit: str) -> tuple[str, ...
         lines = raw.splitlines()
         if len(lines) > 256:
             raise RuntimeError("M18 observations exceed their recovery bound")
-        for line in reversed(lines):
+        for line in lines:
             try:
                 value = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
@@ -1034,12 +1026,21 @@ def _resolve_github_source_root(
     for commit in _controller_commits(state_root, current_commit):
         if commit == current_commit:
             continue
-        source_root, base_digest = _materialize_controller_source(
+        source_root, base_digest, created = _materialize_controller_source(
             project_root=project_root,
             state_root=state_root,
             commit=commit,
         )
         if _github_specs_match_deployment(specs, base_digest):
+            if created:
+                _append_observation(
+                    state_root,
+                    "sidecar.deployment_pinned",
+                    "Recovered the exact registered GitHub sidecar source",
+                    commit=commit,
+                    base_deployment_sha256=base_digest,
+                    source_sha256=_source_tree_sha256(source_root),
+                )
             return source_root
     raise RuntimeError("registered GitHub deployment source is unavailable")
 
