@@ -1230,14 +1230,14 @@ def _response_usage(response: Mapping[str, Any]) -> InferenceUsage | None:
     if not isinstance(raw_usage, dict):
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
-            error_code="upstream_ambiguous",
+            error_code="upstream_stream_invalid_usage",
         )
     input_details = raw_usage.get("input_tokens_details", {})
     output_details = raw_usage.get("output_tokens_details", {})
     if not isinstance(input_details, dict) or not isinstance(output_details, dict):
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
-            error_code="upstream_ambiguous",
+            error_code="upstream_stream_invalid_usage",
         )
     try:
         usage = InferenceUsage.from_mapping(
@@ -1251,7 +1251,7 @@ def _response_usage(response: Mapping[str, Any]) -> InferenceUsage | None:
     except (KeyError, ValidationError) as exc:
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
-            error_code="upstream_ambiguous",
+            error_code="upstream_stream_invalid_usage",
         ) from exc
     total = raw_usage.get("total_tokens")
     if total is not None and (
@@ -1261,7 +1261,7 @@ def _response_usage(response: Mapping[str, Any]) -> InferenceUsage | None:
     ):
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
-            error_code="upstream_ambiguous",
+            error_code="upstream_stream_invalid_usage",
         )
     return usage
 
@@ -1274,7 +1274,7 @@ def _sse_terminal(
     except UnicodeDecodeError as exc:
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
-            error_code="upstream_ambiguous",
+            error_code="upstream_stream_invalid_utf8",
         ) from exc
     terminals: list[tuple[str, str | None, InferenceUsage | None]] = []
     saw_json_event = False
@@ -1296,7 +1296,7 @@ def _sse_terminal(
         except ChatGPTConnectorError as exc:
             raise ChatGPTResponseAmbiguousError(
                 "provider invocation outcome is ambiguous",
-                error_code="upstream_ambiguous",
+                error_code="upstream_stream_invalid_event",
             ) from exc
         saw_json_event = True
         event_type = event.get("type")
@@ -1305,12 +1305,22 @@ def _sse_terminal(
             if not isinstance(response, dict) or response.get("status") != "completed":
                 raise ChatGPTResponseAmbiguousError(
                     "provider invocation outcome is ambiguous",
-                    error_code="upstream_ambiguous",
+                    error_code="upstream_stream_invalid_completed",
                 )
             terminals.append(("completed", None, _response_usage(response)))
         elif event_type == "response.failed":
             response = event.get("response")
-            error = response.get("error") if isinstance(response, dict) else None
+            if not isinstance(response, dict) or response.get("status") != "failed":
+                raise ChatGPTResponseAmbiguousError(
+                    "provider invocation outcome is ambiguous",
+                    error_code="upstream_stream_invalid_failed",
+                )
+            error = response.get("error")
+            if error is not None and not isinstance(error, dict):
+                raise ChatGPTResponseAmbiguousError(
+                    "provider invocation outcome is ambiguous",
+                    error_code="upstream_stream_invalid_failed",
+                )
             code = error.get("code") if isinstance(error, dict) else None
             terminals.append(
                 (
@@ -1320,7 +1330,24 @@ def _sse_terminal(
                 )
             )
         elif event_type == "response.incomplete":
-            terminals.append(("failed", "response_incomplete", None))
+            response = event.get("response")
+            if not isinstance(response, dict) or response.get("status") != "incomplete":
+                raise ChatGPTResponseAmbiguousError(
+                    "provider invocation outcome is ambiguous",
+                    error_code="upstream_stream_invalid_incomplete",
+                )
+            details = response.get("incomplete_details")
+            if not isinstance(details, dict):
+                raise ChatGPTResponseAmbiguousError(
+                    "provider invocation outcome is ambiguous",
+                    error_code="upstream_stream_invalid_incomplete",
+                )
+            reason = _safe_error_code(details.get("reason"), fallback="unknown")
+            incomplete_code = _safe_error_code(
+                f"response_incomplete_{reason}",
+                fallback="response_incomplete",
+            )
+            terminals.append(("failed", incomplete_code, None))
         elif event_type == "error":
             code = event.get("code")
             if code is None:
@@ -1333,10 +1360,15 @@ def _sse_terminal(
                     None,
                 )
             )
-    if not saw_json_event or len(terminals) != 1:
+    if not saw_json_event or not terminals:
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
-            error_code="upstream_ambiguous",
+            error_code="upstream_stream_missing_terminal",
+        )
+    if len(terminals) != 1:
+        raise ChatGPTResponseAmbiguousError(
+            "provider invocation outcome is ambiguous",
+            error_code="upstream_stream_conflicting_terminals",
         )
     return terminals[0]
 
@@ -1827,7 +1859,7 @@ class OpenAIResponsesClient:
         ):
             raise ChatGPTResponseAmbiguousError(
                 "provider invocation outcome is ambiguous",
-                error_code="upstream_ambiguous",
+                error_code="upstream_content_type_invalid",
                 status_code=response.status_code,
                 request_bytes=len(body),
                 response_bytes=len(response.body),
@@ -1837,7 +1869,7 @@ class OpenAIResponsesClient:
         except ChatGPTResponseAmbiguousError as exc:
             raise ChatGPTResponseAmbiguousError(
                 "provider invocation outcome is ambiguous",
-                error_code="upstream_ambiguous",
+                error_code=exc.error_code,
                 status_code=response.status_code,
                 request_bytes=len(body),
                 response_bytes=len(response.body),

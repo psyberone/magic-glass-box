@@ -2202,8 +2202,9 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v52; external-review remediation R1-R8 complete; two-project live exit
-proof in final clean-restart remediation**
+schema v52; external-review remediation R1-R8 complete; third live checkpoint
+retained; provider-stream diagnostic remediation complete; paid continuation
+awaits explicit budget authority**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2707,6 +2708,41 @@ statement-plus-branch coverage with clean Ruff format and lint. Because an
 activated validation command is immutable authority, the failed execution is
 not rewritten or retried with a silently changed recipe; the final eligible
 two-project proof starts from a new state root under the committed controller.
+
+That new state pinned clean controller commit `1282eaf`, passed the real
+credential-free carrier preflight, and began both producers. Each first
+provider dispatch sent 43,432 request bytes and received an HTTP 200 stream of
+109,185 bytes, but the connector could not verify either stream as a successful
+terminal response and correctly recorded ambiguous outcomes. No candidate or
+downstream provider side effect followed.
+The preserved state conservatively accounts 3,400,000 microusd-equivalent;
+together with the two earlier preserved R9 states, cumulative conservative and
+reported accounting is 3,880,533 under the explicitly authorized $5 ceiling.
+One additional ambiguous reservation would exceed that authority, so no paid
+diagnostic call or retry was made.
+
+The event names were already supported; the live finding was that every
+post-dispatch parser rejection collapsed to the same `upstream_ambiguous`
+code. The RED-first correction now validates the documented completed, failed,
+and incomplete terminal shapes, retains a bounded incomplete reason, and
+distinguishes invalid UTF-8, event JSON, terminal shape, usage, content type,
+missing terminal, and conflicting terminals without retaining the response
+body. It deliberately does not infer which category caused the already-
+discarded streams. The next paid continuation requires a committed controller,
+an explicit code-change observation for the preserved state, and fresh budget
+authority sufficient for the conservative reservation before it can gather
+that evidence.
+
+The remediation gate passes 1,680 tests at 86% aggregate statement-plus-branch
+coverage with clean Ruff format and lint. Mutmut's incremental changed-line
+sample generated nine mutants: four died on the first run and two additional
+behavioral error-code mutants died after a survivor-driven assertion. The
+three remaining variants alter only inner exception prose that the public
+client deliberately replaces with its stable redacted diagnostic; they do not
+change outcome, error code, accounting, or replay authority. The effective
+meaningful score is therefore 6/6 (100%), above the 80% floor. Association
+generation and mutant execution were serial and completed without memory
+pressure.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

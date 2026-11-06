@@ -1697,8 +1697,9 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                 HTTPResponse(
                     200,
                     "text/event-stream",
-                    b'data: {"type":"response.failed","response":{"error":'
-                    b'{"code":"subscription_sharing_usage_limit_exceeded"}}}\n\n',
+                    b'data: {"type":"response.failed","response":'
+                    b'{"status":"failed","error":{"code":'
+                    b'"subscription_sharing_usage_limit_exceeded"}}}\n\n',
                     "req_stream",
                 ),
                 "subscription_sharing_usage_limit_exceeded",
@@ -1920,39 +1921,125 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         incomplete = HTTPResponse(
             200,
             "text/event-stream",
-            b'data: {"type":"response.incomplete"}\n\n',
+            b'data: {"type":"response.incomplete","response":'
+            b'{"status":"incomplete","incomplete_details":'
+            b'{"reason":"max_output_tokens"}}}\n\n',
             None,
         )
         with self.assertRaises(ChatGPTResponseFailure) as raised:
             self.invoke(FakeHTTPClient(incomplete))
-        self.assertEqual(raised.exception.error_code, "response_incomplete")
+        self.assertEqual(
+            raised.exception.error_code,
+            "response_incomplete_max_output_tokens",
+        )
 
         ambiguous = (
-            HTTPResponse(200, "application/json", completed_sse(), None),
-            HTTPResponse(
-                200,
-                "text/event-stream",
-                b'data: {"type":"response.completed",'
-                b'"response":{"status":"failed"}}\n\n',
-                None,
+            (
+                HTTPResponse(200, "application/json", completed_sse(), None),
+                "upstream_content_type_invalid",
             ),
-            HTTPResponse(
-                200,
-                "text/event-stream",
-                completed_sse() + completed_sse(),
-                None,
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b'data: {"type":"response.completed",'
+                    b'"response":{"status":"failed"}}\n\n',
+                    None,
+                ),
+                "upstream_stream_invalid_completed",
             ),
-            HTTPResponse(200, "text/event-stream", b"data: {bad-json}\n\n", None),
-            HTTPResponse(200, "text/event-stream", b"data: \xff\n\n", None),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b'data: {"type":"response.failed",'
+                    b'"response":{"status":"completed"}}\n\n',
+                    None,
+                ),
+                "upstream_stream_invalid_failed",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b'data: {"type":"response.incomplete"}\n\n',
+                    None,
+                ),
+                "upstream_stream_invalid_incomplete",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b'data: {"type":"response.incomplete","response":'
+                    b'{"status":"incomplete","incomplete_details":null}}\n\n',
+                    None,
+                ),
+                "upstream_stream_invalid_incomplete",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    completed_sse() + completed_sse(),
+                    None,
+                ),
+                "upstream_stream_conflicting_terminals",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b'data: {"type":"response.created"}\n\n',
+                    None,
+                ),
+                "upstream_stream_missing_terminal",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b"data: {bad-json}\n\n",
+                    None,
+                ),
+                "upstream_stream_invalid_event",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b"data: \xff\n\n",
+                    None,
+                ),
+                "upstream_stream_invalid_utf8",
+            ),
         )
-        for response in ambiguous:
+        for response, error_code in ambiguous:
             with (
                 self.subTest(
                     content_type=response.content_type, body=response.body[:20]
                 ),
-                self.assertRaises(ChatGPTResponseAmbiguousError),
+                self.assertRaises(ChatGPTResponseAmbiguousError) as raised,
             ):
                 self.invoke(FakeHTTPClient(response))
+            self.assertEqual(raised.exception.error_code, error_code)
+
+    def test_invalid_completed_usage_has_a_bounded_ambiguous_diagnostic(self) -> None:
+        response = HTTPResponse(
+            200,
+            "text/event-stream",
+            b'data: {"type":"response.completed","response":'
+            b'{"status":"completed","usage":{"input_tokens":"many"}}}\n\n',
+            None,
+        )
+
+        with self.assertRaises(ChatGPTResponseAmbiguousError) as raised:
+            self.invoke(FakeHTTPClient(response))
+
+        self.assertEqual(
+            raised.exception.error_code,
+            "upstream_stream_invalid_usage",
+        )
 
     def test_http_error_fallback_and_raw_response_limit_are_bounded(self) -> None:
         malformed = HTTPResponse(500, "application/json", b"not-json", None)
@@ -2192,6 +2279,16 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
         ambiguous = self.connector(
             FakeHTTPClient(HTTPTransportError("private", ambiguous=True))
         ).invoke(invocation_request(self.scope))
+        diagnosed_ambiguous = self.connector(
+            FakeHTTPClient(
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b'data: {"type":"response.created"}\n\n',
+                    "req_missing_terminal",
+                )
+            )
+        ).invoke(invocation_request(self.scope))
 
         self.assertEqual(failed.outcome, "failed")
         self.assertEqual(
@@ -2201,6 +2298,11 @@ class OpenAIChatGPTConnectorTests(unittest.TestCase):
         self.assertEqual(failed.retry_after_seconds, 91)
         self.assertEqual(ambiguous.outcome, "ambiguous")
         self.assertEqual(ambiguous.error_code, "upstream_ambiguous")
+        self.assertEqual(diagnosed_ambiguous.outcome, "ambiguous")
+        self.assertEqual(
+            diagnosed_ambiguous.error_code,
+            "upstream_stream_missing_terminal",
+        )
 
     def test_configuration_schema_and_route_limits_fail_closed(self) -> None:
         def value() -> dict[str, object]:

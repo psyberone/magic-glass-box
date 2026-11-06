@@ -366,6 +366,21 @@ is absent or exceeds the pinned output bound. Provider-reported input overhead
 and monetary reservation overruns remain successful, honestly accounted paid
 work rather than becoming discarded ambiguous responses.
 
+A 2xx stream is successful only when it contains exactly one structurally
+consistent `response.completed` terminal. A well-formed `response.failed` or
+`response.incomplete` terminal is an explicit failure; the latter preserves a
+bounded reason such as `response_incomplete_max_output_tokens`. Invalid UTF-8,
+invalid event JSON, invalid completed/failed/incomplete shapes, invalid usage,
+a missing terminal, conflicting terminals, and an explicitly wrong content
+type remain ambiguous and consume the conservative reservation. Each branch
+has a bounded machine-readable diagnostic code, while the provider stream
+itself remains transient. This follows OpenAI's documented distinction between
+completed, failed, incomplete, explicit-error, and interrupted streams; it
+does not turn a diagnostic into replay permission. See
+[Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events)
+and
+[Errors and recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+
 The OpenAI route additionally enforces the current Sign in with ChatGPT
 requirements before any HTTPS dispatch: `store` is false, `stream` is true,
 the model is connector-pinned, unsupported or unknown top-level fields fail
