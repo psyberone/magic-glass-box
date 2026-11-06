@@ -1,4 +1,4 @@
-FROM magic-glass-box/runtime-proof:m18c-068b6a8
+FROM magic-glass-box/runtime-proof:m18r9-81a5cf8
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git make \

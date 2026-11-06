@@ -1,4 +1,4 @@
-FROM magic-glass-box/runtime-proof:m18c-068b6a8
+FROM magic-glass-box/runtime-proof:m18r9-81a5cf8
 
 RUN python3 -m venv /opt/mgb-worker-tools \
     && /opt/mgb-worker-tools/bin/pip install --no-cache-dir \
