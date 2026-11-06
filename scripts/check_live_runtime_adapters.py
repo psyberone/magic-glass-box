@@ -631,6 +631,11 @@ class _RecordingDockerEngine:
     def remove(self, container_id: str) -> None:
         self.delegate.remove(container_id)
 
+    def publish_gateway_response(
+        self, container_id: str, response: bytes, marker: bytes
+    ) -> None:
+        self.delegate.publish_gateway_response(container_id, response, marker)
+
     def managed_containers(self, run_id: str) -> tuple[str, ...]:
         return self.delegate.managed_containers(run_id)
 

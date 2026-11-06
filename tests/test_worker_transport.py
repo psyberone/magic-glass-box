@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from magic_glass_box.gateway import MAX_GATEWAY_SEQUENCE, FileGatewayManager
+from magic_glass_box.gateway import (
+    GATEWAY_RESPONSE_NAME,
+    GATEWAY_RESPONSE_READY_NAME,
+    MAX_GATEWAY_SEQUENCE,
+    FileGatewayManager,
+    encode_gateway_delivery,
+)
 from magic_glass_box.service import AcceptedProviderResponse
 from magic_glass_box.worker_transport import (
     PROVIDER_GATEWAY_TIMEOUT_SECONDS,
@@ -25,6 +31,8 @@ from magic_glass_box.worker_transport import (
     ProviderHTTPTransport,
     ProviderRetryableTransportError,
     WorkerTransportError,
+    _install_gateway_delivery,
+    _mailbox_deliver,
     _strict_json,
     _TransportHandler,
     _TransportServer,
@@ -60,6 +68,116 @@ class ProviderControl:
 
 
 class FileGatewayClientTests(unittest.TestCase):
+    def test_mailbox_delivery_cli_requires_container_root(self) -> None:
+        with (
+            mock.patch("magic_glass_box.worker_transport.os.geteuid", return_value=501),
+            self.assertRaisesRegex(WorkerTransportError, "container root"),
+        ):
+            _mailbox_deliver()
+
+    def test_split_response_mailbox_rejects_worker_owned_state(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            responses = Path(temporary) / "responses"
+            responses.mkdir(mode=0o755)
+            (responses / GATEWAY_RESPONSE_READY_NAME).touch(mode=0o644)
+            client = FileGatewayClient(
+                mailbox,
+                response_directory=responses,
+                timeout=0.1,
+            )
+
+            with self.assertRaisesRegex(WorkerTransportError, "unsafe"):
+                client.exchange("run.describe", {})
+
+    def test_split_response_mailbox_uses_root_owned_delivery_frames(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            root = Path(temporary) / "gateway"
+            responses = Path(temporary) / "responses"
+            control = ProviderControl()
+            manager = FileGatewayManager(root, control, poll_interval=0.005)
+            try:
+                endpoint = manager.open(
+                    RUN_ID,
+                    capabilities=("provider.invoke",),
+                    credential_names=("openai-main",),
+                )
+
+                def deliver(response: bytes, marker: bytes) -> None:
+                    _install_gateway_delivery(
+                        encode_gateway_delivery(response, marker),
+                        directory=responses,
+                        owner_uid=os.getuid(),
+                    )
+
+                manager.attach_delivery(RUN_ID, deliver)
+                client = FileGatewayClient(
+                    endpoint.directory,
+                    response_directory=responses,
+                    timeout=1,
+                    response_owner_uid=os.getuid(),
+                )
+
+                accepted = client.exchange(
+                    "provider.invoke",
+                    {
+                        "grant": "openai-main",
+                        "request": {
+                            "body": {"input": "hello"},
+                            "protocol": "openai-responses",
+                        },
+                    },
+                )
+
+                self.assertTrue(accepted["ok"])
+                self.assertTrue((responses / GATEWAY_RESPONSE_NAME).is_file())
+                self.assertTrue((responses / GATEWAY_RESPONSE_READY_NAME).is_file())
+                self.assertEqual(responses.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(
+                    (responses / GATEWAY_RESPONSE_NAME).stat().st_mode & 0o777,
+                    0o644,
+                )
+            finally:
+                manager.close()
+
+    def test_delivery_frame_is_verified_before_replacing_a_response(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            directory = Path(temporary) / "responses"
+            response = b'{"ok":true}\n'
+            digest = hashlib.sha256(response).hexdigest()
+            marker = (
+                json.dumps(
+                    {"sequence": 1, "sha256": digest, "size": len(response)},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            _install_gateway_delivery(
+                encode_gateway_delivery(response, marker),
+                directory=directory,
+                owner_uid=os.getuid(),
+            )
+            prior = (directory / GATEWAY_RESPONSE_NAME).read_bytes()
+            invalid_marker = marker.replace(digest.encode(), b"0" * 64)
+
+            with self.assertRaisesRegex(WorkerTransportError, "delivery"):
+                _install_gateway_delivery(
+                    encode_gateway_delivery(response, invalid_marker),
+                    directory=directory,
+                    owner_uid=os.getuid(),
+                )
+
+            self.assertEqual((directory / GATEWAY_RESPONSE_NAME).read_bytes(), prior)
+
     def test_strict_json_rejects_nonfinite_exponent_numbers(self) -> None:
         for raw in (b'{"value":1e999}', b'{"value":-1e999}'):
             with (
@@ -443,6 +561,36 @@ class FileGatewayClientTests(unittest.TestCase):
             finally:
                 publisher.join(1)
             self.assertFalse(publisher.is_alive())
+
+    def test_expired_initial_deadline_does_not_start_a_fresh_response_wait(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108
+            mailbox = Path(temporary) / "mailbox"
+            mailbox.mkdir()
+            for name in (
+                "request.json",
+                "request.ready",
+                "response.json",
+                "response.ready",
+            ):
+                (mailbox / name).write_bytes(b"")
+            client = FileGatewayClient(mailbox, timeout=1)
+
+            with (
+                mock.patch(
+                    "magic_glass_box.worker_transport._read_file",
+                    side_effect=AssertionError("expired deadline read the mailbox"),
+                ),
+                self.assertRaisesRegex(WorkerTransportError, "timed out"),
+            ):
+                client._wait_response(
+                    1,
+                    "worker-" + "1" * 32,
+                    1,
+                    allow_progress=False,
+                    initial_deadline=time.monotonic() - 1,
+                )
 
     def test_response_commit_race_retries_the_newer_bounded_body(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:  # noqa: S108

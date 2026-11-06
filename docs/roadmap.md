@@ -2623,6 +2623,38 @@ records an explicit code-change observation. Harness-authored wake facts are
 labelled as such, and genuine change requests derive from their durable round
 cause rather than a round counter.
 
+The first R9 live attempt exposed a Docker Desktop carrier defect before the
+single MGB producer retry was authorized: container-to-host request commits
+were visible, but the already-running container retained an empty cached view
+of host-rewritten response inodes. The host held the correct committed bytes
+and a newly started container saw them, ruling out provider failure and MGB's
+marker encoding. Buffered writes, raw writes, atomic replacement, consistency
+flags, and alternate host paths all reproduced the same one-way boundary.
+
+R9 now treats the bind mount as request-only transport. The host mirrors every
+committed response through bounded Docker stdin to a fixed root helper, which
+installs it in a 32 MiB root-owned container tmpfs. The agent remains non-root,
+networkless, and unable to modify the response side; response content is
+absent from argv and logs. RED-first tests cover exact framing, digest
+verification before replacement, split-mailbox reads, immutable response
+permissions, pre-start attachment, and bounded engine delegation. A
+credential-free M18 preflight then passed two 116 KiB round trips, including a
+delayed second response, through the rebuilt real worker image. The prior live
+state and its one open retry ruling remain untouched until the affected gates
+and focused mutation checks pass.
+
+Those carrier gates now pass. The complete suite passes 1,676 tests at 86%
+aggregate statement-plus-branch coverage, with clean Ruff format/lint,
+compilation, and diff checks. The serial focused mutation pass killed 41/50
+selected mutants (82%). The nine first-pass survivors comprised eight
+meaningful boundary variants and one whitespace-equivalent variant; direct
+RED-first regression tests now pin all eight meaningful behaviors. A requested
+survivor replay began rebuilding associations instead of executing the nine
+targets, so it was stopped at the declared 20-minute stability ceiling rather
+than risk another memory-pressure incident. It does not replace or inflate the
+accepted 41/50 result. The credential-free two-round-trip Docker preflight also
+passes after the root helper was pinned to its absolute immutable-image path.
+
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
 ceiling, expired execution, inactive execution, open-ruling admission, typed

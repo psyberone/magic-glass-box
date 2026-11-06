@@ -88,6 +88,7 @@ class FakeExecutor:
         self.cleanup_calls: list[str] = []
         self.stop_calls: list[str] = []
         self.stop_results: list[int] = []
+        self.publish_calls: list[tuple[str, bytes, bytes]] = []
         self.stopped = threading.Event()
 
     def execute(self, request: SandboxRequest, *, before_start=None) -> SandboxResult:
@@ -126,6 +127,11 @@ class FakeExecutor:
         if result:
             self.stopped.set()
         return result
+
+    def publish_gateway_response(
+        self, container_id: str, response: bytes, marker: bytes
+    ) -> None:
+        self.publish_calls.append((container_id, response, marker))
 
 
 class FakeResultStore:
@@ -188,6 +194,7 @@ class FakeGatewayManager:
         self.cleanup_error: Exception | None = None
         self.open_calls: list[tuple[str, tuple[object, ...], tuple[str, ...]]] = []
         self.cleanup_calls: list[str] = []
+        self.delivery_calls: list[tuple[str, object]] = []
 
     def open(
         self,
@@ -206,6 +213,9 @@ class FakeGatewayManager:
         if self.cleanup_error is not None:
             raise self.cleanup_error
         return True
+
+    def attach_delivery(self, run_id: str, delivery: object) -> None:
+        self.delivery_calls.append((run_id, delivery))
 
 
 class RunCoordinatorTests(unittest.TestCase):
@@ -414,6 +424,15 @@ class RunCoordinatorTests(unittest.TestCase):
                     ("krab", "provider-main"),
                 )
             ],
+        )
+        self.assertEqual(len(self.gateways.delivery_calls), 1)
+        delivery_run_id, delivery = self.gateways.delivery_calls[0]
+        self.assertEqual(delivery_run_id, run["id"])
+        assert callable(delivery)
+        delivery(b"response", b"marker")
+        self.assertEqual(
+            self.executor.publish_calls,
+            [(CONTAINER_ID, b"response", b"marker")],
         )
         self.assertEqual(
             self.workspaces.prepare_calls,

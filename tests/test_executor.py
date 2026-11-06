@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shlex
@@ -28,10 +29,12 @@ from magic_glass_box.executor import (
     build_sandbox_plan,
 )
 from magic_glass_box.gateway import (
+    CONTAINER_GATEWAY_RESPONSE_ROOT,
     GATEWAY_REQUEST_NAME,
     GATEWAY_REQUEST_READY_NAME,
     GATEWAY_RESPONSE_NAME,
     GATEWAY_RESPONSE_READY_NAME,
+    decode_gateway_delivery,
 )
 from magic_glass_box.runtime import RuntimeLaunch
 
@@ -335,6 +338,17 @@ class SandboxPlanTests(unittest.TestCase):
         arguments = "\n".join(plan.create_args)
         self.assertIn(
             "MAGIC_GLASS_BOX_GATEWAY_DIR=/run/magic-glass-box",
+            plan.create_args,
+        )
+        self.assertIn(
+            f"MAGIC_GLASS_BOX_GATEWAY_RESPONSE_DIR={CONTAINER_GATEWAY_RESPONSE_ROOT}",
+            plan.create_args,
+        )
+        self.assertIn(
+            (
+                f"{CONTAINER_GATEWAY_RESPONSE_ROOT}:rw,nosuid,nodev,noexec,"
+                "size=32m,mode=0755,uid=0,gid=0"
+            ),
             plan.create_args,
         )
         self.assertIn(
@@ -768,6 +782,11 @@ class FakeDockerEngine:
     def remove(self, container_id: str) -> None:
         self._call("remove", container_id)
 
+    def publish_gateway_response(
+        self, container_id: str, response: bytes, marker: bytes
+    ) -> None:
+        self._call("publish", (container_id, response, marker))
+
     def managed_containers(self, run_id: str) -> tuple[str, ...]:
         self._call("managed", run_id)
         return self.managed
@@ -970,6 +989,17 @@ class DockerExecutorTests(unittest.TestCase):
         self.assertEqual(
             [operation for operation, _ in self.engine.calls],
             ["inspect", "create", "remove"],
+        )
+
+    def test_gateway_response_publication_is_delegated_to_the_engine(self) -> None:
+        response = b'{"ok":true}\n'
+        marker = b'{"sequence":1,"sha256":"0","size":12}\n'
+
+        self.executor.publish_gateway_response(CONTAINER_ID, response, marker)
+
+        self.assertEqual(
+            self.engine.calls,
+            [("publish", (CONTAINER_ID, response, marker))],
         )
 
     def test_log_capture_failure_still_removes_the_container(self) -> None:
@@ -1198,6 +1228,50 @@ class DockerCLITests(unittest.TestCase):
                 ["container", "rm", "--force", "--volumes", CONTAINER_ID],
             ],
         )
+
+    def test_gateway_response_uses_bounded_stdin_not_command_arguments(self) -> None:
+        response = b'{"ok":true}\n'
+        digest = __import__("hashlib").sha256(response).hexdigest()
+        marker = (
+            json.dumps(
+                {"sequence": 1, "sha256": digest, "size": len(response)},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            + b"\n"
+        )
+        self.runner.return_value = self.completed()
+
+        self.client.publish_gateway_response(CONTAINER_ID, response, marker)
+
+        call = self.runner.call_args
+        command = call.args[0]
+        self.assertEqual(
+            command,
+            [
+                "/usr/local/bin/docker",
+                "container",
+                "exec",
+                "--env",
+                "PYTHONHOME=",
+                "--env",
+                "PYTHONPATH=",
+                "--workdir",
+                "/",
+                "--user",
+                "0:0",
+                "--interactive",
+                CONTAINER_ID,
+                "/usr/local/bin/magic-glass-box-worker",
+                "mailbox-deliver",
+            ],
+        )
+        self.assertNotIn(response.decode(), " ".join(command))
+        frame = base64.b64decode(call.kwargs["input"], validate=True)
+        self.assertEqual(decode_gateway_delivery(frame), (response, marker))
+        self.assertNotIn("stdin", call.kwargs)
+        with self.assertRaisesRegex(ExecutionError, "container identifier"):
+            self.client.publish_gateway_response("short", response, marker)
 
     def test_lists_managed_containers_by_exact_run_label(self) -> None:
         second = "c" * 64

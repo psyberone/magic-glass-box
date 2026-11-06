@@ -151,10 +151,12 @@ against a real local `imitation-krab`: idempotent question delivery,
 bodyless reminder replay, reverse-route response verification, and
 metadata-only local persistence all pass. The same proof verifies the control
 room's live role and claim-queue overlay without surfacing private interaction
-content. The gateway carrier has
-been exercised through the real Docker executor:
-the worker has `--network none`, direct egress fails, and a typed request still
-reaches the orchestrator. A second live proof reaches one policy-pinned local
+content. The gateway carrier has been exercised through the real Docker
+executor: the worker has `--network none`, direct egress fails, and typed
+requests reach the orchestrator. Responses return through a bounded root-owned
+container tmpfs, not a Docker Desktop bind rewrite; a credential-free
+preflight proves two large round trips before any live-provider start. A second
+live proof reaches one policy-pinned local
 provider through a separately launched connector while undeclared grants,
 destinations, models, direct networking, and credential exposure all fail
 closed. Controlled remote execution has likewise completed its live

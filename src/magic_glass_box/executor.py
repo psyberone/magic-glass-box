@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -17,15 +19,18 @@ from typing import Protocol
 
 from .domain import AgentProfileSpec, NetworkMode, WorkspaceMode
 from .gateway import (
+    CONTAINER_GATEWAY_RESPONSE_ROOT,
     CONTAINER_GATEWAY_ROOT,
     GATEWAY_FILE_NAMES,
     GATEWAY_WRITABLE_NAMES,
+    encode_gateway_delivery,
 )
 from .runtime import RuntimeLaunch
 
 RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+CONTAINER_WORKER_TRANSPORT_EXECUTABLE = "/usr/local/bin/magic-glass-box-worker"
 MAX_DOCKER_OUTPUT_BYTES = 1024 * 1024
 MAX_DOCKER_LOG_BYTES = 24 * 1024 * 1024
 DEFAULT_RUN_TIMEOUT_SECONDS = 6 * 60 * 60
@@ -44,6 +49,7 @@ RESERVED_RUNTIME_ENVIRONMENT = {
     "KRAB_TOKEN_FILE",
     "MAGIC_GLASS_BOX_CREDENTIAL_DIR",
     "MAGIC_GLASS_BOX_GATEWAY_DIR",
+    "MAGIC_GLASS_BOX_GATEWAY_RESPONSE_DIR",
     "MAGIC_GLASS_BOX_RUN_ID",
     "TMPDIR",
 }
@@ -275,6 +281,16 @@ def build_sandbox_plan(
         "--tmpfs",
         f"/tmp:rw,nosuid,nodev,noexec,size={policy.tmpfs_bytes}",  # noqa: S108
     ]
+    if gateway is not None:
+        tmpfs_args.extend(
+            (
+                "--tmpfs",
+                (
+                    f"{CONTAINER_GATEWAY_RESPONSE_ROOT}:rw,nosuid,nodev,noexec,"
+                    "size=32m,mode=0755,uid=0,gid=0"
+                ),
+            )
+        )
     if request.validation_tmpfs:
         tmpfs_args.extend(
             (
@@ -344,6 +360,15 @@ def build_sandbox_plan(
         args.extend(("--env", f"{name}={runtime_environment[name]}"))
     if gateway is not None:
         args.extend(("--env", f"MAGIC_GLASS_BOX_GATEWAY_DIR={CONTAINER_GATEWAY_ROOT}"))
+        args.extend(
+            (
+                "--env",
+                (
+                    "MAGIC_GLASS_BOX_GATEWAY_RESPONSE_DIR="
+                    f"{CONTAINER_GATEWAY_RESPONSE_ROOT}"
+                ),
+            )
+        )
     args.extend(("--mount", workspace_mount))
     if gateway is not None:
         args.extend(
@@ -386,6 +411,10 @@ class DockerEngine(Protocol):
     def stop(self, container_id: str) -> None: ...
 
     def remove(self, container_id: str) -> None: ...
+
+    def publish_gateway_response(
+        self, container_id: str, response: bytes, marker: bytes
+    ) -> None: ...
 
     def managed_containers(self, run_id: str) -> tuple[str, ...]: ...
 
@@ -478,6 +507,11 @@ class DockerExecutor:
     def stop_run(self, run_id: str) -> int:
         return self._operate_managed(run_id, self.engine.stop)
 
+    def publish_gateway_response(
+        self, container_id: str, response: bytes, marker: bytes
+    ) -> None:
+        self.engine.publish_gateway_response(container_id, response, marker)
+
     def _operate_managed(self, run_id: str, operation: Callable[[str], None]) -> int:
         if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:
             raise ExecutionError("invalid run identifier")
@@ -539,27 +573,42 @@ class DockerCLI:
         timeout: float | None = None,
         use_command_timeout: bool = True,
         max_output_bytes: int = MAX_DOCKER_OUTPUT_BYTES,
+        input_text: str | None = None,
     ) -> str:
         effective_timeout = self.command_timeout if use_command_timeout else timeout
         try:
             command = [str(self.binary), *args]
             if self.runner is None:
-                completed = self._bounded_process(
-                    command,
-                    timeout=effective_timeout,
-                    max_output_bytes=max_output_bytes,
-                )
+                if input_text is None:
+                    completed = self._bounded_process(
+                        command,
+                        timeout=effective_timeout,
+                        max_output_bytes=max_output_bytes,
+                    )
+                else:
+                    with tempfile.TemporaryFile() as source:
+                        source.write(input_text.encode("ascii"))
+                        source.seek(0)
+                        completed = self._bounded_process(
+                            command,
+                            timeout=effective_timeout,
+                            max_output_bytes=max_output_bytes,
+                            stdin=source,
+                        )
             else:
-                completed = self.runner(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=effective_timeout,
-                    check=False,
-                )
+                runner_arguments: dict[str, object] = {
+                    "capture_output": True,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "timeout": effective_timeout,
+                    "check": False,
+                }
+                if input_text is None:
+                    runner_arguments["stdin"] = subprocess.DEVNULL
+                else:
+                    runner_arguments["input"] = input_text
+                completed = self.runner(command, **runner_arguments)
         except subprocess.TimeoutExpired:
             raise ExecutionError("Docker command timed out") from None
         except OSError:
@@ -588,12 +637,13 @@ class DockerCLI:
         *,
         timeout: float | None,
         max_output_bytes: int,
+        stdin: object = subprocess.DEVNULL,
     ) -> subprocess.CompletedProcess[str]:
         if timeout is None:
             raise ExecutionError("Docker command timeout is unavailable")
         process = subprocess.Popen(  # noqa: S603 - configured absolute Docker binary
             command,
-            stdin=subprocess.DEVNULL,
+            stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -713,6 +763,36 @@ class DockerCLI:
 
     def remove(self, container_id: str) -> None:
         self._run(("container", "rm", "--force", "--volumes", container_id))
+
+    def publish_gateway_response(
+        self, container_id: str, response: bytes, marker: bytes
+    ) -> None:
+        if (
+            not isinstance(container_id, str)
+            or CONTAINER_ID_RE.fullmatch(container_id) is None
+        ):
+            raise ExecutionError("invalid container identifier")
+        frame = encode_gateway_delivery(response, marker)
+        encoded = base64.b64encode(frame).decode("ascii")
+        self._run(
+            (
+                "container",
+                "exec",
+                "--env",
+                "PYTHONHOME=",
+                "--env",
+                "PYTHONPATH=",
+                "--workdir",
+                "/",
+                "--user",
+                "0:0",
+                "--interactive",
+                container_id,
+                CONTAINER_WORKER_TRANSPORT_EXECUTABLE,
+                "mailbox-deliver",
+            ),
+            input_text=encoded,
+        )
 
     def managed_containers(self, run_id: str) -> tuple[str, ...]:
         if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:

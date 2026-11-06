@@ -41,7 +41,9 @@ from magic_glass_box.gateway import (
     GatewayError,
     RunGateway,
     _write_all,
+    decode_gateway_delivery,
     default_gateway_root,
+    encode_gateway_delivery,
 )
 from magic_glass_box.krab import KrabError
 from magic_glass_box.provider import (
@@ -1744,6 +1746,84 @@ class FileGatewayManagerTests(unittest.TestCase):
         self.assertTrue(self.manager.cleanup(RUN_ID))
         self.assertFalse(endpoint.directory.exists())
         self.assertFalse(self.manager.cleanup(RUN_ID))
+
+    def test_attached_delivery_receives_the_exact_committed_response(self) -> None:
+        endpoint = self.manager.open(
+            RUN_ID,
+            capabilities=(GatewayCapability.RUN_DESCRIBE,),
+            credential_names=("krab",),
+        )
+        deliveries: list[tuple[bytes, bytes]] = []
+        self.manager.attach_delivery(
+            RUN_ID, lambda response, marker: deliveries.append((response, marker))
+        )
+
+        response = self.exchange(
+            endpoint.directory,
+            (json.dumps(request("run.describe")) + "\n").encode(),
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(len(deliveries), 1)
+        delivered_response, delivered_marker = deliveries[0]
+        self.assertEqual(
+            delivered_response,
+            (endpoint.directory / GATEWAY_RESPONSE_NAME).read_bytes(),
+        )
+        self.assertEqual(
+            delivered_marker,
+            (endpoint.directory / GATEWAY_RESPONSE_READY_NAME).read_bytes(),
+        )
+        self.assertEqual(
+            decode_gateway_delivery(
+                encode_gateway_delivery(delivered_response, delivered_marker)
+            ),
+            (delivered_response, delivered_marker),
+        )
+        with self.assertRaisesRegex(GatewayError, "already attached"):
+            self.manager.attach_delivery(RUN_ID, lambda _response, _marker: None)
+        with self.assertRaisesRegex(GatewayError, "not active"):
+            self.manager.attach_delivery(OTHER_RUN_ID, lambda _response, _marker: None)
+
+    def test_oversized_response_delivery_preserves_correlated_failure(self) -> None:
+        endpoint = self.manager.open(
+            RUN_ID,
+            capabilities=(GatewayCapability.RUN_DESCRIBE,),
+            credential_names=("krab",),
+        )
+        deliveries: list[tuple[bytes, bytes]] = []
+        self.manager.attach_delivery(
+            RUN_ID, lambda response, marker: deliveries.append((response, marker))
+        )
+        channel = self.manager._active[RUN_ID][0]
+
+        with mock.patch("magic_glass_box.gateway.MAX_GATEWAY_RESPONSE_BYTES", 64):
+            channel._publish(
+                1,
+                {
+                    "version": 1,
+                    "request_id": "req-12345678",
+                    "ok": True,
+                    "result": {"value": "x" * 1024},
+                },
+            )
+
+        self.assertEqual(len(deliveries), 1)
+        raw, marker_raw = deliveries[0]
+        self.assertTrue(raw.endswith(b"\n"))
+        response = json.loads(raw)
+        self.assertEqual(response["request_id"], "req-12345678")
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "internal_error")
+        self.assertEqual(
+            response["error"]["message"],
+            "gateway response exceeds its size limit",
+        )
+        marker = json.loads(marker_raw)
+        self.assertEqual(marker["sequence"], 1)
+        self.assertEqual(marker["size"], len(raw))
+        self.assertEqual(marker["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual((endpoint.directory / GATEWAY_RESPONSE_NAME).read_bytes(), raw)
 
     def test_mailbox_write_rejects_a_zero_progress_os_write(self) -> None:
         target = Path(self.temporary.name) / "zero-progress"

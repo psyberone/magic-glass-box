@@ -500,9 +500,12 @@ network namespace. It translates the vendor protocol to serialized mailbox
 operations. MGB turns an authorized mailbox operation into one strict connector
 invocation; only the separately launched connector owns an upstream socket or
 reusable provider credential.
-The mailbox directory and response files are read-only in the container. Only
-the fixed request payload and request commit files are writable. Sequence,
-size, and SHA-256 commitments prevent torn reads and stale response confusion.
+Only the fixed request payload and request commit bind files are worker-
+writable. Responses are installed through bounded Docker stdin in a dedicated
+root-owned container tmpfs; the non-root worker can read but cannot modify
+them. This avoids relying on host-to-container bind rewrite coherence while
+preserving `--network none`. Sequence, size, and SHA-256 commitments prevent
+torn reads and stale response confusion.
 The retired `krab_only` mode fails closed.
 
 The gateway binds run identity outside the agent-controlled request. Its

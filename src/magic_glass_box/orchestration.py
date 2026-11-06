@@ -44,6 +44,10 @@ class SandboxExecutor(Protocol):
 
     def stop_run(self, run_id: str) -> int: ...
 
+    def publish_gateway_response(
+        self, container_id: str, response: bytes, marker: bytes
+    ) -> None: ...
+
 
 class RunWorkspaceManager(Protocol):
     def prepare(
@@ -65,6 +69,12 @@ class RunGatewayManager(Protocol):
     ) -> GatewayEndpoint: ...
 
     def cleanup(self, run_id: str) -> bool: ...
+
+    def attach_delivery(
+        self,
+        run_id: str,
+        delivery: Callable[[bytes, bytes], None],
+    ) -> None: ...
 
 
 class RunResultStore(Protocol):
@@ -458,6 +468,16 @@ class RunCoordinator:
 
                 def before_start(plan: SandboxPlan, container_id: str) -> None:
                     nonlocal running_attempt, started_container
+                    if gateway_directory is not None:
+                        assert self.gateway_manager is not None
+                        self.gateway_manager.attach_delivery(
+                            run_id,
+                            lambda response, marker: (
+                                self.executor.publish_gateway_response(
+                                    container_id, response, marker
+                                )
+                            ),
+                        )
                     started_container = (plan, container_id)
                     running_attempt = self.database.start_run_attempt(
                         attempt["id"],

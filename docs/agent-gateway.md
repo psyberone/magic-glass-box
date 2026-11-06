@@ -47,20 +47,39 @@ fresh allowance under the same ceiling.
 
 ## Carrier contract
 
-The container receives `MAGIC_GLASS_BOX_GATEWAY_DIR=/run/magic-glass-box`.
-That directory contains four mode-0600 regular files:
+The container receives the request-side
+`MAGIC_GLASS_BOX_GATEWAY_DIR=/run/magic-glass-box` and the response-side
+`MAGIC_GLASS_BOX_GATEWAY_RESPONSE_DIR=/run/magic-glass-box-gateway-response`.
+The host mailbox contains four mode-0600 regular files:
 
 | File | Worker access | Purpose |
 | --- | --- | --- |
 | `request.json` | read/write | One UTF-8 JSON request followed by `\n` |
 | `request.ready` | read/write | Commit for the complete request |
-| `response.json` | read-only | One UTF-8 JSON response followed by `\n` |
-| `response.ready` | read-only | Commit for the complete response |
+| `response.json` | read-only host copy | One UTF-8 JSON response followed by `\n` |
+| `response.ready` | read-only host copy | Commit for the complete response |
 
-The directory itself is mounted read-only. Docker overlays only the two request
-files as writable bind mounts, so the worker cannot add paths or replace the
-response files. This regular-file carrier works across native Linux and Docker
-Desktop, where host Unix sockets do not cross the VM-backed bind boundary.
+The request directory is mounted read-only. Docker overlays only the two
+request files as writable bind mounts, so the worker cannot add paths. The
+trusted host writes the response commit to its private mailbox, then sends the
+same bounded response and marker over Docker's stdin channel to a fixed
+`/usr/local/bin/magic-glass-box-worker mailbox-deliver` helper. The absolute
+image-owned path prevents runtime environment or workspace content from
+selecting a different root process. That helper runs as container root and
+installs the commit in a dedicated 32 MiB `noexec`, `nosuid`, `nodev` tmpfs. The agent runs
+as a different non-root identity; it can read the mode-0644 response files but
+cannot create, replace, chmod, or write them. Response bytes never enter Docker
+command arguments or container logs, and the worker receives no Docker
+authority.
+
+This asymmetric carrier is intentional. Dynamic host rewrites of an already
+bind-mounted inode are not reliably visible to a running container on every
+Docker Desktop file-sharing backend, while container-to-host request writes
+are visible. Host Unix sockets likewise do not cross that VM-backed boundary.
+Installing the response inside the container gives native Linux and Docker
+Desktop the same fail-closed protocol without granting worker networking or a
+writable response path. Every live harness proves two large bidirectional
+round trips through this exact path before loading remote-provider credentials.
 
 The request files are nevertheless writable host storage. The executor fails
 closed unless a trusted embedding admits the request under an external hard
@@ -79,11 +98,12 @@ A commit is a newline-terminated, canonical JSON object:
 The worker writes and flushes `request.json`, then writes and flushes
 `request.ready`. Sequences are positive, strictly increasing safe integers.
 The orchestrator reads a request only when its exact byte length and SHA-256
-match the commit. It writes and flushes `response.json` before publishing the
-matching sequence in `response.ready`. Requests are limited to 3 MiB and
-responses to 9 MiB so a 2 MiB vendor request or escaped 4 MiB buffered SSE
-response still fits its committed envelope. Malformed frames, duplicate JSON
-keys, non-finite numbers,
+match the commit. It writes and flushes its host `response.json`, publishes the
+matching sequence in `response.ready`, and then installs that exact pair in the
+container-local response tmpfs. Requests are limited to 3 MiB. Responses have
+a separate bounded allowance large enough for a 4 MiB provider body after the
+maximum JSON-escape expansion plus its gateway envelope. Malformed frames,
+duplicate JSON keys, non-finite numbers,
 torn commits, oversized files, and replayed sequences fail closed.
 
 Mailbox content is ephemeral transport state, never SQLite state. Normal run
@@ -376,7 +396,7 @@ the coordinator to stop the disposable worker.
 Every mailbox operation retains a worker-side deadline. Provider exchanges use
 that deadline as a 30-second host-liveness window rather than an absolute model
 turn limit. While a provider operation is pending, the trusted host publishes
-monotonic progress frames through the read-only response side of the mailbox;
+monotonic progress frames through the root-owned response side of the mailbox;
 each fresh frame renews the worker's liveness window. Replayed or frozen frames
 do not. A healthy long provider stream can therefore finish, while a dead
 gateway causes the worker to release the mailbox lock and fail the request.

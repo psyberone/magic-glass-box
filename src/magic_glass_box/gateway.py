@@ -7,7 +7,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -84,6 +84,13 @@ GATEWAY_FILE_NAMES = frozenset(
 )
 GATEWAY_WRITABLE_NAMES = (GATEWAY_REQUEST_NAME, GATEWAY_REQUEST_READY_NAME)
 CONTAINER_GATEWAY_ROOT = "/run/magic-glass-box"
+CONTAINER_GATEWAY_RESPONSE_ROOT = "/run/magic-glass-box-gateway-response"
+GATEWAY_DELIVERY_HEADER_BYTES = 8
+MAX_GATEWAY_DELIVERY_BYTES = (
+    GATEWAY_DELIVERY_HEADER_BYTES
+    + MAX_GATEWAY_RESPONSE_BYTES
+    + MAX_GATEWAY_MARKER_BYTES
+)
 RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 INTERACTION_ID_RE = re.compile(r"^int_[0-9a-f]{32}$")
 ASSIGNMENT_ID_RE = re.compile(r"^was_[0-9a-f]{32}$")
@@ -92,6 +99,39 @@ REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 
 class GatewayError(RuntimeError):
     """A run-scoped gateway could not be created or operated safely."""
+
+
+def encode_gateway_delivery(response: bytes, marker: bytes) -> bytes:
+    """Frame one response commit for container-local installation."""
+    if (
+        not isinstance(response, bytes)
+        or not 1 <= len(response) <= MAX_GATEWAY_RESPONSE_BYTES
+        or not isinstance(marker, bytes)
+        or not 1 <= len(marker) <= MAX_GATEWAY_MARKER_BYTES
+    ):
+        raise GatewayError("gateway delivery is outside its size bounds")
+    return (
+        len(response).to_bytes(GATEWAY_DELIVERY_HEADER_BYTES, "big") + response + marker
+    )
+
+
+def decode_gateway_delivery(frame: bytes) -> tuple[bytes, bytes]:
+    """Decode one exact response commit without accepting trailing data."""
+    if (
+        not isinstance(frame, bytes)
+        or not GATEWAY_DELIVERY_HEADER_BYTES + 2
+        <= len(frame)
+        <= MAX_GATEWAY_DELIVERY_BYTES
+    ):
+        raise GatewayError("gateway delivery frame is invalid")
+    response_size = int.from_bytes(frame[:GATEWAY_DELIVERY_HEADER_BYTES], "big")
+    if not 1 <= response_size <= MAX_GATEWAY_RESPONSE_BYTES:
+        raise GatewayError("gateway delivery frame is invalid")
+    marker_offset = GATEWAY_DELIVERY_HEADER_BYTES + response_size
+    marker_size = len(frame) - marker_offset
+    if not 1 <= marker_size <= MAX_GATEWAY_MARKER_BYTES:
+        raise GatewayError("gateway delivery frame is invalid")
+    return frame[GATEWAY_DELIVERY_HEADER_BYTES:marker_offset], frame[marker_offset:]
 
 
 class GatewayControlPlane(Protocol):
@@ -1126,6 +1166,16 @@ class _FileGatewayChannel:
         self.progress_interval = progress_interval
         self.stop_event = threading.Event()
         self.failure: BaseException | None = None
+        self._delivery: Callable[[bytes, bytes], None] | None = None
+        self._delivery_lock = threading.Lock()
+
+    def attach_delivery(self, delivery: Callable[[bytes, bytes], None]) -> None:
+        if not callable(delivery):
+            raise GatewayError("gateway response delivery must be callable")
+        with self._delivery_lock:
+            if self._delivery is not None:
+                raise GatewayError("gateway response delivery is already attached")
+            self._delivery = delivery
 
     def _publish(self, sequence: int, response: dict[str, Any]) -> None:
         encoded = (canonical_json(response) + "\n").encode("utf-8")
@@ -1145,8 +1195,13 @@ class _FileGatewayChannel:
             size=len(encoded),
             sha256=hashlib.sha256(encoded).hexdigest(),
         )
+        encoded_marker = marker.encode()
         _write_all(self.directory / GATEWAY_RESPONSE_NAME, encoded)
-        _write_all(self.directory / GATEWAY_RESPONSE_READY_NAME, marker.encode())
+        _write_all(self.directory / GATEWAY_RESPONSE_READY_NAME, encoded_marker)
+        with self._delivery_lock:
+            delivery = self._delivery
+        if delivery is not None:
+            delivery(encoded, encoded_marker)
 
     def _publish_progress(
         self,
@@ -1449,6 +1504,20 @@ class FileGatewayManager:
                 run_root.rmdir()
                 raise
         return GatewayEndpoint(directory=run_root)
+
+    def attach_delivery(
+        self,
+        run_id: str,
+        delivery: Callable[[bytes, bytes], None],
+    ) -> None:
+        if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:
+            raise GatewayError("invalid gateway run identifier")
+        with self._lock:
+            active = self._active.get(run_id)
+            if active is None:
+                raise GatewayError(f"gateway is not active for run: {run_id}")
+            channel = active[0]
+            channel.attach_delivery(delivery)
 
     def cleanup(self, run_id: str) -> bool:
         if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:

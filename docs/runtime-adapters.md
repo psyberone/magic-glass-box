@@ -119,7 +119,8 @@ prompt policy.
 A runtime adapter is not a network escape hatch. It does not mount a vendor
 token, select the upstream model, or enable container egress. A compatible
 `gateway_only` image installs this package and its `magic-glass-box-worker`
-entry point alongside the vendor CLI. The adapter launches that entry point,
+entry point alongside the vendor CLI, with its root-helper link fixed at
+`/usr/local/bin/magic-glass-box-worker`. The adapter launches that entry point,
 which binds only `127.0.0.1:8766` inside the container and starts the vendor
 process as its child.
 
@@ -158,7 +159,11 @@ on the fixed request file. Sequence, size, digest, response correlation, and
 timeouts are verified on every exchange. Ordinary tool calls have an absolute
 worker-side mailbox deadline. A provider exchange instead has a 30-second
 host-liveness window renewed only by fresh, monotonic progress frames from the
-read-only response side of the mailbox. This prevents a dead gateway from
+root-owned container-local response side of the mailbox. The host installs
+each exact committed frame through bounded Docker stdin; the non-root worker
+can read but cannot write that tmpfs. This avoids Docker Desktop bind-rewrite
+incoherence without giving the worker network or Docker authority. It prevents
+a dead gateway from
 holding the lock forever without imposing an absolute deadline on a healthy
 long provider stream. The image remains incompatible if it contains only a
 stock vendor CLI and not this worker entry point.

@@ -7,9 +7,11 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -27,13 +29,18 @@ from magic_glass_box.domain import (
     WorkItemEnvelope,
     WorkspaceMode,
 )
-from magic_glass_box.executor import DockerCLI, DockerExecutor
+from magic_glass_box.executor import (
+    DockerCLI,
+    DockerExecutor,
+    SandboxRequest,
+)
 from magic_glass_box.gateway import FileGatewayManager
 from magic_glass_box.krab import KrabIdentity
 from magic_glass_box.openai_chatgpt import ChatGPTOAuth, ChatGPTProfileStore
 from magic_glass_box.orchestration import CandidateReviewWorkspaces, RunCoordinator
 from magic_glass_box.results import WorkspaceResultStore
-from magic_glass_box.service import ControlPlane
+from magic_glass_box.runtime import RuntimeLaunch
+from magic_glass_box.service import AcceptedProviderResponse, ControlPlane
 from magic_glass_box.service_sidecar import (
     ServiceOperationRequest,
     ServiceOperationResponse,
@@ -1253,6 +1260,123 @@ def _build_supervisor(
     return supervisor, gateways, result_store, candidate_store
 
 
+def _assert_gateway_carrier(
+    *,
+    docker_engine: DockerCLI,
+    state_root: Path,
+    worker_image: str,
+) -> None:
+    """Prove bidirectional networkless delivery before any live provider call."""
+
+    class CarrierControl:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke_provider(
+            self,
+            run_id: str,
+            *,
+            grant_name: str,
+            request: dict[str, Any],
+        ) -> AcceptedProviderResponse:
+            del run_id, request
+            self.calls += 1
+            if self.calls == 2:
+                time.sleep(0.2)
+            body = "data: " + ("x" * 116_622) + "\n\n"
+            return AcceptedProviderResponse(
+                invocation_id=f"pvi_{self.calls:032x}",
+                grant_name=grant_name,
+                provider="carrier-proof",
+                model="no-remote-provider",
+                status_code=200,
+                request_bytes=32,
+                response_bytes=len(body.encode()),
+                untrusted_response={
+                    "body": body,
+                    "content_type": "text/event-stream",
+                    "protocol": "openai-responses",
+                },
+            )
+
+    container_code = """\
+import os
+from pathlib import Path
+from magic_glass_box.worker_transport import FileGatewayClient
+
+client = FileGatewayClient(
+    Path(os.environ["MAGIC_GLASS_BOX_GATEWAY_DIR"]),
+    response_directory=Path(os.environ["MAGIC_GLASS_BOX_GATEWAY_RESPONSE_DIR"]),
+    timeout=5,
+)
+payload = {
+    "grant": "carrier-proof",
+    "request": {"protocol": "openai-responses", "body": {"input": "proof"}},
+}
+for _index in range(2):
+    response = client.exchange("provider.invoke", payload, timeout=5)
+    assert response["ok"] is True
+    assert len(response["result"]["untrusted_response"]["body"]) > 100_000
+print("m18-gateway-carrier-ok")
+"""
+    run_id = "run_" + secrets.token_hex(16)
+    control = CarrierControl()
+    with tempfile.TemporaryDirectory(
+        dir=state_root,
+        prefix="gateway-carrier-preflight-",
+    ) as temporary:
+        root = Path(temporary)
+        workspace = root / "workspace"
+        workspace.mkdir(mode=0o700)
+        gateways = FileGatewayManager(
+            root / "gateways",
+            control,  # type: ignore[arg-type]
+            poll_interval=0.005,
+        )
+        endpoint = gateways.open(
+            run_id,
+            capabilities=(GatewayCapability.PROVIDER_INVOKE,),
+            credential_names=("carrier-proof",),
+        )
+        profile = AgentProfileSpec.create(
+            image=worker_image,
+            command=("/opt/magic-glass-box/bin/python3", "-c", container_code),
+            workspace_mode=WorkspaceMode.READ_ONLY,
+            network_mode=NetworkMode.GATEWAY_ONLY,
+            credential_names=("carrier-proof",),
+            gateway_capabilities=(GatewayCapability.PROVIDER_INVOKE,),
+        )
+        executor = DockerExecutor(
+            docker_engine,
+            allow_unenforced_worker_storage=True,
+        )
+        request = SandboxRequest(
+            run_id=run_id,
+            profile=profile,
+            workspace=workspace,
+            launch=RuntimeLaunch(profile.command),
+            gateway_directory=endpoint.directory,
+        )
+        try:
+            result = executor.execute(
+                request,
+                before_start=lambda _plan, container_id: gateways.attach_delivery(
+                    run_id,
+                    lambda response, marker: executor.publish_gateway_response(
+                        container_id, response, marker
+                    ),
+                ),
+            )
+        finally:
+            gateways.close()
+        if (
+            result.exit_code != 0
+            or result.stdout.strip() != "m18-gateway-carrier-ok"
+            or control.calls != 2
+        ):
+            raise RuntimeError("M18 gateway carrier preflight failed")
+
+
 def _drive_one_technical_stop(
     *,
     supervisor: Supervisor,
@@ -1684,6 +1808,7 @@ def _report(
         "executions": execution_evidence,
         "active_execution_ids": dict(executions),
         "controller": dict(controller_identity),
+        "gateway_carrier_preflight": "passed_without_remote_provider",
         "direct_worker_network": "denied",
         "credential_exposure": "none outside credential-owning host processes",
         "local_worker_storage": "explicit unenforced-storage risk acceptance",
@@ -1796,25 +1921,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     revisions = {MGB_PROJECT: MGB_REVISION, IK_PROJECT: IK_REVISION}
 
-    profile_store = ChatGPTProfileStore(profile_dir)
-    oauth = ChatGPTOAuth(profile_store)
-    session = oauth.session()
-    if MODEL not in {model.slug for model in oauth.list_models()}:
-        raise RuntimeError("M18 model is unavailable to the selected account")
-    initial_secrets = _session_secrets(profile_store)
     connector_deployment = _deployment_digest(project_root)
     connector_root = state_root / "connector"
     connector_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(connector_root, 0o700)
     connector_socket = connector_root / "provider.sock"
 
-    docker_engine = _RecordingDockerEngine(
-        DockerCLI(command_timeout=60, run_timeout=RUN_TIMEOUT_SECONDS)
-    )
+    docker_cli = DockerCLI(command_timeout=60, run_timeout=RUN_TIMEOUT_SECONDS)
+    docker_engine = _RecordingDockerEngine(docker_cli)
     worker_image = docker_engine.inspect_image(args.worker_image)
     validation_image = docker_engine.inspect_image(args.validation_image)
     if worker_image.image_id == validation_image.image_id:
         raise RuntimeError("M18 worker and validation images must be distinct")
+    _assert_gateway_carrier(
+        docker_engine=docker_cli,
+        state_root=state_root,
+        worker_image=args.worker_image,
+    )
+
+    profile_store = ChatGPTProfileStore(profile_dir)
+    oauth = ChatGPTOAuth(profile_store)
+    session = oauth.session()
+    if MODEL not in {model.slug for model in oauth.list_models()}:
+        raise RuntimeError("M18 model is unavailable to the selected account")
+    initial_secrets = _session_secrets(profile_store)
 
     gh_bin_raw = shutil.which("gh")
     git_bin_raw = shutil.which("git")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import fcntl
 import hashlib
 import json
@@ -24,16 +26,20 @@ from urllib.parse import urlsplit
 
 from .domain import canonical_json
 from .gateway import (
+    CONTAINER_GATEWAY_RESPONSE_ROOT,
     GATEWAY_FILE_NAMES,
     GATEWAY_PROTOCOL_VERSION,
     GATEWAY_REQUEST_NAME,
     GATEWAY_REQUEST_READY_NAME,
     GATEWAY_RESPONSE_NAME,
     GATEWAY_RESPONSE_READY_NAME,
+    MAX_GATEWAY_DELIVERY_BYTES,
     MAX_GATEWAY_MARKER_BYTES,
     MAX_GATEWAY_REQUEST_BYTES,
     MAX_GATEWAY_RESPONSE_BYTES,
     MAX_GATEWAY_SEQUENCE,
+    GatewayError,
+    decode_gateway_delivery,
 )
 from .inference import MAX_PROVIDER_RETRY_AFTER_SECONDS
 
@@ -165,6 +171,46 @@ def _read_file(path: Path, limit: int) -> bytes:
     return value
 
 
+def _read_delivery_file(path: Path, limit: int, *, owner_uid: int) -> bytes:
+    try:
+        directory_info = path.parent.lstat()
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError):
+            raise
+        raise WorkerTransportError("gateway response mailbox is unavailable") from exc
+    if (
+        stat.S_ISLNK(directory_info.st_mode)
+        or not stat.S_ISDIR(directory_info.st_mode)
+        or directory_info.st_uid != owner_uid
+        or directory_info.st_mode & 0o777 != 0o755
+    ):
+        raise WorkerTransportError("gateway response mailbox is unsafe")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise WorkerTransportError("gateway response mailbox is unavailable") from exc
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != owner_uid
+            or info.st_mode & 0o777 != 0o644
+        ):
+            raise WorkerTransportError(
+                "gateway response mailbox contains an unsafe file"
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            value = stream.read(limit + 1)
+    finally:
+        os.close(descriptor)
+    if len(value) > limit:
+        raise WorkerTransportError("gateway mailbox response exceeds its size limit")
+    return value
+
+
 def _write_descriptor(descriptor: int, value: bytes) -> None:
     os.ftruncate(descriptor, 0)
     os.lseek(descriptor, 0, os.SEEK_SET)
@@ -249,6 +295,79 @@ class _Marker:
         ).encode("ascii")
 
 
+def _delivery_file(path: Path, value: bytes, *, owner_uid: int) -> None:
+    existed = path.exists()
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o644,
+        )
+    except OSError as exc:
+        raise WorkerTransportError("gateway delivery mailbox is unavailable") from exc
+    try:
+        if not existed:
+            os.fchmod(descriptor, 0o644)
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != owner_uid
+            or info.st_mode & 0o777 != 0o644
+        ):
+            raise WorkerTransportError("gateway delivery mailbox is unsafe")
+        _write_descriptor(descriptor, value)
+    finally:
+        os.close(descriptor)
+
+
+def _install_gateway_delivery(
+    frame: bytes,
+    *,
+    directory: Path = Path(CONTAINER_GATEWAY_RESPONSE_ROOT),
+    owner_uid: int = 0,
+) -> None:
+    """Install one verified host response in a container-local mailbox."""
+    if isinstance(owner_uid, bool) or not isinstance(owner_uid, int) or owner_uid < 0:
+        raise WorkerTransportError("gateway delivery owner is invalid")
+    try:
+        response, marker_raw = decode_gateway_delivery(frame)
+        marker = _Marker.decode(marker_raw)
+    except (GatewayError, WorkerTransportError) as exc:
+        raise WorkerTransportError("gateway delivery frame is invalid") from exc
+    assert marker is not None
+    if (
+        len(response) != marker.size
+        or hashlib.sha256(response).hexdigest() != marker.sha256
+    ):
+        raise WorkerTransportError("gateway delivery frame is invalid")
+    directory = Path(directory)
+    try:
+        directory.mkdir(mode=0o755)
+        os.chmod(directory, 0o755)  # noqa: S103 - root-owned, worker-readable mailbox
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise WorkerTransportError("gateway delivery mailbox is unavailable") from exc
+    try:
+        info = directory.lstat()
+    except OSError as exc:
+        raise WorkerTransportError("gateway delivery mailbox is unavailable") from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != owner_uid
+        or info.st_mode & 0o777 != 0o755
+    ):
+        raise WorkerTransportError("gateway delivery mailbox is unsafe")
+    _delivery_file(directory / GATEWAY_RESPONSE_NAME, response, owner_uid=owner_uid)
+    _delivery_file(
+        directory / GATEWAY_RESPONSE_READY_NAME,
+        marker_raw,
+        owner_uid=owner_uid,
+    )
+
+
 class FileGatewayClient:
     """Serialize committed-file exchanges across worker processes."""
 
@@ -257,8 +376,21 @@ class FileGatewayClient:
         directory: Path,
         *,
         timeout: float = PROVIDER_GATEWAY_TIMEOUT_SECONDS,
+        response_directory: Path | None = None,
+        response_owner_uid: int = 0,
     ):
         self.directory = Path(directory)
+        self.response_directory = (
+            self.directory if response_directory is None else Path(response_directory)
+        )
+        self._split_response_mailbox = response_directory is not None
+        if (
+            isinstance(response_owner_uid, bool)
+            or not isinstance(response_owner_uid, int)
+            or response_owner_uid < 0
+        ):
+            raise WorkerTransportError("gateway response mailbox owner is invalid")
+        self.response_owner_uid = response_owner_uid
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -279,13 +411,24 @@ class FileGatewayClient:
             descriptor = _safe_file(self.directory / name, os.O_RDONLY)
             os.close(descriptor)
 
+    def _read_response_file(self, name: str, limit: int) -> bytes:
+        path = self.response_directory / name
+        if not self._split_response_mailbox:
+            return _read_file(path, limit)
+        return _read_delivery_file(path, limit, owner_uid=self.response_owner_uid)
+
     def _next_sequence(self) -> int:
         markers = []
         for name in (GATEWAY_REQUEST_READY_NAME, GATEWAY_RESPONSE_READY_NAME):
-            marker = _Marker.decode(
-                _read_file(self.directory / name, MAX_GATEWAY_MARKER_BYTES),
-                allow_empty=True,
-            )
+            try:
+                raw = (
+                    _read_file(self.directory / name, MAX_GATEWAY_MARKER_BYTES)
+                    if name == GATEWAY_REQUEST_READY_NAME
+                    else self._read_response_file(name, MAX_GATEWAY_MARKER_BYTES)
+                )
+            except FileNotFoundError:
+                raw = b""
+            marker = _Marker.decode(raw, allow_empty=True)
             if marker is not None:
                 markers.append(marker.sequence)
         sequence = max(markers, default=0) + 1
@@ -379,10 +522,14 @@ class FileGatewayClient:
         )
         last_heartbeat = 0
         while time.monotonic() < deadline:
-            ready_raw = _read_file(
-                self.directory / GATEWAY_RESPONSE_READY_NAME,
-                MAX_GATEWAY_MARKER_BYTES,
-            )
+            try:
+                ready_raw = self._read_response_file(
+                    GATEWAY_RESPONSE_READY_NAME,
+                    MAX_GATEWAY_MARKER_BYTES,
+                )
+            except FileNotFoundError:
+                time.sleep(0.01)
+                continue
             try:
                 marker = _Marker.decode(ready_raw, allow_empty=True)
             except WorkerTransportError:
@@ -390,10 +537,14 @@ class FileGatewayClient:
             if marker is None or marker.sequence != sequence:
                 time.sleep(0.01)
                 continue
-            raw = _read_file(
-                self.directory / GATEWAY_RESPONSE_NAME,
-                MAX_GATEWAY_RESPONSE_BYTES,
-            )
+            try:
+                raw = self._read_response_file(
+                    GATEWAY_RESPONSE_NAME,
+                    MAX_GATEWAY_RESPONSE_BYTES,
+                )
+            except FileNotFoundError:
+                time.sleep(0.01)
+                continue
             if (
                 len(raw) != marker.size
                 or hashlib.sha256(raw).hexdigest() != marker.sha256
@@ -764,7 +915,26 @@ def _gateway_from_environment() -> FileGatewayClient:
     value = os.environ.get("MAGIC_GLASS_BOX_GATEWAY_DIR")
     if not value:
         raise WorkerTransportError("gateway mailbox environment is unavailable")
-    return FileGatewayClient(Path(value))
+    response_value = os.environ.get("MAGIC_GLASS_BOX_GATEWAY_RESPONSE_DIR")
+    return FileGatewayClient(
+        Path(value),
+        response_directory=None if not response_value else Path(response_value),
+    )
+
+
+def _mailbox_deliver() -> int:
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        raise WorkerTransportError("gateway delivery requires container root")
+    encoded_limit = 4 * ((MAX_GATEWAY_DELIVERY_BYTES + 2) // 3)
+    encoded = sys.stdin.buffer.read(encoded_limit + 1)
+    if not encoded or len(encoded) > encoded_limit:
+        raise WorkerTransportError("gateway delivery frame is invalid")
+    try:
+        frame = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise WorkerTransportError("gateway delivery frame is invalid") from exc
+    _install_gateway_delivery(frame)
+    return 0
 
 
 def _serve(dialect: str, grant: str, command: list[str]) -> int:
@@ -829,6 +999,7 @@ def _parser() -> argparse.ArgumentParser:
     call = commands.add_parser("call")
     call.add_argument("operation")
     call.add_argument("payload", nargs="?", default="{}")
+    commands.add_parser("mailbox-deliver", help=argparse.SUPPRESS)
     return parser
 
 
@@ -840,6 +1011,8 @@ def main(argv: list[str] | None = None) -> int:
             if command[:1] == ["--"]:
                 command.pop(0)
             return _serve(args.dialect, args.grant, command)
+        if args.command == "mailbox-deliver":
+            return _mailbox_deliver()
         return _call(args.operation, args.payload)
     except WorkerTransportError as exc:
         print(f"magic-glass-box-worker: {exc}", file=sys.stderr)
