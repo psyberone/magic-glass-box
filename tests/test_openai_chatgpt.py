@@ -1922,6 +1922,11 @@ class OpenAIResponsesClientTests(unittest.TestCase):
             b'data: {"type":"response.failed","response":'
             b'{"status":"failed","error":{"code":"server_error"}}}\n\n'
         )
+        quota_failed_terminal = (
+            b'data: {"type":"response.failed","response":'
+            b'{"status":"failed","error":'
+            b'{"code":"subscription_sharing_usage_limit_exceeded"}}}\n\n'
+        )
         incomplete_terminal = (
             b'data: {"type":"response.incomplete","response":'
             b'{"status":"incomplete","incomplete_details":'
@@ -1940,6 +1945,78 @@ class OpenAIResponsesClientTests(unittest.TestCase):
             raised.exception.error_code,
             "response_incomplete_max_output_tokens",
         )
+
+        failure_only_multiple = (
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    failed_terminal + failed_terminal,
+                    None,
+                ),
+                "multiple_failure_server_error",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    incomplete_terminal + incomplete_terminal,
+                    None,
+                ),
+                "multiple_failure_response_incomplete_max_output_tokens",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    error_terminal + error_terminal,
+                    None,
+                ),
+                "multiple_failure_server_error",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    failed_terminal + error_terminal,
+                    None,
+                ),
+                "multiple_failure_server_error",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    incomplete_terminal + error_terminal,
+                    None,
+                ),
+                "multiple_failure_response_incomplete_max_output_tokens",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    quota_failed_terminal + error_terminal,
+                    None,
+                ),
+                "multiple_failure_subscription_sharing_usage_limit_exceeded",
+            ),
+        )
+        for response, error_code in failure_only_multiple:
+            with (
+                self.subTest(
+                    failure_only=True,
+                    content_type=response.content_type,
+                    body=response.body[:20],
+                ),
+                self.assertRaises(ChatGPTResponseFailure) as raised,
+            ):
+                self.invoke(FakeHTTPClient(response))
+            self.assertNotIsInstance(
+                raised.exception,
+                ChatGPTResponseAmbiguousError,
+            )
+            self.assertEqual(raised.exception.error_code, error_code)
 
         ambiguous = (
             (
@@ -1962,6 +2039,17 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                     "text/event-stream",
                     b'data: {"type":"response.failed",'
                     b'"response":{"status":"completed"}}\n\n',
+                    None,
+                ),
+                "upstream_stream_invalid_failed",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    b'data: {"type":"response.failed",'
+                    b'"response":{"status":"failed","error":"server_error"}}'
+                    b"\n\n",
                     None,
                 ),
                 "upstream_stream_invalid_failed",
@@ -1998,46 +2086,10 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                 HTTPResponse(
                     200,
                     "text/event-stream",
-                    failed_terminal + failed_terminal,
-                    None,
-                ),
-                "upstream_stream_duplicate_response_failed",
-            ),
-            (
-                HTTPResponse(
-                    200,
-                    "text/event-stream",
-                    incomplete_terminal + incomplete_terminal,
-                    None,
-                ),
-                "upstream_stream_duplicate_response_incomplete",
-            ),
-            (
-                HTTPResponse(
-                    200,
-                    "text/event-stream",
-                    error_terminal + error_terminal,
-                    None,
-                ),
-                "upstream_stream_duplicate_error",
-            ),
-            (
-                HTTPResponse(
-                    200,
-                    "text/event-stream",
                     completed_sse() + failed_terminal,
                     None,
                 ),
                 "upstream_stream_success_failure_conflict",
-            ),
-            (
-                HTTPResponse(
-                    200,
-                    "text/event-stream",
-                    failed_terminal + error_terminal,
-                    None,
-                ),
-                "upstream_stream_multiple_failure_terminals",
             ),
             (
                 HTTPResponse(
@@ -2076,6 +2128,37 @@ class OpenAIResponsesClientTests(unittest.TestCase):
             ):
                 self.invoke(FakeHTTPClient(response))
             self.assertEqual(raised.exception.error_code, error_code)
+
+    def test_sse_framing_accepts_line_endings_comments_and_data_lines(self) -> None:
+        for raw in (
+            completed_sse().replace(b"\n", b"\r\n"),
+            completed_sse().replace(b"\n", b"\r"),
+            b": heartbeat\n\n" + completed_sse(),
+        ):
+            with self.subTest(raw_prefix=raw[:20]):
+                result = self.invoke(
+                    FakeHTTPClient(HTTPResponse(200, "text/event-stream", raw, None))
+                )
+            self.assertEqual(result.status_code, 200)
+
+        multiline_body = (
+            b'data: {"type":"response.failed",\n'
+            b'data: "response":{"status":"failed"}}\n\n'
+        )
+        for line_ending in (b"\n", b"\r\n", b"\r"):
+            multiline_failure = HTTPResponse(
+                200,
+                "text/event-stream",
+                multiline_body.replace(b"\n", line_ending),
+                None,
+            )
+            with (
+                self.subTest(line_ending=line_ending),
+                self.assertRaises(ChatGPTResponseFailure) as raised,
+            ):
+                self.invoke(FakeHTTPClient(multiline_failure))
+            self.assertNotIsInstance(raised.exception, ChatGPTResponseAmbiguousError)
+            self.assertEqual(raised.exception.error_code, "response_failed")
 
     def test_invalid_completed_usage_has_a_bounded_ambiguous_diagnostic(self) -> None:
         response = HTTPResponse(

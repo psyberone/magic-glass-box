@@ -2202,8 +2202,8 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v52; external-review remediation R1-R8 complete; fourth live checkpoint
-retained; provider-stream terminal-conflict diagnostic remediation complete;
+schema v52; external-review remediation R1-R8 complete; fifth live checkpoint
+retained; failure-only terminal reconciliation complete;
 paid continuation awaits sufficient explicit budget authority**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
@@ -2773,6 +2773,44 @@ subsequent whole-cache display pass was stopped after 5,707 of 66,758 entries
 because it was only walking retained repository-wide results; it is not claimed
 as a fresh whole-repository mutation sweep. The exact final tree then passed
 all 1,681 tests at 86% branch-aware coverage, Ruff, and the formatting gate.
+
+The owner then authorized a third separate $5 live-proof epoch. Fresh state
+root `m18-20261107-r11` pinned clean controller `852bfe8`, preserved the prior
+source revisions, passed carrier preflight without a provider call, and ran the
+two producers serially. Both calls again sent 43,432 bytes and received the
+same 109,238-byte HTTP 200 stream. The refined parser established that neither
+stream contained a completion and that each contained multiple distinct
+failure-terminal types. MGB returned
+`upstream_stream_multiple_failure_terminals`, created no candidate or provider
+effect, and stopped at the workflow ruling boundary. The epoch accounts
+3,400,000 microusd-equivalent and retains 1,600,000, below another 1,700,000
+reservation. Lifetime conservative and reported accounting across the three
+separate $5 authorizations is 10,680,533 microusd-equivalent under their
+combined $15 ceiling.
+
+Official OpenAI guidance treats only `response.completed` as success and
+handles failed, incomplete, explicit-error, and interrupted streams as
+non-success paths. The connector already buffers the complete bounded body
+before returning anything to the worker. A third RED-first refinement therefore
+keeps any completion conflict ambiguous, but reconciles a fully validated set
+of failure-only terminals as an explicit failure. It carries the first bounded
+provider code as `multiple_failure_<code>`, retains conservative accounting,
+and preserves quota/rate markers for normal recovery classification. This does
+not accept partial output or expose the response body; it lets the next
+authorized checkpoint reveal whether the stable 109,238-byte failure is an
+output cap, quota limit, or another provider failure.
+
+Fresh serial mutation generation scoped to `_sse_terminal` produced 128
+mutants and passed both the clean-suite and forced-failure guards. The first
+pass killed 94. Review classified 25 survivors as equivalent encodings,
+unobservable internal tuple labels, or changes only to non-contractual
+diagnostic prose. RED-first assertions for CR/LF normalization, comment frames,
+multiline `data:` fields, malformed failed shapes, and absent provider errors
+killed the other nine on direct replay. The effective meaningful result is
+103/103 (100%), above the 80% floor without binding product behavior to
+incidental implementation text. The exact reconciled tree then passed all
+1,682 tests at 87% aggregate statement-plus-branch coverage, Ruff, and the
+formatting gate.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

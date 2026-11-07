@@ -371,15 +371,18 @@ consistent `response.completed` terminal. A well-formed `response.failed` or
 `response.incomplete` terminal is an explicit failure; the latter preserves a
 bounded reason such as `response_incomplete_max_output_tokens`. Invalid UTF-8,
 invalid event JSON, invalid completed/failed/incomplete shapes, invalid usage,
-a missing terminal, conflicting terminals, and an explicitly wrong content
-type remain ambiguous and consume the conservative reservation. Each branch
-has a bounded machine-readable diagnostic code, while the provider stream
-itself remains transient. Multiple terminals are further classified without
-retaining their content: a repeated event type, a completed/failure conflict,
-or multiple failure terminal types. The durable proof report also keeps the
+a missing terminal, repeated completion, a completed/failure conflict, and an
+explicitly wrong content type remain ambiguous and consume the conservative
+reservation. Each branch has a bounded machine-readable diagnostic code, while
+the provider stream itself remains transient. When the fully buffered stream
+contains multiple structurally valid failure terminals and no completion,
+their outcomes agree: the connector returns an explicit failure carrying the
+first bounded provider code as `multiple_failure_<code>`. The conservative
+reservation remains consumed, and a quota or rate-limit marker remains visible
+to the ordinary recovery classifier. The durable proof report also keeps the
 bounded request and response byte counts. This follows OpenAI's documented
 distinction between completed, failed, incomplete, explicit-error, and
-interrupted streams; it does not turn a diagnostic into replay permission. See
+interrupted streams; only a fully validated `response.completed` is success. See
 [Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events)
 and
 [Errors and recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).

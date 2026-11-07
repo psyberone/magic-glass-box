@@ -1372,13 +1372,14 @@ def _sse_terminal(
         )
     if len(terminals) != 1:
         unique_types = set(terminal_event_types)
+        if "response.completed" not in unique_types:
+            primary_code = terminals[0][1] or "response_failed"
+            return ("failed", f"multiple_failure_{primary_code}"[:64], None)
         if len(unique_types) == 1:
             only_type = next(iter(unique_types)).replace(".", "_")
             error_code = f"upstream_stream_duplicate_{only_type}"
-        elif "response.completed" in unique_types:
-            error_code = "upstream_stream_success_failure_conflict"
         else:
-            error_code = "upstream_stream_multiple_failure_terminals"
+            error_code = "upstream_stream_success_failure_conflict"
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
             error_code=error_code,
