@@ -1713,6 +1713,8 @@ def _provider_invocation_evidence(
         "protocol",
         "model",
         "http_status",
+        "request_bytes",
+        "response_bytes",
         "input_tokens",
         "cached_input_tokens",
         "output_tokens",

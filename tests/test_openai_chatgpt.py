@@ -1918,12 +1918,20 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         self.assertEqual(oversized.exception.error_code, "request_too_large")
 
     def test_terminal_stream_variants_are_classified_without_replay(self) -> None:
+        failed_terminal = (
+            b'data: {"type":"response.failed","response":'
+            b'{"status":"failed","error":{"code":"server_error"}}}\n\n'
+        )
+        incomplete_terminal = (
+            b'data: {"type":"response.incomplete","response":'
+            b'{"status":"incomplete","incomplete_details":'
+            b'{"reason":"max_output_tokens"}}}\n\n'
+        )
+        error_terminal = b'data: {"type":"error","code":"server_error"}\n\n'
         incomplete = HTTPResponse(
             200,
             "text/event-stream",
-            b'data: {"type":"response.incomplete","response":'
-            b'{"status":"incomplete","incomplete_details":'
-            b'{"reason":"max_output_tokens"}}}\n\n',
+            incomplete_terminal,
             None,
         )
         with self.assertRaises(ChatGPTResponseFailure) as raised:
@@ -1984,7 +1992,52 @@ class OpenAIResponsesClientTests(unittest.TestCase):
                     completed_sse() + completed_sse(),
                     None,
                 ),
-                "upstream_stream_conflicting_terminals",
+                "upstream_stream_duplicate_response_completed",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    failed_terminal + failed_terminal,
+                    None,
+                ),
+                "upstream_stream_duplicate_response_failed",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    incomplete_terminal + incomplete_terminal,
+                    None,
+                ),
+                "upstream_stream_duplicate_response_incomplete",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    error_terminal + error_terminal,
+                    None,
+                ),
+                "upstream_stream_duplicate_error",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    completed_sse() + failed_terminal,
+                    None,
+                ),
+                "upstream_stream_success_failure_conflict",
+            ),
+            (
+                HTTPResponse(
+                    200,
+                    "text/event-stream",
+                    failed_terminal + error_terminal,
+                    None,
+                ),
+                "upstream_stream_multiple_failure_terminals",
             ),
             (
                 HTTPResponse(

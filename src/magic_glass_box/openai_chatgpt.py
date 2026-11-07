@@ -1277,6 +1277,7 @@ def _sse_terminal(
             error_code="upstream_stream_invalid_utf8",
         ) from exc
     terminals: list[tuple[str, str | None, InferenceUsage | None]] = []
+    terminal_event_types: list[str] = []
     saw_json_event = False
     for frame in text.split("\n\n"):
         data_lines = [
@@ -1308,6 +1309,7 @@ def _sse_terminal(
                     error_code="upstream_stream_invalid_completed",
                 )
             terminals.append(("completed", None, _response_usage(response)))
+            terminal_event_types.append(event_type)
         elif event_type == "response.failed":
             response = event.get("response")
             if not isinstance(response, dict) or response.get("status") != "failed":
@@ -1329,6 +1331,7 @@ def _sse_terminal(
                     None,
                 )
             )
+            terminal_event_types.append(event_type)
         elif event_type == "response.incomplete":
             response = event.get("response")
             if not isinstance(response, dict) or response.get("status") != "incomplete":
@@ -1348,6 +1351,7 @@ def _sse_terminal(
                 fallback="response_incomplete",
             )
             terminals.append(("failed", incomplete_code, None))
+            terminal_event_types.append(event_type)
         elif event_type == "error":
             code = event.get("code")
             if code is None:
@@ -1360,15 +1364,24 @@ def _sse_terminal(
                     None,
                 )
             )
+            terminal_event_types.append(event_type)
     if not saw_json_event or not terminals:
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
             error_code="upstream_stream_missing_terminal",
         )
     if len(terminals) != 1:
+        unique_types = set(terminal_event_types)
+        if len(unique_types) == 1:
+            only_type = next(iter(unique_types)).replace(".", "_")
+            error_code = f"upstream_stream_duplicate_{only_type}"
+        elif "response.completed" in unique_types:
+            error_code = "upstream_stream_success_failure_conflict"
+        else:
+            error_code = "upstream_stream_multiple_failure_terminals"
         raise ChatGPTResponseAmbiguousError(
             "provider invocation outcome is ambiguous",
-            error_code="upstream_stream_conflicting_terminals",
+            error_code=error_code,
         )
     return terminals[0]
 

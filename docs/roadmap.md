@@ -2202,9 +2202,9 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v52; external-review remediation R1-R8 complete; third live checkpoint
-retained; provider-stream diagnostic remediation complete; paid continuation
-awaits explicit budget authority**
+schema v52; external-review remediation R1-R8 complete; fourth live checkpoint
+retained; provider-stream terminal-conflict diagnostic remediation complete;
+paid continuation awaits sufficient explicit budget authority**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2743,6 +2743,36 @@ change outcome, error code, accounting, or replay authority. The effective
 meaningful score is therefore 6/6 (100%), above the 80% floor. Association
 generation and mutant execution were serial and completed without memory
 pressure.
+
+On 2026-11-07 the owner authorized a separate additional $5 live-proof epoch.
+The earlier states and their accounting remain immutable. Fresh state root
+`m18-20261107-r10` pinned clean controller `b438c88`, passed the credential-free
+carrier preflight, and began both projects serially. Each producer again sent
+43,432 request bytes and received an HTTP 200 stream, now 109,238 bytes. The
+repaired connector classified both as `upstream_stream_conflicting_terminals`;
+no candidate or downstream provider effect followed. The new epoch accounts
+3,400,000 microusd-equivalent, leaving 1,600,000—less than the next 1,700,000
+conservative reservation—so no further call was made. Lifetime conservative
+and reported accounting across the two authorizations is 7,280,533
+microusd-equivalent under their combined $10 ceiling.
+
+The stream bodies remain deliberately unrecoverable, so the checkpoint cannot
+honestly distinguish a duplicate lifecycle event from a success/failure
+mixture. A second RED-first diagnostic refinement preserves that boundary while
+splitting multiple terminals into repeated completed/failed/incomplete/error,
+completed-plus-failure, or multiple-failure categories. It also carries the
+already bounded request and response byte counts into the durable proof report.
+None of these diagnostics authorizes replay; another paid call remains gated
+on new explicit budget authority after this controller change is committed and
+observed.
+
+The refinement's serial Mutmut generation, clean-suite check, and forced-fail
+guard completed without memory pressure. Both mutations generated for the
+changed `_sse_terminal` control-flow boundary were killed (2/2, 100%). The
+subsequent whole-cache display pass was stopped after 5,707 of 66,758 entries
+because it was only walking retained repository-wide results; it is not claimed
+as a fresh whole-repository mutation sweep. The exact final tree then passed
+all 1,681 tests at 86% branch-aware coverage, Ruff, and the formatting gate.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

@@ -21,6 +21,7 @@ from scripts.check_live_m18 import (
     _LostReceiptClientFactory,
     _pin_controller_identity,
     _proof_status,
+    _provider_invocation_evidence,
     _registered_github_specs,
     _resolve_github_source_root,
     _runtime_diagnostics,
@@ -128,6 +129,22 @@ class LiveM18ContractTests(unittest.TestCase):
             [run["workflow_generation"] for run in _all_runs(database, lineage)],  # type: ignore[arg-type]
             [1, 2, 1],
         )
+
+    def test_provider_evidence_keeps_bounded_transport_byte_counts(self) -> None:
+        evidence = _provider_invocation_evidence(
+            {
+                "id": "pinv_diagnostic",
+                "outcome": "ambiguous",
+                "error_code": "upstream_stream_duplicate_response_completed",
+                "request_bytes": 43_432,
+                "response_bytes": 109_238,
+            },
+            execution_id="wfx_diagnostic",
+            run_id="run_diagnostic",
+        )
+
+        self.assertEqual(evidence["request_bytes"], 43_432)
+        self.assertEqual(evidence["response_bytes"], 109_238)
 
     def test_controller_drift_requires_owner_observation(self) -> None:
         first = {

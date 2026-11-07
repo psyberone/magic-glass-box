@@ -374,9 +374,12 @@ invalid event JSON, invalid completed/failed/incomplete shapes, invalid usage,
 a missing terminal, conflicting terminals, and an explicitly wrong content
 type remain ambiguous and consume the conservative reservation. Each branch
 has a bounded machine-readable diagnostic code, while the provider stream
-itself remains transient. This follows OpenAI's documented distinction between
-completed, failed, incomplete, explicit-error, and interrupted streams; it
-does not turn a diagnostic into replay permission. See
+itself remains transient. Multiple terminals are further classified without
+retaining their content: a repeated event type, a completed/failure conflict,
+or multiple failure terminal types. The durable proof report also keeps the
+bounded request and response byte counts. This follows OpenAI's documented
+distinction between completed, failed, incomplete, explicit-error, and
+interrupted streams; it does not turn a diagnostic into replay permission. See
 [Responses streaming events](https://developers.openai.com/api/reference/resources/responses/streaming-events)
 and
 [Errors and recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
