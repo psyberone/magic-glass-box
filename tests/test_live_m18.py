@@ -37,6 +37,38 @@ class LiveM18ContractTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
+    def test_cli_accepts_explicit_ten_dollar_ceiling_and_rejects_more(self) -> None:
+        required = [
+            "--profile-dir",
+            "/private/profile",
+            "--mgb-repository",
+            "/source/mgb",
+            "--ik-repository",
+            "/source/ik",
+            "--gh-config-dir",
+            "/private/gh",
+            "--state-dir",
+            "/private/state",
+        ]
+
+        parsed = live_m18.parse_args(
+            [
+                *required,
+                "--budget-ceiling-microusd",
+                "10000000",
+            ]
+        )
+
+        self.assertEqual(parsed.budget_ceiling_microusd, 10_000_000)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+            live_m18.parse_args(
+                [
+                    *required,
+                    "--budget-ceiling-microusd",
+                    "10000001",
+                ]
+            )
+
     def test_existing_executions_select_one_active_execution_per_project(self) -> None:
         calls: list[tuple[str, str | None, int]] = []
 

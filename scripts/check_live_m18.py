@@ -106,7 +106,8 @@ CONFIGURATION_NAME = "m18-implementation"
 VALIDATION_OBLIGATION = "full_quality"
 MGB_VALIDATION = "mgb_full_quality"
 IK_VALIDATION = "ik_full_quality"
-BUDGET_MICROUSD = 5_000_000
+DEFAULT_BUDGET_MICROUSD = 5_000_000
+MAX_LIVE_BUDGET_MICROUSD = 10_000_000
 PROOF_TIMEOUT_SECONDS = 10_800.0
 RUN_TIMEOUT_SECONDS = 1_800.0
 REPORT_NAME = "m18-live-report.json"
@@ -140,6 +141,18 @@ def _bounded_text(value: object, *, limit: int = MAX_DIAGNOSTIC_TEXT) -> str | N
     if not isinstance(value, str):
         return None
     return value[-limit:]
+
+
+def _budget_microusd(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if not 1 <= parsed <= MAX_LIVE_BUDGET_MICROUSD:
+        raise argparse.ArgumentTypeError(
+            f"must be between 1 and {MAX_LIVE_BUDGET_MICROUSD} microusd"
+        )
+    return parsed
 
 
 def _runtime_diagnostics(logs: Sequence[str]) -> list[dict[str, Any]]:
@@ -1156,6 +1169,7 @@ def _prepare_control_plane(
     connector_deployment_sha256: str,
     credential_scope_sha256: str,
     github_specs: Mapping[str, ServiceSidecarSpec],
+    budget_ceiling_microusd: int,
 ) -> dict[str, str]:
     database = control.database
     database.initialize()
@@ -1206,7 +1220,7 @@ def _prepare_control_plane(
         deployment_sha256=connector_deployment_sha256,
         scope_sha256=credential_scope_sha256,
         model=MODEL,
-        budget_ceiling_microusd=BUDGET_MICROUSD,
+        budget_ceiling_microusd=budget_ceiling_microusd,
     ).to_dict()
     grant_value["connector_name"] = CONNECTOR_NAME
     from magic_glass_box.inference import InferenceGrantSpec
@@ -1972,6 +1986,7 @@ def _report(
     stop_reason: str,
     fresh: bool,
     controller_identity: Mapping[str, Any],
+    budget_ceiling_microusd: int,
     proof_error: BaseException | None = None,
 ) -> dict[str, Any]:
     report_path = state_root / REPORT_NAME
@@ -2022,7 +2037,7 @@ def _report(
         "status": _proof_status(database, executions),
         "model": MODEL,
         "billing_basis": "OpenAI ChatGPT subscription/quota; invoice cost unavailable",
-        "budget_ceiling_microusd": BUDGET_MICROUSD,
+        "budget_ceiling_microusd": budget_ceiling_microusd,
         "provider_invocations": len(provider_invocations),
         "provider_invocation_evidence": provider_evidence,
         "provider_effect_recovery": _lost_receipt_evidence(state_root, database),
@@ -2081,6 +2096,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--state-dir", required=True, type=Path)
     parser.add_argument("--worker-image", default=WORKER_IMAGE)
     parser.add_argument("--validation-image", default=VALIDATION_IMAGE)
+    parser.add_argument(
+        "--budget-ceiling-microusd",
+        type=_budget_microusd,
+        default=DEFAULT_BUDGET_MICROUSD,
+        help="durable proof ceiling; explicit live authorization is still required",
+    )
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
         "--acknowledge-controller-change",
@@ -2221,6 +2242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             connector_deployment_sha256=connector_deployment,
             credential_scope_sha256=session.credential_scope_sha256,
             github_specs=github_specs,
+            budget_ceiling_microusd=args.budget_ceiling_microusd,
         )
     else:
         assert existing_executions is not None
@@ -2236,6 +2258,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             specs=github_specs,
         )
         executions = existing_executions
+
+    stored_grant = database.get_provider_grant(GRANT_NAME)
+    if (
+        stored_grant["policy"]["budget"]["project_microusd"]
+        != args.budget_ceiling_microusd
+    ):
+        raise RuntimeError("existing provider budget does not match this M18 proof")
 
     connector = database.get_inference_connector(CONNECTOR_NAME)
     workflow._write_workflow_connector_config(
@@ -2257,6 +2286,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             stop_reason="prepared_no_live_execution",
             fresh=fresh,
             controller_identity=controller_identity,
+            budget_ceiling_microusd=args.budget_ceiling_microusd,
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
@@ -2385,6 +2415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             stop_reason=stop_reason,
             fresh=fresh,
             controller_identity=controller_identity,
+            budget_ceiling_microusd=args.budget_ceiling_microusd,
             proof_error=proof_error,
         )
         _append_observation(
