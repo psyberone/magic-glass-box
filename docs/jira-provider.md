@@ -140,6 +140,25 @@ an upstream error body into a result or diagnostic. See Atlassian's
 
 - This provider targets Jira Cloud REST v3; it does not claim Jira Data Center
   compatibility.
+- An identified older self-hosted Jira Server deployment uses REST v2 and
+  Basic username/password authentication because it predates PAT support. It
+  is an explicit M25+ conformance target, not an alternate credential accepted
+  by this Cloud provider. Any implementation must bind the exact server
+  version, context path, verified TLS/CA identity, authentication mode, and
+  project mapping inside a separate credential-owning deployment. Atlassian's
+  [Jira Server REST overview](https://developer.atlassian.com/server/jira/platform/about-the-jira-server-rest-apis/)
+  and
+  [Basic authentication guide](https://developer.atlassian.com/server/jira/platform/basic-authentication/)
+  define the starting transport rather than the Cloud v3 contract.
+- Jira Data Center is a third, separate future target. The owner has no
+  authorized Data Center fixture, so its documented REST APIs and PAT, OAuth,
+  or Basic authentication options are research inputs only—not evidence that
+  this Cloud provider or a future Server provider is compatible. Data Center
+  support requires a reproducible exact-version fixture and its own live
+  conformance proof. See Atlassian's
+  [Data Center REST API](https://developer.atlassian.com/server/jira/platform/rest/v10002/)
+  and
+  [personal access token documentation](https://confluence.atlassian.com/enterprise/using-personal-access-tokens-1026032365.html).
 - `work.list` is a bounded newest-updated discovery window, not a mirror or
   synchronization cursor.
 - Only the initial core-owned `done` state is supported. Reopening, assignment,

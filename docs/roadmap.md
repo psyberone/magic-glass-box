@@ -2850,9 +2850,63 @@ eligible for the Panopticon coordinator's final M18 fidelity disposition.
 coverage when naturally triggered, truthful budget and closeout records,
 coordinator fidelity disposition, and independent technical approval.
 
-## Milestone 19: containerized remote runner appliance
+## Post-M18 proof order
 
-**Status: planned infrastructure candidate after M18**
+M18 must complete its retained two-project live proof and receive the required
+technical and coordinator dispositions before implementation begins on the next
+milestone. The future sequence is deliberately dependency-shaped:
+
+| Order | Slice | Why it comes here |
+| --- | --- | --- |
+| M19A | Quota-backed worker storage | Removes the accepted local storage escape before adding another execution deployment. |
+| M19B | Containerized remote runner | Standardizes the remote substrate on top of enforceable storage and the proven M15 authority contract. |
+| M20 | Work readiness and approved plans | Establishes durable product and plan authority before a UI exposes actions for it. |
+| M21 | Project baseline drift awareness | Makes external repository movement an explicit fact that can stale plans and candidates before the workspace renders them. |
+| M22 | Read-only project workspace | Proves one truthful human view of the existing ledger before adding browser mutations. |
+| M23 | Human developer actions | Adds identity-bound, versioned actions only after the read model is coherent. |
+| M24 | Agent parity and shared dogfood | Proves humans and agents use the same meanings and authority after both surfaces exist. |
+| M25+ | Provider breadth by demonstrated need | Adds vendors only in response to a real semantic gap, not to collect logos. |
+
+The Anthropic Console connector remains an optional provider track, eligible
+only after M18 exits and never a hidden prerequisite for M19-M24. The Furies
+remains a quarantined horizon concept after the ordinary control plane,
+execution substrate, shared-project dogfood, and review templates have proved
+themselves.
+
+## Milestone 19: enforced execution substrate
+
+**Status: planned in two bounded checkpoints after M18 exits**
+
+Close the accepted execution-substrate debt before adding workflow or product
+surface area. Storage enforcement applies to every local or remote worker;
+containerizing the remote runner then changes deployment mechanics without
+inventing a second authority model.
+
+### M19A: quota-backed worker storage admission
+
+- Replace the interim local-executor storage escape with a quota-backed worker
+  storage transport or admission controller that enforces aggregate byte and
+  inode ceilings for copy-on-write workspaces and gateway request files.
+- Give each admitted worker an exact storage authority and retain bounded
+  reservation, measured-use, release, and refusal evidence without exposing a
+  host path to the worker.
+- Fail closed when the configured enforcement backend is unavailable or cannot
+  cover the requested workspace. There is no silent downgrade from enforced to
+  acknowledged-only storage.
+- Keep `--allow-unenforced-worker-storage` visibly exceptional for unsupported
+  development environments. It cannot satisfy M19A, a live proof, or a claim
+  that storage quotas were enforced.
+- Prove concurrent workers cannot oversubscribe the same ceiling, byte and
+  inode exhaustion stop safely, cleanup and restart reconciliation release only
+  the correct reservation, and result capture cannot escape its admitted
+  boundary.
+
+**Checkpoint proof:** local networkless workers complete happy-path gateway and
+result-capture work under exact byte and inode ceilings; deliberate byte and
+inode exhaustion, concurrent admission, crash, and cleanup cases fail or
+recover without quota bypass, cross-run deletion, or guessed capacity.
+
+### M19B: containerized remote runner appliance
 
 Package the M15 remote runner as a pinned, already-running controller image so
 an SSH target needs only OpenSSH, Docker, the image, private durable state, and
@@ -2874,11 +2928,6 @@ commands on the host.
   and evidence contracts. Add deployment inspection for controller image,
   configuration, state identity, protocol version, engine mode, and recipe
   authority.
-- Replace the interim local-executor storage escape with a quota-backed worker
-  storage transport or admission controller that enforces aggregate byte and
-  inode ceilings for copy-on-write workspaces and gateway request files. Keep
-  `--allow-unenforced-worker-storage` visibly exceptional and never report it
-  as quota enforcement.
 - Prove fail-closed behavior for a missing or substituted controller,
   restart/reconciliation without duplication, job-to-job isolation, absence of
   host prerequisites beyond Docker/OpenSSH, and continued credential and
@@ -2890,9 +2939,13 @@ runs in a disposable job container rather than the controller. The complete
 design and acceptance boundary are in
 [containerized-runner-appliance.md](containerized-runner-appliance.md).
 
-## Milestone 19.5: work readiness and human-approved plans
+**Milestone exit:** M19A's local enforcement proof and M19B's repeatable remote
+appliance proof both pass. An appliance that standardizes deployment while
+still requiring the unenforced-storage acknowledgement does not complete M19.
 
-**Status: planned workflow-authority slice after M19 and before M20**
+## Milestone 20: work readiness and human-approved plans
+
+**Status: planned workflow-authority slice after M19**
 
 Extend the fixed implementation prescription with an explicit pre-build
 boundary. An authorized human or agent may select a work item for consideration,
@@ -2962,9 +3015,77 @@ approval, and carry the approved plan identity through candidate review,
 validation, and the final audit trail without treating plan approval as product
 or landing approval.
 
-## Milestone 20: collaborative project workspace
+## Milestone 21: project baseline drift awareness
 
-**Status: planned product surface after M19.5**
+**Status: planned repository-truth slice after M20 and before the project
+workspace**
+
+MGB may operate beside human developers and other automation that advance the
+authoritative repository independently. Add a provider-neutral, read-only
+baseline observer so MGB can detect and route those changes without silently
+pulling code into a running workspace. This milestone does not expand M18-M20;
+it consumes their exact base, environment, plan, and invalidation facts before
+the human workspace depends on them.
+
+Track three identities independently:
+
+- the latest authoritative remote head and tree;
+- the project baseline MGB has admitted; and
+- the exact base, dependency resolution, toolchain, and image pinned to each
+  execution.
+
+Classify each observation as `in_sync`, `remote_ahead`, `local_ahead`,
+`diverged`, `rewritten`, or `unknown`. A changed remote creates an append-only
+drift event with old and new identities, bounded path/diff metadata, manifest
+and lockfile changes, declared and resolved dependency-version changes, and
+toolchain or image changes. Remote content remains untrusted at ingestion: do
+not execute hooks, package-manager scripts, or changed code merely to describe
+the delta.
+
+Reactions depend on execution state:
+
+- work not yet started uses the latest accepted baseline and context;
+- an approved plan whose pinned baseline changes becomes visibly stale and
+  cannot authorize a producer until replanned or explicitly ruled upon;
+- in-flight work keeps its immutable workspace and receives a durable,
+  exact-revision drift notice that requires acknowledgement;
+- review or landing readiness is invalidated and follows the accepted
+  refold/fresh-evidence path; and
+- closed work retains the observation for audit and future planning without
+  being reopened automatically.
+
+A coordinator or maintainer records `unaffected`,
+`context_refresh_required`, `candidate_refresh_required`, `stop`, or
+`owner_ruling_required`. MGB may mechanically identify changed paths,
+manifests, locks, and versions; it may not decide that a breaking or semantic
+change is harmless. A repository title, release note, or commit message is
+evidence to inspect, not authority.
+
+Keep machine-managed project facts separate from authored documentation.
+Observed baseline, lockfile digest, resolved versions, and image digest may
+advance after bounded validation. Project context or repository documentation
+receives a proposed amendment with exact provenance; acceptance creates a new
+context revision and visibly stales dependent work. An execution always
+reports what its environment actually contained, so a repository that now
+declares library v2 cannot make an in-flight v1 container appear current.
+
+Expose observation through narrow capabilities such as
+`repository.refs.observe@1` and `repository.delta.describe@1`, not raw forge or
+Git commands. Credentials remain in the controller/sidecar boundary. The
+feature never auto-pulls, rebases, edits documentation, changes an agent's
+workspace, or grants provider authority.
+
+**Exit proof:** exercise remote advance before dispatch, after plan approval,
+during execution, and before landing; divergence and history rewrite; a
+human-landed breaking dependency update; declared-versus-resolved version
+mismatch; durable notification and acknowledgement; accepted and rejected
+context amendments; and unavailable observation without guessed fallback.
+The approved-plan, control-room read projection, review, and landing records
+must all agree on the exact stale or current baseline identity.
+
+## Collaborative project workspace program
+
+**Status: planned as three separately gated milestones after M21**
 
 Turn the completed M4 control room and the run-scoped worker gateway into two
 purpose-built views of one durable project. A human developer should be able to
@@ -2973,14 +3094,16 @@ container; an agent should be able to inspect and advance the same project
 through narrow typed capabilities without receiving a human session, reusable
 credential, or generic control-plane API.
 
-This milestone does not create a second workflow engine, ledger, or chat store.
+This program does not create a second workflow engine, ledger, or chat store.
 The browser, CLI, and agent gateway use the same service operations, optimistic
 versions, project/work-item/thread identities, candidates, gates, rulings, and
 audit events. Krab remains the private message carrier, and MGB continues to
 retain only bounded interaction metadata rather than message bodies or
 transcripts.
 
-### M20A: read-only project workspace and process map
+## Milestone 22: read-only project workspace and process map
+
+**Status: planned read surface after M21**
 
 - Add a project switcher and one project home that presents the charter and
   context revision, admitted work queue, assignments, active seats, runs,
@@ -3007,14 +3130,16 @@ transcripts.
   requirements. Automatic refresh or streaming is a later security-reviewed
   enhancement, not a prerequisite for the first slice.
 
-**Checkpoint proof:** a human can open one project and accurately identify
+**Exit proof:** a human can open one project and accurately identify
 what is running, who or what owns it, what has already happened, why it is
 blocked, and the single next authorized action. Restarting the web process
 reconstructs the same view solely from durable state. Cross-project records,
 private content, and stale terminal history outside the declared bound do not
 leak into it.
 
-### M20B: human developer action surface
+## Milestone 23: human developer action surface
+
+**Status: planned action surface after M22**
 
 - Bind every browser session to one active MGB user and its authorized project
   role/Krab identity. Per-process access and CSRF capabilities remain necessary
@@ -3038,12 +3163,14 @@ leak into it.
   distinct. Rare authority changes remain deliberate operator actions rather
   than convenient buttons beside routine review and correction controls.
 
-**Checkpoint proof:** two separately authorized humans cannot answer, approve,
+**Exit proof:** two separately authorized humans cannot answer, approve,
 cancel, or review on one another's behalf. A maintainer can request changes,
 the same authorized developer role receives the durable correction round, and
 no browser action bypasses the existing service/storage authority checks.
 
-### M20C: agent parity and shared-project dogfood
+## Milestone 24: agent parity and shared-project dogfood
+
+**Status: planned shared-surface proof after M23**
 
 - Publish a bounded project-workspace capability map for agents using the
   existing self-describing gateway. It composes narrow operations such as
@@ -3083,71 +3210,7 @@ Defer native desktop/mobile clients, a separate TUI, customizable dashboards,
 arbitrary workflow drawing, provider-specific panels, transcript search, and
 plugin-supplied browser code until this shared-project proof is complete.
 
-## Unsequenced candidate: project baseline drift awareness
-
-**Status: accepted roadmap need; sequencing deferred**
-
-MGB may operate beside human developers and other automation that advance the
-authoritative repository independently. Add a provider-neutral, read-only
-baseline observer so MGB can detect and route those changes without silently
-pulling code into a running workspace. This candidate does not expand M18,
-M19, or M20. It may reuse exact base, environment, and invalidation facts those
-milestones already require, but its watcher, dependency analysis, notification,
-and context-amendment behavior remain a separate future slice.
-
-Track three identities independently:
-
-- the latest authoritative remote head and tree;
-- the project baseline MGB has admitted; and
-- the exact base, dependency resolution, toolchain, and image pinned to each
-  execution.
-
-Classify each observation as `in_sync`, `remote_ahead`, `local_ahead`,
-`diverged`, `rewritten`, or `unknown`. A changed remote creates an append-only
-drift event with old and new identities, bounded path/diff metadata, manifest
-and lockfile changes, declared and resolved dependency-version changes, and
-toolchain or image changes. Remote content remains untrusted at ingestion: do
-not execute hooks, package-manager scripts, or changed code merely to describe
-the delta.
-
-Reactions depend on execution state:
-
-- work not yet started uses the latest accepted baseline and context;
-- in-flight work keeps its immutable workspace and receives a durable,
-  exact-revision drift notice that requires acknowledgement;
-- review or landing readiness is invalidated and follows the accepted
-  refold/fresh-evidence path; and
-- closed work retains the observation for audit and future planning without
-  being reopened automatically.
-
-A coordinator or maintainer records `unaffected`,
-`context_refresh_required`, `candidate_refresh_required`, `stop`, or
-`owner_ruling_required`. MGB may mechanically identify changed paths, manifests,
-locks, and versions; it may not decide that a breaking or semantic change is
-harmless. A repository title, release note, or commit message is evidence to
-inspect, not authority.
-
-Keep machine-managed project facts separate from authored documentation.
-Observed baseline, lockfile digest, resolved versions, and image digest may
-advance after bounded validation. Project context or repository documentation
-receives a proposed amendment with exact provenance; acceptance creates a new
-context revision and visibly stales dependent work. An execution always reports
-what its environment actually contained, so a repository that now declares
-library v2 cannot make an in-flight v1 container appear current.
-
-Expose observation through narrow capabilities such as
-`repository.refs.observe@1` and `repository.delta.describe@1`, not raw forge or
-Git commands. Credentials remain in the controller/sidecar boundary. The
-feature never auto-pulls, rebases, edits documentation, changes an agent's
-workspace, or grants provider authority.
-
-Before sequencing, define bounded proof for remote advance before dispatch,
-during execution, and before landing; divergence and history rewrite; a human-
-landed breaking dependency update; declared-versus-resolved version mismatch;
-durable notification and acknowledgement; accepted and rejected context
-amendments; and unavailable observation without guessed fallback.
-
-## Milestone 21+: provider breadth by demonstrated need
+## Milestone 25+: provider breadth by demonstrated need
 
 **Status: candidates, not commitments**
 
@@ -3159,12 +3222,24 @@ implement all four at once. Self-hosted GitLab, Gitea/Forgejo, and other forges
 remain separate conformance targets, not assumed equivalents of their cloud
 namesakes.
 
-- Revisit the Jira write surface only after M15 and its audit/dogfood gate.
-  Start from the smallest demonstrated provider-neutral operations beyond the
-  existing `done` transition—such as a bounded comment or additional lifecycle
-  state—and give each operation its own explicit effect binding. Assignment or
-  field edits require a concrete use case; agents never receive arbitrary Jira
-  update, transition, or REST authority.
+- M15 and its audit/dogfood gate are complete, so the Jira write surface is now
+  eligible when a real workflow needs it. Start from the smallest demonstrated
+  provider-neutral operations beyond the existing `done` transition—such as a
+  bounded comment or additional lifecycle state—and give each operation its
+  own explicit effect binding. Assignment or field edits require a concrete
+  use case; agents never receive arbitrary Jira update, transition, or REST
+  authority.
+- Add legacy self-hosted Jira as a distinct conformance target. The known work
+  deployment is older Jira Server, predates PAT support, and exposes REST v2
+  through Basic username/password authentication. Do not reinterpret the Jira
+  Cloud v3 adapter by changing its base URL: bind the exact Jira product,
+  version, context path, API version, authentication mode, project, and
+  normalized capabilities to a separate inspected deployment.
+- Track Jira Data Center as a third Jira-family target, separate from both
+  Cloud and legacy Server. The owner has no authorized Data Center fixture, so
+  it remains documentation/research-only until a user or contributor supplies
+  a reproducible version-pinned environment. MGB makes no Data Center
+  compatibility claim from API documentation or shared Jira ancestry alone.
 - GitLab is the first second-forge candidate because its cloud mirror is now
   available. It must pass the capability conformance suite and expose only the
   operations it truthfully supports; GitHub mechanics are not copied by
@@ -3185,12 +3260,43 @@ system: GitLab Issues and Azure Boards remain distinct adapters and live
 conformance targets even though MGB already has owned GitLab and Azure DevOps
 repositories.
 
+Treat the three Jira families explicitly:
+
+| Target | Evidence status | Initial authentication boundary |
+| --- | --- | --- |
+| Jira Cloud | Implemented and live-proven | Account plus API token against the pinned Cloud REST v3 surface |
+| Legacy Jira Server | Known older-enterprise target; version-matched fixture still required | Basic username/password against the exact REST v2 deployment |
+| Jira Data Center | Watch/contributor target; no owner-accessible fixture | Whatever PAT, OAuth, or Basic mode the exact inspected version truthfully supports |
+
+The legacy Jira Server target keeps its username and password only in the
+credential-owning provider process. Basic authentication is sent only over
+verified HTTPS; an internal CA must be explicitly pinned rather than bypassing
+certificate validation. Its credential-scope fingerprint includes the exact
+host and context path, reported product/version, authentication mode, account,
+secret digest, project mapping, state mapping, and CA identity. Data Center
+uses a separate inspected deployment and credential binding even when a
+particular endpoint resembles Server or Cloud. There is no silent fallback
+between authentication modes and no Jira credential reaches MGB core or a
+worker.
+
+Before implementation, obtain an authorized reproducible fixture or bounded
+captured contract for the actual legacy version. Prove REST v2 pagination,
+field and transition differences, permission-limited service-account behavior,
+CAPTCHA/authentication denial, lost-response reconciliation, non-root context
+paths, and version-unavailable failure without probing a production work system
+outside its owner's approval.
+
 The eventual candidate order is:
 
-1. **Azure Boards and GitLab Issues.** Investigate these first because owned
-   cloud projects already exist. Azure's configurable work-item processes are
-   a particularly useful test that MGB's normalized work surface does not
-   assume Jira fields or GitHub issue states.
+1. **Legacy Jira Server, Azure Boards, and GitLab Issues.** Jira Server is the
+   first known older-enterprise compatibility target, but implementation waits
+   for an authorized version-matched fixture. Investigate Azure Boards and
+   GitLab Issues in parallel only when their owned cloud projects supply the
+   demonstrated need. Azure's configurable work-item processes are a
+   particularly useful test that MGB's normalized work surface does not assume
+   Jira fields or GitHub issue states. Jira Data Center remains adjacent
+   research, not an implementation candidate, until a reproducible fixture is
+   available.
 2. **Linear and YouTrack.** These are the leading additional engineering-native
    commercial candidates. Linear represents a modern cloud and GraphQL
    surface; YouTrack represents a mature REST surface available in both cloud
@@ -3232,18 +3338,22 @@ Before any candidate becomes a milestone, its investigation must record:
 - the maintenance cost of deterministic fixtures, optional live smoke tests,
   and a continuously operated live conformance target.
 
-An initial eventual matrix may therefore cover Jira Cloud, GitHub Issues,
-GitLab Issues, Azure Boards, Linear, YouTrack, Plane, and one Gitea/Forgejo
-deployment. This is a research backlog, not an instruction to implement all
-eight or a condition on M16 through M19.
+An initial operator-accessible eventual matrix may therefore cover Jira Cloud,
+one exact legacy Jira Server version, GitHub Issues, GitLab Issues, Azure
+Boards, Linear, YouTrack, Plane, and one Gitea/Forgejo deployment. Jira Data
+Center joins only when a reproducible authorized fixture exists. This is a
+research backlog, not an instruction to implement every target or a condition
+on M19 through M24.
 
 ## Optional provider-auth track: Anthropic Console OAuth connector
 
-**Status: planned, non-blocking — does not gate or reorder Milestones 8B–11**
+**Status: designed but unscheduled; eligible after M18 exits and non-blocking
+for M19-M24**
 
 This track is intentionally outside the numbered milestone sequence. It may be
-scheduled after Milestone 11; pulling it forward requires an explicit roadmap
-decision rather than silently displacing an existing item.
+promoted into M25+ when a demonstrated inference-provider need justifies it, or
+run earlier as explicitly approved parallel work after M18. Pulling it forward
+never silently displaces an existing core milestone.
 
 > **DESIGN ONLY — NOT IMPLEMENTED:** No Anthropic connector module, CLI,
 > private configuration, example, or live proof exists yet. Claude Code
@@ -3396,6 +3506,18 @@ the same module. See Anthropic's
 and
 [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
 pages.
+
+## Horizon: The Furies
+
+**Status: quarantined concept; not scheduled**
+
+The Furies does not enter the numbered roadmap merely because its design notes
+exist. Reconsider it only after M19's execution substrate, M24's shared-project
+dogfood, the capability-provider boundaries, and the reusable review templates
+have all produced operating evidence. The first eligible slice is a reviewed
+safety case, kill switch, and local containment harness with no live-target
+agent—not an adversarial fleet. The complete boundary and deletion rule remain
+in [the-furies.md](the-furies.md).
 
 ## Continuous gates
 

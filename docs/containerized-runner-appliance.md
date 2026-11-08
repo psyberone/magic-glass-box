@@ -1,7 +1,7 @@
 # Containerized remote runner appliance
 
-**Status: design only; planned Milestone 19 candidate after audit, dogfood, and
-the first reusable-template delivery.**
+**Status: design only; planned Milestone 19B after quota-backed worker storage
+admission and the first reusable-template delivery.**
 
 The M15 SSH carrier proved the controlled-execution protocol against an
 operator-owned host. Its first deployment installs the MGB runner and its
@@ -129,8 +129,9 @@ existing bounded status and evidence documents.
 
 ## Acceptance proof
 
-M19 is complete only when a repeatable live proof demonstrates all of the
-following:
+M19B is complete only when a repeatable live proof demonstrates all of the
+following; full M19 completion additionally requires the separate M19A storage
+admission proof:
 
 - the remote host has no MGB Python package or Git dependency outside the
   image, while the protocol still operates through Docker and OpenSSH;
