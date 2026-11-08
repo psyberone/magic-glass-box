@@ -707,6 +707,86 @@ class LiveM18ContractTests(unittest.TestCase):
             observation["metadata"]["effects"][0]["operation_id"], "sop_lost"
         )
 
+    def test_drive_stops_after_workflow_requires_control_room_attention(self) -> None:
+        class Database:
+            def __init__(self) -> None:
+                self.attention = False
+
+            def get_workflow_execution(self, execution_id: str) -> dict[str, object]:
+                responsibility = {
+                    "status": "action_required",
+                    "holder": "control_plane",
+                    "reason": "landing_dispatch",
+                }
+                if self.attention and execution_id == "wfx_mgb":
+                    responsibility = {
+                        "status": "attention",
+                        "holder": "control_room",
+                        "reason": "provider_effect_unresolved",
+                    }
+                return {
+                    "id": execution_id,
+                    "state": "active",
+                    "stage": "landing",
+                    "correction_round": 0,
+                    "landing": None,
+                    "responsibility": responsibility,
+                    "rulings": [],
+                }
+
+        database = Database()
+
+        class Supervisor:
+            drained = False
+
+            def tick(self) -> dict[str, bool]:
+                database.attention = True
+                return {"workflow": True}
+
+            def drain(self, *, timeout: int) -> None:
+                self.drained = timeout == 30
+
+        class Control:
+            @staticmethod
+            def list_workflow_manual_wakes(
+                *, execution_id: str
+            ) -> list[dict[str, object]]:
+                del execution_id
+                return []
+
+        class Waves:
+            def before_tick(self) -> None:
+                return None
+
+        supervisor = Supervisor()
+        with mock.patch.object(live_m18, "PROOF_TIMEOUT_SECONDS", 0.01):
+            reason = _drive_one_technical_stop(
+                supervisor=supervisor,  # type: ignore[arg-type]
+                database=database,  # type: ignore[arg-type]
+                control=Control(),  # type: ignore[arg-type]
+                executions={MGB_PROJECT: "wfx_mgb", IK_PROJECT: "wfx_ik"},
+                connector_waves=Waves(),  # type: ignore[arg-type]
+                state_root=self.root,
+            )
+
+        self.assertEqual(reason, "workflow_attention_required")
+        self.assertTrue(supervisor.drained)
+        observation = json.loads(
+            (self.root / "observations.jsonl").read_text(encoding="utf-8")
+        )
+        self.assertEqual(observation["kind"], "workflow.attention_required")
+        self.assertEqual(
+            observation["metadata"]["attention"],
+            [
+                {
+                    "execution_id": "wfx_mgb",
+                    "holder": "control_room",
+                    "project_key": MGB_PROJECT,
+                    "reason": "provider_effect_unresolved",
+                }
+            ],
+        )
+
     def test_drive_and_report_status_recognize_completed_proof(self) -> None:
         class Database:
             @staticmethod

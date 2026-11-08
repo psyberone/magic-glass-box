@@ -2202,12 +2202,11 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v52; external-review remediation R1-R8 complete; R13 live checkpoint
-retained; failure-only terminal reconciliation classified the upstream failure
-and the local-budget retry seam plus its worker-image deployment preflight are
-remediated;
-paid continuation awaits both provider quota and sufficient explicit budget
-authority**
+schema v52; external-review remediation R1-R8 complete; R15 retained after
+successful paid production and review, exact maintainer approvals, and two
+lost-receipt recoveries; provider publication then failed closed on stale
+primary revisions; the harness attention-stop defect is remediated and the
+final proof requires a fresh refold against the observed remote heads**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2880,6 +2879,37 @@ start with this host/image behavior mismatch. The exact remediation tree passes
 all 1,684 tests at 87% aggregate statement-plus-branch coverage with clean Ruff
 format and lint; the stale-image rejection and rebuilt-image acceptance also
 pass against real networkless Docker sandboxes without a provider call.
+
+R14 expired its workflow wall-time during preparation and spent no provider
+quota. After the owner confirmed the subscription-quota reset and authorized a
+fresh $10 ceiling, R15 started from a new state root and completed both genuine
+producer runs, both independent review runs, and both pinned validation gates.
+Thirty-nine successful provider invocations account 343,336 microusd-equivalent
+of subscription usage: 582,859 input tokens, including 96,768 cached input
+tokens, and 7,609 output tokens, including 306 reasoning tokens. The exact MGB
+candidate `d184e35aea854b310c3cb5e1341fb3beb50554ee` and exact Imitation Krab
+candidate `1edbca33d710dc0cd43462142f990fb29db0e1a3` each received a durable
+maintainer approval.
+
+R15 then discarded one accepted `refs.publish` receipt per project. In both
+cases a replacement controller observed the already-published remote ref and
+reconciled the original operation without replay. The subsequent
+`change.open` effects failed closed with `github-revision-conflict`: the proof
+had pinned MGB to local-only revision `81a5cf8` while GitHub primary was
+`1965ca4`, and it had pinned Imitation Krab to `cc07784` while its remote
+`0.7.0` primary was `73e9e2c`. No proposal opened and no landing occurred.
+Those exact approved candidates and published branches remain retained audit
+evidence, but approval does not transfer to a new refolded candidate hash.
+
+That honest provider conflict exposed a live-harness defect rather than a core
+authority defect: durable `provider_effect_unresolved` control-room attention
+was correctly recorded, but the harness recognized only rulings and uncertain
+effects as technical stops and would otherwise wait until its three-hour proof
+timeout. A RED-first regression now requires the driver to drain and stop on
+any durable workflow responsibility with `status=attention`, recording only
+the bounded execution, holder, and reason metadata. The next fresh proof pins
+the two observed remote primaries and may spend only the unconsumed 9,656,664
+microusd-equivalent of the owner's R15 authorization.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

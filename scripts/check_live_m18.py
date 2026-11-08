@@ -98,8 +98,8 @@ WORKER_IMAGE = "magic-glass-box/worker:m18r13-14582ae"
 VALIDATION_IMAGE = "magic-glass-box/validation:m18r13-14582ae"
 MGB_PROJECT = "magic-glass-box-m18"
 IK_PROJECT = "imitation-krab-m18"
-MGB_REVISION = "81a5cf848c2ed23d5872d10227a550971724e748"
-IK_REVISION = "cc0778433d97fb1c82a7c2fde1b222b86b436e5d"
+MGB_REVISION = "1965ca4cdb387d218e8abb7c7320e6cd25597231"
+IK_REVISION = "73e9e2c954e144bb1fc106b27c2e25905c69f389"
 MGB_PROFILE_NAMES = ("M18 MGB Producer", "M18 MGB Reviewer")
 IK_PROFILE_NAMES = ("M18 IK Producer", "M18 IK Reviewer")
 CONFIGURATION_NAME = "m18-implementation"
@@ -1424,6 +1424,33 @@ def _has_open_ruling(database: Database, execution_id: str) -> bool:
     return any(ruling["state"] == "open" for ruling in execution["rulings"])
 
 
+def _workflow_attention(
+    database: Database, executions: Mapping[str, str]
+) -> list[dict[str, str]]:
+    attention: list[dict[str, str]] = []
+    for project_key, execution_id in executions.items():
+        execution = database.get_workflow_execution(execution_id)
+        responsibility = execution.get("responsibility")
+        if (
+            not isinstance(responsibility, Mapping)
+            or responsibility.get("status") != "attention"
+        ):
+            continue
+        holder = responsibility.get("holder")
+        reason = responsibility.get("reason")
+        if not isinstance(holder, str) or not isinstance(reason, str):
+            raise RuntimeError("workflow attention is malformed")
+        attention.append(
+            {
+                "project_key": project_key,
+                "execution_id": execution_id,
+                "holder": holder,
+                "reason": reason,
+            }
+        )
+    return attention
+
+
 def _all_completed(database: Database, executions: Mapping[str, str]) -> bool:
     return all(
         database.get_workflow_execution(execution_id)["state"] == "completed"
@@ -1722,6 +1749,16 @@ def _drive_one_technical_stop(
         ):
             supervisor.drain(timeout=30)
             return "workflow_ruling_required"
+        attention = _workflow_attention(database, executions)
+        if attention:
+            supervisor.drain(timeout=30)
+            _append_observation(
+                state_root,
+                "workflow.attention_required",
+                "The live harness stopped for durable control-room attention",
+                attention=attention,
+            )
+            return "workflow_attention_required"
         _acknowledge_requested_wakes(control, executions, state_root=state_root)
         connector_waves.before_tick()
         result = supervisor.tick()
