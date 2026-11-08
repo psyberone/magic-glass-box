@@ -2204,9 +2204,9 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 **Status: bounded implementation and internal quality gates complete through
 schema v52; external-review remediation R1-R8 complete; R15 retained after
 successful paid production and review, exact maintainer approvals, and two
-lost-receipt recoveries; provider publication then failed closed on stale
-primary revisions; the harness attention-stop defect is remediated and the
-final proof requires a fresh refold against the observed remote heads**
+lost-receipt recoveries; R16 then proved the refold but found the IK work item
+already present on its current primary; the obsolete task is replaced by open
+IK issue #11 for the next fresh two-project proof**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2910,6 +2910,25 @@ any durable workflow responsibility with `status=attention`, recording only
 the bounded execution, holder, and reason metadata. The next fresh proof pins
 the two observed remote primaries and may spend only the unconsumed 9,656,664
 microusd-equivalent of the owner's R15 authorization.
+
+R16 pinned those exact remote primaries under clean controller `41d3228` and
+passed the credential-free worker-image preflight. Both producers completed 24
+successful calls accounting 193,320 microusd-equivalent, but Imitation Krab's
+producer truthfully returned no candidate: remote `0.7.0` already contained
+the requested liveness-help wording. The director opened the expected
+`no_candidate_changes` owner ruling and the harness stopped without review,
+publication, or landing. This is retained as a no-op detection checkpoint, not
+described as progress toward the two-candidate exit proof.
+
+The next fresh proof replaces only that obsolete project-local brief with open
+Imitation Krab issue #11, “Clarify participant handles and message body limits
+in CLI help.” The imported brief preserves its non-goals: handles remain the
+only participant identifier, the 16 KiB UTF-8 body ceiling does not change,
+and no profile or discovery feature is added. The MGB task, portable policy,
+activation shape, validation authority, provider capabilities, and two-project
+exit criteria remain unchanged. Its ceiling is at most 9,463,344
+microusd-equivalent, the unconsumed remainder of the same owner authorization
+after R15 and R16.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

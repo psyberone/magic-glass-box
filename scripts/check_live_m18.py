@@ -598,37 +598,51 @@ def _work_item(project_key: str) -> WorkItemEnvelope:
     return WorkItemEnvelope.from_mapping(
         {
             **common,
-            "external_id": "M18-IK-LIVENESS-COPY",
-            "title": "Describe krab health as a liveness probe",
+            "source": "github",
+            "external_id": "11",
+            "source_updated_at": "2026-11-06T17:14:45Z",
+            "title": "Clarify participant handles and message body limits in CLI help",
             "brief": (
-                "Change the krab health subcommand help from `check daemon health "
-                "without credentials` to `probe daemon liveness without credentials`. "
-                "Add the smallest stable assertion for that public help text. Do not "
-                "change request behavior, readiness semantics, schemas, or endpoints."
+                "Imitation Krab issue #11 reports that session-create --participant "
+                "accepts a handle, not a stable usr_... ID, while send bodies are "
+                "limited to 16 KiB of UTF-8 text. Render the participant argument as "
+                "--participant HANDLE, reject a usr_... participant locally with an "
+                "actionable handle-specific message, and document the shared limit "
+                "for both --body and --body-file without changing server semantics."
             ),
             "acceptance_criteria": [
-                "Top-level CLI help describes krab health as a liveness probe.",
-                "A focused test fails if the bounded help contract regresses.",
-                "Health request behavior and machine-readable schemas are unchanged.",
+                "Top-level and command-specific help use handle terminology.",
+                (
+                    "A usr_... participant fails before mutation with an actionable "
+                    "message, while valid handles continue to work unchanged."
+                ),
+                (
+                    "send --help states the 16 KiB UTF-8 limit for both --body and "
+                    "--body-file."
+                ),
+                "Boundary-size and oversize UTF-8 bodies produce documented outcomes.",
+                "The server-side size check and clear oversize error remain intact.",
                 "The complete unittest suite and branch-aware coverage floor pass.",
             ],
             "constraints": [
                 "Use only the Python standard library.",
-                "Keep loopback and credential-free health boundaries unchanged.",
-                "Do not expand liveness into readiness or compatibility checking.",
-                "Use RED-first verification for the help assertion.",
+                "Do not accept user IDs as a second participant identifier.",
+                "Do not increase the body limit.",
+                "Do not add profiles or participant discovery.",
+                "Use RED-first happy- and sad-path verification.",
                 "Do not commit, push, open a pull request, or use the network.",
             ],
             "context": [
                 {
                     "type": "note",
                     "value": (
-                        "An earlier independent maintainer review accepted the health "
-                        "feature and left this exact wording polish as non-blocking."
+                        "Imported from psyberone/imitation-krab issue #11 after the "
+                        "earlier liveness-copy work item became a truthful no-op on "
+                        "the current 0.7.0 primary."
                     ),
                 }
             ],
-            "labels": ["m18-live", "cli", "liveness"],
+            "labels": ["m18-live", "cli", "documentation", "enhancement"],
         }
     )
 

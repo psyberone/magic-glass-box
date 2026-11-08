@@ -238,6 +238,28 @@ class LiveM18ContractTests(unittest.TestCase):
         self.assertNotIn("--outdir /tmp/m18-dist", recipe)
         self.assertLess(recipe.index("make PYTHON="), recipe.index("cp -R "))
 
+    def test_ik_work_item_tracks_the_open_participant_help_issue(self) -> None:
+        work_item = live_m18._work_item(IK_PROJECT)
+
+        self.assertEqual(work_item.source, "github")
+        self.assertEqual(work_item.external_id, "11")
+        self.assertEqual(
+            work_item.title,
+            "Clarify participant handles and message body limits in CLI help",
+        )
+        self.assertIn(
+            "session-create --participant accepts a handle",
+            work_item.brief,
+        )
+        self.assertIn(
+            "Boundary-size and oversize UTF-8 bodies produce documented outcomes.",
+            work_item.acceptance_criteria,
+        )
+        self.assertIn(
+            "Do not accept user IDs as a second participant identifier.",
+            work_item.constraints,
+        )
+
     def test_live_harness_starts_both_exact_registered_github_sidecars(self) -> None:
         specs = _github_specs(
             state_root=self.root,
