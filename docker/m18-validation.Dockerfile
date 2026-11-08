@@ -1,4 +1,5 @@
-FROM magic-glass-box/runtime-proof:m18r9-81a5cf8
+ARG RUNTIME_PROOF_IMAGE=magic-glass-box/runtime-proof:m18r13-14582ae
+FROM ${RUNTIME_PROOF_IMAGE}
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git make \

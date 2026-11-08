@@ -94,8 +94,8 @@ MODEL = "gpt-6.1-sol"
 POLICY_NAME = "implementation-portable-v1"
 CONNECTOR_NAME = "openai-chatgpt-m18"
 GRANT_NAME = "openai-chatgpt-m18"
-WORKER_IMAGE = "magic-glass-box/worker:m18r9-81a5cf8"
-VALIDATION_IMAGE = "magic-glass-box/validation:m18r9-81a5cf8"
+WORKER_IMAGE = "magic-glass-box/worker:m18r13-14582ae"
+VALIDATION_IMAGE = "magic-glass-box/validation:m18r13-14582ae"
 MGB_PROJECT = "magic-glass-box-m18"
 IK_PROJECT = "imitation-krab-m18"
 MGB_REVISION = "81a5cf848c2ed23d5872d10227a550971724e748"
@@ -1517,7 +1517,7 @@ def _assert_gateway_carrier(
     state_root: Path,
     worker_image: str,
 ) -> None:
-    """Prove bidirectional networkless delivery before any live provider call."""
+    """Prove networkless delivery and terminal budget mapping before live calls."""
 
     class CarrierControl:
         def __init__(self) -> None:
@@ -1569,6 +1569,26 @@ for _index in range(2):
     assert response["ok"] is True
     assert len(response["result"]["untrusted_response"]["body"]) > 100_000
 print("m18-gateway-carrier-ok")
+"""
+    budget_code = """\
+import http.client as h
+import threading as t
+from magic_glass_box.worker_transport import ProviderHTTPTransport as P
+from magic_glass_box.worker_transport import _TransportServer as S
+class G:
+ def exchange(self,*a,**k):
+  return {"version":1,"request_id":"proof","ok":False,
+          "error":{"code":"budget_exhausted","message":"redacted"}}
+s=S(("127.0.0.1",0),P(G(),dialect="openai-responses",grant="proof"))
+q=t.Thread(target=s.serve_forever);q.start()
+try:
+ c=h.HTTPConnection("127.0.0.1",s.server_port,timeout=2)
+ c.request("POST","/v1/responses",body='{"model":"x","stream":true}',headers={"Content-Type":"application/json"})
+ r=c.getresponse();r.read();c.close()
+ assert r.status==402 and r.getheader("Retry-After") is None
+finally:
+ s.shutdown();s.server_close();q.join(timeout=2)
+print("m18-budget-terminal-ok")
 """
     run_id = "run_" + secrets.token_hex(16)
     control = CarrierControl()
@@ -1626,6 +1646,24 @@ print("m18-gateway-carrier-ok")
             or control.calls != 2
         ):
             raise RuntimeError("M18 gateway carrier preflight failed")
+        budget_profile = AgentProfileSpec.create(
+            image=worker_image,
+            command=("/opt/magic-glass-box/bin/python3", "-c", budget_code),
+            workspace_mode=WorkspaceMode.READ_ONLY,
+            network_mode=NetworkMode.NONE,
+        )
+        budget_request = SandboxRequest(
+            run_id="run_" + secrets.token_hex(16),
+            profile=budget_profile,
+            workspace=workspace,
+            launch=RuntimeLaunch(budget_profile.command),
+        )
+        budget_result = executor.execute(budget_request)
+        if (
+            budget_result.exit_code != 0
+            or budget_result.stdout.strip() != "m18-budget-terminal-ok"
+        ):
+            raise RuntimeError("M18 worker budget-transport preflight failed")
 
 
 def _drive_one_technical_stop(

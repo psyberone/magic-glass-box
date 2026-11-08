@@ -2202,9 +2202,10 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v52; external-review remediation R1-R8 complete; sixth live checkpoint
+schema v52; external-review remediation R1-R8 complete; R13 live checkpoint
 retained; failure-only terminal reconciliation classified the upstream failure
-and the local-budget retry seam is remediated;
+and the local-budget retry seam plus its worker-image deployment preflight are
+remediated;
 paid continuation awaits both provider quota and sufficient explicit budget
 authority**
 
@@ -2852,6 +2853,33 @@ mutation clean-suite guard also exposed a pre-existing load-sensitive
 action-accounting test whose one-second production-action deadline was not part
 of its assertion. That test now allows ten seconds; the separate deterministic
 deadline tests and production timeout behavior are unchanged.
+
+The owner then authorized a separate $10 R13 epoch. The harness gained an
+explicit durable ceiling capped at 10,000,000 microusd-equivalent, while
+retaining the separate live-quota acknowledgement. Fresh state root
+`m18-20261108-r13` pinned clean controller `dee91d0`; its prepare-only report
+and immutable provider grant both proved the exact $10 ceiling with zero usage
+before the connector started. Five real calls each sent 43,432 request bytes,
+received 109,238 response bytes, and reconciled to the same explicit
+subscription-sharing usage-limit failure. R13 therefore accounts 8,500,000 and
+retains 1,500,000, below another conservative reservation. Thirty subsequent
+budget denials remained local with zero request bytes, response bytes, or
+additional quota.
+
+R13 also proved that committing a controller fix is insufficient when the
+frozen worker image still carries the old bridge. The host had the terminal
+HTTP 402 mapping, but `magic-glass-box/worker:m18r9-81a5cf8` still translated
+the same denial to HTTP 502 and triggered those 30 retries. M18 preparation now
+runs a synthetic `budget_exhausted` exchange through the actual selected
+networkless worker image and requires HTTP 402 without `Retry-After`, in
+addition to its bidirectional carrier proof. The exact stale image fails that
+preflight; rebuilt `magic-glass-box/worker:m18r13-14582ae` passes it. The M18
+worker and validation Dockerfiles accept an explicit runtime-proof base and
+default to the rebuilt controller image. No future paid M18 invocation may
+start with this host/image behavior mismatch. The exact remediation tree passes
+all 1,684 tests at 87% aggregate statement-plus-branch coverage with clean Ruff
+format and lint; the stale-image rejection and rebuilt-image acceptance also
+pass against real networkless Docker sandboxes without a provider call.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
