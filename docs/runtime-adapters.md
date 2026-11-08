@@ -146,6 +146,11 @@ response bodies are durable. See
 If the connector result is ambiguous, the loopback bridge poisons itself for
 the remainder of that worker process. Any automatic retry attempted by the
 vendor CLI fails locally and cannot create a second MGB or provider dispatch.
+Provider quota and rate-limit failures remain retryable HTTP 429 responses with
+only the bounded `Retry-After` chosen by the control plane. Exhaustion of MGB's
+durable run budget is different: the bridge returns a redacted HTTP 402 without
+`Retry-After`, so a vendor CLI cannot mistake a local authority denial for a
+transient upstream failure and fan out immediate retries.
 
 The same entry point exposes bounded gateway calls to the agent:
 

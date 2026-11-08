@@ -6404,7 +6404,8 @@ class WorkflowDirectorTests(unittest.TestCase):
             workflow_director=director,
             poll_interval=0.05,
             action_lease_seconds=10,
-            action_timeout=1,
+            # This exercises accounting, not deadlines; tolerate loaded CI hosts.
+            action_timeout=10,
         )
         build_action = self.database.enqueue_supervisor_actions()[0]
         self.assertFalse(director.advance(self.execution["id"], expected_version=1))

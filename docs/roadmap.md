@@ -2202,9 +2202,11 @@ bounded acceptance plan, and deliberately small M18 recommendation are in
 ## Milestone 18: first reusable-template delivery
 
 **Status: bounded implementation and internal quality gates complete through
-schema v52; external-review remediation R1-R8 complete; fifth live checkpoint
-retained; failure-only terminal reconciliation complete;
-paid continuation awaits sufficient explicit budget authority**
+schema v52; external-review remediation R1-R8 complete; sixth live checkpoint
+retained; failure-only terminal reconciliation classified the upstream failure
+and the local-budget retry seam is remediated;
+paid continuation awaits both provider quota and sufficient explicit budget
+authority**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2811,6 +2813,45 @@ killed the other nine on direct replay. The effective meaningful result is
 incidental implementation text. The exact reconciled tree then passed all
 1,682 tests at 87% aggregate statement-plus-branch coverage, Ruff, and the
 formatting gate.
+
+On 2026-11-08 the owner authorized a fourth separate $5 live-proof epoch.
+Fresh state root `m18-20261108-r12` pinned clean controller `ac93d3e`, retained
+the same source revisions and images, and passed carrier preflight without a
+provider call. Both producers sent 43,432 request bytes and received 109,238
+response bytes. The connector reconciled each fully validated failure-only
+stream as an explicit
+`multiple_failure_subscription_sharing_usage_limit_exceeded` outcome. This is
+the provider's subscription-sharing quota limit, not a successful or ambiguous
+completion. MGB created no candidate or downstream provider effect, paused the
+runs, and durably woke eligible work after the bounded 15-minute recovery
+delay. The epoch accounts 3,400,000 microusd-equivalent and retains 1,600,000,
+below another 1,700,000 reservation.
+
+The wake exposed a separate local seam: the resumed worker had insufficient
+MGB budget, but the loopback bridge translated each `budget_exhausted` denial
+to generic HTTP 502. The vendor CLI retried that apparently transient error 30
+times. All 30 requests were rejected before connector dispatch, carried zero
+request and response bytes in the provider ledger, and spent no additional
+quota, but the fan-out was operationally wrong. A RED-first regression now
+requires one redacted HTTP 402 response without `Retry-After`, while preserving
+HTTP 429 and bounded delay for real quota and rate-limit recovery. Official
+[OpenAI stream guidance](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+likewise treats only `response.completed` as success and permits quota failures
+to arrive through `response.failed`. No further paid continuation is authorized
+until the controller change is committed and observed, the subscription quota
+is available, and fresh budget can fund the conservative reservation.
+
+The exact remediation tree passes all 1,683 tests at 87% aggregate
+statement-plus-branch coverage with clean Ruff format and lint. Fresh serial
+Mutmut association generated ten variants over the new classification and HTTP
+mapping. The tests killed all seven meaningful variants: corrupt, inverted, or
+misspelled budget classification and missing or incorrect 402 responses. Three
+survivors change only the internal exception prose that the HTTP boundary
+deliberately redacts, for an effective meaningful score of 7/7 (100%). The
+mutation clean-suite guard also exposed a pre-existing load-sensitive
+action-accounting test whose one-second production-action deadline was not part
+of its assertion. That test now allows ten seconds; the separate deterministic
+deadline tests and production timeout behavior are unchanged.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

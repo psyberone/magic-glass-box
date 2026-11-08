@@ -74,6 +74,10 @@ class ProviderRetryableTransportError(WorkerTransportError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class ProviderBudgetTransportError(WorkerTransportError):
+    """The run's durable provider budget cannot fund this invocation."""
+
+
 class GatewayClient(Protocol):
     def exchange(
         self,
@@ -714,6 +718,8 @@ class ProviderHTTPTransport:
                 raise ProviderAmbiguousTransportError(
                     "provider gateway returned an invalid response"
                 )
+            if error["code"] == "budget_exhausted":
+                raise ProviderBudgetTransportError("provider budget is exhausted")
             if error["code"] in {"quota_exhausted", "rate_limited"}:
                 retry_after_seconds = error.get("retry_after_seconds")
                 if (
@@ -871,6 +877,9 @@ class _TransportHandler(BaseHTTPRequestHandler):
             return
         except ProviderRetryableTransportError as exc:
             self._failure(429, retry_after_seconds=exc.retry_after_seconds)
+            return
+        except ProviderBudgetTransportError:
+            self._failure(402)
             return
         except WorkerTransportError:
             self._failure(502)

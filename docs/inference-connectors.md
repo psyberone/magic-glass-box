@@ -486,6 +486,12 @@ to stop the disposable container, and completion or failure closes that
 attempt as `interrupted` without failing the run. The worker-facing HTTP bridge
 returns a redacted 429 with the bounded `Retry-After`, while the run-scoped
 gateway prevents another provider dispatch once the pause is durable.
+An MGB `budget_exhausted` denial is not a provider recovery signal. The bridge
+returns a redacted HTTP 402 with no `Retry-After`; the vendor CLI therefore sees
+a terminal local authority failure instead of retrying it as transport
+unavailability. A later, separately authorized invocation may still succeed if
+capacity becomes available, so the bridge does not poison the entire worker as
+it does after an ambiguous dispatch.
 
 The supervisor never wakes a paused run while an attempt is still active or a
 human interaction remains open. An operator may answer that interaction while
