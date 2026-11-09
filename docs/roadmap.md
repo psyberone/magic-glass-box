@@ -2206,7 +2206,9 @@ schema v52; external-review remediation R1-R8 complete; R15 retained after
 successful paid production and review, exact maintainer approvals, and two
 lost-receipt recoveries; R16 then proved the refold but found the IK work item
 already present on its current primary; the obsolete task is replaced by open
-IK issue #11 for the next fresh two-project proof**
+IK issue #11; R17 produced two reviewed candidates, but MGB validation exposed
+and now has a separately remediated Python 3.11 primary-branch incompatibility
+that must land before the next fresh refold**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2929,6 +2931,37 @@ activation shape, validation authority, provider capabilities, and two-project
 exit criteria remain unchanged. Its ceiling is at most 9,463,344
 microusd-equivalent, the unconsumed remainder of the same owner authorization
 after R15 and R16.
+
+R17 pinned clean controller `b314c45`, the same two observed primaries, and the
+replacement IK brief. Both producers and both independent reviewers completed
+through 52 successful calls accounting 557,902 microusd-equivalent: 1,011,454
+input tokens, including 257,792 cached input tokens, and 11,661 output tokens,
+including 1,101 reasoning tokens. IK candidate
+`3d213a7a8aca7dd9972525421e019c7964ced65e` changed README and CLI guidance plus
+happy/sad boundary tests; its independent review and full pinned validation both
+passed. MGB candidate `92e068db94facef60a2c9b46e0bd9f37b53329eb`
+retained the narrow license-metadata diff and received an approving independent
+review.
+
+The planned replacement-controller checkpoint then recorded MGB's immutable
+validation failure. An exact replay showed that format and lint passed, but the
+remote primary's existing controller-source recovery test called
+`TarFile.extractall(filter="data")`, an interface absent from the pinned Python
+3.11.2 validation image even though MGB declares Python 3.11 support. The
+packaging candidate did not cause that failure and must not absorb the unrelated
+fix. No maintainer disposition, provider intent, publication, or landing was
+recorded for either R17 candidate.
+
+The separate RED-first remediation validates every archived member as a unique,
+bounded regular file or directory beneath `src/magic_glass_box`, rejects unsafe
+paths and file ancestors, and materializes those files directly into the
+private empty deployment directory without `extractall`. Focused compatibility
+and traversal tests pass under the exact Python 3.11.2 image. Its full
+read-only, networkless validation-image gate passes all 1,687 tests at 86%
+aggregate statement-plus-branch coverage with clean Ruff format and lint. This
+primary-branch fix must land separately before another fresh proof refolds both
+candidates; the remaining cross-state authorization is at most 8,905,442
+microusd-equivalent after R15, R16, and R17.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

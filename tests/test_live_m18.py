@@ -460,13 +460,18 @@ class LiveM18ContractTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        selected = _resolve_github_source_root(
-            project_root=repository,
-            current_source_root=repository / "src",
-            state_root=state,
-            current_commit=new_commit,
-            specs=specs,
-        )
+        with mock.patch.object(
+            live_m18.tarfile.TarFile,
+            "extractall",
+            side_effect=AssertionError("unbounded archive extraction is forbidden"),
+        ):
+            selected = _resolve_github_source_root(
+                project_root=repository,
+                current_source_root=repository / "src",
+                state_root=state,
+                current_commit=new_commit,
+                specs=specs,
+            )
 
         self.assertNotEqual(selected, repository / "src")
         self.assertEqual(
@@ -495,6 +500,20 @@ class LiveM18ContractTests(unittest.TestCase):
         ]
         self.assertEqual(len(recovery_observations), 1)
         self.assertEqual(recovery_observations[0]["metadata"]["commit"], old_commit)
+
+    def test_legacy_controller_archive_fallback_rejects_traversal(self) -> None:
+        raw = live_m18.io.BytesIO()
+        with live_m18.tarfile.open(fileobj=raw, mode="w:") as archive:
+            member = live_m18.tarfile.TarInfo("src/magic_glass_box/../../escape.py")
+            member.size = 1
+            archive.addfile(member, live_m18.io.BytesIO(b"x"))
+        raw.seek(0)
+
+        with (
+            live_m18.tarfile.open(fileobj=raw, mode="r:") as archive,
+            self.assertRaisesRegex(RuntimeError, "archive is unsafe"),
+        ):
+            live_m18._controller_archive_members(archive)
 
     def test_usage_totals_are_complete_across_generations(self) -> None:
         self.assertEqual(

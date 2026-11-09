@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from magic_glass_box.candidates import GitCandidateStore
@@ -118,6 +118,7 @@ MAX_DIAGNOSTIC_EVENTS = 32
 MAX_DIAGNOSTIC_TEXT = 2048
 MAX_CONTROLLER_OBSERVATIONS_BYTES = 1024 * 1024
 MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_CONTROLLER_SOURCE_ARCHIVE_MEMBERS = 4096
 CONTROLLER_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_SIDECAR_NAMES = {
     MGB_PROJECT: "github-m18-mgb",
@@ -921,6 +922,77 @@ def _source_tree_sha256(source_root: Path) -> str:
     return digest.hexdigest()
 
 
+def _controller_archive_members(
+    archive: tarfile.TarFile,
+) -> list[tarfile.TarInfo]:
+    members = archive.getmembers()
+    if not members or len(members) > MAX_CONTROLLER_SOURCE_ARCHIVE_MEMBERS:
+        raise RuntimeError("pinned GitHub source archive is unsafe")
+    entries: dict[PurePosixPath, bool] = {}
+    total = 0
+    for member in members:
+        if not (member.isdir() or member.isfile()):
+            raise RuntimeError("pinned GitHub source archive is unsafe")
+        raw_name = member.name
+        normalized_name = raw_name.rstrip("/") if member.isdir() else raw_name
+        path = PurePosixPath(normalized_name)
+        if (
+            not normalized_name
+            or (
+                member.isdir()
+                and raw_name not in {normalized_name, normalized_name + "/"}
+            )
+            or "\\" in normalized_name
+            or path.is_absolute()
+            or path.as_posix() != normalized_name
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or not (
+                path.parts == ("src",) or path.parts[:2] == ("src", "magic_glass_box")
+            )
+            or path in entries
+            or (member.isfile() and member.size < 0)
+        ):
+            raise RuntimeError("pinned GitHub source archive is unsafe")
+        entries[path] = member.isdir()
+        if member.isfile():
+            total += member.size
+            if total > MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES:
+                raise RuntimeError(
+                    "pinned GitHub source archive exceeds its size bounds"
+                )
+    for path in entries:
+        if any(entries.get(parent) is False for parent in path.parents):
+            raise RuntimeError("pinned GitHub source archive is unsafe")
+    return members
+
+
+def _extract_controller_archive(
+    archive: tarfile.TarFile,
+    members: Sequence[tarfile.TarInfo],
+    destination: Path,
+) -> None:
+    for member in sorted(
+        (item for item in members if item.isdir()),
+        key=lambda item: len(PurePosixPath(item.name).parts),
+    ):
+        path = PurePosixPath(member.name.rstrip("/"))
+        destination.joinpath(*path.parts).mkdir(mode=0o700, parents=True, exist_ok=True)
+    for member in (item for item in members if item.isfile()):
+        path = PurePosixPath(member.name)
+        target = destination.joinpath(*path.parts)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        source = archive.extractfile(member)
+        if source is None:
+            raise RuntimeError("pinned GitHub source archive is invalid")
+        with source:
+            raw = source.read(member.size + 1)
+        if len(raw) != member.size:
+            raise RuntimeError("pinned GitHub source archive is invalid")
+        with target.open("xb") as output:
+            output.write(raw)
+        target.chmod(0o700 if member.mode & 0o111 else 0o600)
+
+
 def _materialize_controller_source(
     *,
     project_root: Path,
@@ -978,11 +1050,9 @@ def _materialize_controller_source(
     temporary = Path(tempfile.mkdtemp(prefix=".source-", dir=deployment_root))
     try:
         with tarfile.open(fileobj=io.BytesIO(archive_raw), mode="r:") as archive:
-            members = archive.getmembers()
-            if any(not (member.isdir() or member.isfile()) for member in members):
-                raise RuntimeError("pinned GitHub source archive is unsafe")
+            members = _controller_archive_members(archive)
             try:
-                archive.extractall(temporary, members=members, filter="data")
+                _extract_controller_archive(archive, members, temporary)
             except (OSError, tarfile.TarError) as exc:
                 raise RuntimeError("pinned GitHub source archive is invalid") from exc
             if not (temporary / "src" / "magic_glass_box").is_dir():
