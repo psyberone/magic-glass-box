@@ -1099,8 +1099,10 @@ class GitSnapshotterTests(unittest.TestCase):
                     )
 
     def test_real_process_output_stderr_timeout_and_exit_are_bounded(self) -> None:
-        snapshotter = GitSnapshotter(timeout=0.1)
-        environment = snapshotter._environment(self.root)
+        # Output-limit checks must not race the deliberately short timeout check
+        # when the validation host is busy.
+        output_snapshotter = GitSnapshotter(timeout=5)
+        environment = output_snapshotter._environment(self.root)
         for script, message in (
             ("import os; os.write(1, b'x' * 10000)", "output limit"),
             ("import os; os.write(2, b'x' * 100000)", "output limit"),
@@ -1109,16 +1111,17 @@ class GitSnapshotterTests(unittest.TestCase):
                 self.subTest(script=script),
                 self.assertRaisesRegex(WorkspaceError, message),
             ):
-                snapshotter._bounded_process(
+                output_snapshotter._bounded_process(
                     [sys.executable, "-c", script], environment, 10
                 )
+        timeout_snapshotter = GitSnapshotter(timeout=0.1)
         started = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
-            snapshotter._bounded_process(
+            timeout_snapshotter._bounded_process(
                 [sys.executable, "-c", "import time; time.sleep(2)"], environment, 10
             )
         self.assertLess(time.monotonic() - started, 1)
-        result = snapshotter._bounded_process(
+        result = output_snapshotter._bounded_process(
             [sys.executable, "-c", "import sys; sys.exit(7)"], environment, 10
         )
         self.assertEqual(result.returncode, 7)

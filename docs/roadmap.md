@@ -2207,8 +2207,10 @@ successful paid production and review, exact maintainer approvals, and two
 lost-receipt recoveries; R16 then proved the refold but found the IK work item
 already present on its current primary; the obsolete task is replaced by open
 IK issue #11; R17 produced two reviewed candidates, but MGB validation exposed
-and now has a separately remediated Python 3.11 primary-branch incompatibility
-that must land before the next fresh refold**
+and separately remediated a Python 3.11 primary-branch incompatibility; R18
+then produced fresh reviewed candidates and exposed a second unrelated primary
+defect: a loaded-host timing race in a real-process output-bound test; that
+test-only fix is fully validated and must land before the MGB candidate refolds**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -2962,6 +2964,51 @@ aggregate statement-plus-branch coverage with clean Ruff format and lint. This
 primary-branch fix must land separately before another fresh proof refolds both
 candidates; the remaining cross-state authorization is at most 8,905,442
 microusd-equivalent after R15, R16, and R17.
+
+R18 pinned clean controller `5c25e0a`, corrected MGB primary
+`6705d6541fba6d47eb582a9912630c6e008c1dbf`, and unchanged IK 0.7.0 primary
+`73e9e2c954e144bb1fc106b27c2e25905c69f389`. Its prepare-only invocation
+accounted zero provider usage and verified the two immutable source snapshots,
+credential-owning host processes, denied worker network, portable activation,
+and 8,905,442 microusd-equivalent durable state-local ceiling. Two paid
+invocations made 49 successful calls accounting 537,799 microusd-equivalent:
+929,884 input tokens, including 166,144 cached input tokens, and 11,438 output
+tokens, including 1,139 reasoning tokens.
+
+IK candidate `a9aab9273c0d9f3e2703ae09808c3c27e4261851` changed README and CLI
+guidance plus focused client and service boundary tests. Its independent review
+and full pinned validation passed, leaving only exact maintainer disposition.
+MGB candidate `2eac46ab311adbf4190cc447d3348b1c57703b8c` retained the narrow SPDX
+license and setuptools-bound change with durable metadata tests. Its independent
+review passed, but immutable validation recorded a failure and correctly opened
+an unresolved owner ruling before maintainer approval or any provider effect.
+
+The retained validation evidence deliberately contained the command, image,
+candidate identity, exit, duration, byte count, and output digest rather than
+the output body. A production-plan replay under the same read-only workspace,
+network denial, Python 3.11 image, two CPUs, 2 GiB memory, and 256 MiB tmpfs
+reproduced the actual primary defect: the existing
+`test_real_process_output_stderr_timeout_and_exit_are_bounded` used a single
+0.1-second process deadline for output-bound, timeout, and exit-code assertions.
+Under host load the deadline could expire before the child wrote enough bytes,
+so a legitimate timeout incorrectly failed a test expecting the output ceiling.
+The packaging candidate neither caused nor should absorb that defect.
+
+The separate test-only remediation gives the real stdout/stderr and exit-code
+checks a bounded five-second deadline while retaining the 0.1-second deadline
+only for the deliberate sleep/timeout check. The focused real-process test
+passes 25 consecutive runs. The exact read-only, networkless validation image
+passes all 1,687 tests with one skip, 86% aggregate statement-plus-branch
+coverage, and clean Ruff format and lint. After this fix lands, MGB must refold
+onto the new primary rather than overriding or retrying the stale failed gate;
+the independently validated IK candidate remains unaffected. R18 leaves at
+most 8,367,643 microusd-equivalent of the cross-state authorization.
+
+R18 also exposed a diagnostic usability question for later design: validation
+evidence is durable and tamper-evident but a digest alone cannot explain a
+failure. A future slice should evaluate a bounded, explicitly untrusted
+validation diagnostic artifact with independent size and access policy; it must
+not silently turn worker transcripts or reasoning streams into retained logs.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
