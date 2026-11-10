@@ -2212,7 +2212,9 @@ then produced fresh reviewed candidates and exposed a second unrelated primary
 defect: a loaded-host timing race in a real-process output-bound test; that
 test-only fix is fully validated and landed; R18 closed terminal-incomplete
 after its owner-approved IK candidate exhausted the original two-hour window;
-R19 is authorized with the schema's bounded seven-day workflow window**
+R19 landed both approved candidates after lost-receipt recovery, then honestly
+held both targets when post-landing proof exposed terminal-newline
+canonicalization missing from the verifier**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -3033,6 +3035,36 @@ disposition does not repeatedly invalidate otherwise bounded evidence. This
 does not widen the 1,800-second run timeout, two-seat ceiling, single shared-host
 concurrency slot, review-round bounds, credential or network boundary, or the
 remaining 8,367,643 microusd-equivalent cross-state authorization.
+
+R19 produced and independently approved MGB candidate
+`406aca0e66d83ce764f23996ffcd09bbe631673f` and IK candidate
+`f0b4f16c535727c86d10a1bd8c0d28cb20fe9a43`; both exact pinned validations
+passed before owner approval. Fifty-one provider calls reported 567,880
+microusd-equivalent. One recovered `subscription_sharing_user_unavailable` 503
+had no invoice amount and retained the policy's conservative 1,700,000 reserve,
+so durable accounting is 2,267,880 and the remaining ceiling is 6,099,763.
+
+Both `refs.publish` success responses were deliberately discarded after GitHub
+accepted them. Replacement-controller reconciliation recovered the exact
+published candidate refs without replaying either effect. GitHub PR #2 then
+squash-landed MGB as `fc36272f6a46aac1dac29a2f4ee6dbd66a8cbfbd` on `main`,
+and GitHub PR #13 squash-landed IK as
+`9cf4c0e6ae2e29450a6a3604285b48e8208c1850` on `0.7.0`. Authoritative
+read-back proved both approved trees, exact expected first parents, closed
+changes, and no undeclared secondary effects.
+
+The immutable post-landing proofs nevertheless classified both landings as
+mismatches because each approved change body ended in one LF while GitHub's
+canonical squash-commit message omitted that terminal LF. Every other expected
+and observed byte matched. The fail-closed behavior correctly retained both
+proofs, placed target holds, and requested owner rulings rather than silently
+calling the workflows complete. A RED-first regression now canonicalizes only
+terminal LF characters in the expected Git commit message; internal message
+changes and all tree, parent, ref, and secondary-effect mismatches remain
+failures. The focused regression plus all 70 workflow-director tests pass.
+R19 remains an honest active/held proof until its immutable mismatch rulings
+receive explicit owner disposition; the already-landed repository state is not
+rewritten or relabeled.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry

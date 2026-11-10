@@ -2542,7 +2542,9 @@ class IntegrationStorage:
                 title = operation["spec"]["parameters"].get("title")
                 body = operation["spec"]["parameters"].get("body")
                 expected_message = (
-                    title + (f"\n\n{body}" if body else "")
+                    # Git commit messages do not retain terminal blank lines.
+                    # Preserve every other byte of the approved title/body.
+                    (title + (f"\n\n{body}" if body else "")).rstrip("\n")
                     if isinstance(title, str) and isinstance(body, str)
                     else None
                 )

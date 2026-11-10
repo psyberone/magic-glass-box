@@ -1837,7 +1837,10 @@ class WorkflowDirectorTests(unittest.TestCase):
         return execution, activation, bindings
 
     def activated_provider_landing(
-        self, *, external_id: str
+        self,
+        *,
+        external_id: str,
+        body: str = "Exact activated workflow proposal.",
     ) -> tuple[
         dict[str, object],
         dict[str, object],
@@ -1857,7 +1860,7 @@ class WorkflowDirectorTests(unittest.TestCase):
             expected_version=enqueued["version"],
             head_ref=f"refs/heads/mgb/{external_id}",
             title="Prove activated provider authority",
-            body="Exact activated workflow proposal.",
+            body=body,
             draft=False,
             configured_by_handle="operator",
         )
@@ -2994,6 +2997,48 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertTrue(
             self.director().advance(landed["id"], expected_version=landed["version"])
         )
+
+    def test_activated_landing_accepts_provider_trimmed_terminal_newline(self) -> None:
+        body = "Exact activated workflow proposal.\n"
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-trailing-newline",
+            body=body,
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+            readback_overrides={
+                "landing_commit_message": (
+                    "Prove activated provider authority\n\n" + body.rstrip("\n")
+                )
+            },
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "conformant")
+        self.assertIsNone(landed["landing"]["target_hold"])
 
     def test_activated_landing_requires_first_parent_message_and_effect_proof(
         self,
