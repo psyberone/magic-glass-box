@@ -1420,14 +1420,22 @@ def _prepare_control_plane(
 def _existing_executions(database: Database) -> dict[str, str]:
     result: dict[str, str] = {}
     for project_key in (MGB_PROJECT, IK_PROJECT):
-        executions = database.list_workflow_executions(
-            project_key=project_key, state="active", limit=2
-        )
-        if len(executions) != 1:
+        executions = database.list_workflow_executions(project_key=project_key, limit=2)
+        active = [item for item in executions if item["state"] == "active"]
+        if len(active) == 1:
+            selected = active[0]
+        elif (
+            not active
+            and len(executions) == 1
+            and executions[0]["state"] in {"cancelled", "completed"}
+        ):
+            selected = executions[0]
+        else:
             raise RuntimeError(
-                "M18 state must contain exactly one active execution per project"
+                "M18 state must contain one active execution or one unambiguous "
+                "terminal execution per project"
             )
-        result[project_key] = executions[0]["id"]
+        result[project_key] = selected["id"]
     return result
 
 
@@ -1538,6 +1546,14 @@ def _workflow_attention(
 def _all_completed(database: Database, executions: Mapping[str, str]) -> bool:
     return all(
         database.get_workflow_execution(execution_id)["state"] == "completed"
+        for execution_id in executions.values()
+    )
+
+
+def _all_terminal(database: Database, executions: Mapping[str, str]) -> bool:
+    return all(
+        database.get_workflow_execution(execution_id)["state"]
+        in {"cancelled", "completed"}
         for execution_id in executions.values()
     )
 
@@ -1789,6 +1805,9 @@ def _drive_one_technical_stop(
     if _all_completed(database, executions):
         supervisor.drain(timeout=30)
         return "both_completed"
+    if _all_terminal(database, executions):
+        supervisor.drain(timeout=30)
+        return "all_terminal_incomplete"
     initially_pending = sum(
         _is_pending_maintainer(database, execution_id)
         for execution_id in executions.values()
@@ -1802,6 +1821,9 @@ def _drive_one_technical_stop(
         if _all_completed(database, executions):
             supervisor.drain(timeout=30)
             return "both_completed"
+        if _all_terminal(database, executions):
+            supervisor.drain(timeout=30)
+            return "all_terminal_incomplete"
         uncertain = _uncertain_provider_effects(database, executions)
         newly_uncertain = [
             effect
@@ -2064,6 +2086,8 @@ def _execution_evidence(
 def _proof_status(database: Database, executions: Mapping[str, str]) -> str:
     if _all_completed(database, executions):
         return "completed"
+    if _all_terminal(database, executions):
+        return "terminal_incomplete"
     if all(
         _is_pending_maintainer(database, execution_id)
         for execution_id in executions.values()

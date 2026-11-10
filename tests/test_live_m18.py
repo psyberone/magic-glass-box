@@ -69,7 +69,7 @@ class LiveM18ContractTests(unittest.TestCase):
                 ]
             )
 
-    def test_existing_executions_select_one_active_execution_per_project(self) -> None:
+    def test_existing_executions_retain_one_terminal_sibling(self) -> None:
         calls: list[tuple[str, str | None, int]] = []
 
         class Database:
@@ -78,10 +78,14 @@ class LiveM18ContractTests(unittest.TestCase):
                 *, project_key: str, state: str | None = None, limit: int
             ) -> list[dict[str, str]]:
                 calls.append((project_key, state, limit))
-                executions = [
-                    {"id": "wfx_cancelled", "state": "cancelled"},
-                    {"id": "wfx_" + project_key, "state": "active"},
-                ]
+                executions = (
+                    [{"id": "wfx_mgb_cancelled", "state": "cancelled"}]
+                    if project_key == MGB_PROJECT
+                    else [
+                        {"id": "wfx_ik_cancelled", "state": "cancelled"},
+                        {"id": "wfx_ik_active", "state": "active"},
+                    ]
+                )
                 if state is not None:
                     executions = [item for item in executions if item["state"] == state]
                 return executions[:limit]
@@ -89,15 +93,15 @@ class LiveM18ContractTests(unittest.TestCase):
         self.assertEqual(
             _existing_executions(Database()),  # type: ignore[arg-type]
             {
-                "magic-glass-box-m18": "wfx_magic-glass-box-m18",
-                "imitation-krab-m18": "wfx_imitation-krab-m18",
+                "magic-glass-box-m18": "wfx_mgb_cancelled",
+                "imitation-krab-m18": "wfx_ik_active",
             },
         )
         self.assertEqual(
             calls,
             [
-                ("magic-glass-box-m18", "active", 2),
-                ("imitation-krab-m18", "active", 2),
+                ("magic-glass-box-m18", None, 2),
+                ("imitation-krab-m18", None, 2),
             ],
         )
 
@@ -859,6 +863,44 @@ class LiveM18ContractTests(unittest.TestCase):
         self.assertEqual(reason, "both_completed")
         self.assertTrue(supervisor.drained)
         self.assertEqual(_proof_status(database, executions), "completed")  # type: ignore[arg-type]
+
+    def test_drive_and_report_status_preserve_terminal_incomplete_proof(self) -> None:
+        class Database:
+            @staticmethod
+            def get_workflow_execution(execution_id: str) -> dict[str, str]:
+                return {
+                    "id": execution_id,
+                    "state": "cancelled" if execution_id == "wfx_mgb" else "completed",
+                }
+
+        class Supervisor:
+            drained = False
+
+            def drain(self, *, timeout: int) -> None:
+                self.drained = timeout == 30
+
+            @staticmethod
+            def tick() -> dict[str, bool]:
+                raise AssertionError("terminal proof must not tick")
+
+        executions = {MGB_PROJECT: "wfx_mgb", IK_PROJECT: "wfx_ik"}
+        database = Database()
+        supervisor = Supervisor()
+        reason = _drive_one_technical_stop(
+            supervisor=supervisor,  # type: ignore[arg-type]
+            database=database,  # type: ignore[arg-type]
+            control=object(),  # type: ignore[arg-type]
+            executions=executions,
+            connector_waves=object(),  # type: ignore[arg-type]
+            state_root=self.root,
+        )
+
+        self.assertEqual(reason, "all_terminal_incomplete")
+        self.assertTrue(supervisor.drained)
+        self.assertEqual(
+            _proof_status(database, executions),  # type: ignore[arg-type]
+            "terminal_incomplete",
+        )
 
 
 if __name__ == "__main__":
