@@ -98,7 +98,7 @@ WORKER_IMAGE = "magic-glass-box/worker:m18r13-14582ae"
 VALIDATION_IMAGE = "magic-glass-box/validation:m18r13-14582ae"
 MGB_PROJECT = "magic-glass-box-m18"
 IK_PROJECT = "imitation-krab-m18"
-MGB_REVISION = "6705d6541fba6d47eb582a9912630c6e008c1dbf"
+MGB_REVISION = "3935100d8c5802f1d821f0405e71510a4abd753d"
 IK_REVISION = "73e9e2c954e144bb1fc106b27c2e25905c69f389"
 MGB_PROFILE_NAMES = ("M18 MGB Producer", "M18 MGB Reviewer")
 IK_PROFILE_NAMES = ("M18 IK Producer", "M18 IK Reviewer")
@@ -108,6 +108,7 @@ MGB_VALIDATION = "mgb_full_quality"
 IK_VALIDATION = "ik_full_quality"
 DEFAULT_BUDGET_MICROUSD = 5_000_000
 MAX_LIVE_BUDGET_MICROUSD = 10_000_000
+LIVE_WORKFLOW_WALL_TIME_SECONDS = 7 * 24 * 60 * 60
 PROOF_TIMEOUT_SECONDS = 10_800.0
 RUN_TIMEOUT_SECONDS = 1_800.0
 REPORT_NAME = "m18-live-report.json"
@@ -736,7 +737,7 @@ def _policy() -> WorkflowPolicySpec:
                 "review_rounds": 2,
                 "seat_count": 2,
                 "shared_host_concurrency": 1,
-                "wall_time_seconds": 10_800,
+                "wall_time_seconds": LIVE_WORKFLOW_WALL_TIME_SECONDS,
             },
             "wake_mode": "manual",
             "required_capabilities": [
@@ -759,11 +760,9 @@ def _activation(
     if project_key == MGB_PROJECT:
         validation = MGB_VALIDATION
         rounds = 2
-        wall_time = 10_800
     else:
         validation = IK_VALIDATION
         rounds = 1
-        wall_time = 7_200
     return WorkflowActivationSpec.from_mapping(
         {
             "schema_version": 1,
@@ -785,7 +784,7 @@ def _activation(
                 "review_rounds": rounds,
                 "seat_count": 2,
                 "shared_host_concurrency": 1,
-                "wall_time_seconds": wall_time,
+                "wall_time_seconds": LIVE_WORKFLOW_WALL_TIME_SECONDS,
             },
             "wake_bindings": [
                 {"role": "producer", "wake_class": "human_turn_only"},

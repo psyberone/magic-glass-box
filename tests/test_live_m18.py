@@ -69,6 +69,33 @@ class LiveM18ContractTests(unittest.TestCase):
                 ]
             )
 
+    def test_live_policy_uses_the_approved_bounded_operator_window(self) -> None:
+        bindings = {
+            name: {"id": "cpb_" + character * 32}
+            for name, character in zip(
+                ("change.open", "landing.invoke", "refs.publish"),
+                ("a", "b", "c"),
+                strict=True,
+            )
+        }
+        policy_resources = live_m18._policy().to_dict()["resource_maxima"]
+        activations = [
+            live_m18._activation(
+                project_key=project_key,
+                policy_sha256="d" * 64,
+                configuration_version_id="wfv_" + "e" * 32,
+                bindings=bindings,
+            ).to_dict()["resources"]
+            for project_key in (MGB_PROJECT, IK_PROJECT)
+        ]
+
+        self.assertEqual(live_m18.LIVE_WORKFLOW_WALL_TIME_SECONDS, 604_800)
+        self.assertEqual(policy_resources["wall_time_seconds"], 604_800)
+        for resources in activations:
+            self.assertEqual(resources["wall_time_seconds"], 604_800)
+            self.assertEqual(resources["seat_count"], 2)
+            self.assertEqual(resources["shared_host_concurrency"], 1)
+
     def test_existing_executions_retain_one_terminal_sibling(self) -> None:
         calls: list[tuple[str, str | None, int]] = []
 

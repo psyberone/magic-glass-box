@@ -2210,7 +2210,9 @@ IK issue #11; R17 produced two reviewed candidates, but MGB validation exposed
 and separately remediated a Python 3.11 primary-branch incompatibility; R18
 then produced fresh reviewed candidates and exposed a second unrelated primary
 defect: a loaded-host timing race in a real-process output-bound test; that
-test-only fix is fully validated and must land before the MGB candidate refolds**
+test-only fix is fully validated and landed; R18 closed terminal-incomplete
+after its owner-approved IK candidate exhausted the original two-hour window;
+R19 is authorized with the schema's bounded seven-day workflow window**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -3009,6 +3011,28 @@ evidence is durable and tamper-evident but a digest alone cannot explain a
 failure. A future slice should evaluate a bounded, explicitly untrusted
 validation diagnostic artifact with independent size and access policy; it must
 not silently turn worker transcripts or reasoning streams into retained logs.
+
+The owner approved exact IK candidate
+`a9aab9273c0d9f3e2703ae09808c3c27e4261851` and cancelled the stale MGB
+validation workflow rather than overriding its failed gate. Resuming the
+surviving IK execution then truthfully opened a non-extendable
+`resource_exhausted` ruling: the original 7,200-second activation window had
+continued through its overnight maintainer wait, as required by the accepted
+pre-landing wall-time contract. No provider effect or additional model call
+occurred. The owner cancelled that expired execution; its approval remains
+durable evidence but cannot authorize landing outside the expired workflow.
+R18 is therefore retained as `terminal_incomplete`, not called a successful
+proof.
+
+The harness now retains one unambiguous cancelled or completed sibling while
+continuing another active project and reports mixed terminal outcomes without
+claiming both completed. R19 is a fresh two-project proof pinned to MGB primary
+`3935100d8c5802f1d821f0405e71510a4abd753d`. Its owner-approved workflow
+window is the schema's finite maximum of 604,800 seconds so asynchronous human
+disposition does not repeatedly invalidate otherwise bounded evidence. This
+does not widen the 1,800-second run timeout, two-seat ceiling, single shared-host
+concurrency slot, review-round bounds, credential or network boundary, or the
+remaining 8,367,643 microusd-equivalent cross-state authorization.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
