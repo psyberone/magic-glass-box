@@ -2214,7 +2214,9 @@ test-only fix is fully validated and landed; R18 closed terminal-incomplete
 after its owner-approved IK candidate exhausted the original two-hour window;
 R19 landed both approved candidates after lost-receipt recovery, then honestly
 held both targets when post-landing proof exposed terminal-newline
-canonicalization missing from the verifier**
+canonicalization missing from the verifier; the RED-first correction is fully
+validated, the owner cancelled both landed-but-unproved executions and lifted
+only the two false-positive holds, and R19 is closed terminal-incomplete**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -3061,10 +3063,20 @@ proofs, placed target holds, and requested owner rulings rather than silently
 calling the workflows complete. A RED-first regression now canonicalizes only
 terminal LF characters in the expected Git commit message; internal message
 changes and all tree, parent, ref, and secondary-effect mismatches remain
-failures. The focused regression plus all 70 workflow-director tests pass.
-R19 remains an honest active/held proof until its immutable mismatch rulings
-receive explicit owner disposition; the already-landed repository state is not
-rewritten or relabeled.
+failures. The focused regression plus all 70 workflow-director tests pass; the
+full gate passes 1,691 tests at 87% aggregate statement-plus-branch coverage
+with clean Ruff format and lint.
+
+The owner explicitly acknowledged corrected controller
+`6a9e0be583c0052afccd367e53d4b8705b3b0ddd`, resolved both exact
+`landing_authority_mismatch` rulings as `cancel`, and lifted only the two known
+false-positive target holds at version 2. The immutable mismatch proofs remain
+intact; no proof was rewritten or relabeled. The final supervisor pass made no
+provider call, retained the 2,267,880 microusd-equivalent accounting total,
+observed both executions as cancelled, and stopped `all_terminal_incomplete`.
+R19 is therefore closed `terminal_incomplete`: both approved changes are
+landed on their intended primaries, but the original activation did not
+establish successful landing proof under its then-pinned verifier.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
