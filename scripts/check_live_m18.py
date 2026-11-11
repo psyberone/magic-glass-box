@@ -18,12 +18,12 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from magic_glass_box.candidates import GitCandidateStore
-from magic_glass_box.db import Database
+from magic_glass_box.db import ConflictError, Database
 from magic_glass_box.domain import (
     AgentProfileSpec,
     GatewayCapability,
@@ -52,6 +52,7 @@ from magic_glass_box.service_sidecar import (
     UnixServiceSidecarClient,
 )
 from magic_glass_box.supervision import Supervisor
+from magic_glass_box.workflow_closeout import WorkflowCloseoutDeclaration
 from magic_glass_box.workflow_director import WorkflowDirector
 from magic_glass_box.workflow_policy import WorkflowActivationSpec, WorkflowPolicySpec
 from magic_glass_box.workflows import (
@@ -120,6 +121,12 @@ MAX_DIAGNOSTIC_TEXT = 2048
 MAX_CONTROLLER_OBSERVATIONS_BYTES = 1024 * 1024
 MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_CONTROLLER_SOURCE_ARCHIVE_MEMBERS = 4096
+EXECUTION_LINEAGE_LIMIT = 100
+CLOSEOUT_DEADLINE_DAYS = 7
+HOLD_ISOLATION_KEYS = {
+    MGB_PROJECT: "m18-live:hold-isolation:mgb",
+    IK_PROJECT: "m18-live:hold-isolation:ik",
+}
 CONTROLLER_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_SIDECAR_NAMES = {
     MGB_PROJECT: "github-m18-mgb",
@@ -323,6 +330,93 @@ def _append_observation(
         os.close(descriptor)
 
 
+def _read_observations(state_root: Path) -> list[dict[str, Any]]:
+    path = state_root / OBSERVATIONS_NAME
+    if not path.exists():
+        return []
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_CONTROLLER_OBSERVATIONS_BYTES + 1)
+    except OSError as exc:
+        raise RuntimeError("M18 observations are unavailable") from exc
+    if len(raw) > MAX_CONTROLLER_OBSERVATIONS_BYTES:
+        raise RuntimeError("M18 observations exceed their recovery bound")
+    lines = raw.splitlines()
+    if len(lines) > 256:
+        raise RuntimeError("M18 observations exceed their recovery bound")
+    observations: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+            raise RuntimeError("M18 observations are invalid") from exc
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("kind"), str)
+            or not isinstance(value.get("metadata"), dict)
+        ):
+            raise RuntimeError("M18 observations are invalid")
+        observations.append(value)
+    return observations
+
+
+def _proof_observation_evidence(state_root: Path) -> dict[str, Any]:
+    observations = _read_observations(state_root)
+    return {
+        "missing_binding_negatives": [
+            dict(item["metadata"])
+            for item in observations
+            if item["kind"] == "activation.missing_binding_refused"
+        ],
+        "target_hold_isolation": [
+            {
+                "kind": item["kind"],
+                **dict(item["metadata"]),
+            }
+            for item in observations
+            if item["kind"]
+            in {"target_hold.isolation_readback", "target_hold.isolation_complete"}
+        ],
+    }
+
+
+def _run_bounded_bytes(
+    command: Sequence[str],
+    *,
+    limit: int,
+    failure_message: str,
+    overflow_message: str,
+    cwd: Path | None = None,
+) -> bytes:
+    """Capture local proof output through a temporary file before allocating it."""
+    try:
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            completed = subprocess.run(  # noqa: S603 - caller supplies fixed proof argv
+                list(command),
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=120,
+                check=False,
+            )
+            if completed.returncode != 0:
+                stderr.seek(0)
+                detail = (
+                    stderr.read(MAX_DIAGNOSTIC_TEXT)
+                    .decode("utf-8", errors="replace")
+                    .strip()
+                )
+                suffix = f": {detail}" if detail else ""
+                raise RuntimeError(f"{failure_message}{suffix}")
+            if stdout.tell() > limit:
+                raise RuntimeError(overflow_message)
+            stdout.seek(0)
+            return stdout.read(limit + 1)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(failure_message) from exc
+
+
 def _run_checked(command: Sequence[str], *, cwd: Path | None = None) -> str:
     completed = subprocess.run(  # noqa: S603 - fixed local proof argv
         list(command),
@@ -344,51 +438,77 @@ def _git(repository: Path, *arguments: str) -> str:
 
 
 def _controller_identity(project_root: Path) -> dict[str, Any]:
-    commit = _git(project_root, "rev-parse", "HEAD")
-    diff = _run_checked(
-        ("git", "-C", str(project_root), "diff", "--binary", "HEAD", "--")
-    ).encode()
     git_bin = shutil.which("git")
     if git_bin is None:
         raise RuntimeError("git is required to identify the M18 controller")
-    untracked_raw = subprocess.run(  # noqa: S603 - fixed local proof argv
+    resolved_git = str(Path(git_bin).resolve(strict=True))
+    resolved_root = project_root.resolve(strict=True)
+    commit = _git(resolved_root, "rev-parse", "HEAD")
+    diff = _run_bounded_bytes(
         (
-            str(Path(git_bin).resolve(strict=True)),
+            resolved_git,
             "-C",
-            str(project_root),
+            str(resolved_root),
+            "diff",
+            "--binary",
+            "HEAD",
+            "--",
+        ),
+        limit=MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES,
+        failure_message="could not inventory tracked controller changes",
+        overflow_message="controller inventory exceeds its size bound",
+    )
+    digest = hashlib.sha256()
+    digest.update(b"tracked-diff\0")
+    digest.update(diff)
+    dirty = bool(diff)
+    total = len(diff)
+    del diff
+
+    untracked_raw = _run_bounded_bytes(
+        (
+            resolved_git,
+            "-C",
+            str(resolved_root),
             "ls-files",
             "--others",
             "--exclude-standard",
             "-z",
         ),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=120,
-        check=False,
+        limit=MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES,
+        failure_message="could not inventory untracked controller files",
+        overflow_message="controller inventory exceeds its size bound",
     )
-    if untracked_raw.returncode != 0:
-        raise RuntimeError("could not inventory untracked controller files")
-    digest = hashlib.sha256()
-    digest.update(b"tracked-diff\0")
-    digest.update(diff)
-    untracked_paths = sorted(path for path in untracked_raw.stdout.split(b"\0") if path)
+    untracked_paths = sorted(path for path in untracked_raw.split(b"\0") if path)
+    if len(untracked_paths) > MAX_CONTROLLER_SOURCE_ARCHIVE_MEMBERS:
+        raise RuntimeError("controller inventory exceeds its member bound")
     for encoded_path in untracked_paths:
         relative = Path(os.fsdecode(encoded_path))
-        candidate = (project_root / relative).resolve(strict=True)
-        if not candidate.is_relative_to(project_root.resolve(strict=True)):
-            raise RuntimeError("controller inventory escaped the repository")
-        digest.update(b"untracked\0")
-        digest.update(encoded_path)
-        digest.update(b"\0")
-        if candidate.is_symlink():
-            digest.update(os.readlink(candidate).encode())
-        elif candidate.is_file():
-            digest.update(candidate.read_bytes())
-        else:
-            raise RuntimeError("controller inventory contains a non-regular entry")
+        try:
+            candidate = (resolved_root / relative).resolve(strict=True)
+            if not candidate.is_relative_to(resolved_root):
+                raise RuntimeError("controller inventory escaped the repository")
+            if not candidate.is_file():
+                raise RuntimeError("controller inventory contains a non-regular entry")
+            size = candidate.stat().st_size
+            total += size
+            if total > MAX_CONTROLLER_SOURCE_ARCHIVE_BYTES:
+                raise RuntimeError("controller inventory exceeds its size bound")
+            digest.update(b"untracked\0")
+            digest.update(encoded_path)
+            digest.update(b"\0")
+            observed = 0
+            with candidate.open("rb") as stream:
+                while chunk := stream.read(64 * 1024):
+                    observed += len(chunk)
+                    digest.update(chunk)
+            if observed != size:
+                raise RuntimeError("controller inventory changed while it was read")
+        except OSError as exc:
+            raise RuntimeError("controller inventory is unavailable") from exc
     return {
         "commit": commit,
-        "dirty": bool(diff or untracked_paths),
+        "dirty": dirty or bool(untracked_paths),
         "dirty_sha256": digest.hexdigest(),
     }
 
@@ -1369,7 +1489,7 @@ def _prepare_control_plane(
     executions: dict[str, str] = {}
     for project_key in (MGB_PROJECT, IK_PROJECT):
         configuration = configurations[project_key]
-        activation = control.create_workflow_activation(
+        initial_activation = control.create_workflow_activation(
             project_key=project_key,
             policy_name=POLICY_NAME,
             expected_policy_version=policy["version"],
@@ -1389,19 +1509,82 @@ def _prepare_control_plane(
             imported_by=operator["id"],
         )
         project = database.get_project(project_key)
-        execution = control.start_workflow_execution(
+        missing_capability = "landing.invoke"
+        missing_binding = bindings[project_key][missing_capability]
+        control.unbind_project_capability(
+            missing_binding["id"],
+            expected_version=missing_binding["version"],
+            unbound_by_handle="operator",
+        )
+        unavailable = control.get_workflow_activation(project_key=project_key)
+        if unavailable["availability"] != {
+            "status": "unavailable",
+            "reason": "activation_requirements_unavailable",
+        }:
+            raise RuntimeError("M18 missing-binding negative stayed available")
+        start_arguments = {
+            "project_key": project_key,
+            "configuration_name": CONFIGURATION_NAME,
+            "work_item_id": work_item["id"],
+            "source_revision": revisions[project_key],
+            "expected_configuration_version": configuration["version"],
+            "expected_context_version_id": project["context_version_id"],
+            "expected_work_item_version_id": work_item["work_item_version_id"],
+            "expected_thread_generation": 1,
+            "expected_thread_version": 1,
+            "requested_by_handle": "operator",
+        }
+        try:
+            control.start_workflow_execution(
+                **start_arguments,
+                expected_activation_version=initial_activation["version"],
+                idempotency_key=f"m18-live:{project_key}:missing-binding",
+            )
+        except ConflictError as exc:
+            if str(exc) != "workflow activation capability is unavailable":
+                raise RuntimeError(
+                    "M18 missing-binding negative failed for another reason"
+                ) from exc
+        else:
+            raise RuntimeError("M18 missing-binding negative did not fail closed")
+        _append_observation(
+            state_root,
+            "activation.missing_binding_refused",
+            "The live proof refused a start while one required binding was absent",
             project_key=project_key,
-            configuration_name=CONFIGURATION_NAME,
-            work_item_id=work_item["id"],
-            source_revision=revisions[project_key],
-            expected_configuration_version=configuration["version"],
-            expected_context_version_id=project["context_version_id"],
-            expected_work_item_version_id=work_item["work_item_version_id"],
-            expected_thread_generation=1,
-            expected_thread_version=1,
+            capability=missing_capability,
+            unavailable_activation_version=initial_activation["version"],
+            unavailable_binding_id=missing_binding["id"],
+            availability=unavailable["availability"],
+            refusal="workflow activation capability is unavailable",
+        )
+        replacement_binding = control.bind_project_capability(
+            project_key=project_key,
+            capability_name=missing_capability,
+            capability_version=1,
+            sidecar_name=GITHUB_SIDECAR_NAMES[project_key],
+            mapping_name="primary",
+            bound_by_handle="operator",
+        )
+        bindings[project_key][missing_capability] = replacement_binding
+        activation = control.revise_workflow_activation(
+            project_key=project_key,
+            policy_name=POLICY_NAME,
+            expected_policy_version=policy["version"],
+            spec=_activation(
+                project_key=project_key,
+                policy_sha256=policy["content_sha256"],
+                configuration_version_id=configuration[
+                    "workflow_configuration_version_id"
+                ],
+                bindings=bindings[project_key],
+            ),
+            acknowledged_by_handle="operator",
+        )
+        execution = control.start_workflow_execution(
+            **start_arguments,
             expected_activation_version=activation["version"],
-            idempotency_key=f"m18-live:{project_key}:v1",
-            requested_by_handle="operator",
+            idempotency_key=f"m18-live:{project_key}:v2",
         )
         executions[project_key] = execution["id"]
     _append_observation(
@@ -1444,11 +1627,14 @@ def _execution_lineage(
     lineage: dict[str, list[dict[str, Any]]] = {}
     for project_key, current_execution_id in executions.items():
         current = database.get_workflow_execution(current_execution_id)
+        candidates = database.list_workflow_executions(
+            project_key=project_key, limit=EXECUTION_LINEAGE_LIMIT
+        )
+        if len(candidates) >= EXECUTION_LINEAGE_LIMIT:
+            raise RuntimeError("M18 execution lineage reached its bounded limit")
         related = [
             execution
-            for execution in database.list_workflow_executions(
-                project_key=project_key, limit=100
-            )
+            for execution in candidates
             if execution["work_item_id"] == current["work_item_id"]
         ]
         if not any(item["id"] == current_execution_id for item in related):
@@ -1588,6 +1774,196 @@ def _uncertain_provider_effects(
                     }
                 )
     return uncertain
+
+
+def _declare_ready_closeouts(
+    control: ControlPlane,
+    database: Database,
+    executions: Mapping[str, str],
+    *,
+    state_root: Path,
+) -> bool:
+    ready: list[tuple[str, dict[str, Any]]] = []
+    for project_key, execution_id in executions.items():
+        execution = database.get_workflow_execution(execution_id)
+        if (
+            execution["state"] == "active"
+            and execution["stage"] == "completion"
+            and execution["closeout"] is None
+        ):
+            ready.append((project_key, execution))
+    if not ready:
+        return False
+    observed = datetime.fromisoformat(_now().replace("Z", "+00:00"))
+    deadline = (
+        (observed + timedelta(days=CLOSEOUT_DEADLINE_DAYS))
+        .astimezone(UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+    reasons = {
+        MGB_PROJECT: (
+            "Re-run the full quality and isolated wheel proof from the landed "
+            "primary on the remote validation host."
+        ),
+        IK_PROJECT: (
+            "Re-run the complete branch-aware suite from the landed primary on "
+            "the remote validation host."
+        ),
+    }
+    declarations: list[dict[str, str]] = []
+    for project_key, execution in ready:
+        declaration = WorkflowCloseoutDeclaration.from_mapping(
+            {
+                "schema_version": 1,
+                "obligations": [
+                    {
+                        "kind": "deferred_validation",
+                        "obligation": VALIDATION_OBLIGATION,
+                        "deadline": deadline,
+                        "reason": reasons[project_key],
+                    }
+                ],
+            }
+        )
+        control.declare_workflow_closeout(
+            execution["id"],
+            expected_version=execution["version"],
+            declaration=declaration,
+            declared_by_handle="operator",
+        )
+        declarations.append(
+            {
+                "project_key": project_key,
+                "execution_id": execution["id"],
+                "content_sha256": declaration.digest,
+                "deadline": deadline,
+            }
+        )
+    _append_observation(
+        state_root,
+        "workflow.closeout_declared",
+        "The activation owner retained genuine deadline-bearing obligations",
+        declarations=declarations,
+    )
+    return True
+
+
+def _hold_evidence(hold: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: hold.get(key)
+        for key in (
+            "id",
+            "workflow_execution_id",
+            "idempotency_key",
+            "state",
+            "version",
+        )
+    }
+
+
+def _exercise_target_hold_isolation(
+    control: ControlPlane,
+    database: Database,
+    executions: Mapping[str, str],
+    *,
+    state_root: Path,
+) -> bool:
+    observations = _read_observations(state_root)
+    if any(item["kind"] == "target_hold.isolation_complete" for item in observations):
+        return False
+    current: dict[str, dict[str, Any]] = {}
+    for project_key, execution_id in executions.items():
+        execution = database.get_workflow_execution(execution_id)
+        landing = execution.get("landing")
+        if (
+            execution["state"] != "active"
+            or execution["stage"] != "landing"
+            or not isinstance(landing, Mapping)
+            or landing.get("provider_landing_id") is not None
+        ):
+            return False
+        current[project_key] = execution
+
+    holds = {
+        hold.get("idempotency_key"): hold
+        for hold in control.list_integration_target_holds(open_only=False)
+        if hold.get("idempotency_key") in HOLD_ISOLATION_KEYS.values()
+    }
+    for project_key in (MGB_PROJECT, IK_PROJECT):
+        key = HOLD_ISOLATION_KEYS[project_key]
+        if key not in holds:
+            execution = current[project_key]
+            control.place_integration_target_hold(
+                execution["id"],
+                expected_execution_version=execution["version"],
+                reason_summary=(
+                    "M18 live proof: demonstrate independent target-hold "
+                    "isolation before provider dispatch."
+                ),
+                placed_by_handle="operator",
+                idempotency_key=key,
+            )
+    holds = {
+        hold.get("idempotency_key"): hold
+        for hold in control.list_integration_target_holds(open_only=False)
+        if hold.get("idempotency_key") in HOLD_ISOLATION_KEYS.values()
+    }
+    if set(holds) != set(HOLD_ISOLATION_KEYS.values()):
+        raise RuntimeError("M18 target-hold isolation records are incomplete")
+
+    first = holds[HOLD_ISOLATION_KEYS[MGB_PROJECT]]
+    if first["state"] == "open":
+        control.lift_integration_target_hold(
+            first["id"],
+            expected_version=first["version"],
+            lifted_by_handle="operator",
+        )
+    holds = {
+        hold.get("idempotency_key"): hold
+        for hold in control.list_integration_target_holds(open_only=False)
+        if hold.get("idempotency_key") in HOLD_ISOLATION_KEYS.values()
+    }
+    first = holds[HOLD_ISOLATION_KEYS[MGB_PROJECT]]
+    other = holds[HOLD_ISOLATION_KEYS[IK_PROJECT]]
+    readback_recorded = any(
+        item["kind"] == "target_hold.isolation_readback" for item in observations
+    )
+    if first["state"] != "lifted" or other["state"] not in {"open", "lifted"}:
+        raise RuntimeError("M18 target-hold isolation read-back did not fail closed")
+    if other["state"] == "lifted" and not readback_recorded:
+        raise RuntimeError("M18 target-hold isolation read-back is missing")
+    if not readback_recorded:
+        _append_observation(
+            state_root,
+            "target_hold.isolation_readback",
+            "Lifting one exact hold left the other project's hold open",
+            lifted_hold=_hold_evidence(first),
+            other_hold=_hold_evidence(other),
+        )
+    if other["state"] == "open":
+        control.lift_integration_target_hold(
+            other["id"],
+            expected_version=other["version"],
+            lifted_by_handle="operator",
+        )
+    final_holds = {
+        hold.get("idempotency_key"): hold
+        for hold in control.list_integration_target_holds(open_only=False)
+        if hold.get("idempotency_key") in HOLD_ISOLATION_KEYS.values()
+    }
+    if any(hold["state"] != "lifted" for hold in final_holds.values()):
+        raise RuntimeError("M18 target-hold isolation cleanup is incomplete")
+    _append_observation(
+        state_root,
+        "target_hold.isolation_complete",
+        "Both isolated proof holds were lifted by the activation owner",
+        holds=[
+            _hold_evidence(final_holds[HOLD_ISOLATION_KEYS[project_key]])
+            for project_key in (MGB_PROJECT, IK_PROJECT)
+        ],
+    )
+    return True
 
 
 def _build_supervisor(
@@ -1817,12 +2193,20 @@ def _drive_one_technical_stop(
     }
     deadline = time.monotonic() + PROOF_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
+        if _declare_ready_closeouts(
+            control, database, executions, state_root=state_root
+        ):
+            continue
         if _all_completed(database, executions):
             supervisor.drain(timeout=30)
             return "both_completed"
         if _all_terminal(database, executions):
             supervisor.drain(timeout=30)
             return "all_terminal_incomplete"
+        if _exercise_target_hold_isolation(
+            control, database, executions, state_root=state_root
+        ):
+            continue
         uncertain = _uncertain_provider_effects(database, executions)
         newly_uncertain = [
             effect
@@ -1831,6 +2215,16 @@ def _drive_one_technical_stop(
         ]
         if newly_uncertain:
             supervisor.drain(timeout=30)
+            observed_operation_ids = {
+                effect["operation_id"] for effect in newly_uncertain
+            }
+            for effect in _uncertain_provider_effects(database, executions):
+                if (
+                    effect["operation_id"] not in initial_uncertain_ids
+                    and effect["operation_id"] not in observed_operation_ids
+                ):
+                    newly_uncertain.append(effect)
+                    observed_operation_ids.add(effect["operation_id"])
             _append_observation(
                 state_root,
                 "provider.receipt_discarded",
@@ -2223,6 +2617,7 @@ def _report(
         "provider_invocations": len(provider_invocations),
         "provider_invocation_evidence": provider_evidence,
         "provider_effect_recovery": _lost_receipt_evidence(state_root, database),
+        **_proof_observation_evidence(state_root),
         "usage": usage,
         "source_revisions": {
             MGB_PROJECT: MGB_REVISION,

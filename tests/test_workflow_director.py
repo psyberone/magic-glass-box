@@ -2494,6 +2494,42 @@ class WorkflowDirectorTests(unittest.TestCase):
         self.assertIsNotNone(target["change_effect_id"])
         self.assertEqual(completed["responsibility"]["reason"], "landing_dispatch")
 
+    def test_activated_landing_refetches_after_provider_request_return_shape(
+        self,
+    ) -> None:
+        enqueued, _gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-provider-return-shape"
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        original = self.control.issue_provider_landing
+
+        def issue_with_provider_only_shape(*args: object, **kwargs: object) -> object:
+            original(*args, **kwargs)
+            return {
+                "provider_landing_id": "plr_return_shape_only",
+                "operation_id": "sop_return_shape_only",
+            }
+
+        with mock.patch.object(
+            self.control,
+            "issue_provider_landing",
+            side_effect=issue_with_provider_only_shape,
+        ):
+            self.assertFalse(
+                self.director().advance(
+                    claimed["id"], expected_version=claimed["version"]
+                )
+            )
+
+        refetched = self.database.get_workflow_execution(claimed["id"])
+        self.assertEqual(refetched["landing"]["queue_state"], "awaiting_receipt")
+        self.assertIsNotNone(refetched["landing"]["provider_landing_id"])
+
     def test_confirmed_readback_derives_an_exact_normalized_target(self) -> None:
         execution, _activation, bindings = self.start_activated_provider_execution(
             external_id="activated-exact-derived-target"
@@ -3039,6 +3075,138 @@ class WorkflowDirectorTests(unittest.TestCase):
         landed = self.database.get_workflow_execution(awaiting["id"])
         self.assertEqual(landed["landing"]["proof"]["status"], "conformant")
         self.assertIsNone(landed["landing"]["target_hold"])
+
+    def test_activated_landing_accepts_all_provider_trimmed_terminal_newlines(
+        self,
+    ) -> None:
+        body = "Exact activated workflow proposal.\n\n"
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-multiple-trailing-newlines",
+            body=body,
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+            readback_overrides={
+                "landing_commit_message": (
+                    "Prove activated provider authority\n\n" + body.rstrip("\n")
+                )
+            },
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "conformant")
+        self.assertIsNone(landed["landing"]["target_hold"])
+
+    def test_activated_landing_accepts_a_title_only_commit_message(self) -> None:
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-title-only",
+            body="",
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+            readback_overrides={
+                "landing_commit_message": "Prove activated provider authority"
+            },
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "conformant")
+        self.assertIsNone(landed["landing"]["target_hold"])
+
+    def test_activated_landing_preserves_internal_bytes_before_terminal_newline(
+        self,
+    ) -> None:
+        body = "Exact activated workflow proposal.\n"
+        enqueued, gate, _activation, _bindings = self.activated_provider_landing(
+            external_id="activated-landing-internal-message-change",
+            body=body,
+        )
+        self.assertFalse(
+            self.director().advance(
+                enqueued["id"], expected_version=enqueued["version"]
+            )
+        )
+        claimed = self.database.get_workflow_execution(enqueued["id"])
+        self.assertFalse(
+            self.director().advance(claimed["id"], expected_version=claimed["version"])
+        )
+        awaiting = self.database.get_workflow_execution(enqueued["id"])
+        issued = self.control.get_provider_landing(
+            awaiting["landing"]["provider_landing_id"]
+        )
+        expected_tree = self.database.get_gate_policy(gate["policy_id"])[
+            "tree_revision"
+        ]
+        self.complete_activated_landing_operation(
+            issued,
+            expected_tree=expected_tree,
+            observed_tree=expected_tree,
+            readback_overrides={
+                "landing_commit_message": (
+                    "Prove activated provider authority\n\n"
+                    "Exact activated workflow proposal changed."
+                )
+            },
+        )
+
+        self.assertFalse(
+            self.director().advance(
+                awaiting["id"], expected_version=awaiting["version"]
+            )
+        )
+        landed = self.database.get_workflow_execution(awaiting["id"])
+        self.assertEqual(landed["landing"]["proof"]["status"], "mismatch")
+        self.assertEqual(
+            landed["landing"]["proof"]["reasons"],
+            ["landing_commit_message_mismatch"],
+        )
+        self.assertEqual(landed["landing"]["target_hold"]["state"], "open")
 
     def test_activated_landing_requires_first_parent_message_and_effect_proof(
         self,

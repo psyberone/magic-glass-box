@@ -2216,7 +2216,10 @@ R19 landed both approved candidates after lost-receipt recovery, then honestly
 held both targets when post-landing proof exposed terminal-newline
 canonicalization missing from the verifier; the RED-first correction is fully
 validated, the owner cancelled both landed-but-unproved executions and lifted
-only the two false-positive holds, and R19 is closed terminal-incomplete**
+only the two false-positive holds, and R19 is closed terminal-incomplete; the
+final fidelity disposition is `NOT YET`, so one fresh proof remains; the blind
+implementation/security review is technically nonblocking but scanner coverage
+prevented a certified automated security gate**
 
 Implement only M17's smallest accepted reuse slice. Preserve the prohibition
 on arbitrary graphs, provider-native mechanics, prompt-defined authority, and
@@ -3067,16 +3070,84 @@ failures. The focused regression plus all 70 workflow-director tests pass; the
 full gate passes 1,691 tests at 87% aggregate statement-plus-branch coverage
 with clean Ruff format and lint.
 
-The owner explicitly acknowledged corrected controller
-`6a9e0be583c0052afccd367e53d4b8705b3b0ddd`, resolved both exact
-`landing_authority_mismatch` rulings as `cancel`, and lifted only the two known
-false-positive target holds at version 2. The immutable mismatch proofs remain
-intact; no proof was rewritten or relabeled. The final supervisor pass made no
-provider call, retained the 2,267,880 microusd-equivalent accounting total,
-observed both executions as cancelled, and stopped `all_terminal_incomplete`.
-R19 is therefore closed `terminal_incomplete`: both approved changes are
-landed on their intended primaries, but the original activation did not
-establish successful landing proof under its then-pinned verifier.
+The owner resolved the first exact `landing_authority_mismatch` ruling as
+`cancel`, then explicitly acknowledged corrected controller
+`6a9e0be583c0052afccd367e53d4b8705b3b0ddd` before resolving the second exact
+ruling the same way. Only the two known false-positive target holds were lifted,
+at version 2. The immutable mismatch proofs remain intact; no proof was rewritten
+or relabeled. The final supervisor pass made no provider call, retained the
+2,267,880 microusd-equivalent accounting total, observed both executions as
+cancelled, and stopped `all_terminal_incomplete`. R19 is therefore closed
+`terminal_incomplete`: both approved changes are landed on their intended
+primaries, but the original activation did not establish successful landing
+proof under its then-pinned verifier.
+
+The Panopticon coordinator independently reproduced all frozen R19 hashes,
+policy bindings, lost-receipt reconciliation, candidate and landing objects,
+immutable mismatches, owner dispositions, provider accounting, and controller
+history. Its final disposition is `NOT YET`. R19 never recorded a conformant
+landing proof under a pinned corrected verifier, never reached completion or
+created a closeout declaration and genuine open obligation, and did not exercise
+a missing required binding in either live project. Exact candidate reviews are
+valid workflow evidence but do not replace the separate blind technical and
+security approval required for the M18 implementation.
+
+The next proof must start from fresh state under a clean controller at or after
+`6a9e0be583c0052afccd367e53d4b8705b3b0ddd`. Before any paid worker starts, it
+must refuse one unavailable-binding start per project and restore authority with
+a new activation version. During landing it must explicitly place two isolated
+coordinator holds, lift one, read the other still open, and then lift the second.
+It must retain one interruption and authoritative reconciliation per project,
+record conformant landing proofs for both, and finish with genuine
+deadline-bearing deferred-validation obligations and truthful `closed, N open`
+closeout. A fresh live budget requires separate owner authorization.
+
+The non-paid preflight remediation now makes those proof requirements executable:
+fresh preparation refuses one deliberately unavailable `landing.invoke` binding
+per project before rebinding under activation version 2; landing places two
+project-scoped holds, reads the second still open after lifting the first, and
+recovers if the controller dies after the second lift; completion declares one
+genuine seven-day deferred-validation obligation per project; receipt-loss
+evidence is re-read after the supervisor drain; and bounded execution-lineage
+reads fail visibly at their cap. The report carries only the structured
+missing-binding and hold-isolation observations. Landing-verifier regressions
+also cover one or many provider-trimmed terminal LFs, title-only messages,
+internal message changes, and provider-request return-shape refetching. No live
+provider call was made and the fresh budget remains gated on owner authority.
+
+The initial remediated tree passed Ruff plus all 1,705 tests at 87% aggregate
+statement-plus-branch coverage. A serial final-code mutation campaign over the
+eight exercised live-harness boundaries and the extracted observation-evidence
+projection killed 922/1,092 mutants (84.43%), above the 80% floor; the projection
+itself killed 28/28. Two loop mutations timed out. The remaining survivors alter
+diagnostic prose, equivalent false-like list arguments, already-rejected later
+guards, or older harness branches outside this remediation rather than weakening
+the accepted proof facts.
+
+The independent changed-delta Panopticon red-team review then accepted all 26
+review cells, seven primary advisor entries, two adversarial backups, and 24
+tool-advisor entries. It reported grade S, LOW risk, health 100, no independently
+confirmed medium-or-higher finding, and no finding contributing to the failure
+threshold. Its gate remained `INCONCLUSIVE` only because tool breadth was not
+certifiable: Semgrep covered the tree only partially, Bandit produced no usable
+output, and no applicable SCA tool produced output. This is nonblocking human
+technical and security evidence, not a falsely claimed automated certification.
+
+The review did expose one worthwhile operational hardening seam and two test
+gaps. Controller Git diff and untracked inventories now spill through bounded
+temporary files before allocation; untracked contents are member- and
+aggregate-size-bounded, resolved inside the repository, restricted to regular
+files, and streamed into the identity digest. Observation recovery reads only
+its configured maximum plus one byte. The lost-receipt proof now asserts the
+exact delegate invocations rather than only their counts. RED-first boundary
+tests bind exact accepted limits, aggregate accounting, multi-chunk reads,
+inventory drift and path rejection, subprocess timeouts, bounded diagnostics,
+and physical read ceilings. Their focused final-code mutation campaign killed
+227/235 mutants (96.60%); the eight survivors are equivalent encoding or
+path-resolution variants. The exact reviewed-and-remediated tree passes Ruff
+plus all 1,720 tests at 87% aggregate statement-plus-branch coverage. No live
+provider call was made; M18 still requires its fresh paid two-project proof and
+the resulting final dispositions.
 
 R9's acceptance tests include non-owner, succeeded-predecessor, stale and
 foreign predecessor, successor-before-ruling, second-continue, exhausted retry
