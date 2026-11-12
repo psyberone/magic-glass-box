@@ -6,7 +6,10 @@ import json
 import os
 import signal
 import sqlite3
+import subprocess
+import sys
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -612,6 +615,74 @@ class CLITests(unittest.TestCase):
             status = main(["--db", str(self.database), *arguments])
         output = stdout.getvalue() or stderr.getvalue()
         return status, json.loads(output), stderr.getvalue()
+
+    def test_version_uses_distribution_metadata_without_command_or_database(
+        self,
+    ) -> None:
+        stdout = io.StringIO()
+        with (
+            mock.patch("magic_glass_box.cli.version", return_value="9.8.7") as metadata,
+            mock.patch("magic_glass_box.cli.Database") as database,
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stdout.getvalue(), "magic-glass-box 9.8.7\n")
+        metadata.assert_called_once_with("magic-glass-box")
+        database.assert_not_called()
+
+    def test_version_is_documented_in_top_level_help(self) -> None:
+        self.assertIn("--version", build_parser().format_help())
+
+    def test_version_matches_for_console_and_module_entry_points(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        entry_point = project["project"]["scripts"]["magic-glass-box"]
+        fixture = Path(self.temporary.name)
+        metadata = fixture / "magic_glass_box-9.8.7.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(
+            "Metadata-Version: 2.1\nName: magic-glass-box\nVersion: 9.8.7\n",
+            encoding="utf-8",
+        )
+        (metadata / "entry_points.txt").write_text(
+            f"[console_scripts]\nmagic-glass-box = {entry_point}\n",
+            encoding="utf-8",
+        )
+        console = fixture / "magic-glass-box"
+        console.write_text(
+            "import sys\n"
+            "from importlib.metadata import distribution\n"
+            "entries = distribution('magic-glass-box').entry_points\n"
+            "entry = next(entry for entry in entries "
+            "if entry.group == 'console_scripts' and entry.name == 'magic-glass-box')\n"
+            "sys.exit(entry.load()())\n",
+            encoding="utf-8",
+        )
+        environment = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(fixture), str(root / "src"))),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        for arguments in ([str(console)], ["-m", "magic_glass_box"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(  # noqa: S603 -- test-controlled interpreter and arguments
+                    [sys.executable, *arguments, "--version"],
+                    cwd=fixture,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "magic-glass-box 9.8.7\n")
+                self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            sorted(path.name for path in fixture.iterdir()),
+            [console.name, metadata.name],
+        )
 
     def test_json_output_preserves_unicode_for_human_readability(self) -> None:
         stream = io.StringIO()
